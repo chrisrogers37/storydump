@@ -1,10 +1,10 @@
-"""`identity.upsert_google_identity`'s sign-up gate (092), against a
+"""`identity.upsert_google_identity`'s sign-up gate (`fn_signup_admitted`), against a
 scripted executor: a subject seen before signs in untouched, a NEW one creates
 its user only when `fn_signup_admitted` admits its verified email, and
 `signup_open` skips the ask. The door's own answers are
 `tests/scripts/test_signup_gate.py`'s, as `svc_ingress` on the replayed schema.
 
-`identity.unlink_telegram` (099) likewise: it asks the
+`identity.unlink_telegram` (`fn_identity_unlink`) likewise: it asks the
 `fn_identity_unlink` door and retires the user's live `link` states unless the
 door kept the identity; the door's answers are `test_identity_unlink_gate.py`'s.
 """

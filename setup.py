@@ -8,6 +8,8 @@ setup(
     description="Instagram Story Automation System with Telegram Integration",
     author="Chris Rogers",
     packages=find_packages(),
+    # Schema construction reads these files at runtime.
+    package_data={"src.models.target.ddl": ["*.sql"]},
     # Floors, not pins: `requirements.txt` holds the pins for a deploy, this
     # list holds the names a `pip install -e .` must resolve. Only the NAMES
     # have to agree, and `tests/test_dependency_declarations.py` holds them

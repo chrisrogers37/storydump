@@ -1,19 +1,19 @@
-"""Gate — jobs + leases + fencing + durable counters (#859).
+"""Gate — jobs + leases + fencing + durable counters.
 
 THE DATABASE IS THE AUTHORITY, SO THE HEAVY HALF BYPASSES THE SERVICE — as
 in the intent-ledger gate: `uq_jobs_serialized_lease`,
-`ck_jobs_system_kinds`, the NOT NULL, and the two `059` doors are what these
+`ck_jobs_system_kinds`, the NOT NULL, and the two `04_functions.sql` doors are what these
 tests prove, from plain psycopg2 connections as the real `svc_worker` login.
 A smaller final class asserts the jobs service surfaces those verdicts
 rather than substituting its own.
 
-Concurrency rules (#883), all load-bearing:
+Concurrency rules, all load-bearing:
 
 * Every race here runs on REAL concurrent connections at **READ COMMITTED** —
   asserted in its own test, not assumed — because the same race can pass at
-  stricter levels while lying at ours (#883).
+  stricter levels while lying at ours.
 * No refusal is inferred from a bare rowcount: a self-transition no-op reports
-  ``rows=1`` to a loser (#883). Where rowcount IS the discriminator (the
+  ``rows=1`` to a loser. Where rowcount IS the discriminator (the
   finalization CAS), the docstring says why it can be: the CAS misses on the
   token PREDICATE (``rows=0``), which is a different mechanism from the
   self-transition no-op that reports a phantom win.
@@ -27,13 +27,12 @@ Concurrency rules (#883), all load-bearing:
 The serialization race is made DETERMINISTIC rather than probabilistic: the
 first claimer holds its transaction open, so the second claimer's index entry
 blocks on the uncommitted lease and the violation fires exactly at the
-winner's commit — the #883 block-then-reevaluate window, driven on purpose.
+winner's commit — the block-then-reevaluate window, driven on purpose.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import re
 import threading
@@ -45,19 +44,15 @@ import psycopg2
 import pytest
 from psycopg2 import errors as pg_errors
 
-from scripts.migration_runner import MIGRATIONS_DIR
 from src.services.target import jobs, work_loop
 from src.services.target.work_loop import WorkerConfig
-from src.worker import compose
 from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
     execute,
     fetch_all,
-    fetch_one,
-    ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -76,7 +71,7 @@ _UPSERT_TEMPLATE = (
 )
 UPSERT_SQL = _UPSERT_TEMPLATE.format(guard=" WHERE rc.count < %s")
 UNGUARDED_UPSERT_SQL = _UPSERT_TEMPLATE.format(guard="")
-#: `ck_jobs_system_kinds`, verbatim from 056 — re-added after the drop proof.
+#: `ck_jobs_system_kinds`, verbatim from `machinery.py` — re-added after the drop proof.
 PAIRING_CHECK_SQL = (
     "ALTER TABLE jobs ADD CONSTRAINT ck_jobs_system_kinds CHECK ("
     "(workspace_id IS NULL) = (kind IN"
@@ -100,7 +95,7 @@ def jobs_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "l2-gate")
@@ -211,7 +206,7 @@ def _leased_rows(jobs_db, key):
 
 
 class TestTheLevelIsReadCommitted:
-    """Pinned as a fact rather than assumed (#883): every concurrency
+    """Pinned as a fact rather than assumed: every concurrency
     claim in this file holds at the level production runs."""
 
     def test_worker_connections_run_read_committed(self, jobs_db):
@@ -262,7 +257,7 @@ class TestClaimDoor:
 
 
 class TestSerializationKeyRace:
-    """Two claimers, one key, driven deterministically through the #883
+    """Two claimers, one key, driven deterministically through the
     window: the loser BLOCKS on the winner's uncommitted index entry and is
     REFUSED at the winner's commit — then retries clean."""
 
@@ -314,7 +309,7 @@ class TestSerializationKeyRace:
         key = _key()
         winner, loser, retry = self._race(jobs_db, key)
 
-        # The loser was REFUSED — loudly, by name — never told it won (#883).
+        # The loser was REFUSED — loudly, by name — never told it won.
         assert "row" not in loser, (
             f"the loser was handed a claim: {loser.get('row')} — the #883"
             " phantom-win shape"
@@ -439,7 +434,7 @@ class TestKillResumeExpiryAndFencing:
 
             # And the live token DOES finalize — the CAS discriminates on the
             # token, which is why rowcount is trustworthy here and not in the
-            # #883 case: this is a WHERE miss, not a self-transition no-op.
+            # case: this is a WHERE miss, not a self-transition no-op.
             with cas.cursor() as cur:
                 cur.execute("SET app.tenant_id = %s", (str(jobs_db["ws"]),))
                 cur.execute(CAS_SQL, ("succeeded", job_id, live_token))
@@ -456,7 +451,7 @@ class TestKillResumeExpiryAndFencing:
         assert final == "succeeded"
 
 
-# --- #1329: lease recovery survives the death of the reaper's own holder -----
+# ---: lease recovery survives the death of the reaper's own holder -----
 #
 # `fn_reaper_sweep`'s first leg (above) is the only lease recovery for every
 # kind, and the reaper is itself a recurring singleton the clock mints. These
@@ -468,7 +463,7 @@ RECURRING = {"v": 1, "reap_expired": 60.0}
 NOTHING_MINTED, REAPER_MINTED = (0, 0, 0, 0, 0), (0, 0, 0, 1, 0)
 #: A lease that runs out while the test waits, as a killed worker's does.
 DYING_LEASE, LAPSE_S = "300 milliseconds", 0.5
-#: The four columns 084 grants `svc_clock` on `jobs`.
+#: The four `jobs` columns `svc_clock` may update for lease recovery.
 LEASE_COLUMNS = "state, locked_by, lease_token, locked_until"
 
 
@@ -530,106 +525,14 @@ def _rows(jobs_db, kind) -> list:
     )
 
 
-@contextlib.contextmanager
-def _ticking_on_083(jobs_db):
-    """083's tick — the one production runs before 084 — installed from its
-    own file for the duration, and the replayed tick restored afterwards, so
-    every other test here meets the current definition."""
-    owner = jobs_db["owner_stream"]
-    ddl, comment = fetch_one(
-        owner,
-        "SELECT pg_get_functiondef(oid), obj_description(oid, 'pg_proc')"
-        " FROM pg_proc WHERE oid = 'fn_clock_tick(int, interval, jsonb)'::regprocedure",
-    )
-    execute(owner, (MIGRATIONS_DIR / "083_clock_tick_deadlines.sql").read_text())
-    try:
-        yield
-    finally:
-        execute(owner, ddl)
-        execute(
-            owner,
-            "COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS %s",
-            (comment,),
-        )
-
-
 def _sender_key() -> str:
     return f"{jobs.SENDER_KEY_PREFIX}{uuid.uuid4()}"
 
 
 class TestTheReapersOwnDeadLease:
-    """084 (#1329): the tick returns its own kind's expired lease to `ready`
+    """`fn_clock_tick`: the tick returns its own kind's expired lease to `ready`
     before its mint guard reads it — the one lease the reaper cannot re-ready
     is its own."""
-
-    async def test_083s_tick_leaves_the_job_system_wedged_and_084s_recovers_it(
-        self, jobs_db
-    ):
-        # A worker claims the reaper the clock minted, and a delivery on one
-        # binding with a second queued behind it on the same key. Then it dies.
-        assert _tick(jobs_db) == REAPER_MINTED, (
-            "positive control: the tick minted the reaper and nothing else"
-        )
-        reaper = _claimed(jobs_db, lane="bulk", worker="w-dead", lease=DYING_LEASE)
-        assert reaper["kind"] == "reap_expired"
-        key = _sender_key()
-        first = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-2)
-        queued = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-1)
-        held = _claimed(jobs_db, lane="interactive", worker="w-dead", lease=DYING_LEASE)
-        assert held["id"] == first
-        await asyncio.sleep(LAPSE_S)
-        dead = {"state": "leased", "locked_by": "w-dead", "lapsed": True}
-        waiting = {"state": "ready", "locked_by": None, "lapsed": None}
-
-        with _ticking_on_083(jobs_db):
-            assert _tick(jobs_db) == NOTHING_MINTED
-            assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **dead}], (
-                "083 reads the dead lease as live: no successor, no revive — and"
-                " its leg 1 writes nothing, so no later tick differs"
-            )
-            assert _claimed(jobs_db, lane="bulk", worker="w-new") is None, (
-                "the dead reaper is never handed out again: the door takes ready rows"
-            )
-            assert _claimed(jobs_db, lane="interactive", worker="w-new") is None, (
-                "the queued delivery waits behind a dead lease on its key"
-            )
-
-        # 084's tick: the reaper's own lease is `ready` again and nothing is
-        # minted beside it; the delivery's dead lease is left to the reaper.
-        assert _tick(jobs_db) == NOTHING_MINTED
-        assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **waiting}]
-        assert _rows(jobs_db, "deliver_outbox") == [
-            {"id": first, **dead},
-            {"id": queued, **waiting},
-        ], "the tick revives only its own kinds; a tenant's lease is the reaper's"
-
-        # A new worker's bulk lane, exactly as the worker composes it, runs
-        # the revived reaper, which frees the delivery's dead lease.
-        async with ingress_engine(jobs_db["worker"]) as engine:
-            app = compose(engine=engine, config=WorkerConfig(), env={})
-            lane = next(loop for loop in app.loops if loop.lane == "bulk")
-            assert await lane.run_once() is True, "the bulk lane claimed nothing"
-        assert (lane.processed, lane.failures, lane.fenced) == (1, 0, 0)
-        assert _rows(jobs_db, "reap_expired") == [
-            {
-                "id": reaper["id"],
-                "state": "succeeded",
-                "locked_by": lane._worker_name,
-                "lapsed": False,
-            }
-        ], "the revived row itself ran, and it is still the only reaper row"
-        again = _claimed(jobs_db, lane="interactive", worker="w-new")
-        assert again["id"] == first and again["attempts"] == 2, (
-            "the delivery the dead worker held goes first: its key's order holds"
-        )
-        assert _claimed(jobs_db, lane="interactive", worker="w-new-2") is None, (
-            "the key still serializes: the queued delivery waits for the first"
-        )
-        lapsed = fetch_one(
-            jobs_db["owner_stream"],
-            "SELECT count(*) FROM jobs WHERE state = 'leased' AND locked_until < now()",
-        )[0]
-        assert lapsed == 0, "no expired lease is left anywhere"
 
     def test_a_live_lease_is_never_revived(self, jobs_db):
         assert _tick(jobs_db) == REAPER_MINTED
@@ -686,7 +589,7 @@ class TestTheReapersOwnDeadLease:
 
 
 class TestTheReviveRidesItsOwnGrant:
-    """084's column grant is load-bearing on EVERY tick, not only when a lease
+    """`fn_clock_tick`'s column grant is load-bearing on EVERY tick, not only when a lease
     is dead: the revive's UPDATE is checked when it is planned, so without the
     grant the tick itself is refused. Removed, restored."""
 
@@ -703,10 +606,10 @@ class TestTheReviveRidesItsOwnGrant:
 
 
 class TestTheReaperEndsAReadyJobPastItsDeadline:
-    """086 (#1429): the reaper ends a `ready` job past its deadline `failed`,
+    """`fn_reaper_sweep` deadline leg: the reaper ends a `ready` job past its deadline `failed`,
     and says so in its payload, when a sweep re-mints its kind."""
 
-    #: The kinds a sweep re-mints, which 086's leg may end: the clock's
+    #: The kinds a sweep re-mints, which `fn_reaper_sweep` may end at their deadlines: the clock's
     #: recurring singletons and its slot, refresh and reauth legs, the sender
     #: sweep's `deliver_outbox`, and the sync kinds, whose source it re-arms.
     RE_MINTED = frozenset(
@@ -722,18 +625,18 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "sync_media_source",
             "first_ingest_chunk",
             # The converter also ends at its deadline, but its terminal row
-            # prevents automatic remint in the same operator run (137).
+            # prevents automatic remint in the same operator run (source mix constraints).
             "convert_source_mix",
         }
     )
     #: Nothing re-mints these, so ending one would only lose its work. The
-    #: exception is `retention_sweep`, which the clock mints hourly and 086's
+    #: exception is `retention_sweep`, which the clock mints hourly and the reaper's deadline
     #: leg does not list: a late one is still claimed (`fn_claim_job` reads no
     #: deadline, and only it holds its key), so it runs late rather than
     #: strands. Listing it is a migration.
-    #: `activation_nudge_sweep` (106) is minted daily by the clock once it is
+    #: `activation_nudge_sweep` (`users.activation_nudge_at`) is minted daily by the clock once it is
     #: switched on, and is kept for the same reason: a late sweep runs late.
-    #: 145's three archive lifecycle kinds are kept too: the sweep runs late
+    #: The three archive lifecycle kinds are kept too: the sweep runs late
     #: like the nudge, and its two minting doors skip a key that still holds a
     #: ready job, so ending one past its deadline would only delay the next.
     KEPT = frozenset(
@@ -951,7 +854,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
                 fetch=True,
             )[0]
             # One statement stamps both, so the span is exact; a kind missing
-            # from 086's re-arm list leaves the source NULL.
+            # from `fn_reaper_sweep`'s re-arm list leaves the source NULL.
             assert span == timedelta(seconds=work_loop.REARM_AFTER_SECONDS), (
                 f"{kind}: a sync kind must be named in 086's re-arm too"
             )
@@ -962,7 +865,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
         )
 
     def test_the_re_arm_rides_its_own_grant(self, jobs_db):
-        """086's column grant is load-bearing: without it the sweep is refused
+        """`fn_reaper_sweep`'s column grant is load-bearing: without it the sweep is refused
         (the re-arm's UPDATE is checked when it is planned). Removed, restored."""
         owner = jobs_db["owner_stream"]
         _sweep(jobs_db)  # positive control: the grant is in
@@ -1081,15 +984,15 @@ class TestRawSqlInvariants:
 
 
 class TestWhatTheDatabaseDeliberatelyDoesNotEnforce:
-    """`jobs` has NO transition guard (#883), MEASURED here, and the
+    """`jobs` has NO transition guard, MEASURED here, and the
     jobs service contract is written against that fact rather than
     around an assumption.
 
     Why no guard is the right reading — carried by the MECHANISM on each
-    edge, not by any classification of the table (#887): entering
+    edge, not by any classification of the table: entering
     `leased` is guarded by a partial UNIQUE INDEX, writer-independent and
     therefore stronger than a trigger, so the case for the trigger as the
-    authority (#883) does not transfer; leaving it is the token+state CAS,
+    authority does not transfer; leaving it is the token+state CAS,
     where that case transfers INVERTED — only a WRONG caller (a stale owner)
     can be misled, about its own staleness, the far weaker failure. Both
     proven above, including the double-finalize case. The residual — a bare
@@ -1374,7 +1277,7 @@ class TestTheServicePathAgreesWithTheDoors:
 
             # A token the door no longer honors: the count comes back short,
             # the tripwire fires, and WHICH lease is stale stays the CAS's
-            # question — the count alone cannot say (059's contract).
+            # question — the count alone cannot say (`04_functions.sql`'s contract).
             hb.register(uuid.uuid4())
             assert await hb.beat_once() == 1
             assert hb.short_beats == 1 and shorts == [(2, 1)]
@@ -1386,7 +1289,7 @@ class TestTheServicePathAgreesWithTheDoors:
         """The state predicate the retained token requires: after a successful
         finalize, the SAME live token must not finalize again (a lost commit
         ack + client retry would otherwise overwrite the terminal row and be
-        told it won — the #883 phantom-win shape one table over)."""
+        told it won — the phantom-win shape one table over)."""
         from src.services.target.jobs import JobFenced, claim_job, finalize_job
 
         key = _key()

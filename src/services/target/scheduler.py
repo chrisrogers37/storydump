@@ -1,16 +1,16 @@
-"""Scheduler-as-clock, dispatcher, and the recurring system jobs (#864).
+"""Scheduler-as-clock, dispatcher, and the recurring system jobs.
 
 Three things that are easy to conflate and must not be: the **clock** decides
 *when*, the **dispatcher** decides *what runs*, and **system jobs** are the
 recurring population riding on both. The clock does not execute work — it runs
 "inside an elected worker, no separate pool" — and the dispatcher is
-`fn_clock_tick`, a `059` door. This module is the election, the loop, and the
+`fn_clock_tick`, a `04_functions.sql` door. This module is the election, the loop, and the
 executors.
 
 ## Does the outbox's lease argument extend to recurring work? No, and the shape
 ## difference is exactly the one worth naming
 
-The outbox (#897) needs no guard of its own because
+The outbox needs no guard of its own because
 `uq_jobs_serialized_lease` admits one live sender per key and **holding the
 lease is the proof the predecessor does not**. That argument is about who
 *executes*. Recurring work has a second edge a one-shot delivery does not: it
@@ -19,11 +19,11 @@ must be **scheduled again**, and the lease says nothing about that.
 Look at what `fn_clock_tick`'s recurring leg actually does:
 
     IF NOT EXISTS (SELECT 1 FROM jobs WHERE kind = k AND state IN ('ready','leased'))
-    THEN INSERT INTO jobs (...) ...
+    THEN INSERT INTO jobs (...)...
 
 That `NOT EXISTS` is a **snapshot read**, not a lock — the same shape as
-`fn_claim_job`'s serialization check, which cannot serialize two callers
-(#890). And the index that rescues `fn_claim_job` does not rescue this one:
+`fn_claim_job`'s serialization check, which cannot serialize two callers.
+And the index that rescues `fn_claim_job` does not rescue this one:
 `uq_jobs_serialized_lease` is partial on ``state = 'leased'``, while the
 double-insert happens at ``state = 'ready'``. **Two concurrent ticks would both
 see no live row and both insert.** A clock that can double-fire is the same
@@ -156,7 +156,7 @@ async def tick(
     recurring: dict,
     capability=None,
 ) -> dict:
-    """One dispatcher pass, through the `059` door. Runs in the caller's tx.
+    """One dispatcher pass, through the `04_functions.sql` door. Runs in the caller's tx.
 
     The door is the authority on what a tick does and on how its insert budget
     is shared between the five classes — this wrapper adds no policy, exactly
@@ -164,7 +164,7 @@ async def tick(
     call sites read as intent and so the numbers arrive as parameters.
 
     *recurring* is the seam the door documents: ``{"v": 1, "<kind>":
-    seconds, ...}``.
+    seconds,...}``.
     """
     from src.services.target.instagram_sources import is_activated
 
@@ -227,12 +227,12 @@ async def _notice_no_media(
 
     **The dedup is an atomic claim, not a read-then-write.** The UPDATE both
     tests the window and stamps it in one statement, so two workers racing the
-    same starved account produce one notice, not two. A `SELECT ... IF stale
+    same starved account produce one notice, not two. A `SELECT... IF stale
     THEN UPDATE` would be correct in a test and wrong under the second worker
-    — the #883 shape `execute_plan_slot` already avoids on the minting edge.
+    — the shape `execute_plan_slot` already avoids on the minting edge.
 
     **An empty binding set is NOT a success, and not a bare `0` either.**
-    A workspace with no push binding has nowhere for this to land (#1090 —
+    A workspace with no push binding has nowhere for this to land ( —
     `push_bindings` selects active `telegram%` rows only, so a web-born
     workspace has none), so it returns `outbox.UNDELIVERABLE` and the job
     finalizes `review_required`. Returning `0` would collapse "told nobody,
@@ -321,7 +321,7 @@ async def execute_plan_slot(
     slot that already had an intent is the idempotency guard doing its job and
     the customer has nothing to learn from it; a slot that found no media is a
     missed slot, which the customer is owed a notice about ("you are told once
-    — not silently nothing", #1090). That notice is emitted here, where the
+    — not silently nothing"). That notice is emitted here, where the
     empty case already lives.
 
     *no_media_notice_after_seconds* is the dedup window (24 h) and is
@@ -329,8 +329,7 @@ async def execute_plan_slot(
     how a once-a-day notice becomes either a flood or a silence, and there is
     exactly one production caller to pass it.
 
-    *low_runway_days* is the runway notice's level (#1478,
-    `content_runway.after_mint`): a mint that leaves the account with fewer
+    *low_runway_days* is the runway notice's level (`content_runway.after_mint`): a mint that leaves the account with fewer
     days of eligible content than this tells the workspace once, and the next
     drop is told only after the account has climbed back
     `content_runway.REARM_MARGIN_DAYS` above it. Required for the same reason
@@ -343,7 +342,7 @@ async def execute_plan_slot(
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
     `plan_slot` job — which the clock's own `NOT EXISTS` cannot rule out, and
     which a lease cannot either — mints no second intent. A read-then-write
-    would be the #883 shape: correct in a test, wrong under two workers.
+    would be the shape: correct in a test, wrong under two workers.
 
     Note the conflict target is spelled as **columns**, not
     ``ON CONFLICT ON CONSTRAINT uq_intent_slot``.
@@ -354,9 +353,8 @@ async def execute_plan_slot(
     The target carries ``WHERE origin = 'cadence'`` because the slot key is a
     cadence rule: a planned row (a story a person scheduled for a chosen time)
     takes no slot, so it must never absorb a slot's mint, and a slot's mint
-    must never meet it. `uq_intent_slot` is that partial index (088 added it
-    beside the unconditional key, 089 dropped the unconditional one and gave
-    the partial one its name). Postgres infers a partial unique index only
+    must never meet it. `uq_intent_slot` is the partial unique index on
+    cadence slots. Postgres infers a partial unique index only
     from a conflict target whose predicate implies the index's: the
     predicate-less spelling finds no arbiter and raises on every mint.
 
@@ -373,16 +371,16 @@ async def execute_plan_slot(
     Within the drawn folder: never-posted files go in the folder's shuffled
     order — the row's random id, not index time, which puts a batch exported
     together in a row — and once everything has posted, the file posted
-    longest ago goes first so a small folder rotates (#1251)."""
+    longest ago goes first so a small folder rotates."""
     draw = rng if rng is not None else random.SystemRandom()
     # Never-posted first, in the folder's shuffled order: `m.id` is a random
     # UUID, a stable per-file shuffle key — index time puts a batch exported
     # together in a row. Once everything has posted, least-recently-posted
     # first, so a small folder rotates through its files instead of
-    # repeating the oldest one (#1251).
+    # repeating the oldest one.
     order = " ORDER BY m.last_posted_at NULLS FIRST, m.id LIMIT 1"
     # Selection's rule and the connected folders' weights, read as the runway
-    # reads them (#1478): the files this draws from and the count the Overview
+    # reads them: the files this draws from and the count the Overview
     # shows are one pool, so they cannot disagree.
     from src.services.target import source_policy, versioned_mix, readers
     from decimal import Decimal
@@ -606,13 +604,12 @@ async def execute_retention_sweep(
 ) -> int:
     """The `retention_sweep` executor. Returns rate-counter rows deleted.
 
-    Runs ONE retention class, `rate_counters`, through the 059 door
+    Runs ONE retention class, `rate_counters`, through the `04_functions.sql` door
     `fn_retention_batch`. Each call deletes at most *batch* rows in a short
     transaction of its own from *session_factory*, repeated until a call
-    comes back short or *budget_seconds* is spent. The other classes the door knows stay
-    unswept: each changes something a reader relies on (the audit trail, the
-    cap ledger's `debited_total`, the snapshots), so each is its own
-    decision (#1327).
+    comes back short or *budget_seconds* is spent. The door accepts only
+    `rate_counters`; the audit trail, cap ledger and archive exports remain
+    outside this sweep.
     """
     stop_at = time.monotonic() + budget_seconds
     total = 0
@@ -744,7 +741,7 @@ class Clock:
             # aborts all five identically. A job kind missing from
             # `ck_jobs_kind` stops the clock estate-wide, and without the log
             # its only symptom, five layers away, is a worker gate failing
-            # `assert bulk.processed >= 1` on `0 >= 1` (#1074).
+            # `assert bulk.processed >= 1` on `0 >= 1`.
             #
             # `logger.exception` rather than a formatted message: the failing
             # row is in the DBAPI error's own text, so re-rendering it by hand

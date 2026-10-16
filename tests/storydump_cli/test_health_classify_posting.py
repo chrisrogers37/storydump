@@ -227,7 +227,7 @@ def test_the_destination_count_never_reaches_the_verdict():
 
 
 class TestBothStuckPhasesAreFalse:
-    """Both stuck phases (#1268), stated as a test.
+    """Both stuck phases, stated as a test.
 
     Two stacked causes with opposite remedies, and `/health/scheduling` reads
     `healthy` across both, every field of it true. The one assertion false in
@@ -278,7 +278,7 @@ class TestBothStuckPhasesAreFalse:
 
 
 def test_debits_without_landings_are_called_out_as_such():
-    """The cap ledger (#1268), earning its place in the CONTRAST.
+    """The cap ledger, earning its place in the CONTRAST.
 
     `daily_post_counts` is debited at the `approved → publishing` flip, BEFORE
     the publish call, so a nonzero total beside zero landings means publishing
@@ -383,7 +383,7 @@ class TestEveryCountAndAgePairMustAgree:
 
     **All three pairs.** The two pairs feeding the grace ladder are guarded as
     the landing pair is: a null age there would fall into `float(None or 0)`
-    and contribute zero elapsed (#1269).
+    and contribute zero elapsed.
     """
 
     #: (count field, age field, a count that must force a non-null age)
@@ -427,7 +427,7 @@ class TestAMissingLadderAgeCannotSILENCEAnOverdueEstate:
     Not reachable from the SQL — each pair comes from one `count(*)` and one
     `max(...)` over one population in one statement. This is the guard for the
     edit that decouples them, and `posting_health` already filters one side of
-    one pair deliberately (the landing filter in `fn_health_posting_freshness`, 081), so that edit has a precedent in the
+    one pair deliberately (the landing filter in `fn_health_posting_freshness`, fleet health functions), so that edit has a precedent in the
     very file that produces these fields.
     """
 
@@ -496,7 +496,7 @@ def test_a_silence_alert_does_not_contradict_itself():
     """`_describe_estate` runs on the `silent` path too, where `posted_ever > 0`.
 
     Its branches all diagnose an estate that has NEVER posted, so appending one
-    to a silence alert would produce "N post(s) landed in total, and ... nothing
+    to a silence alert would produce "N post(s) landed in total, and... nothing
     is landing" — an alert arguing with itself.
     """
     v = read(payload(posted_ever=300, last_post_age_seconds=SILENCE + 1))

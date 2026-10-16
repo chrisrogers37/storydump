@@ -1,5 +1,5 @@
 """The data-deletion route and its status page, end to end as the production role
-(#1644, migration 143).
+(Meta deletion receipt functions).
 
 The OAuth gate's world: the real app on the replayed target schema, connected as
 `svc_ingress`. The mapping a deletion request finds is the one the REAL callback

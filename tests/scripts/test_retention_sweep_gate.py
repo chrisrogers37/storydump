@@ -3,9 +3,9 @@
 The executor is run exactly as the worker's registry runs it: connected as
 `svc_worker`, no tenant, the `system` actor, at `WorkerConfig`'s numbers. It
 must delete every `rate_counters` row whose window started more than 7 days
-ago, keep every newer one, and leave every other table alone — including rows
-the door's other classes WOULD delete (an aged cap-ledger day, an aged
-succeeded job, an aged archive table), because those classes are not built.
+ago, keep every newer one, and leave every other table alone. An aged cap-ledger
+day, an aged succeeded job and an aged archive table serve as retained
+sentinels outside the rate-counter sweep.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from tests.scripts.conftest import (
     fetch_all,
     fetch_one,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     run_as_worker,
     seed_workspace_chain,
 )
@@ -53,12 +53,12 @@ def migrated_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "retention-gate")
             with conn.cursor() as cur:
-                # Rows the door's OTHER classes would take, at any keep.
+                # Aged sentinels outside the rate-counter sweep.
                 cur.execute(
                     "INSERT INTO daily_post_counts"
                     " (workspace_id, ig_account_id, local_date, count, cap_at_write)"
@@ -135,7 +135,7 @@ def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(
     # Exactly the old rows went, every new one survived.
     assert _survivors(sweep_db) == NEW_KEYS
     # And no other table moved: the aged cap-ledger day, the aged job and the
-    # aged archive table the door's unbuilt classes would take are all there.
+    # aged archive table all remain in place.
     after.pop("public.rate_counters")
     assert after == before
 

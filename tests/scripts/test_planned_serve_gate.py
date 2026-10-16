@@ -1,5 +1,5 @@
-"""Gate: a planned story is served on time or missed out loud (089;
-#1413, #1414).
+"""Gate: a planned story is served on time or missed out loud (`fn_planned_serve` / `fn_planned_misses`;
+).
 
 A planned story (`origin = 'planned'`) is served by the prompt sweep, not
 minted and prompted in one transaction as a cadence story is, so the only
@@ -43,7 +43,7 @@ from tests.scripts.conftest import (
     in_tenant,
     ingress_engine,
     reap_as_worker,
-    replay_advertised_stream,
+    build_world,
     txn,
 )
 
@@ -58,7 +58,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn}
     finally:
         gen.close()
@@ -164,7 +164,7 @@ def _seed_story(
     account and every other kind on the workspace. *entered_ago_s* backdates
     `entered_state_at`, *cap* stamps `cap_consumed_on` (a `publishing` row needs
     it), and *rule* ``(unit, every, days)`` gives a planned story a repeat rule
-    (116) whose time of day is its own slot's, in the workspace's zone."""
+    (repeat rules) whose time of day is its own slot's, in the workspace's zone."""
     tag = uuid.uuid4().hex[:10]
     acct_tag = on["acct_tag"] if on else tag
     if on:
@@ -392,7 +392,7 @@ class TestServedOnTime:
 
     def test_a_scheduler_who_has_left_the_workspace_is_named_no_more(self, world):
         """A series outlives the person who planned it, and a card names them
-        only while they are still a member (#485). The card served while they
+        only while they are still a member. The card served while they
         were names them; the same card rendered again after they left does
         not."""
         w = _workspace(world, "p3-left")

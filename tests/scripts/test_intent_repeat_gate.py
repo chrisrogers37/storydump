@@ -1,8 +1,8 @@
-"""Gate: a planned story repeats (116; #485, #1687).
+"""A planned story repeats according to its repeat rule.
 
 `post_intents` carries a four-column repeat rule. `fn_repeat_times` gives the rule's grid, reading
 local times through `fn_wall_instant`, and `tg_intent_repeat` makes the next occurrence in the
-transaction that ends one. Each ending is driven against the replayed advertised stream, under the
+transaction that ends one. Each ending is driven against the code-built schema, under the
 role that causes it in production:
 
 - the port, as `svc_ingress`: skip, reject, posted by a person, and the cancel a person asks for;
@@ -44,7 +44,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     in_tenant,
-    replay_advertised_stream,
+    build_world,
     txn,
 )
 from tests.scripts.test_planned_serve_gate import (
@@ -92,7 +92,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn, "ingress": as_user(dsn, "svc_ingress")}
     finally:
         gen.close()
@@ -753,9 +753,9 @@ class TestTheTriggerIsTotal:
 class TestASuccessorStartsClean:
     def test_a_successor_starts_clean(self, world):
         """Every column tg_intent_repeat's INSERT does not name holds its default on the
-        successor, #1688's approval_rule among them, and nothing is carried over from
+        successor's approval_rule among them, and nothing is carried over from
         the ended occurrence. `approval_mode` is named, and written as 'manual', as
-        every insert writes it (110)."""
+        every insert writes it (approval rules)."""
         w = _ws(world, "clean")
         s = _seed(world, w, state="publishing", slot_in_s=-600, cap=True)
         _exec(

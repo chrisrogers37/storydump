@@ -1,4 +1,4 @@
-"""Migrations 142-143 (#1644): the Meta identity mapping and
+"""Meta identity mappings and deletion receipts: the Meta identity mapping and
 deletion receipt doors, driven as the real runtime logins.
 
 Each test gets a fresh lineage database: receipts are tenant-free and the doors
@@ -32,12 +32,12 @@ REFUSED = psycopg2.errors.RaiseException
 
 
 @pytest.fixture
-def db(lane_db, admin_conn):
+def db(world_db, admin_conn):
     set_test_passwords(admin_conn)
     return {
-        "owner": lane_db,
-        "ingress": as_user(lane_db, "svc_ingress"),
-        "worker": as_user(lane_db, "svc_worker"),
+        "owner": world_db,
+        "ingress": as_user(world_db, "svc_ingress"),
+        "worker": as_user(world_db, "svc_worker"),
     }
 
 
@@ -226,7 +226,7 @@ def settle_transit(db, w, *, destroyed):
     )
 
 
-# --- 142: the mappings and the deauthorize door ------------------------------
+# --- `meta_identity_mappings`: the mappings and the deauthorize door ------------------------------
 
 
 def test_subject_mappings_are_one_equality_read_across_tenants_without_a_tenant(db):
@@ -334,7 +334,7 @@ def test_one_current_mapping_per_credential(db):
     map_identity(db, w, subject(), authorization=str(uuid.uuid4()), current=False)
 
 
-# --- 143: receive, replay, classification ------------------------------------
+# --- Meta deletion receipt functions: receive, replay, classification ------------------------------------
 
 
 def test_a_request_freezes_its_scope_and_a_replay_reuses_the_receipt(db):
@@ -624,7 +624,7 @@ def test_a_null_fingerprint_inside_the_array_is_refused(db):
         )
 
 
-# --- 143: the worker's scope read and progress report ------------------------
+# --- Meta deletion receipt functions: the worker's scope read and progress report ------------------------
 
 
 def two_workspace_receipt(db):

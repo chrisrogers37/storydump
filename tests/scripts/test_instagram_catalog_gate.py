@@ -305,7 +305,7 @@ def test_asset_revision_change_clears_validation_and_capture(sync_conn, archive)
 
 @pytest.mark.parametrize("role", ["svc_worker", "svc_ingress"])
 def test_asset_runtime_rls_hides_foreign_and_unset_tenants(
-    lane_db, sync_conn, admin_conn, archive, role
+    world_db, sync_conn, admin_conn, archive, role
 ):
     other = seed_workspace_chain(sync_conn, "asset-rls-other")
     with sync_conn.cursor() as cur:
@@ -314,7 +314,7 @@ def test_asset_runtime_rls_hides_foreign_and_unset_tenants(
         insert_asset(cur, foreign)
     sync_conn.commit()
     set_test_passwords(admin_conn)
-    conn = psycopg2.connect(as_user(lane_db, role))
+    conn = psycopg2.connect(as_user(world_db, role))
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM instagram_media_assets")
@@ -630,11 +630,11 @@ def test_generation_authorization_identity_cannot_be_rewritten(sync_conn, archiv
 
 @pytest.mark.parametrize("role", ["svc_worker", "svc_ingress"])
 def test_runtime_roles_own_rows_and_deny_missing_or_foreign_tenant(
-    lane_db, sync_conn, admin_conn, archive, role
+    world_db, sync_conn, admin_conn, archive, role
 ):
     other = seed_workspace_chain(sync_conn, "catalog-other")
     set_test_passwords(admin_conn)
-    conn = psycopg2.connect(as_user(lane_db, role))
+    conn = psycopg2.connect(as_user(world_db, role))
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT current_user")

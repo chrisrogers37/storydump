@@ -1,7 +1,8 @@
-"""Migration 134: archive ownership, current observations and immutable captures.
+"""Archive ownership, current observations and immutable captures.
 
-Schema definitions only. Services use hand-written SQL under the tenant UoW.
-Triggers and RLS are owned by the migration, not mirrored by ORM behavior.
+`ddl.build()` creates these tables through `TargetBase.metadata`. Services use
+SQL under the tenant unit of work. Functions, triggers and row policies live
+in `src/models/target/ddl/`.
 """
 
 from sqlalchemy import (
@@ -52,6 +53,13 @@ class MediaSourceDestination(TargetBase):
             ["ig_accounts.workspace_id", "ig_accounts.id"],
             name="fk_source_destinations_account",
             ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_source_destinations_account",
+            "workspace_id",
+            "ig_account_id",
+            "source_id",
+            postgresql_where=text("state = 'active'"),
         ),
     )
 
@@ -148,9 +156,9 @@ class InstagramSourcePolicy(TargetBase):
     destination_scope = Column(
         Text, nullable=False, server_default=text("'origin_only'")
     )
-    carousel_slides = Column(Text, nullable=False, server_default=text("'all'"))
     created_at = Column(TZ, nullable=False, server_default=text("now()"))
     updated_at = Column(TZ, nullable=False, server_default=text("now()"))
+    carousel_slides = Column(Text, nullable=False, server_default=text("'all'"))
 
     __table_args__ = (
         CheckConstraint(
@@ -191,11 +199,6 @@ class InstagramMediaIndex(TargetBase):
     observation_revision = Column(BigInteger, nullable=False, server_default=text("1"))
     media_item_id = Column(UUID(as_uuid=True), nullable=True)
     first_child_id = Column(Text, nullable=True)
-    slide_count = Column(Integer, nullable=True)
-    slides_complete = Column(Boolean, nullable=False, server_default=text("true"))
-    post_ref = Column(
-        UUID(as_uuid=True), nullable=False, server_default=text("gen_random_uuid()")
-    )
     original_at = Column(TZ, nullable=False)
     permalink = Column(Text, nullable=True)
     like_count = Column(BigInteger, nullable=True)
@@ -208,7 +211,6 @@ class InstagramMediaIndex(TargetBase):
     availability = Column(Text, nullable=False, server_default=text("'available'"))
     exclusion_reason = Column(Text, nullable=True)
     validation_state = Column(Text, nullable=False, server_default=text("'pending'"))
-    validation_capture = Column(JSONB, nullable=True)
     validation_generation_id = Column(UUID(as_uuid=True), nullable=True)
     validation_observation_revision = Column(BigInteger, nullable=True)
     validation_fingerprint = Column(Text, nullable=True)
@@ -219,6 +221,12 @@ class InstagramMediaIndex(TargetBase):
     cached_eligible = Column(Boolean, nullable=True)
     created_at = Column(TZ, nullable=False, server_default=text("now()"))
     updated_at = Column(TZ, nullable=False, server_default=text("now()"))
+    validation_capture = Column(JSONB, nullable=True)
+    slide_count = Column(Integer, nullable=True)
+    slides_complete = Column(Boolean, nullable=False, server_default=text("true"))
+    post_ref = Column(
+        UUID(as_uuid=True), nullable=False, server_default=text("gen_random_uuid()")
+    )
 
     __table_args__ = (
         Index(
@@ -296,6 +304,24 @@ class InstagramMediaIndex(TargetBase):
             "media_item_id",
             unique=True,
             postgresql_where=text("media_item_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_archive_original_time",
+            "workspace_id",
+            "source_id",
+            "original_at",
+            "parent_media_id",
+        ),
+        Index(
+            "ix_archive_suitability",
+            "workspace_id",
+            "source_id",
+            "data_generation_id",
+            "original_at",
+            "media_item_id",
+            postgresql_where=text(
+                "availability = 'available' AND validation_state = 'supported'"
+            ),
         ),
     )
 
@@ -501,15 +527,15 @@ class InstagramArtifact(TargetBase):
     upload_attempt_id = Column(UUID(as_uuid=True), nullable=True)
     admitted_at = Column(TZ, nullable=True)
     outcome = Column(Text, nullable=True)
-    admitted_asset_ref = Column(Text, nullable=True)
-    admitted_resource_type = Column(Text, nullable=True)
-    creation_evidence = Column(JSONB, nullable=True)
     created_asset_ref = Column(Text, nullable=True)
     settled_at = Column(TZ, nullable=True)
     cleanup_state = Column(Text, nullable=False, server_default=text("'pending'"))
-    destroyed_at = Column(TZ, nullable=True)
     created_at = Column(TZ, nullable=False, server_default=text("now()"))
     updated_at = Column(TZ, nullable=False, server_default=text("now()"))
+    admitted_asset_ref = Column(Text, nullable=True)
+    admitted_resource_type = Column(Text, nullable=True)
+    creation_evidence = Column(JSONB, nullable=True)
+    destroyed_at = Column(TZ, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -609,6 +635,14 @@ class InstagramArtifact(TargetBase):
             ],
             name="fk_archive_artifact_intent",
             ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_archive_cleanup_generation",
+            "workspace_id",
+            "source_id",
+            "data_generation_id",
+            "cleanup_state",
+            "outcome",
         ),
     )
 

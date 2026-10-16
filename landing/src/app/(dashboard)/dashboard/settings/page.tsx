@@ -36,7 +36,7 @@ import { parseConnectionResult } from "@/lib/connection-result";
 
 /**
  * Settings — every tab writes. General is the command client, Accounts
- * adds and removes destinations (#1089, and `disable_account`), Integrations
+ * adds and removes destinations (and `disable_account`), Integrations
  * connects and disconnects Drive and mints Telegram links, API tokens mints
  * and revokes.
  *
@@ -45,9 +45,9 @@ import { parseConnectionResult } from "@/lib/connection-result";
  * Every control on these tabs has its route: the General writes are on the
  * command client, `disconnect_account` is a built `COMMAND_SPECS` row and
  * Integrations calls it, `sync_now` is wired, Drive connects per workspace
- * against a per-workspace route (069, #1165), and there is no switch-account
- * control (#1338). A permanently-true flag is the mirror image of a
- * permanently-false one (#1070), and neither survives a reader asking what it
+ * against a per-workspace route (workspace Drive grant), and there is no switch-account
+ * control. A permanently-true flag is the mirror image of a
+ * permanently-false one, and neither survives a reader asking what it
  * would take to flip it.
  *
  * The one flag left on this screen is the posting mix's `editable={isAdmin}`
@@ -82,10 +82,10 @@ export default async function SettingsPage({
 }) {
   // `auth.py:364` redirects here with `?connected=gdrive` on a successful
   // Drive grant, and this page reads it, so the grant does not complete in
-  // silence (#1090).
+  // silence.
   //
   // `?connection=<id>` is the Instagram callback's, where past posts are a
-  // choice (#1644): an opaque id, and only its shape is trusted. The
+  // choice: an opaque id, and only its shape is trusted. The
   // banner says what the API answers for it, never what the query says.
   const { connected, connection } = await searchParams;
   const { session, workspaceId } = await requireWorkspacePage();
@@ -98,7 +98,7 @@ export default async function SettingsPage({
   // disabled on a blank name, so an unreachable read cannot submit one.
   const membership = session.workspaces?.find((w) => w.id === workspaceId);
   const workspaceName = membership?.name ?? "";
-  // The Delete / Restore card is owner-only (#1127). An unknown role — the
+  // The Delete / Restore card is owner-only. An unknown role — the
   // list was unreachable — hides it: a delete control whose refusal we cannot
   // predict is worse than a missing one, and the port refuses non-owners anyway.
   const isOwner = membership?.role === "owner";
@@ -145,7 +145,7 @@ export default async function SettingsPage({
     isAdmin
       ? workspaceFetch<{ tokens?: unknown }>("tokens", workspaceId)
       : Promise.resolve(null),
-    // Pending invitations carry the invitees' addresses (#1571), and only an
+    // Pending invitations carry the invitees' addresses, and only an
     // admin can invite, so a member's page never asks for them.
     isAdmin
       ? workspaceFetch<{ invitations?: unknown }>("invitations", workspaceId)
@@ -368,7 +368,7 @@ export default async function SettingsPage({
 
         {/*
           No `editable` here either: Connect, the folder picker, Sync Now,
-          Remove and Disconnect all call routes that exist (069, #1165), and
+          Remove and Disconnect all call routes that exist (workspace Drive grant), and
           gating them would be the reads-without-writes harm inverted, hiding
           controls that work. `isAdmin` gates one control only: removing a
           Telegram group, which the API refuses below the admin floor.

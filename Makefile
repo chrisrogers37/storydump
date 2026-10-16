@@ -23,15 +23,15 @@ DB_PASSWORD ?=
 # PostgreSQL connection options (respects all connection variables)
 PG_OPTS = -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER)
 
-# init-db's migration runner gets its URL from `scripts.app_db_url`, which
-# percent-encodes every part: pasted into the URL raw, a password carrying `@`,
-# `/` or `%` is misread by libpq after psql has connected with it. The recipe
-# hands the helper each field quoted exactly as psql gets it — the password as
-# in `PGPASSWORD="$(DB_PASSWORD)"`, the other four bare, as in `PG_OPTS` and
-# `-d $(DB_NAME)` — so both steps connect with the same values. Like every psql
-# recipe here, a password carrying `"` or a backtick still breaks the shell
-# line, a `$` that starts a name is expanded in it, and a single-quoted `.env`
-# password keeps its quotes.
+# init-db's schema builder and migration runner get their URL from
+# `scripts.app_db_url`, which percent-encodes every part: pasted into a URL raw,
+# a password carrying `@`, `/` or `%` is misread by libpq. The recipe hands the
+# helper each field quoted exactly as psql gets it — the password as in
+# `PGPASSWORD="$(DB_PASSWORD)"`, the other four bare, as in `PG_OPTS` and
+# `-d $(DB_NAME)` — so init-db connects with the values every psql recipe here
+# uses. Like every psql recipe here, a password carrying `"` or a backtick still
+# breaks the shell line, a `$` that starts a name is expanded in it, and a
+# single-quoted `.env` password keeps its quotes.
 
 # Colors for output
 GREEN  := \033[0;32m
@@ -113,14 +113,13 @@ drop-db: ## Drop the database (WARNING: destructive)
 	@PGPASSWORD="$(DB_PASSWORD)" dropdb $(PG_OPTS) --if-exists $(DB_NAME) 2>/dev/null || true
 	@echo "$(GREEN)✓ Database dropped$(NC)"
 
-init-db: ## Build the schema on a FRESH database, the way the lineage lane proves it: step 0 (the service roles and the DDL door), the by-hand base (the one legacy table no migration creates), then every runner file. DB_USER needs CREATEROLE
+init-db: ## Build the schema from code on an EMPTY database and record the initial marker, or run the newer migrations on a database built that way. DB_USER needs CREATEROLE and must own the database
 	@echo "$(GREEN)Initializing database schema...$(NC)"
-	@PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -q -v ON_ERROR_STOP=1 \
-		-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
-		-f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql 2>&1 || \
-		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions (step 0 creates the svc_* roles: DB_USER needs CREATEROLE).$(NC)" && exit 1)
-	@DATABASE_URL="$$(DB_USER=$(DB_USER) DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=$(DB_HOST) DB_PORT=$(DB_PORT) DB_NAME=$(DB_NAME) python -m scripts.app_db_url)" python -m scripts.migration_runner apply || \
-		(echo "$(RED)✗ The migration runner failed; see its output above.$(NC)" && exit 1)
+	@URL="$$(DB_USER=$(DB_USER) DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=$(DB_HOST) DB_PORT=$(DB_PORT) DB_NAME=$(DB_NAME) python -m scripts.app_db_url)" && \
+		DATABASE_URL="$$URL" python -m src.models.target.ddl init && \
+		DATABASE_URL="$$URL" python -m scripts.migration_runner adopt && \
+		DATABASE_URL="$$URL" python -m scripts.migration_runner apply || \
+		(echo "$(RED)✗ init-db failed; see the output above. The builder refuses a database that is neither empty nor built from code (make reset-db starts over).$(NC)" && exit 1)
 	@echo "$(GREEN)✓ Schema initialized$(NC)"
 
 setup-db: create-db init-db ## Create database and initialize schema

@@ -1,4 +1,4 @@
-"""Cap-ledger gate — the flip, refund, and the two resolve edges (#862).
+"""Cap-ledger gate — the flip, refund, and the two resolve edges.
 
 ZERO OVER-CAP is the assertion the product depends on: over-cap means posting
 more than Meta allows, which limits the account. Everything here proves it,
@@ -40,7 +40,7 @@ from src.services.target.publish_cap import FlipOutcome, IntentNotApproved
 from tests.scripts.conftest import (
     _scratch,
     async_url,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -55,7 +55,7 @@ def cap_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "l5-cap")
@@ -508,7 +508,7 @@ class TestReEntry:
     def _stepped_back(self, cap_db):
         intent = _new_intent(cap_db)  # approved, undebited
         assert _run(_flip(cap_db["engine"], cap_db, intent)) is FlipOutcome.PROCEED
-        # The hop the pipeline makes on a wait (edge 076): progress and the
+        # The hop the pipeline makes on a wait (edge `post_intent_transitions`): progress and the
         # debit stay on the row.
         _exec(
             cap_db,
@@ -575,7 +575,7 @@ class TestReEntry:
 
 
 class TestAPlannedStorySitsOutsideTheCap:
-    """A planned story (#1413) neither spends the account's daily cap nor
+    """A planned story neither spends the account's daily cap nor
     waits on it, so a spent day never pushes it and it never pushes a cadence
     story to tomorrow. Key 4 and the cancel honour hold it exactly as they hold
     a cadence story."""

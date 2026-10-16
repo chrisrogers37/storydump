@@ -29,7 +29,7 @@ from src.services.target.webhook_ingress import AdmissionConflict, DeliveryRepla
 from tests.scripts.conftest import (
     _scratch,
     async_url,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -41,7 +41,7 @@ def admit_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             seed_workspace_chain(conn, "l8-gate")

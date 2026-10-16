@@ -1,4 +1,4 @@
-"""092: a new account needs a way in while in beta.
+"""`fn_signup_admitted`: a new account needs a way in while in beta.
 
 `fn_signup_admitted` answers whether a new Google account with a verified
 email may create its user: the owner admitted the address, or a pending,
@@ -7,20 +7,20 @@ unexpired invitation is addressed to it. It runs here as the production role
 upsert that asks it, so the bound parameter's type is the real one too. The
 admissions are seeded as the schema owner, the way the owner admits someone.
 
-098 holds the invitation branch to the invitation's standing, read
+invitation legitimacy checks holds the invitation branch to the invitation's standing, read
 live: it counts only from an `active` workspace whose owner or admin still sent
 it, so a removed or demoted inviter, a suspended workspace and an invitation
 with no recorded inviter admit nobody new.
 
-115 lets someone who signed in without the link see the invitations
+invitee invitation functions lets someone who signed in without the link see the invitations
 the accept door would honour for their address, and have the link sent again:
 a fresh token for the same invitation, emailed to its address alone.
 
-129 (#1723) gives an admission a claim link: through the claim
+`signup_admissions` gives an admission a claim link: through the claim
 page's form post and the callback, a new Google account with any address signs
 up once, and the spot is used up for the admitted address too.
 
-133 (#1740) makes an account created at an admitted address use the
+`trg_signup_admission_consume` makes an account created at an admitted address use the
 admission up as it is created, so the spot stays used when the person's
 verified email later moves: neither the old link nor the freed address opens a
 second account. Two sign-ins of one admission at once are characterized, the
@@ -59,7 +59,7 @@ from tests.scripts.conftest import (
     fetch_all,
     in_user_plane,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     rows_holding,
     seed_workspace_chain,
 )
@@ -90,7 +90,7 @@ INVITATIONS = {
 LIVE = {"live@example.com", "Mixed@Example.com"}
 
 #: (address, who sent it) for each pending, unexpired invitation whose
-#: standing 098 judges. The owner sent every invitation above.
+#: standing invitation legitimacy checks judges. The owner sent every invitation above.
 SENT_BY = {
     "from-admin@example.com": "admin",
     "from-removed@example.com": "removed",
@@ -155,7 +155,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner_dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner_dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(owner_dsn)
         try:
             chain = seed_workspace_chain(conn, "signup")
@@ -250,7 +250,7 @@ class TestTheDoor:
 
     @pytest.mark.parametrize("email", [e for e in SENT_BY if e not in STANDING])
     def test_an_invitation_that_lost_its_standing_lets_nobody_in(self, world, email):
-        """098: the inviter was removed, demoted or disabled, the workspace is
+        """invitation legitimacy checks: the inviter was removed, demoted or disabled, the workspace is
         suspended, or nobody is recorded as the inviter — the invitation is
         pending and unexpired, and still admits no new account."""
         assert _admitted(world, email) is False
@@ -303,7 +303,7 @@ def _accept(world, email, user, *, token=None):
 
 
 class TestTheAcceptDoor:
-    """098 holds `fn_invitation_accept` to the same standing as the sign-up
+    """invitation legitimacy checks holds `fn_invitation_accept` to the same standing as the sign-up
     door, so an EXISTING account cannot come in through an invitation the
     sign-up door refuses, and a removal outranks an invitation sent before it.
     The refusal is the door's own `no_data_found`, the answer a used or
@@ -509,25 +509,11 @@ def _blocks_another(conn, timeout: float = 10.0) -> bool:
     return False
 
 
-def _backfill_sql() -> str:
-    """098's one-time revoke, read from the file so the test runs the shipped
-    statement rather than a copy."""
-    from pathlib import Path
-
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "scripts/migrations/098_invitations_admit_while_legitimate.sql"
-    )
-    text_ = migration.read_text()
-    start = text_.index("UPDATE workspace_invitations i SET state = 'revoked'")
-    return text_[start : text_.index(";", start)]
-
-
 def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
     """`GET …/invitations` lists what the doors would still accept: not an
     invitation from a removed, demoted or disabled sender or with none. An
-    invitation to someone removed after it was sent is revoked by the removal
-    (or by 098's one-time revoke), so the state filter leaves it out."""
+    invitation to someone removed after it was sent is revoked by the removal,
+    so the state filter leaves it out."""
     listed = {
         row["email"]
         for row in asyncio.run(
@@ -542,95 +528,6 @@ def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
 
     assert LIVE | STANDING <= listed
     assert not listed & (set(SENT_BY) - STANDING)
-
-
-def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(world):
-    """098 revokes, once, the pending invitations of an inviter who has a
-    removal record and is not a member there again, and those addressed (by
-    email or Telegram id) to a person removed after they were sent. A
-    removed-then-re-invited inviter's, an accepted one, a current admin's and
-    one sent to a removed person after the removal are left as they were. Run
-    inside a transaction that is rolled back, so the world is untouched."""
-    gone = _existing_user(world, "gone-inviter@example.com")
-    back = _existing_user(world, "back-inviter@example.com")
-    addressee = _existing_user(world, "Removed-Addressee@example.com")
-    rows = {
-        "by-gone@example.com": (gone, "pending"),
-        "by-gone-used@example.com": (gone, "accepted"),
-        "by-back@example.com": (back, "pending"),
-        "by-admin@example.com": (world["inviters"]["admin"], "pending"),
-    }
-    conn = psycopg2.connect(world["owner"])
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'operator'")
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'admin')",
-                (world["ws"], back),
-            )
-            # A Telegram-only person, removed like the others.
-            tg_person = _user(cur)
-            cur.execute(
-                "INSERT INTO user_identities (user_id, provider, external_id)"
-                " VALUES (%s, 'telegram', '770098')",
-                (tg_person,),
-            )
-            for user in (gone, back, addressee, tg_person):
-                cur.execute(
-                    "INSERT INTO workspace_member_removals"
-                    " (workspace_id, user_id, removed_by_user_id)"
-                    " VALUES (%s, %s, %s)",
-                    (world["ws"], user, world["ws_owner"]),
-                )
-            for email, (by, state) in rows.items():
-                _invite(cur, world["ws"], email, by=by, state=state)
-            admin = world["inviters"]["admin"]
-            # Sent before the removal, and after it.
-            for email, sent in (
-                ("removed-addressee@example.com", "-1 hour"),
-                ("REMOVED-ADDRESSEE@example.com", "1 minute"),
-            ):
-                _invite(cur, world["ws"], email, by=admin, sent=sent)
-            # Invited by Telegram id before the removal and after it.
-            for token, sent in (("tg-before", "-1 hour"), ("tg-after", "1 minute")):
-                cur.execute(
-                    "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-                    " delivery_channel, invited_tg_user_id, expires_at,"
-                    " invited_by_user_id, created_at)"
-                    " VALUES (%s, %s, 'telegram', 770098, now() + interval '7 days',"
-                    " %s, now() + %s::interval)",
-                    (world["ws"], token, admin, sent),
-                )
-            cur.execute(_backfill_sql())
-            cur.execute(
-                "SELECT token_hash, state FROM workspace_invitations"
-                " WHERE token_hash IN ('tg-before', 'tg-after')"
-            )
-            by_telegram = dict(cur.fetchall())
-            cur.execute(
-                "SELECT email, state FROM workspace_invitations WHERE email = ANY(%s)",
-                (
-                    [
-                        *rows,
-                        "removed-addressee@example.com",
-                        "REMOVED-ADDRESSEE@example.com",
-                    ],
-                ),
-            )
-            after = dict(cur.fetchall())
-    finally:
-        conn.rollback()
-        conn.close()
-    assert after == {
-        "by-gone@example.com": "revoked",
-        "by-gone-used@example.com": "accepted",
-        "by-back@example.com": "pending",
-        "by-admin@example.com": "pending",
-        "removed-addressee@example.com": "revoked",
-        "REMOVED-ADDRESSEE@example.com": "pending",
-    }
-    assert by_telegram == {"tg-before": "revoked", "tg-after": "pending"}
 
 
 class TestTheAdmissionsTable:
@@ -764,7 +661,7 @@ class TestTheSignInRoute:
         assert _users_with(world, "friend@example.com") == 1
 
 
-# --- 129 (#1723): the claim link at sign-in ---------------------------------
+# --- signup admission functions: the claim link at sign-in ---------------------------------
 
 
 def _unspent(world, email, token):
@@ -862,7 +759,7 @@ class TestTheClaimLink:
         assert _users_with(world, "c5-held@example.com") == 1
 
 
-# --- 133 (#1740): an account's creation uses its admission up ---------------
+# --- `trg_signup_admission_consume`: an account's creation uses its admission up ---------------
 
 
 def _welcomed(response):
@@ -939,9 +836,9 @@ def signin_budget(world):
 
 @pytest.mark.usefixtures("signin_budget")
 class TestADirectSignUpUsesItsAdmission:
-    """133 (#1740): an account created at an admitted address
+    """`trg_signup_admission_consume`: an account created at an admitted address
     uses the admission up in the transaction that creates it, so the spot stays
-    used when the person's verified email later moves (#1579).
+    used when the person's verified email later moves.
 
     The direct sign-up writes the used spot down itself, as the claim link
     does: counting the spot used only while an account holds the address would
@@ -1073,7 +970,7 @@ class TestADirectSignUpUsesItsAdmission:
 
 @pytest.mark.usefixtures("signin_budget")
 class TestWhatAnAccountsCreationLeavesAlone:
-    """133 touches one row: the unconsumed admission at the address an account
+    """`trg_signup_admission_consume` touches one row: the unconsumed admission at the address an account
     is created with. A claim the sign-up never asked, an account's later move
     to an admitted address, a refresh, a collision, invitations and open
     sign-up are left alone. The link-first sign-up, the link's reuse, the
@@ -1146,9 +1043,9 @@ class TestWhatAnAccountsCreationLeavesAlone:
     def test_an_account_moving_to_an_admitted_address_uses_nothing(
         self, world, google_configured, monkeypatch
     ):
-        """133 runs when an account is created, never when one changes. An
+        """`trg_signup_admission_consume` runs when an account is created, never when one changes. An
         existing account whose verified email moves to an admitted address
-        holds it, so 129's doors refuse that admission's link and a new
+        holds it, so signup admission functions' doors refuse that admission's link and a new
         account at it, but the admission was used to create no one and is
         not stamped."""
         user = _google_account(world, "sub-keep-mover", "keep-mover@example.com")
@@ -1395,7 +1292,7 @@ class TestTheOverlapLeft:
         assert row["claim_token_hash"] is None
 
 
-# --- 115: an invited person's own invitations -------------------------------
+# --- invitee invitation functions: an invited person's own invitations -------------------------------
 
 #: The web origin a link sent again is built on.
 ORIGIN = "https://app.example.test"
@@ -1439,7 +1336,7 @@ def _ids(rows):
 
 
 class TestTheInviteeSeesTheirInvitations:
-    """115: someone who signed in without the link is shown the invitations the
+    """invitee invitation functions: someone who signed in without the link is shown the invitations the
     accept door would still honour for their verified address, through
     `fn_invitations_for` as `svc_ingress`, and nothing else."""
 
@@ -1597,7 +1494,7 @@ class _AtSend(RecordingSender):
 
 
 class TestTheLinkSentAgain:
-    """115: "Email me the link again" emails a new link to the invitation's
+    """invitee invitation functions: "Email me the link again" emails a new link to the invitation's
     address, through `invitations.reissue` as `svc_ingress`, and replaces the
     token only once the email went. The old link then stops working, nothing
     else about the invitation changes, and the new link exists only in the

@@ -1,5 +1,5 @@
 """The four health surfaces — Railway's probe, the scheduling axis, the
-posting axis (#1090, #1268) and the delivery axis (#1482).
+posting axis and the delivery axis.
 
 Like every other route in the API, they live in a module here and are
 included as a router. `storydump health` renders the scheduling and posting
@@ -41,7 +41,7 @@ from src.services.target.work_loop import WorkerConfig
 #: The one version string: the OpenAPI document's and `/health`'s. Read by
 #: `src/api/app.py` for `FastAPI(version=…)` so the two cannot disagree.
 #:
-#: Read from the package rather than typed (#1359).
+#: Read from the package rather than typed.
 #: A number that has to be remembered in two places is a number that drifts.
 VERSION = __version__
 #: The commit Railway deployed, which it sets on every Git-triggered deploy.
@@ -176,13 +176,13 @@ async def queue_pressure(state) -> dict | None:
 
 @router.get("/health/scheduling")
 async def scheduling_health_check(request: Request):
-    """Is scheduling still advancing? (#1090) — a SECOND health surface,
+    """Is scheduling still advancing? — a SECOND health surface,
     deliberately not `/health` above.
 
     Railway gates deploys on `/health`, whose docstring is explicit that a
     probe opening a connection would take the service down for a database
     blip no restart repairs. That is right, and it is exactly why this is a
-    separate dependency-touching check (#1026): liveness and "is the work
+    separate dependency-touching check: liveness and "is the work
     happening" are different questions and one endpoint cannot answer both
     without making one of them wrong.
 
@@ -218,17 +218,17 @@ async def scheduling_health_check(request: Request):
         # and has no tenant; naming one that does not exist is a lie the guard
         # correctly refused, and the remedy is the one its own message gives.
         #
-        # The estate-wide reads answer through doors (081): each
+        # The estate-wide reads answer through doors (fleet health functions): each
         # is a SECURITY DEFINER function owned by `svc_maintenance`, so the
         # answer is the same under the owner login and under `svc_ingress`.
-        # Without the door (#751), under `svc_ingress` every policy-covered
+        # Without the door, under `svc_ingress` every policy-covered
         # table reads empty and this surface would say `no-signal` for a
         # live estate.
         #
         # Each statement is capped (`health_reads`): a statement past the cap is
         # cancelled, which the app answers as a 503, and frees its connection.
         async with health_reads.connect(engine) as conn:
-            # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
+            # TWO AXES, ONE PAYLOAD. The cursor axis is empty whenever
             # no destination is active, and `no-signal` is then the answer
             # whether the worker is healthy or DEAD — so the cursor axis alone
             # covers nothing until the first tenant arrives. The worker
@@ -250,7 +250,7 @@ async def scheduling_health_check(request: Request):
 
 @router.get("/health/posting")
 async def posting_health_check(request: Request):
-    """Did a post actually LAND? (#1268) — a THIRD health surface.
+    """Did a post actually LAND? — a THIRD health surface.
 
     `/health/scheduling` above reads the clock and the worker. Both can stay
     true while nothing posts, every field of them correct. An intent
@@ -298,7 +298,7 @@ async def posting_health_check(request: Request):
         # A DIRECT CONNECTION, not a unit of work, for the reason the route
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
-        # Its cross-tenant reach is 081's doors, the same footing as the route
+        # Its cross-tenant reach is fleet health functions' doors, the same footing as the route
         # above, and its statements are capped the same way.
         async with health_reads.connect(engine) as conn:
             posting = await posting_health.posting_freshness(conn)
@@ -318,7 +318,7 @@ async def posting_health_check(request: Request):
 
 @router.get("/health/delivery")
 async def delivery_health_check(request: Request):
-    """Are the messages the product sends getting through? (#1482)
+    """Are the messages the product sends getting through?
 
     A FOURTH health surface, by `/health/posting`'s own rule. Deliveries failing
     and posts not landing are independent causes, so folding this axis into
@@ -326,8 +326,8 @@ async def delivery_health_check(request: Request):
 
     The last hour's outbox rows whose last failure fell in it, by class and the
     provider's code, how many of them ended `failed` or sit `ambiguous`, and how
-    many rows were sent in the same hour (`delivery_health`, through 101's
-    doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: any
+    many rows were sent in the same hour (`delivery_health`'s definer functions).
+    NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: any
     alert on it belongs outside the app. Unauthenticated,
     so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
 
@@ -339,8 +339,8 @@ async def delivery_health_check(request: Request):
 
     async def read():
         # A direct connection, as on `/health/posting`: the read is estate-wide
-        # and has no tenant, its cross-tenant reach is 101's doors, and its
-        # statements are capped the same way (`health_reads`).
+        # and has no tenant. Definer functions provide its cross-tenant reach,
+        # and its statements are capped the same way (`health_reads`).
         async with health_reads.connect(engine) as conn:
             return await delivery_health.outbox_failures(conn)
 

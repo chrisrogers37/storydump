@@ -1,4 +1,4 @@
-"""Are the messages the product sends getting through? (#1482)
+"""Are the messages the product sends getting through?
 
 The read behind ``GET /health/delivery``, and its fourth health surface.
 
@@ -6,10 +6,8 @@ The read behind ``GET /health/delivery``, and its fourth health surface.
 
 `settle` (``outbox.py``) sorts every failed send by type: a 429 goes back to
 `pending`, a definitive answer ends `failed`, and a lost one is `ambiguous`.
-Until migration 101 it then wrote the state and nothing else, so a burst of
-failures left no cause in the database. 101 records the class, the provider's
-code and the time on the row. This module counts them, so a poller can alert
-on them.
+`channel_outbox` records the failure class, provider code and timestamp.
+This module counts those records so an external poller can alert on them.
 
 ## Its own surface, by `/health/posting`'s rule
 
@@ -25,7 +23,7 @@ Folding this into either payload would make one mask the other.
   many of them are ``alerting``: ended `failed`, or sitting `ambiguous`. A 429
   is a deferral, not a failure. It is counted as context and never alerts.
 - The rows SENT in the same window. An hour with no failures and no traffic is
-  not an hour that delivered (#1120); the poller reads the count against it.
+  not an hour that delivered; the poller reads the count against it.
 - Counts only, never a workspace, a chat or a message: the route is
   unauthenticated.
 
@@ -45,7 +43,7 @@ WINDOW_SECONDS = 3600
 
 async def outbox_failures(executor) -> dict[str, Any]:
     """The last hour of delivery failures and deliveries, estate-wide, through
-    101's two doors.
+    `fn_health_outbox_failures` and `fn_health_outbox_sent`.
 
     ``by_class`` maps each failure class to ``{rows, alerting, codes}``, with
     ``codes`` keyed by the provider's code as a string (``"none"`` when no

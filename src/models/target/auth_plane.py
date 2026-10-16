@@ -1,31 +1,11 @@
-"""The auth-plane models (migration 060).
+"""The session, OAuth and service-token table definitions.
 
-The mirror of `060_auth_plane_tables.sql`, on the terms
-`identity_and_tenancy` set: the second side of the parity gate, not
-an independent design.
-
-**Migration 060 creates these three tables WITH their RLS and policies**
-(#746). Nothing about that shows up in this module, because RLS and policies
-have no declarative SQLAlchemy representation; it is noted so the difference
-from `identity_and_tenancy`'s "no policies here, deliberately" is not read
-as an inconsistency.
-
-**`OAuthState` has no surrogate key.** Its primary key is `state` itself — the
-128-bit urlsafe random value the OAuth round-trip carries — so it is the one
-model here that does not call `pk()`. `reconnect_target` is a bare `UUID` with
-no FK: it names a row in a table the migration does not constrain it to, and
-inventing a reference would be a red parity test.
-
-**`ck_oauth_state_context` is a CASE expression**, not a conjunction, and it is
-the interesting constraint in this module: a `signin` state carries neither
-user nor workspace, a `link` state carries a user but no workspace, and every
-other purpose carries both. Getting it wrong would still produce a working
-schema and would fail parity on the normalized definition.
-
-**141 adds the Instagram connect's history choice** to the state
-row and `oauth_connection_results`, the applied result its callback records.
-That table is tenant-scoped, not auth-plane: its policy reads `app.tenant_id`,
-for the API's login alone.
+`ddl.build()` creates these tables through `TargetBase.metadata`. Their
+policies and functions live in `src/models/target/ddl/`.
+`OAuthState.state` is the opaque round-trip value and primary key.
+`ck_oauth_state_context` binds the user and workspace required for each
+purpose. `oauth_connection_results` records the applied Instagram history
+choice and is tenant-scoped for `svc_ingress`.
 """
 
 from sqlalchemy import (
@@ -34,9 +14,11 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKeyConstraint,
+    Index,
     Integer,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -72,18 +54,18 @@ class OAuthState(TargetBase):
     workspace_id = fk("workspaces.id", "CASCADE", nullable=True)
     provider = Column(Text, nullable=False)
     purpose = Column(Text, nullable=False)
-    # No FK: the migration constrains this to no table, and inventing one
-    # would be a red parity test.
+    # The reconnect target is an unconstrained UUID naming the row for its
+    # provider and purpose.
     reconnect_target = Column(UUID(as_uuid=True), nullable=True)
     cookie_nonce_hash = Column(Text, nullable=True)
+    expires_at = Column(TZ, nullable=False)
+    consumed_at = Column(TZ, nullable=True)
+    created_at, updated_at = timestamps()
     #: The PKCE code verifier minted with the state (RFC 7636):
     #: ciphertext under the credential ring, never the verifier itself. NULL on
     #: a state minted without one.
     encrypted_code_verifier = Column(Text, nullable=True)
-    expires_at = Column(TZ, nullable=False)
-    consumed_at = Column(TZ, nullable=True)
-    created_at, updated_at = timestamps()
-    #: The Instagram connect's history choice (141): the entry the
+    #: The Instagram connect's history choice (OAuth archive choice): the entry the
     #: start previewed, and the choice with the mix revision it was shown.
     #: NULL on every state that records none.
     archive_entry = Column(Text, nullable=True)
@@ -142,18 +124,18 @@ class ServiceToken(TargetBase):
     name = Column(Text, nullable=False)
     token_hash = Column(Text, nullable=False)
     role = Column(Text, nullable=False)
-    #: Exactly one subject (077 `ck_service_token_subject`): a person, or a
-    #: workspace. A person-bound token acts as the person across their
-    #: memberships; a workspace service identity reads its one workspace.
-    user_id = fk("users.id", "CASCADE", nullable=True)
     workspace_id = fk("workspaces.id", "CASCADE", nullable=True)
-    #: Who minted a workspace service identity (090), so removing them can
-    #: revoke it. NULL for a person-bound token and for every older token.
-    created_by_user_id = fk("users.id", "SET NULL", nullable=True)
     expires_at = Column(TZ, nullable=True)
     revoked_at = Column(TZ, nullable=True)
     last_used_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
+    #: Exactly one subject (`ck_service_token_subject`): a person, or a
+    #: workspace. A person-bound token acts as the person across their
+    #: memberships; a workspace service identity reads its one workspace.
+    user_id = fk("users.id", "CASCADE", nullable=True)
+    #: Who minted a workspace service identity (workspace member removal), so removing them can
+    #: revoke it. NULL for a person-bound token and for every older token.
+    created_by_user_id = fk("users.id", "SET NULL", nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -164,11 +146,16 @@ class ServiceToken(TargetBase):
             name="ck_service_token_subject",
         ),
         UniqueConstraint("token_hash", name="uq_service_token"),
+        Index(
+            "ix_service_tokens_user",
+            "user_id",
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
     )
 
 
 class OAuthConnectionResult(TargetBase):
-    """What one Instagram connect's callback applied (141): read back
+    """What one Instagram connect's callback applied (OAuth archive choice): read back
     by the person who started it, in the session that returned, until it
     expires fifteen minutes later. A row is written once and never updated."""
 

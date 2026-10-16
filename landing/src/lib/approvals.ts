@@ -1,9 +1,9 @@
 /**
- * Auto-approval on the web (#1477): the approval positions, the rules that
+ * Auto-approval on the web: the approval positions, the rules that
  * approve a story, and the one spelling of every name a person reads for them.
  *
  * MIRRORED, NOT INVENTED. `src/services/target/vocabulary.py` is the API's one
- * spelling of the positions (`APPROVAL_POSITIONS`, 110's two CHECKs), the
+ * spelling of the positions (`APPROVAL_POSITIONS`, approval rules' two CHECKs), the
  * rules (`APPROVAL_RULES`, `ck_intent_approval_rule`) and the rules' names
  * (`RULE_LABELS`: the Telegram card's, the Queue's and the CLI's "Approved by
  * YOLO"). Nothing here can import a Python constant, so `wire-contract.test.ts`

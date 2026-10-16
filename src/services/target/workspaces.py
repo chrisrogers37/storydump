@@ -7,7 +7,7 @@ rules decide its shape:
   `ct_workspaces_owner_at_insert` is a deferred constraint trigger, so a
   workspace and its owner `workspace_members` row must both exist by COMMIT —
   a two-transaction create fails at commit, not at the insert, which is a
-  confusing error to debug. And `p_tenant_workspaces` (`058`) keys on the
+  confusing error to debug. And `p_tenant_workspaces` (`07_row_security.sql`) keys on the
   row's own id, so signup pre-assigns the id and sets `app.tenant_id` to it
   BEFORE the insert. :func:`create_workspace` does both, in that order.
 - **Every read is workspace-keyed except one, and that one goes through a
@@ -15,7 +15,7 @@ rules decide its shape:
   cross-tenant question `p_tenant` on `workspace_members` cannot serve (with
   no tenant claimed the table reads EMPTY, which is indistinguishable from
   the greenfield's normal signed-in-with-no-workspace state). It reads
-  through the `fn_memberships_for_caller()` door (`064`, #1037), after
+  through the `fn_memberships_for_caller()` door (`fn_memberships_for_caller`), after
   claiming the caller in `app.actor_user_id` — the same GUC the
   audit triggers already trust, so nothing new is asserted; the door reads
   it internally and an unset value fails closed to no rows.
@@ -95,20 +95,20 @@ SETTINGS_RANGES: dict[str, tuple[int, int]] = {
 }
 
 #: The per-account schedule overrides an `account_settings_change` may touch —
-#: `054`'s "per-account schedule overrides; NULL = inherit the workspace
+#: `accounts_sources_media.py`'s "per-account schedule overrides; NULL = inherit the workspace
 #: column" — with the Python type each accepts. Deliberately NOT the account's
 #: whole row, and each exclusion is a different kind of thing:
 #:
-#:   - `state` is a governed transition (`ck_ig_accounts_state`, the reauth and
-#:     `moved` flows), not a setting. A settings write that could clear
-#:     `reauth_required` would retire a credential prompt without a credential.
-#:   - `handle` / `display_name` are identity. `provider_account_ref` is derived
-#:     from the handle at creation (`provisioning.manual_ref_for`) and
-#:     `uq_ig_account_live` keys on the ref, so editing the handle here would
-#:     leave the two spellings of one account disagreeing.
-#:   - `next_slot_at` / `last_posted_at` are the clock's machinery — `055`'s
-#:     audit trigger names exactly those two as the columns that advance
-#:     without auditing.
+#: - `state` is a governed transition (`ck_ig_accounts_state`, the reauth and
+#: `moved` flows), not a setting. A settings write that could clear
+#: `reauth_required` would retire a credential prompt without a credential.
+#: - `handle` / `display_name` are identity. `provider_account_ref` is derived
+#: from the handle at creation (`provisioning.manual_ref_for`) and
+#: `uq_ig_account_live` keys on the ref, so editing the handle here would
+#: leave the two spellings of one account disagreeing.
+#: - `next_slot_at` / `last_posted_at` are the clock's machinery — `intent_ledger.py`'s
+#: audit trigger names exactly those two as the columns that advance
+#: without auditing.
 ACCOUNT_SETTINGS_COLUMNS: dict[str, type] = {
     "tz": str,
     "posts_per_day": int,
@@ -117,7 +117,7 @@ ACCOUNT_SETTINGS_COLUMNS: dict[str, type] = {
 }
 
 #: Every account override is nullable, and NULL is not "unset" — it is the
-#: INHERIT arm of the ladder the clock resolves per tick (`059`'s due-scan:
+#: INHERIT arm of the ladder the clock resolves per tick (`04_functions.sql`'s due-scan:
 #: `COALESCE(a.posts_per_day, w.posts_per_day)`). A command that could set an
 #: override but never clear one would be a one-way door: an account could leave
 #: the workspace default and have no way back to it.
@@ -255,7 +255,7 @@ async def list_for_user(executor, *, user_id: str) -> list[dict]:
     authenticated principal's and is claimed as `app.actor_user_id` for this
     transaction; the door never takes it as an argument."""
     # Not `apply_gucs`: that door's `tenant_id` is mandatory and this is the
-    # user-plane read, which has no tenant yet (#1325).
+    # user-plane read, which has no tenant yet.
     await executor.execute(
         text("SELECT set_config('app.actor_user_id', :u, true)"), {"u": str(user_id)}
     )
@@ -271,12 +271,12 @@ async def get_workspace(executor, *, workspace_id: str) -> Optional[dict]:
 
     Carries `restorable_until` — when an offboarding workspace can last be
     restored — computed here from the one grace constant so the dashboard
-    never derives it from a copied number (#1127).
+    never derives it from a copied number.
 
-    Carries `defaults` for the same reason (#1366). `repost_ttl_days` and
+    Carries `defaults` for the same reason. `repost_ttl_days` and
     `skip_ttl_days` are NULL on purpose, so the settings cards must show what
     leaving them alone means; a second copy of the numbers in TSX would drift
-    from the worker's own (#1365). Served, it cannot."""
+    from the worker's own. Served, it cannot."""
     row = await readers.row(
         executor,
         f"SELECT {_CONFIG_COLUMNS} FROM workspaces WHERE id = :ws",
@@ -331,7 +331,7 @@ CREDENTIAL_STATUS_SQL = (
 async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
     """Destinations plus their `ig_login` credential STATUS — presence and
     freshness, never a token — derived exactly as `list_sources` derives it
-    (#1220): `none` (never connected) · `active` · `expired` · `revoked`.
+    `none` (never connected) · `active` · `expired` · `revoked`.
     `uq_credential_per_account` makes the join single-row."""
     return await readers.rows(
         executor,
@@ -359,7 +359,7 @@ GDRIVE_PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 
 async def drive_status(executor, *, workspace_id: str) -> dict:
-    """The WORKSPACE's Google Drive grant (069: one per workspace,
+    """The WORKSPACE's Google Drive grant (workspace Drive grant: one per workspace,
     every folder under it) — `none` (never connected) · `active` · `expired` ·
     `revoked` — plus when it was last granted. Never a token.
 
@@ -389,11 +389,11 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
 
 async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool:
     """Whether *user_id* may browse the workspace's Drive and pick a folder
-    from it (091): the grant is the workspace's, but what it reads is
+    from it (`oauth_credentials.granted_by_user_id`): the grant is the workspace's, but what it reads is
     the Drive of the person who granted it, so only they may walk it.
 
-    A grant with no recorded granter — every one made before 091, or one whose
-    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    A grant with no recorded granter, including a deleted granter
+    (`ON DELETE SET NULL`), is the owner's to browse
     until a reconnect records one. A granter removed or demoted since fails
     the admin floor before this is asked, so nobody browses until someone
     reconnects. False with no grant at all.
@@ -415,7 +415,7 @@ async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool
 
 
 #: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
-#: sets (#1233). Alias the table `s` wherever these are spliced.
+#: sets. Alias the table `s` wherever these are spliced.
 CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
 #: The predicate for a CONNECTED folder: not removed. State is not part of it
 #: — a folder whose grant died is paused, still connected, still weighted.
@@ -435,7 +435,7 @@ LISTED_ACCOUNT_ORDER_SQL = "ORDER BY a.created_at, a.id"
 #: `:ws`: what the CURRENT authorization generation observed (`observed`, of
 #: which `represented` have a media item; `oldest` and `refreshed` bound it),
 #: and what an older generation left `stale`, awaiting reobservation.
-#: :func:`list_sources` and the mix rows' `indexed` (`versioned_mix.resource`)
+#:func:`list_sources` and the mix rows' `indexed` (`versioned_mix.resource`)
 #: both count it, so the two cannot disagree.
 ARCHIVE_COVERAGE_SQL = (
     "SELECT i.workspace_id,i.source_id,"
@@ -479,7 +479,7 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
         executor,
         "WITH coverage AS (" + ARCHIVE_COVERAGE_SQL + ") "
         "SELECT s.id,s.provider,s.state,s.next_sync_at,s.last_sync_success_at,s.alerted_at,s.created_at,"
-        # The folder's own approval position, NULL for the workspace's (#1477).
+        # The folder's own approval position, NULL for the workspace's.
         "       s.approval_mode,"
         "CASE WHEN s.provider='gdrive' THEN s.config->>'folder_ref' END AS folder_ref,"
         "CASE WHEN s.provider='gdrive' THEN s.config->>'folder_name' END AS folder_name,"
@@ -570,15 +570,15 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
-    """Pending invitations the doors would still honour (098): the workspace
+    """Pending invitations the doors would still honour (invitation legitimacy checks): the workspace
     is active and the sender is still an owner or admin there with an active
     account. The others are dead links that age out with their expiry, so they
-    are not listed as pending. The predicate mirrors 098's two doors by hand.
+    are not listed as pending. The predicate mirrors invitation legitimacy checks' two doors by hand.
 
     The doors' third check, a removal newer than the invitation, is not
-    repeated: the runtime cannot read the removal record (#1546), and it needs
+    repeated: the runtime cannot read the removal record, and it needs
     none. A removal revokes the invitations addressed to the person in its own
-    transaction (`invitations.revoke_on_removal`), and 098 revoked the ones
+    transaction (`invitations.revoke_on_removal`), and invitation legitimacy checks revoked the ones
     older removals left pending, so the state filter already leaves them out.
     The token is never read back — only its hash is stored, and the row
     exposes nothing a caller could present."""
@@ -774,9 +774,9 @@ _INTENT_COLUMNS = (
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
     " i.origin, i.scheduled_by_user_id,"
-    # what approved the story, NULL for a person (#1477): the Queue's by-line
+    # what approved the story, NULL for a person: the Queue's by-line
     " i.approval_rule,"
-    # who planned it, while they are still a member (#485)
+    # who planned it, while they are still a member
     f" {identity.member_name_sql('i.scheduled_by_user_id', 'i.workspace_id')}"
     " AS scheduled_by,"
     # the zone the story's times read in: the account's, else the workspace's
@@ -784,7 +784,7 @@ _INTENT_COLUMNS = (
     " COALESCE(a.tz, w.tz) AS tz,"
     f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
     "      THEN i.last_error->>'message' END AS miss_reason,"
-    # a planned story's repeat rule as one value, NULL for none (116, #485)
+    # a planned story's repeat rule as one value, NULL for none (repeat rules)
     f" {intent_ledger.repeat_sql('i.')} AS repeat,"
     " m.file_name, m.media_kind, m.caption, m.category, m.link_url,"
     f" {_picture_sql('m.')},"
@@ -842,7 +842,7 @@ async def list_intents(
     (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
     "what is coming" is the planned ones still `scheduled`. *from_date* and
     *to_date* bound the slot to the workspace's local days ``[from_date,
-    to_date)``: the calendar's day view (#1634). Soonest first, or
+    to_date)``: the calendar's day view. Soonest first, or
     *newest_first* for a history (the latest misses, not the oldest). Bounded
     — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
@@ -879,8 +879,8 @@ _INTENT_DAY_COLUMNS = (
 
 #: What each of a month day's newest carries: enough to name it and to draw its
 #: thumbnail through the route (`has_thumbnail` and its version, never the
-#: link), as the intents read does (#1634), and its provenance, which is also
-#: how the page tells an archive item's picture from a Drive picture (#1644).
+#: link), as the intents read does, and its provenance, which is also
+#: how the page tells an archive item's picture from a Drive picture.
 INTENT_DAY_FIELDS = (*_INTENT_DAY_COLUMNS, "provenance")
 
 
@@ -893,7 +893,7 @@ async def intent_days(
     to_date: date,
     per_day: int,
 ) -> list[dict]:
-    """The calendar's month (#1634): for each of the workspace's local days in
+    """The calendar's month: for each of the workspace's local days in
     ``[from_date, to_date)`` that holds an intent in *states*, how many it
     holds and its *per_day* newest. The count is a COUNT, never re-summed
     from a bounded list; a day with none is absent.
@@ -952,7 +952,7 @@ async def list_media(
     never_posted: bool = False,
     limit: int = 50,
 ) -> list[dict]:
-    """The media pool (#1044) — the workspace's library, not only what has an
+    """The media pool — the workspace's library, not only what has an
     intent."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "m.workspace_id = :ws"
@@ -1013,7 +1013,7 @@ STATS_DAYS = 30
 
 
 async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
-    """Server-side aggregates for the dashboard headline (#1044).
+    """Server-side aggregates for the dashboard headline.
 
     Every figure is a `count(*)`/`sum` over target tables under the claimed
     tenant, one statement per section — never a paged list re-summed, because
@@ -1049,9 +1049,7 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         # Counted as `posts_by_day` counts: only stories that spend the cap
         # (`_SPENDS_CAP_SQL`), since a story a person planned is outside the
         # cadence the mix draws, and windowed on the local date the post
-        # debited the cap, the date `daily_post_counts` counts it on. A
-        # `legacy_backfill` row never debited the cap, so it is outside the
-        # window here as it is in the ledger.
+        # debited the cap, the date `daily_post_counts` counts it on.
         "SELECT m.source_id::text AS k, count(*) AS n"
         "  FROM post_intents i"
         "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
@@ -1223,7 +1221,7 @@ async def change_account_settings(
     bound in the WHERE, not only by RLS").
 
     **It is defence in depth — not the guard.** `p_tenant` on `ig_accounts`
-    (`058`:266) covers `svc_ingress`, the role this runs as, so the cross-tenant
+    (`07_row_security.sql`:266) covers `svc_ingress`, the role this runs as, so the cross-tenant
     write is refused even with this clause removed, and the gate's tenancy case
     stays green without it. The clause is there because the convention is right
     and because `svc_clock` holds `USING (true)` on this table, so the role
@@ -1264,7 +1262,7 @@ async def remove_member(
 ) -> str:
     """`remove_member` ("an admin removes membership explicitly" — the
     revoke for every join edge, the Telegram one included). Returns the role
-    the person held. The runtime never deletes (the 057 grant matrix): the
+    the person held. The runtime never deletes (the `09_grants.sql` grant matrix): the
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
@@ -1272,7 +1270,7 @@ async def remove_member(
     must be the claimed tenant and *by_user_id* an owner or admin of it, or it
     raises. The door records the removal, which the Telegram join
     path honours until the person is invited back. In the same transaction,
-    the workspace service identities they minted are revoked (090), as are the
+    the workspace service identities they minted are revoked (workspace member removal), as are the
     pending invitations in the workspace that they sent or that are addressed
     to them, so none of them lets anyone in and none blocks the fresh
     invitation that brings them back, and every live link state they hold for
@@ -1289,7 +1287,7 @@ async def remove_member(
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
         # The door recorded the removal, which the Telegram join path honours
-        # (090); the service identities this person minted go with them, and so
+        # (workspace member removal); the service identities this person minted go with them, and so
         # do the pending invitations they sent or were sent and every bind or
         # connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(

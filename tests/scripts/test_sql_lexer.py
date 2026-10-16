@@ -1,14 +1,13 @@
-"""The SQL lexer every text scan of a migration shares (#1406).
+"""The SQL lexer every text scan of SQL shares.
 
-Three scans read SQL as text and each has to know where a quoted literal
-starts and ends: the runner's statement splitter, the advertised-DDL
-normalizer, and the tenancy gate's two structural reads. A scan that gets
-this wrong lets a string literal change a gate's verdict. The lexer is the
-one place that answers, so it is pinned here against
+The runner's statement splitter and the statement normalizer read SQL as text,
+and each has to know where a quoted literal, a quoted identifier and a comment
+start and end: a gap there lets a string literal change what they cut or
+compare. The lexer is the one place that answers, so it is pinned here against
 PostgreSQL's own behaviour rather than against a reading of its scanner: every
 case that turns on a subtle rule — escape strings, their continuation across a
-line break, nested block comments, dollar tags — was first put to a live server
-(PostgreSQL 15, `standard_conforming_strings` on), and `TestPostgresAgrees`
+line break, nested block comments, dollar tags — is what a live server
+(PostgreSQL 15, `standard_conforming_strings` on) does, and `TestPostgresAgrees`
 keeps asking one.
 """
 
@@ -16,11 +15,7 @@ from functools import partial
 
 import pytest
 
-from scripts.migration_runner import (
-    MIGRATIONS_DIR,
-    discover_migrations,
-    split_statements,
-)
+from scripts.migration_runner import discover_migrations, split_statements
 from scripts.sql_lexer import (
     BLOCK_COMMENT,
     CODE,
@@ -29,10 +24,13 @@ from scripts.sql_lexer import (
     IDENTIFIER,
     LINE_COMMENT,
     STRING,
+    QuotesWouldMove,
     Segment,
     name_of,
+    normalize_statements,
     segments,
 )
+from src.models.target import ddl
 from tests.scripts.conftest import write_migration
 
 
@@ -160,10 +158,13 @@ class TestSegments:
 
     def test_the_segments_are_the_text(self):
         """Nothing is dropped or doubled: a consumer that rebuilds a statement
-        from its segments gets the statement back. Held over every migration
-        file, so the corpus's own forms are covered, not only the cases above."""
-        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            sql = path.read_text()
+        from its segments gets the statement back. Held over every SQL file of
+        the schema code, so the schema's own forms are covered, not only the
+        cases above."""
+        paths = sorted(ddl.HERE.glob("*.sql"))
+        assert paths, f"positive control: no SQL files under {ddl.HERE}"
+        for path in paths:
+            sql = path.read_text(encoding="utf-8")
             assert "".join(s.text for s in segments(sql)) == sql, path.name
 
 
@@ -225,6 +226,90 @@ class TestTheRunnerSplitsOnTheLexer:
         dropped, a block comment as much as a line one."""
         sql = "-- head\nSELECT 1 /* one */;\n/* only a comment */;\n-- tail\n"
         assert split_statements(sql) == ["-- head\nSELECT 1 /* one */"]
+
+
+class TestNormalizeStatements:
+    def test_splits_strips_comments_and_collapses_whitespace(self):
+        sql = (
+            "-- a header comment\n"
+            "CREATE TABLE t (\n    id   INT\n);\n"
+            "-- runner:postcondition SELECT true\n"
+            "CREATE   INDEX ix ON t (id);"
+        )
+        stmts = normalize_statements(sql)
+        assert stmts == ["CREATE TABLE t ( id INT )", "CREATE INDEX ix ON t (id)"]
+
+    def test_a_literal_line_that_starts_with_dashes_is_kept(self):
+        """A literal's continuation line that starts with `--` is text, not a
+        comment. Dropped, it would take the clauses on it with it: here a DROP
+        COLUMN workspace_id, which PostgreSQL runs."""
+        sql = (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x', DROP COLUMN workspace_id, ALTER COLUMN foo SET DEFAULT 'y\n"
+            "z';"
+        )
+        assert normalize_statements(sql) == [
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc --x', DROP COLUMN"
+            " workspace_id, ALTER COLUMN foo SET DEFAULT 'y z'"
+        ]
+
+    def test_a_comment_after_code_goes_too(self):
+        """Normalized text is one line, so a comment left in it has no end: its
+        `--` would run over the rest of the statement for any scan that reads
+        quotes. Every comment is dropped — trailing, block — never just the
+        lines that hold nothing else."""
+        sql = (
+            "CREATE TABLE t (\n"
+            "    id uuid, -- the row's id\n"
+            "    workspace_id uuid /* the tenant */\n"
+            ");"
+        )
+        assert normalize_statements(sql) == [
+            "CREATE TABLE t ( id uuid, workspace_id uuid )"
+        ]
+
+    def test_a_line_in_a_function_body_is_kept(self):
+        """A dollar-quoted body is a literal: PostgreSQL stores it verbatim
+        (`pg_proc.prosrc`), its comment lines included, so a comparison of
+        normalized bodies has to see a change to one."""
+        sql = (
+            "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$\n"
+            "    -- one, always\n"
+            "    SELECT 1\n"
+            "$$;"
+        )
+        assert normalize_statements(sql) == [
+            "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ -- one, always SELECT 1 $$"
+        ]
+
+    def test_a_comment_still_separates_what_it_sat_between(self):
+        """PostgreSQL reads a comment as whitespace, so `a/* x */b` is two
+        names; removed without a space, they would read as one."""
+        assert normalize_statements("SELECT a/* x */b;") == ["SELECT a b"]
+
+    def test_layout_around_a_literal_is_not_a_moved_quote(self):
+        """The refusal below compares what the quotes bound, not the blanks
+        between them: a statement that ends in a literal loses its trailing
+        line break to normalization and must still normalize."""
+        assert normalize_statements("COMMENT ON TABLE t IS 'x'\n;") == [
+            "COMMENT ON TABLE t IS 'x'"
+        ]
+
+    def test_comment_markers_inside_a_literal_are_text(self):
+        sql = "SELECT '-- not a comment /* nor this */' AS v;"
+        assert normalize_statements(sql) == [
+            "SELECT '-- not a comment /* nor this */' AS v"
+        ]
+
+    def test_text_whose_quotes_would_move_is_refused(self):
+        """An escape string continued across a line break keeps its escape
+        rules only while the break is there: collapsed onto one line, the
+        continuation becomes a standard string and `\\'` ends it. No normalized
+        form keeps the quotes where PostgreSQL has them, so the statement is
+        refused rather than handed to a scan that trusts its quotes."""
+        sql = "SELECT E'a\\''\n'b\\'c';"
+        with pytest.raises(QuotesWouldMove, match="quotes"):
+            normalize_statements(sql)
 
 
 @pytest.mark.integration

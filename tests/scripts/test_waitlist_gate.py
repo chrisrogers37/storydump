@@ -1,4 +1,4 @@
-"""100: the waitlist is written by the API, not by the site.
+"""`waitlist_entries`: the waitlist is written by the API, not by the site.
 
 `POST /public/waitlist` runs here as the production role (`svc_ingress`) on
 the replayed advertised stream, so the grant, the policy, the CHECKs and the
@@ -6,13 +6,13 @@ bound parameters are the real ones: an address lands, a repeat answers the
 same and stores nothing new, and the login that wrote it cannot read it back.
 The list is read as the schema owner, the way the owner reads it.
 
-129 (#1723) makes admission a runtime act, through four
+`signup_admissions` makes admission a runtime act, through four
 `svc_membership` doors driven here as the production logins: the API lists
 the waitlist and admits an address (`signup_admissions`), the worker stores
 the claim link it has just emailed, and a claim spends it. One spot opens one
 account, and the raw claim token rests in no table.
 
-133 (#1740) has the account created at an admitted address use the
+`trg_signup_admission_consume` has the account created at an admitted address use the
 admission up as it is created, through a trigger whose function no role is
 granted EXECUTE on. The owner's surfaces read the spot as used after that
 account moves away, and an account that merely moves to an admitted address
@@ -57,7 +57,7 @@ from tests.scripts.conftest import (
     fetch_all,
     in_user_plane,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     rows_holding,
     seed_workspace_chain,
 )
@@ -72,7 +72,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner_dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner_dsn = build_world(db, owner_actor, admin_conn)
         yield {
             "owner": owner_dsn,
             "ingress": as_user(db, "svc_ingress"),
@@ -964,7 +964,7 @@ class TestTheLogin:
             conn.close()
 
 
-# --- 129 (#1723): admitting from the waitlist ------------------------------
+# --- signup admission functions: admitting from the waitlist ------------------------------
 
 #: The base of the claim link an admission's email carries.
 BASE = "https://app.example.test/claim/"
@@ -982,14 +982,14 @@ def _join(world, email, ago="0"):
 
 def _hold(world, email):
     """An account created with *email* as its primary email. Its creation
-    uses up an unconsumed admission at that address (133)."""
+    uses up an unconsumed admission at that address (`trg_signup_admission_consume`)."""
     execute(world["owner"], "INSERT INTO users (primary_email) VALUES (%s)", (email,))
 
 
 def _move_into(world, email):
     """An account created with no address that then takes *email*, as a
-    returning person's refresh does (#1579). It holds the address without
-    having been created at it, so it uses no admission up (133 is birth only)."""
+    returning person's refresh does. It holds the address without
+    having been created at it, so it uses no admission up (the consumption trigger runs only at birth)."""
     conn = psycopg2.connect(world["owner"])
     try:
         with conn.cursor() as cur:
@@ -1095,8 +1095,8 @@ class TestTheList:
     ):
         """Signed up has three sources, one row each. `list-claimed`'s link was
         used. `list-created`'s account was created at the address, which uses
-        the admission up (133). `list-held`'s account moved onto the address,
-        which uses nothing (133 is birth only), so only the door's arm that
+        the admission up (`trg_signup_admission_consume`). `list-held`'s account moved onto the address,
+        which uses nothing (`trg_signup_admission_consume` is birth only), so only the door's arm that
         reads who holds an address can call it signed up."""
         # Other tests here add entries too: read them all, then keep this one's.
         monkeypatch.setattr(signup_admissions, "LIST_LIMIT", 10_000)
@@ -1344,7 +1344,7 @@ class TestTheLink:
     @pytest.mark.parametrize("how", sorted(HOLDS))
     def test_a_held_address_stores_nothing(self, world, how):
         """An account created at the address has also used the admission up
-        (133), so the account that moved to it is the one that holds the
+        (`trg_signup_admission_consume`), so the account that moved to it is the one that holds the
         address and nothing else: the door refuses both."""
         email = f"link-held-{how}@example.com"
         assert _admit(world, email) == "admitted"
@@ -1370,7 +1370,7 @@ class TestTheClaim:
     @pytest.mark.parametrize("how", sorted(HOLDS))
     def test_a_link_whose_address_an_account_holds_claims_nothing(self, world, how):
         """Dead once the address has an account. One created at it used the
-        admission up as it was created (133), and the refused claim leaves
+        admission up as it was created (`trg_signup_admission_consume`), and the refused claim leaves
         that stamp as it was; one that moved to it used nothing, and the claim
         is refused on the hold alone."""
         email = f"claim-held-{how}@example.com"
@@ -1387,8 +1387,8 @@ class TestTheClaim:
 
 
 class TestTheSignUpDoor:
-    """`fn_signup_admitted` (092, 098, 129): a claimed admission does not admit
-    its address, and the rest of the door is as 092 and 098 make it."""
+    """`fn_signup_admitted` (`fn_signup_admitted`, invitation legitimacy checks, signup admission functions): a claimed admission does not admit
+    its address, and the rest of the door is as `fn_signup_admitted` and invitation legitimacy checks make it."""
 
     def test_an_unclaimed_admission_admits_and_a_claimed_one_no_longer_does(
         self, world
@@ -1597,13 +1597,13 @@ class TestTheTokenNeverRests:
         assert _admission(world, email)["claimed_at"] is not None
 
 
-# --- 133 (#1740): an account's creation uses its admission up ---------------
+# --- `trg_signup_admission_consume`: an account's creation uses its admission up ---------------
 
 
 def _sign_in(world, sub, email):
     """Google subject *sub* through the sign-in upsert as `svc_ingress`, gated
     as deployed: a new subject at an admitted address signs up, and a
-    returning one's address follows *email* (#1579). Returns the user."""
+    returning one's address follows *email*. Returns the user."""
     return _ingress(
         world,
         lambda c: identity.upsert_google_identity(
@@ -1613,7 +1613,7 @@ def _sign_in(world, sub, email):
 
 
 class TestTheOwnerSeesTheSpotStayUsed:
-    """133 (#1740): the owner's surfaces, after the person who signed
+    """`trg_signup_admission_consume`: the owner's surfaces, after the person who signed
     up at an admitted address has moved to another one. The spot reads as
     used on every surface: the list, an admit, a resend and the worker's
     stored link. Each surface is asked as its production login:
@@ -1647,7 +1647,7 @@ class TestTheOwnerSeesTheSpotStayUsed:
 
 
 class TestTheTriggerIsNoDoor:
-    """133's function runs as `svc_membership` for whichever login creates the
+    """`trg_signup_admission_consume`'s function runs as `svc_membership` for whichever login creates the
     user, and EXECUTE on it is granted to no role. PostgreSQL checks EXECUTE on
     a trigger's function when the trigger is created, never when an INSERT
     fires it, so neither runtime login holds it, and both still hold nothing on
@@ -1684,9 +1684,9 @@ class TestTheTriggerIsNoDoor:
     def test_it_fires_after_a_user_is_created_with_an_address_and_never_else(
         self, world
     ):
-        """The two triggers on `users`: 053's touch before an update, and
-        133's after an insert of a row with an address, enabled, and running
-        133's function. No other trigger fires after an insert, so no name
+        """The two triggers on `users`: `identity_and_tenancy.py`'s touch before an update, and
+        `trg_signup_admission_consume`'s after an insert of a row with an address, enabled, and running
+        `trg_signup_admission_consume`'s function. No other trigger fires after an insert, so no name
         order is in play."""
         rows = _rows(
             world["owner"],
@@ -1707,7 +1707,7 @@ class TestTheTriggerIsNoDoor:
         )
 
     def test_the_create_bracket_closed(self, world):
-        """133 granted `svc_membership` CREATE on `public` for the owner
+        """`trg_signup_admission_consume` granted `svc_membership` CREATE on `public` for the owner
         transfer, and revoked it before the file ended."""
         assert _rows(
             world["owner"],

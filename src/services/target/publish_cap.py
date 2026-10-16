@@ -1,5 +1,5 @@
 """The cap ledger: the atomic flip, the manual post, the refund, and
-the two resolve edges (#862).
+the two resolve edges.
 
 The cap-ledger core, separate from the pipeline body because it is what the
 product depends on: **zero over-cap** — posting more than Meta allows gets the
@@ -42,8 +42,8 @@ refund cannot touch the wrong bucket.
 ## Only the cadence spends the cap
 
 The cap is the cadence's own (`daily_post_counts`, "OUR product cadence cap —
-never Meta's", `055`). A story a person planned for a time of their choosing
-(`origin = 'planned'`, 088) sits outside it: it
+never Meta's", `intent_ledger.py`). A story a person planned for a time of their choosing
+(`origin = 'planned'`, `post_intents.origin`) sits outside it: it
 neither spends the day nor waits on a spent one, so the day's cadence is what
 it would have been without it. One predicate says which stories spend the cap,
 :data:`_SPENDS_CAP_SQL`, and every write to a bucket asks it: the flip's debit,
@@ -135,7 +135,7 @@ async def flip_to_publishing(
     :class:`IntentNotApproved` when the row is not approved.
     Runs the one CTE and reads back `(debited, flipped, was_approved,
     cancelling)` — the row counts ARE the decision, because a rowcount here
-    cannot be faked by a self-transition no-op (the #883 shape): a
+    cannot be faked by a self-transition no-op (the shape): a
     debited-but-not-flipped tuple is a real race, and it is exactly what must
     roll back.
 

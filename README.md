@@ -24,7 +24,7 @@ to use Storydump.
 - **Manual or API publishing, per workspace**: with `api_publishing_enabled` off a person posts and taps *Posted myself*; with it on, *Post now* runs the publish pipeline (Drive → Cloudinary → the Instagram Graph API). Dry run and pause are workspace settings too.
 - **Locks**: a posted item is locked for that account for the repost TTL (30 days by default), a skipped one for the skip TTL (45 days by default), a rejected one permanently (`post_locks`).
 - **Audit trail**: every state change of a story writes an `audit_events` row by trigger, naming who acted and through which channel; `storydump story <intent_id>` reads the timeline.
-- **Tenancy**: workspaces with members and roles (owner, admin, member). Tenant tables carry row-level-security policies keyed on the workspace (migration 058); whether the deployed login is subject to them is what `storydump posture` reports.
+- **Tenancy**: workspaces with members and roles (owner, admin, member). Tenant tables carry row-level-security policies keyed on the workspace (`07_row_security.sql`); whether the deployed login is subject to them is what `storydump posture` reports.
 - **A console**: the `storydump` CLI reads the ledger and writes through the same command port the card and the web use.
 
 ## How it works
@@ -54,7 +54,7 @@ whatever database it is pointed at.
 ```bash
 # Clone repository
 git clone <your-repo-url>
-cd storydump
+cd storydump-v2
 
 # Create the virtual environment (.venv/, where the Makefile's test targets look first)
 python3 -m venv .venv
@@ -78,7 +78,7 @@ cp .env.example .env    # or: make env-example
 `.env.example` lists every variable the code reads, with what each one does.
 No variable is required to load settings; a process needs what it reads:
 
-- `TARGET_DATABASE_URL`: the database the API and the worker run against (the runtime login). The worker exits 2 without it; the API answers 503 on every data route.
+- `TARGET_DATABASE_URL`: each process's runtime connection string: `svc_ingress` for the API and `svc_worker` for the worker. The worker exits 2 without it; the API answers 503 on every data route.
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`: what `make create-db`, `make init-db` and the test harness connect with. No deployed process reads them.
 - `DATABASE_URL`: the database-owner login the migration runner applies the schema with. Locally `make init-db` builds it from the `DB_*` components.
 - `ENCRYPTION_KEY`: a Fernet key for the stored credentials, the same one on the API and the worker; neither starts without a valid one (the test suite needs one too).
@@ -98,19 +98,56 @@ environment: `make run` exports `.env` for you, a bare `python -m src.main` or
 make create-db init-db      # the same as: make setup-db
 ```
 
-`init-db` builds the schema the way the lineage lane proves it: step 0 (the
-`svc_*` service roles — they are cluster-wide, so `DB_USER` needs `CREATEROLE` —
-and the DDL door), the by-hand base, then every file under `scripts/migrations/`
-through the migration runner (`python -m scripts.migration_runner apply`). It
-needs `psql` on your `PATH`.
+`make init-db` builds an empty database from the SQLAlchemy models and the SQL
+files in `src/models/target/ddl/`, then runs `runner adopt` and `runner apply`.
+`DB_USER` owns the database and needs `CREATEROLE` for the cluster-wide service
+roles. The builder creates the schema in one transaction and refuses an
+existing schema it does not recognize. `make reset-db` drops and rebuilds the
+local database.
 
-The runner replays the whole lineage, so a fresh database also holds the
-replayed `legacy` schema and its empty `archive` snapshots: migrations 079 (the
-drop of `legacy`) and 080 are gated (`-- runner:manual`), so `apply` reports
-them as owed and never runs them, which is expected on a fresh laptop and not
-a defect. Nothing under `src/` reads either schema.
+The builder creates `svc_ingress` and `svc_worker` without passwords. As the
+local database owner, set a password for each in `psql` (replace the owner and
+database placeholders with the `DB_USER` and `DB_NAME` you configured):
+
+```text
+psql 'postgresql://<owner>@localhost:5432/<database>'
+\password svc_ingress
+\password svc_worker
+\q
+```
+
+Use `svc_ingress` in `.env`'s `TARGET_DATABASE_URL` for the API, and give the
+worker its `svc_worker` URL when starting it below. Percent-encode reserved
+characters in URL passwords; the owner login stays in the `DB_*` settings.
+
+`scripts/migrations/000_initial.sql` is an empty base marker. Adoption records
+it without executing it; later migrations apply on top of that base. The
+runner refuses to execute an unrecorded `000`.
+
+Automatic `runner apply`, including the deployment pre-step, reports `001`
+and `002` as owed. The owner applies them explicitly, validates the intent
+constraints in a separate transaction, and confirms the snapshot backup before
+the archive drop. The [cutover runbook](documentation/operations/schema-cutover.md)
+describes the rehearsal and the required zero-difference parity gate.
+An existing database whose runner ledger records the retired chain first uses
+the owner command `runner convert-ledger --confirm-legacy-ledger`. It preserves
+that ledger as `runner.schema_migrations_legacy` and adopts the current chain;
+the runbook covers rehearsal on a Neon production branch and rollback before 001.
+
 `make validate-env` loads the settings and builds the key ring, as both services do at startup, and
 `make check-health` asks the deployed API.
+
+On Linux with FFmpeg installed, run tests without a database by leaving the
+`DB_*` variables unset and supplying a fresh local encryption key:
+
+```bash
+ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') pytest tests/ -q
+```
+
+Database-backed tests skip without PostgreSQL. The
+[testing guide](documentation/guides/testing-guide.md#giving-the-gates-a-server)
+shows the required-database run and a Linux Docker recipe for macOS, where
+media resource-limit isolation requires a Linux test environment.
 
 ### 4. Run the API and the worker
 
@@ -118,13 +155,14 @@ The `Procfile` names the two processes.
 
 ```bash
 # The API (the Procfile's `web` line): GET /health, /api/v1 (and /openapi.json under API_DOCS=1, never in production)
-export TARGET_DATABASE_URL=postgresql://<user>@localhost:5432/<database>   # the value in your .env
+export TARGET_DATABASE_URL='postgresql://svc_ingress:<password>@localhost:5432/<database>'
 uvicorn src.api.app:app --port 8000
 
 # The worker (the Procfile's `worker` line), in the foreground. `make run`
 # exports `.env` into the process; a bare `python -m src.main` does not read it
 # and refuses to boot without TARGET_DATABASE_URL in its environment.
-make run
+# A make command-line variable overrides the API URL loaded from .env.
+make run TARGET_DATABASE_URL='postgresql://svc_worker:<password>@localhost:5432/<database>'
 ```
 
 The web front end is `npm --prefix landing run dev` (http://localhost:3000); it
@@ -183,7 +221,7 @@ The product runs one bot. It is an adapter of the API, not a command console:
   leaving the group removes nothing (`src/services/target/membership_sync.py`).
 
 Typed commands are not served: a `/pause` or an "approve" typed in a chat is not
-dispatched (#854). Pause, resume, the schedule and the queue live on the web and
+dispatched. Pause, resume, the schedule and the queue live on the web and
 in the `storydump` verbs.
 
 Telegram delivers to the API's webhook (`POST /webhooks/telegram`); the worker
@@ -193,10 +231,9 @@ only sends.
 
 ### Running Tests
 
-The suite runs against a local PostgreSQL. Without one, the root suite's
-database tests skip and the gates under `tests/scripts/` ERROR at their first
-fixture — leave them out (`--ignore=tests/scripts`) for a no-database run. CI sets `REQUIRE_TEST_DATABASE=1` so a database
-that fails to come up is a failure, never a silent skip;
+The suite runs against a local PostgreSQL. Without one, database-backed tests
+in the root suite and under `tests/scripts/` skip. CI sets
+`REQUIRE_TEST_DATABASE=1` so a database that fails to come up is a failure;
 [`documentation/guides/testing-guide.md`](documentation/guides/testing-guide.md#giving-the-gates-a-server)
 has the throwaway-server recipe.
 
@@ -224,14 +261,14 @@ storydump/
 │   ├── channels/          # Telegram transport and webhook registration
 │   ├── config/            # settings.py (no variable is required), constants, defaults
 │   ├── exceptions/        # Typed errors: base, identity, telegram, tenancy
-│   ├── models/target/     # Declarative models (schema parity with the migrations, not an ORM)
+│ ├── models/target/ # Declarative schema and SQL DDL, built together
 │   ├── services/target/   # The tier: the command port, the ledger, jobs, the clock, the publish pipeline, the outbox, the provider adapters, the read views
 │   ├── utils/             # datetime_utils, encryption, logger
 │   ├── worker.py          # The worker's composition root
 │   └── main.py            # The worker entrypoint (dispatches to worker.py)
 ├── storydump_cli/         # The `storydump` console (an HTTP client of the API)
 ├── landing/               # The Next.js site and dashboard (deployed on Vercel)
-├── scripts/               # migration_runner.py, migrations/, window/, the gates
+├── scripts/ # migration_runner.py, migrations/, schema checks
 ├── tests/                 # src/, scripts/ (the DB gates), storydump_cli/
 ├── documentation/         # Guides
 ├── Procfile               # worker: python -m src.main · web: uvicorn src.api.app:app

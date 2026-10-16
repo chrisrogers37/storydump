@@ -1,11 +1,11 @@
-"""An item's link (#1413), EXECUTED — as `svc_ingress`, through the
+"""An item's link, EXECUTED — as `svc_ingress`, through the
 real port, on the replayed target schema.
 
 What only PostgreSQL can say, and so is pinned here rather than in
 `tests/src/services/target/test_set_item_link.py`:
 
 - **The login may write it.** `svc_ingress` holds UPDATE on `media_items`
-  (057), so the link needs no DDL.
+  (`09_grants.sql`), so the link needs no DDL.
 - **Only this workspace's item.** Another workspace's item is `not_found`
   and keeps its link: the predicate and the tenant policy both stand.
 - **Every change names the person** in `audit_events`, with the item's own

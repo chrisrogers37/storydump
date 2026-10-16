@@ -172,7 +172,7 @@ class TestMintingIsSessionOnly:
         (call,) = tokens["mint"]
         assert call["workspace_id"] == WS and call.get("user_id") is None
         assert call["role"] == "readonly"
-        # 090: the minter rides along, so removing them revokes this token.
+        # workspace member removal: the minter rides along, so removing them revokes this token.
         assert call["created_by_user_id"] == PRINCIPAL.user_id
         assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
 

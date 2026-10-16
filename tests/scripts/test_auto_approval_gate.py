@@ -1,5 +1,5 @@
 """Gate: the serve step approves a story automatically, or leaves it
-to a person (#1477).
+to a person.
 
 Driven against the replayed advertised stream, every sweep as `svc_worker`
 with no tenant, exactly as the worker's prompt sweeper runs it
@@ -18,7 +18,7 @@ the story a test minted).
   the story `awaiting_approval` with no rule and no job, and a fault leaves
   the rest of the sweep to go on.
 - **The ledger is the authority.** The serve path's actor is the one
-  `tg_intent_person_or_rule` (110) requires; `test_intent_ledger_gate.py`
+  `tg_intent_person_or_rule` (approval rules) requires; `test_intent_ledger_gate.py`
   covers the rule in depth.
 - **The card's life.** A rule-approved story's card goes out once, settled,
   however far the story got before the sender claimed it; the settled sweep
@@ -63,7 +63,7 @@ from tests.scripts.conftest import (
     as_user,
     in_tenant,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
 )
 from tests.scripts.test_planned_serve_gate import (
     _checked,
@@ -92,7 +92,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn}
     finally:
         gen.close()
@@ -166,7 +166,6 @@ _POSTED_BY = {
     "api": {"ig_container_id": "c-earlier", "publish_step": "effect_confirmed"},
     "dry_run": {"publish_step": "effect_confirmed"},
     "manual": {},
-    "legacy_backfill": {},
 }
 
 
@@ -461,7 +460,7 @@ class TestWhatWaits:
         failure here before it is a silent approval."""
         assert _checked(world, "ck_intent_via") == tuple(sorted(_POSTED_BY))
 
-    @pytest.mark.parametrize("via", ["manual", "dry_run", "legacy_backfill"])
+    @pytest.mark.parametrize("via", ["manual", "dry_run"])
     def test_returning_waits_when_the_only_earlier_post_was_not_through_the_api(
         self, world, via
     ):
@@ -818,7 +817,7 @@ class TestTheCardOfAStoryARuleApproved:
 
 
 class TestTheSenderRendersEveryKeyboard:
-    """#1477, against the ledger: the sender claims a card's edit and sends
+    """Against the ledger: the sender claims a card's edit and sends
     it with the keyboard of its story as it is then, whatever its caller stored
     — a parked story's edit carries the three resolutions and Configure, a
     posted story's Configure alone."""

@@ -1,4 +1,4 @@
-"""The intent-ledger gate (#858).
+"""The intent-ledger gate.
 
 The gate, verbatim: *"model-based transition tests reject every
 illegal/double transition **via raw SQL as well as the service** (the trigger,
@@ -44,13 +44,12 @@ import uuid
 import psycopg2
 import pytest
 
-from scripts.migration_runner import MIGRATIONS_DIR
 from src.services.target import vocabulary
 from tests.scripts.conftest import (
     as_user,
     async_url,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -69,9 +68,9 @@ TERMINAL = ("posted", "skipped", "rejected", "expired", "failed", "cancelled")
 
 
 @pytest.fixture()
-def ledger(owner_window_db, owner_actor, admin_conn):
+def ledger(owner_world_db, owner_actor, admin_conn):
     """A replayed target schema plus the facts the matrix is derived from."""
-    dsn = replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
+    dsn = build_world(owner_world_db, owner_actor, admin_conn)
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -131,7 +130,7 @@ def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     * The state-completeness CHECKs (``ck_posted_complete``,
       ``ck_publishing_debited``, ``ck_ambiguous_called``) mean several states
       cannot simply be asserted into existence. Each is satisfied by its own
-      documented route: ``posted`` via the ``legacy_backfill`` exemption, the
+      documented route: ``posted`` via a manual post carrying a cap debit, the
       publishing pair by carrying a cap debit, and ``publishing_ambiguous`` by
       also recording that publish was called.
 
@@ -150,11 +149,8 @@ def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     c = ledger["chain"]
     extra_cols, extra_vals = "", []
     if state == "posted":
-        # `ck_posted_complete` exempts the legacy_backfill route, which is the
-        # only way to assert a `posted` row into existence without also
-        # fabricating a container id, publish step and cap debit.
-        extra_cols = ", published_via"
-        extra_vals = ["legacy_backfill"]
+        extra_cols = ", published_via, cap_consumed_on"
+        extra_vals = ["manual", "2026-01-01"]
     elif state in ("publishing", "publishing_ambiguous"):
         extra_cols = ", cap_consumed_on, publish_step"
         extra_vals = [
@@ -196,7 +192,7 @@ COMPLETION = {
     "publishing_ambiguous": (
         ", cap_consumed_on = DATE '2026-01-01', publish_step = 'publish_called'"
     ),
-    "posted": ", published_via = 'legacy_backfill'",
+    "posted": ", published_via = 'manual', cap_consumed_on = current_date",
 }
 
 
@@ -205,7 +201,7 @@ def _attempt(ledger, sql, params, *, actor="system", user_id=None, reused=False)
 
     *reused* first commits a transaction that claims an actor, which is the
     state a pooled connection is in: an unset `app.actor_kind` then reads ''
-    rather than NULL (#1421), and a refusal must not depend on which."""
+    rather than NULL, and a refusal must not depend on which."""
     conn = psycopg2.connect(ledger["dsn"])
     conn.autocommit = True
     try:
@@ -249,7 +245,7 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
             if src in TERMINAL:
                 continue  # terminal immutability is a separate, stronger rule
             intent = _new_intent(ledger, src)
-            # The approval edge is a person's (110, #1477), or the system's
+            # The approval edge is a person's (approval rules), or the system's
             # stamping a rule: driven here as the person the other paths are.
             person = (src, dst) == ("awaiting_approval", "approved")
             ok, msg, _ = _attempt(
@@ -292,7 +288,7 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
 
     def test_every_ILLEGAL_edge_is_refused_by_the_trigger(self, ledger):
         """The exhaustive half: all non-edges over the full state cross-product,
-        excluding same-state (refused by `061` — see its own test) and
+        excluding same-state (refused by `trg_intent_guard` — see its own test) and
         terminal sources (covered by immutability)."""
         accepted = []
         checked = 0
@@ -322,11 +318,11 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
 
 
 class TestDoubleTransition:
-    """The gate says "reject every illegal/double transition". `061` refuses
-    a same-state write (#883), and that is what this asserts."""
+    """The gate says "reject every illegal/double transition". `trg_intent_guard` refuses
+    a same-state write, and that is what this asserts."""
 
     def test_a_same_state_write_is_REFUSED_and_moves_nothing(self, ledger):
-        """#883: `061` REFUSES a same-state write, and the write moves
+        """`trg_intent_guard` REFUSES a same-state write, and the write moves
         nothing: no audit row, `entered_state_at` unmoved. Those hold
         because the write is refused rather than inert, which is the
         stronger property and the one a caller can act on.
@@ -367,10 +363,10 @@ class TestDoubleTransition:
         )
 
     def test_a_NON_state_update_is_untouched_by_the_self_transition_guard(self, ledger):
-        """The other half of `061`, and the reason it is `UPDATE OF state`.
+        """The other half of `trg_intent_guard`, and the reason it is `UPDATE OF state`.
 
         A checkpoint update does not name `state`, so the guard must never
-        fire on it. Without this, the #883 guard would silently forbid every
+        fire on it. Without this, the guard would silently forbid every
         checkpoint write — a far worse defect than the one it closes.
         """
         intent = _new_intent(ledger, "scheduled")
@@ -397,12 +393,12 @@ class TestDoubleTransition:
     def test_the_LOSER_of_a_concurrent_transition_is_REFUSED_not_told_it_won(
         self, ledger
     ):
-        """#883: of two writers taking the same edge on the same intent, the
+        """Of two writers taking the same edge on the same intent, the
         loser is REFUSED.
 
         The loser blocks on the row lock, and when the winner commits it
         re-evaluates against the winner's row — so a BEFORE trigger sees
-        ``OLD.state = NEW.state``, which `061` refuses. `transition()` raising
+        ``OLD.state = NEW.state``, which `trg_intent_guard` refuses. `transition()` raising
         or not is the caller's only success signal, and ``rowcount`` does not
         separate them either: a no-op loser would get 1, identical to the
         winner. It is here so the next person to touch these triggers cannot
@@ -584,9 +580,8 @@ class TestActorLessGovernanceMutationsRaiseOnAllFiveTables:
     }
 
     #: Writes that move only a dual-role table's machinery columns. The trigger
-    #: exits before its audit INSERT for these, so its actor test is the only
-    #: thing that refuses them: on a reused connection under `055`, nothing did
-    #: (#1421).
+    #: exits before its audit INSERT for these, so its actor check must reject
+    #: an unset actor on both fresh and reused connections.
     MACHINERY = {
         "ig_accounts": "UPDATE ig_accounts SET next_slot_at = now() WHERE workspace_id=%s",
         "oauth_credentials": (
@@ -629,7 +624,9 @@ class TestActorLessGovernanceMutationsRaiseOnAllFiveTables:
 
 
 class TestEveryGucReadTreatsEmptyAsUnset:
-    """#1421's class. A `SET LOCAL`'s value dies with its transaction but the
+    """Unset settings behave consistently on fresh and reused connections.
+
+    A `SET LOCAL` value dies with its transaction but the
     setting stays defined, so a pooled connection reads an unset `app.*` setting
     as '', and a read that tests only for NULL is right on a fresh connection
     alone. Every `current_setting('app.…', true)` in the live schema, in a
@@ -702,9 +699,9 @@ class TestTheInsertGuard:
             ledger,
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via)"
+            " published_via, cap_consumed_on)"
             " VALUES (%s, %s, %s, 'guard-a', 'manual', now(), 'posted',"
-            " 'legacy_backfill')",
+            " 'manual', current_date)",
             (c["ws"], c["iga"], c["media"]),
         )
         assert not ok and "born scheduled" in msg, msg
@@ -718,9 +715,9 @@ class TestTheInsertGuard:
             ledger,
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via)"
+            " published_via, cap_consumed_on)"
             " VALUES (%s, %s, %s, 'guard-b', 'manual', now(), 'posted',"
-            " 'legacy_backfill')",
+            " 'manual', current_date)",
             (c["ws"], c["iga"], c["media"]),
             actor="migration",
         )
@@ -729,7 +726,7 @@ class TestTheInsertGuard:
 
 #: The approval edge the person rule is about, as raw SQL.
 APPROVE = "UPDATE post_intents SET state = 'approved' WHERE id = %s"
-#: The serve step's approval (#1477): the edge and the rule in ONE update.
+#: The serve step's approval: the edge and the rule in ONE update.
 APPROVE_BY_RULE = (
     "UPDATE post_intents SET state = 'approved', approval_rule = %s WHERE id = %s"
 )
@@ -759,7 +756,7 @@ def _stamped(ledger, rule: str = "auto") -> str:
 
 
 class TestOnlyAPersonOrAStampedRuleApproves:
-    """110 (#1477): `awaiting_approval -> approved` on ANY story is a person's,
+    """approval rules: `awaiting_approval -> approved` on ANY story is a person's,
     `app.actor_kind = 'user'` with an `app.actor_user_id` and the rule left NULL,
     or the system's stamping the rule that approved it in the same UPDATE. The
     rule reads no `origin`, so each behaviour runs on cadence stories and once
@@ -816,7 +813,7 @@ class TestOnlyAPersonOrAStampedRuleApproves:
         assert not ok and "is the system's" in msg, msg
 
     def test_the_pipelines_step_back_is_untouched(self, ledger):
-        """`publishing -> approved` is the float's step back (076), issued by
+        """`publishing -> approved` is the float's step back (`post_intent_transitions`), issued by
         the worker as `system`: the rule is about approval, not about every
         edge that lands in `approved`."""
         intent = _new_intent(ledger, "publishing")
@@ -856,7 +853,7 @@ class TestTheRuleIsStampedOnlyByTheApproval:
 
 class TestOriginIsFixedAtBirth:
     """`origin` must not move: a rule one UPDATE could step around would not
-    hold (088's guarantee, which `tg_intent_person_or_rule` (110) carries)."""
+    hold (`post_intents.origin`'s guarantee, which `tg_intent_person_or_rule` (approval rules) carries)."""
 
     @pytest.mark.parametrize(
         "born, becomes", [("planned", "cadence"), ("cadence", "planned")]
@@ -878,9 +875,8 @@ class TestOriginIsFixedAtBirth:
 
 
 class TestTheDefaultsAskAPerson:
-    """Nothing approves automatically until someone sets a position or a flag,
-    and 110's one-time reset makes every workspace ask, whatever it had saved
-    (a value nothing ever honored is not consent)."""
+    """Nothing approves automatically until someone sets a position or a
+    flag: every approval column defaults to asking."""
 
     def test_each_column_defaults_to_asking(self, ledger):
         expected = {
@@ -898,24 +894,6 @@ class TestTheDefaultsAskAPerson:
                 " ('post_intents', 'approval_rule'))"
             )
             assert {(t, c): d for t, c, d in cur.fetchall()} == expected
-
-    def test_the_reset_makes_every_workspace_ask(self, ledger):
-        """110's one-time reset, read from the file so the test runs the
-        shipped statements rather than a copy (098's pattern)."""
-        reset = re.search(
-            r"SET LOCAL app\.actor_kind = 'migration';.*?SET LOCAL app\.actor_kind = '';",
-            (MIGRATIONS_DIR / "110_approval_positions.sql").read_text(),
-            re.S,
-        ).group()
-        ws = ledger["chain"]["ws"]
-        with ledger["conn"].cursor() as cur:
-            cur.execute("SET app.actor_kind = 'system'")
-            cur.execute(
-                "UPDATE workspaces SET approval_mode = 'auto' WHERE id = %s", (ws,)
-            )
-            cur.execute(reset)
-            cur.execute("SELECT approval_mode FROM workspaces WHERE id = %s", (ws,))
-            assert cur.fetchone() == ("manual",)
 
 
 class TestTheGuardsAreLoadBearing:
@@ -975,7 +953,7 @@ class TestTheGuardsAreLoadBearing:
         assert ok2 and rows2 == 1, f"still refused without the guard: {msg2}"
 
     def test_the_self_transition_guard_is_what_refuses_a_same_state_write(self, ledger):
-        """#883's trigger, held to the same standard as the other four."""
+        """The same-state trigger is necessary for refusing an unchanged state."""
         intent = _new_intent(ledger, "scheduled")
         ok, msg, _ = _attempt(
             ledger, "UPDATE post_intents SET state='scheduled' WHERE id=%s", (intent,)
@@ -1020,8 +998,8 @@ class TestTheGuardsAreLoadBearing:
         sql = (
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via) VALUES (%s, %s, %s, %s, 'manual', now(), 'posted',"
-            " 'legacy_backfill')"
+            " published_via, cap_consumed_on) VALUES (%s, %s, %s, %s, 'manual', now(), 'posted',"
+            " 'manual', current_date)"
         )
         ok, msg, _ = _attempt(ledger, sql, (c["ws"], c["iga"], c["media"], "lb-1"))
         assert not ok and "born scheduled" in msg, msg
@@ -1138,7 +1116,7 @@ class TestTheServicePathAgreesWithTheTrigger:
     async def test_an_ACTOR_LESS_transition_is_refused_by_the_AUDIT_TRIGGER(
         self, ledger, reused
     ):
-        """The one refusal that is not a `check_violation` (#1402).
+        """The one refusal that is not a `check_violation`.
 
         `trg_intent_audit` refuses an anonymous state change with a bare
         `RAISE EXCEPTION`, which asyncpg surfaces as `RaiseError` — so this is
@@ -1146,7 +1124,7 @@ class TestTheServicePathAgreesWithTheTrigger:
         is legal, so the guard passes and the missing actor is the only
         objection left. On a fresh connection the unset setting reads NULL; on
         a pooled connection that has carried an actor it reads '', which the
-        trigger reads as unset too (`085`, #1421).
+        trigger reads as unset too (audit actor checks).
         """
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
@@ -1183,7 +1161,7 @@ class TestTheServicePathAgreesWithTheTrigger:
     async def test_a_transition_that_matches_no_row_raises_IntentNotVisible(
         self, ledger
     ):
-        """#1423, the plain case: an id that does not exist. The UPDATE touches
+        """The plain case: an id that does not exist. The UPDATE touches
         no row, and that is not a success."""
         from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -1205,8 +1183,8 @@ class TestTheServicePathAgreesWithTheTrigger:
     async def test_another_tenants_intent_is_NOT_VISIBLE_under_row_level_security(
         self, ledger
     ):
-        """#1423's real case. Both services run as their own logins without
-        BYPASSRLS (#1379), so a session claimed for another workspace cannot see
+        """Both services run as their own runtime logins without
+        BYPASSRLS, so a session claimed for another workspace cannot see
         this one's intent, and the UPDATE matches no row. Run as `svc_worker`,
         because the gate's own login is the owner, which bypasses the policies.
         The same login, claimed for the intent's own workspace, moves it: the

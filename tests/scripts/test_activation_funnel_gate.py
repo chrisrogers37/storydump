@@ -1,4 +1,4 @@
-"""The activation funnel door counts onboarding across every workspace (104, #1481).
+"""The activation funnel door counts onboarding across every workspace (`fn_activation_funnel`).
 
 `fn_activation_funnel(p_since, p_stall)` answers how far the people who signed
 up since `p_since` got (signed in, workspace created, Instagram connected,
@@ -42,7 +42,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -196,7 +196,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             _seed(conn)
@@ -343,7 +343,7 @@ def test_a_hand_written_audit_row_is_not_an_approval(world):
 
 
 def test_an_automatic_approval_counts_as_the_first_approval(world):
-    """An approval the serve step takes as the system, stamping a rule (#1477),
+    """An approval the serve step takes as the system, stamping a rule,
     is stage 5 just as a person's is: the door counts the intent trigger's own
     row (no detail) for the edge, whoever its actor. Driven
     through the serve step itself, `prompts.sweep_due_prompts`, in one

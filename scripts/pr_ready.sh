@@ -27,7 +27,7 @@ set -uo pipefail
 
 REQUIRED_DEFAULT=(
   "Lint" "Telegram ratchet" "Test" "Security Scan" "Front End"
-  "Changelog Check"
+  "Changelog Check" "Schema consistency"
 )
 
 die_lookup() { echo "CANNOT LOOK: $1" >&2; exit 3; }

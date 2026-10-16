@@ -1,12 +1,12 @@
 """The Drive connect gate — the first non-`ig_login` credential, measured as
-`svc_ingress` under RLS (the grant is the WORKSPACE's: 069, #1165).
+`svc_ingress` under RLS (the grant is the WORKSPACE's: workspace Drive grant).
 
 Two workspaces, for the reason every tenancy assertion in this tier needs two:
 "the row landed in workspace A" is only a claim if there was a workspace B it
 could have landed in instead. The route pair is driven through the REAL app
 with only the two provider calls stubbed (the sign-in exchange, as
 `test_web_router_x2_gate.py` does it, and the Drive exchange), so what is
-measured is the state row, the credential row and the read door (#1054).
+measured is the state row, the credential row and the read door.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from tests.scripts.conftest import (
     fetch_one,
     in_tenant,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 from tests.src.api import conftest as api_conftest
@@ -54,7 +54,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             a = seed_workspace_chain(conn, "drive-a")
@@ -82,7 +82,7 @@ def _error_page(reason: str) -> str:
 def _store(world, tenant, *, grant, by=None) -> str:
     """`store_credential` as the callback runs it: one committed unit of work
     under *tenant*, as its user (the granter, unless *by* names another).
-    Returns the credential id. The grant is the workspace's (069): no source
+    Returns the credential id. The grant is the workspace's (workspace Drive grant): no source
     is named."""
     by = by or tenant["user"]
     return _run(
@@ -164,11 +164,11 @@ class TestTheCredentialRow:
         cid = _store(world, a, grant=drive_grant())
         (row,) = _credential_rows(world, a["ws"])
         assert str(row["id"]) == cid
-        # THE invariant 069 states: provider, and NO owner column — the
+        # THE invariant workspace Drive grant states: provider, and NO owner column — the
         # workspace is the owner.
         assert row["provider"] == "gdrive"
         assert row["media_source_id"] is None and row["ig_account_id"] is None
-        # The 063 fence stays closed, so this must be NULL.
+        # The `fn_clock_tick` provider guards fence stays closed, so this must be NULL.
         assert row["next_refresh_at"] is None
         assert row["state"] == "active"
         assert row["expires_at"] is not None
@@ -214,10 +214,11 @@ class TestTheCredentialRow:
         assert len(_credential_rows(world, b["ws"])) == 1
 
     def test_under_the_owner_role_the_where_alone_binds_the_row(self, world):
-        """Production connects as the owner role with BYPASSRLS, so the tenant
-        GUC binds nothing there: the WHERE must. Read on the OWNER stream —
-        A holds a grant, B holds none — and B must still get nothing
-        (#1246)."""
+        """An owner connection also stays within the requested workspace.
+
+        The deployed API uses `svc_ingress` with RLS. This owner control
+        proves the explicit WHERE independently of the tenant policy.
+        """
         a, b = world["a"], world["b"]
 
         async def owner_read(ws):
@@ -244,10 +245,10 @@ class TestTheCredentialRow:
         assert _run(owner_read(a["ws"])) == "ya29.second"
 
     def test_only_the_granter_browses_and_a_reconnect_hands_it_over(self, world):
-        """091, measured on the real row as `svc_ingress`: the
+        """`oauth_credentials.granted_by_user_id`, measured on the real row as `svc_ingress`: the
         grant names who granted it, only they may browse, and a reconnect by
         another admin makes that admin the granter. A grant with no recorded
-        granter — every one made before 091 — is the owner's alone."""
+        granter — a grant with no recorded granter — is the owner's alone."""
         a = world["a"]
         conn = psycopg2.connect(world["stream"])
         try:
@@ -291,7 +292,7 @@ class TestTheCredentialRow:
         _store(world, a, grant=drive_grant(access_token="ya29.second"))
 
     def test_the_schema_refuses_a_per_source_gdrive_row(self, world):
-        """069's CHECK, measured: the folder-first shape cannot be stored by
+        """workspace Drive grant's CHECK, measured: the folder-first shape cannot be stored by
         accident — a gdrive row naming a source is refused at the constraint."""
         a = world["a"]
         conn = psycopg2.connect(world["stream"])
@@ -312,7 +313,7 @@ class TestTheCredentialRow:
     def test_an_expired_access_token_is_minted_on_the_read_path(
         self, world, monkeypatch
     ):
-        """#1247: the read door refreshes an expired access token
+        """The read door refreshes an expired access token
         from the stored refresh token, writes the new envelope IN PLACE (same
         row) and hands the fresh token back — measured on the real row."""
         from src.config.settings import settings
@@ -549,7 +550,7 @@ class TestTheRoutePairAsSvcIngress:
                     == f"{FRONT}/dashboard/settings?connected=gdrive"
                 )
                 (row,) = _credential_rows(world, ws)
-                # 091: the state's user — the returning browser — is recorded
+                # `oauth_credentials.granted_by_user_id`: the state's user — the returning browser — is recorded
                 # as the granter.
                 assert fetch_one(
                     world["stream"],
@@ -684,7 +685,7 @@ class TestTheRoutePairAsSvcIngress:
                 )
                 assert gone.status_code in (404, 405), gone.text
 
-                # 9. Removed stays removed across a RECONNECT (#1246):
+                # 9. Removed stays removed across a RECONNECT:
                 # the marker tells a removal apart from a disconnect's pause.
                 await client.delete(
                     f"/api/v1/workspaces/{ws}/sources/{sid}", headers=owner

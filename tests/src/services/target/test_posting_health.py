@@ -20,6 +20,7 @@ from src.services.target.posting_health import (
     posting_freshness,
     publish_attempts,
 )
+from tests.src.services.target.schema_code import function_body
 
 
 class FakeExecutor:
@@ -143,34 +144,12 @@ class TestTheOtherTwoReads:
         assert len(fake.statements) == 1
 
 
-class TestTheBackfillExclusion:
-    """The one property in this module a reader cannot check by looking.
-
-    `ck_posted_complete` EXEMPTS `published_via = 'legacy_backfill'` from every
-    evidence requirement, so it is the one `posted` row the database accepts
-    with no proof that anything reached Instagram. The filter guards what the
-    schema permits. Any bulk insert of such rows carries a fresh
-    `entered_state_at` and would read as *a post just landed*, announcing a
-    recovery nobody observed and then going quiet for a full threshold.
-
-    Both posting aggregates must carry the filter. Testing only the count would
-    pass while the AGE goes unfiltered, which is the half that manufactures the
-    false recovery.
-
-    Since 081 the query is the body of `fn_health_posting_freshness`, a door the
-    module reads through, so the property is read from the migration file here
-    (the doors gate reads it from the LIVE function in the replayed world);
-    the module's own statement is pinned to the door.
-    """
+class TestTheDryRunExclusion:
+    """Both posting aggregates exclude simulated publishes."""
 
     @staticmethod
     def _door_body() -> str:
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "081_fleet_health_doors.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_health_posting_freshness()", 1)[1]
-        body = body.split("AS $$", 1)[1].split("$$;", 1)[0]
-        return " ".join(body.split())
+        return " ".join(function_body("fn_health_posting_freshness").split())
 
     async def test_the_module_reads_through_the_door(self):
         fake = FakeExecutor(
@@ -186,11 +165,9 @@ class TestTheBackfillExclusion:
         assert "FROM fn_health_posting_freshness()" in sql
         assert "FROM post_intents" not in sql
 
-    def test_both_posting_aggregates_exclude_backfilled_rows(self):
+    def test_both_posting_aggregates_exclude_dry_runs(self):
         sql = self._door_body()
-        predicate = (
-            "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
-        )
+        predicate = "state = 'posted' AND published_via <> 'dry_run'"
         # Once for `posted_ever`, once for `last_post_age_seconds`. A single
         # occurrence means one of the two is reading the unfiltered population.
         assert sql.count(predicate) == 2

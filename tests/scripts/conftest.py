@@ -1,4 +1,4 @@
-"""Shared fixtures and helpers for the migration-runner suites.
+"""Shared fixtures and helpers for the database gate suites.
 
 Real-PostgreSQL scratch databases, one per test, dropped on teardown — never
 the shared per-session application database. Connection parameters come from
@@ -6,24 +6,21 @@ the same settings the rest of the suite uses (``.env.test`` via the root
 conftest), so a credential or port move breaks every suite the same way
 instead of this one differently.
 
-Host model (#758/#763/#768 — several runs share this cluster): the DATABASE
-half of isolation is per-session naming (#763's session suffix, reused here
-so one run has one identity); the ROLE half cannot be namespaced — the seven
+Several pytest runs can share this cluster. Database isolation uses
+``SESSION_DB_SUFFIX`` from the root conftest, so each run has one identity.
+Roles cannot be namespaced — the seven
 ``svc_*`` roles are cluster-scoped spec names — so this suite SERIALIZES on
 the cluster's own advisory lock and QUEUES behind concurrent runs instead of
 corrupting them. Every cleanup path is scoped to this suite's own database
 prefixes; nothing here can touch a database it did not name.
 
-ONE lock, not two (#785). The mutex is ``SUITE_CLUSTER_LOCK_KEY``, held
+ONE lock, not two. The mutex is ``SUITE_CLUSTER_LOCK_KEY``, held
 session-wide by ``admin_conn``. It reaches every process that can reach the
 cluster, which is the scope the guarded resource actually has.
 """
 
 import contextlib
-import functools
 import json
-import shutil
-import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -33,11 +30,9 @@ import psycopg2.sql
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor, UUID_adapter
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-
-from scripts.migration_runner import MIGRATIONS_DIR, legacy_lineage_max
 
 from src.config.db_url import userinfo
 from src.config.settings import settings
@@ -57,13 +52,13 @@ psycopg2.extensions.register_adapter(uuid.UUID, UUID_adapter)
 
 
 def pytest_configure(config):
-    """Refuse this directory under pytest-xdist (#809).
+    """Refuse this directory under pytest-xdist.
 
     WHAT THIS IS AND IS NOT. It makes an unsafe invocation fail in under a
     second instead of producing a twenty-minute silent queue; it does NOT make
     this directory parallel-safe, and nothing here moves it toward that. The
     seven ``svc_*`` roles are cluster-scoped spec names that cannot be
-    namespaced per session (#768), which is why the suite serializes on
+    namespaced per session, which is why the suite serializes on
     ``SUITE_CLUSTER_LOCK_KEY`` in the first place. Under ``-n`` each worker is a
     separate process with its own session, so workers 2..N queue on a lock the
     first one holds until the session ends — they do not corrupt each other,
@@ -124,11 +119,11 @@ def pytest_configure(config):
 
 
 #: Scratch-database naming: ONE home for the convention every sweep predicate
-#: derives from. The session token is #763's — one pytest run, one identity,
+#: derives from. The session token is the root suite's SESSION_DB_SUFFIX:
+#: one pytest run, one identity,
 #: correlatable across the root suite's databases and these.
 TEST_DB_PREFIX = "runner_test_"
-TPL_DB_PREFIX = "runner_tpl_"
-SUITE_DB_PREFIXES = (TEST_DB_PREFIX, TPL_DB_PREFIX)
+SUITE_DB_PREFIXES = (TEST_DB_PREFIX, "runner_tpl_")
 
 #: Advisory-lock key for "a tests/scripts suite is using this cluster's
 #: shared objects (service roles, scratch namespaces)". Distinct from the
@@ -136,25 +131,25 @@ SUITE_DB_PREFIXES = (TEST_DB_PREFIX, TPL_DB_PREFIX)
 #: shared resource, so PostgreSQL's lock is the mutex that actually reaches
 #: every process that can reach it, whichever bot or host owns it.
 #:
-#: THE SINGLE PRIMITIVE (#785). This lock alone guards the role lifecycle, with
+#: THE SINGLE PRIMITIVE. This lock alone guards the role lifecycle, with
 #: no `flock` keyed on the same cluster alongside it, for reasons that are
 #: properties of the two mechanisms and not of any one deployment:
 #:
 #: - **Scope.** The roles are CLUSTER-scoped; a `flock` is HOST-scoped. Two
-#:   containers or hosts pointing at one cluster do not share a temp directory,
-#:   so the file lock silently fails to serialise them while this one still
-#:   does. `tempfile.gettempdir()` also follows `TMPDIR`, so the same divergence
-#:   is reachable on a single host.
+#: containers or hosts pointing at one cluster do not share a temp directory,
+#: so the file lock silently fails to serialise them while this one still
+#: does. `tempfile.gettempdir()` also follows `TMPDIR`, so the same divergence
+#: is reachable on a single host.
 #: - **Coverage by container, not by enumeration.** This lock is held for the
-#:   whole session, so it covers `_sweep_leftovers` — which drops OTHER
-#:   sessions' suite-prefixed databases and is the most destructive thing here.
-#:   Widening a per-fixture lock means maintaining a list of fixture names that
-#:   goes stale the next time one is added.
+#: whole session, so it covers `_sweep_leftovers` — which drops OTHER
+#: sessions' suite-prefixed databases and is the most destructive thing here.
+#: Widening a per-fixture lock means maintaining a list of fixture names that
+#: goes stale the next time one is added.
 #: - **Crash safety is not a discriminator.** Measured on this cluster: SIGKILL
-#:   the holder with no cleanup path and the lock clears anyway (the backend
-#:   sees EOF and exits). Both mechanisms have the property.
+#: the holder with no cleanup path and the lock clears anyway (the backend
+#: sees EOF and exits). Both mechanisms have the property.
 #: - **It can name its holder.** The wait below prints pid/user/application
-#:   from `pg_locks`; a file lock cannot say who holds it.
+#: from `pg_locks`; a file lock cannot say who holds it.
 SUITE_CLUSTER_LOCK_KEY = 753_2026
 SUITE_LOCK_WAIT_SECONDS = 1200
 
@@ -166,66 +161,9 @@ SUITE_LOCK_WAIT_SECONDS = 1200
 SCRATCH_LOCK_KEY = 785_2026
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
+ROLES_SQL = REPO_ROOT / "src" / "models" / "target" / "ddl" / "01_roles.sql"
 
-#: The one legacy table no migration creates: `posting_history_dedup_archive`,
-#: made by hand in production during #941. A world that will apply the snapshot
-#: file (078) has to hold it, in `public` before the 051 move so it rides into
-#: `legacy` the way production's did — which is why the lane seeds it beside
-#: `SETUP_SQL`, and why the snapshot gate (`test_legacy_snapshots.py`) reads its
-#: DDL from here.
-BY_HAND_SQL = REPO_ROOT / "tests" / "scripts" / "fixtures" / "legacy_by_hand.sql"
-
-#: Advertised-stream boundaries for the target-lineage increments (#806), used
-#: by the derivation's unit tests. Held here because the stream is generated
-#: from the advertised DDL blocks — one inserted statement moves every boundary,
-#: and a bare literal at each use site lets consumers drift apart while each
-#: stays green.
-#:
-#: DELIBERATELY LITERAL, NOT DERIVED. `F2_6_END` is "the index of the first
-#: ENABLE ROW LEVEL SECURITY", and a test asserts exactly that property at that
-#: bound; deriving it from the stream would make that assertion true by
-#: construction. Re-derive them by hand when the stream changes — that is a
-#: review event, which is the point.
-F2_2_END = 22  # 053 = stream[2:22]: 7 tables, 4 tenant-keyed, no RLS
-F2_6_END = 126  # end of 057 — the last index before any RLS is enabled
-BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
-
-#: The step-0 companion artifact (#787): the window's legacy-DDL definer
-#: door. Applied by the owner actor immediately after the bootstrap, and by
-#: any owner-world stand-up that will replay 050 — 050 calls the door rather
-#: than issuing owner DDL itself, so a world without it cannot apply 050 at
-#: all. Deliberately a SECOND file rather than more of the bootstrap: the
-#: bootstrap is cluster-scoped (it provisions the seven svc_* roles and so
-#: needs the suite mutex), this is per-database and needs none, which is what
-#: lets the owner-world sites apply it through `psql_apply`.
-DOOR_SQL = REPO_ROOT / "scripts" / "window" / "step0_legacy_ddl_door.sql"
-
-#: THE LEGACY LINEAGE'S STAND-UP IS TWO FILES (#787), and this constant is
-#: the one place that says so. 050 routes its owner-DDL through the step-0
-#: definer door, so any world that will REPLAY 050 — not merely one that applies
-#: `SETUP_SQL` — has to carry the door first. Window worlds get it from
-#: `run_bootstrap`; owner worlds get it from here. Named rather than inlined
-#: because the failure mode of forgetting it is a bare `schema "window_ddl" does
-#: not exist` at migration 050, which reads as a corpus defect rather than as a
-#: missing fixture file.
-LEGACY_STANDUP = [SETUP_SQL, DOOR_SQL]
-
-#: The last version of the LEGACY lineage — everything numbered below the
-#: schema move. **Derived from the move file's own marker, never written down
-#: here**: a bound stated as a literal is a second enumeration of the corpus,
-#: and it would be right on the day it was typed and silently wrong the first
-#: time anyone renumbered anything. Read it, do not replace it with an int.
-#:
-#: What it is FOR: from 051 on the corpus holds two lineages in one directory,
-#: and the suites below guard the legacy one — the schema the running
-#: application is built on. Replaying past the boundary renames `public` out
-#: from under them, so every legacy-lineage replay passes this bound. The lane
-#: that replays *across* the boundary is `test_lineage_lane.py`, deliberately
-#: a separate suite rather than a flag on these.
-LEGACY_LINEAGE_MAX = legacy_lineage_max(MIGRATIONS_DIR)
-
-#: The seven service roles, split as the step-0 bootstrap provisions them.
+#: The seven service roles declared by the schema code.
 #: Held here rather than re-listed per test so the inventory has one home on
 #: the test side too.
 LOGIN_ROLES = ("svc_ingress", "svc_worker", "svc_migration")
@@ -264,7 +202,7 @@ def as_user(dsn: str, user: str) -> str:
 def sweep_as_worker(dsn: str) -> int:
     """`work_loop.ensure_sender_jobs` the way the worker runs it: as the login
     *dsn* names (the worker's), in its own session with the EMPTY tenant and
-    the `system` actor — the sweep's cross-tenant read is the door's (082).
+    the `system` actor — the sweep's cross-tenant read is the door's (worker sweep functions).
     Run it AFTER the transaction that enqueued the cards has committed: a
     second session cannot see an uncommitted row."""
     import asyncio
@@ -388,13 +326,13 @@ def assert_holds_cluster_lock(admin_conn, door: str) -> None:
     """Refuse a cluster-scoped door unless the connection handed in IS a holder
     of ``SUITE_CLUSTER_LOCK_KEY``.
 
-    WHY THE PARAMETER IS CHECKED RATHER THAN DECORATIVE (#808). The cheap fix
+    WHY THE PARAMETER IS CHECKED RATHER THAN DECORATIVE. The cheap fix
     for a door that does not declare its mutex is to put the connection in the
     signature and never use it, so the fixture graph forces the dependency. That
     is a marker: nothing goes red when a later author deletes an argument the
     body ignores.
 
-    The alternative is impossible for a helper holding only a DSN (#808), in
+    The alternative is impossible for a helper holding only a DSN, in
     both of the forms available to it. Measured on this cluster:
 
     - ``pg_try_advisory_lock(SUITE_CLUSTER_LOCK_KEY)`` returns True when called
@@ -439,7 +377,7 @@ def assert_holds_cluster_lock(admin_conn, door: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def admin_conn():
+def admin_conn(setup_test_database):
     """One session-wide connection to the maintenance database.
 
     Serializes the whole session on ``SUITE_CLUSTER_LOCK_KEY`` — visibly
@@ -450,6 +388,8 @@ def admin_conn():
     lock is released by the connection closing, which the ``finally``
     guarantees even if setup dies after acquisition.
     """
+    if setup_test_database is None:
+        pytest.skip("Database not available - skipping integration test")
     conn = maintenance_conn()
     try:
         with conn.cursor() as cur:
@@ -476,23 +416,6 @@ def admin_conn():
                 _sweep_leftovers(cur)
             except Exception as exc:  # noqa: BLE001 - hygiene must not fail the run
                 print(f"conftest: leftover sweep skipped on error: {exc}")
-        yield conn
-    finally:
-        conn.close()
-
-
-@pytest.fixture()
-def outsider_conn():
-    """A connection valid in every way EXCEPT that it does not hold the mutex.
-
-    Same cluster, database, user and process as ``admin_conn`` — both go
-    through `maintenance_conn`, whose docstring already names this consumer:
-    "anything that has to reach the cluster from OUTSIDE it". The single
-    difference is the advisory lock, which is what makes a refusal asserted
-    against this connection a controlled result rather than an unexplained one.
-    """
-    conn = maintenance_conn()
-    try:
         yield conn
     finally:
         conn.close()
@@ -528,11 +451,8 @@ def _sweep_leftovers(cur) -> None:
         _drop_roles_hardened(cur, tuple(strays))
 
 
-def _create_db(
-    admin_conn, name: str, template: str | None = None, owner: str | None = None
-) -> str:
-    clause = f' TEMPLATE "{template}"' if template else ""
-    clause += f' OWNER "{owner}"' if owner else ""
+def _create_db(admin_conn, name: str, owner: str | None = None) -> str:
+    clause = f' OWNER "{owner}"' if owner else ""
     with admin_conn.cursor() as cur:
         cur.execute(f'CREATE DATABASE "{name}"{clause}')
     return _dsn(name)
@@ -541,7 +461,7 @@ def _create_db(
 def _drop_db(admin_conn, name: str, timeout_s: float = 20.0) -> None:
     """Drop a scratch database, tolerating backends we are not allowed to kill.
 
-    **A failure here is not local** (#758): teardown drops the database
+    **A failure here is not local**: teardown drops the database
     *before* the roles, because a grant inside a database is a catalog
     dependency on the role. So a drop that raises leaves the database standing,
     which leaves the roles undroppable, which fails the SETUP of every
@@ -593,7 +513,6 @@ def _drop_db(admin_conn, name: str, timeout_s: float = 20.0) -> None:
 
 def _scratch(
     admin_conn,
-    template: str | None = None,
     owner: str | None = None,
     roles: list | None = None,
 ):
@@ -604,7 +523,7 @@ def _scratch(
     if roles is not None:
         drop_service_roles(admin_conn)
     name = _scratch_name()
-    dsn = _create_db(admin_conn, name, template, owner)
+    dsn = _create_db(admin_conn, name, owner)
     try:
         yield dsn
     finally:
@@ -625,12 +544,8 @@ def second_scratch_db(admin_conn):
     yield from _scratch(admin_conn)
 
 
-# --- the declared actors (#753: the actor split) -----------------------------
-#
-# Three actors, three jobs: the lineage seeds under a database-owner-shaped
-# actor (non-superuser + CREATEROLE, so legacy tables carry real legacy
-# ownership); the step-0 bootstrap runs as that owner; window steps run as
-# svc_migration.
+# The database owner applies schema code and ledger changes. Runtime services
+# connect through their restricted service logins.
 
 
 @pytest.fixture(scope="session")
@@ -640,7 +555,7 @@ def owner_actor(admin_conn):
     Session-scoped like the service roles (roles are cluster objects); the
     admin is granted membership so it can create databases OWNED by it.
     Teardown goes through the hardened drop so a leaked owner-owned database
-    cannot strand the role (#768's class, for the role this suite adds).
+    cannot strand the role.
     """
     reason = actor_lacks_createrole(admin_conn)
     if reason:
@@ -664,60 +579,49 @@ def owner_db(admin_conn, owner_actor):
 
 
 @pytest.fixture()
-def owner_window_db(admin_conn, owner_actor):
-    """An owner-owned database plus the service-role bracket — for tests
-    that run the bootstrap and act as the window actor."""
+def owner_world_db(admin_conn, owner_actor):
+    """An empty owner database with service roles absent before and after."""
     yield from _scratch(admin_conn, owner=owner_actor, roles=[])
 
 
 def set_test_passwords(admin_conn) -> None:
-    """Give the LOGIN service roles their test password — the step the
-    bootstrap deliberately leaves to deployment env."""
+    """Set the service login passwords supplied by the test environment."""
     with admin_conn.cursor() as cur:
         for role in LOGIN_ROLES:
             cur.execute(f'ALTER ROLE "{role}" PASSWORD %s', (TEST_ACTOR_PASSWORD,))
 
 
-def replay_advertised_stream(db_dsn: str, owner_actor: str, admin_conn) -> str:
-    """Bootstrap as the owner, then replay the advertised stream as
-    svc_migration into the empty public. Returns the window actor's DSN. The
-    canonical full-schema stand-up: suites call this, never inline the
-    sequence (test_advertised_ddl_replay imports it, per the window_actor rule
-    below)."""
-    import psycopg2 as _psycopg2
+def build_world(db_dsn: str, owner_actor: str, admin_conn) -> str:
+    """Build a complete test database as its owner and adopt the base marker.
 
-    from scripts.advertised_ddl import (
-        DEFAULT_DOCS,
-        DEFAULT_MANIFEST,
-        build_stream,
-        load_manifest,
-    )
+    The caller brackets the database and service roles with ``_scratch``.
+    Role creation uses the schema's roles step under the suite cluster lock;
+    the schema and ledger use the same non-superuser owner as deployment.
+    """
+    from scripts.migration_runner import MIGRATIONS_DIR, adopt
+    from src.models.target.ddl import build
 
-    manifest = load_manifest(DEFAULT_MANIFEST)
-    stream = build_stream(DEFAULT_DOCS, manifest)
-    as_svc = window_actor(db_dsn, owner_actor, admin_conn)
-    conn = _psycopg2.connect(as_svc)
-    conn.autocommit = True
+    assert_holds_cluster_lock(admin_conn, "build_world")
+    owner = as_user(db_dsn, owner_actor)
+    provision_roles(admin_conn, owner)
+    engine = create_engine(owner)
     try:
-        with conn.cursor() as cur:
-            cur.execute(stream)
+        with engine.connect() as conn:
+            build(conn)
+        adopt(owner, MIGRATIONS_DIR, MIGRATIONS_DIR / "adoption_manifest.json")
+        set_test_passwords(admin_conn)
     finally:
-        conn.close()
-    return as_svc
+        engine.dispose()
+    return owner
 
 
 @pytest.fixture(scope="module")
 def ingress_world(admin_conn, owner_actor):
-    """A replayed schema, as its owner (`svc_migration`, which owns the tables)
-    and as `svc_ingress`: the world of a gate that runs commands through the
-    real port, replayed once per module. A gate re-registers it as its own
-    `world` (``world = ingress_world``), the way `test_repeat_verbs_gate.py`
-    takes the repeat gate's. It is not named `world`: most gate modules
-    define a `world` of their own, which would shadow it."""
+    """A schema built once per module, addressed as owner and API login."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner = build_world(db, owner_actor, admin_conn)
         yield {"owner": owner, "ingress": as_user(owner, "svc_ingress")}
     finally:
         gen.close()
@@ -779,7 +683,7 @@ def seed_intent_chain(
     ``app.actor_kind``). ``state`` overrides the intent's column default
     (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``;
     ``origin`` likewise (``'cadence'``) for a planned story, which must be
-    BORN planned: the ledger refuses changing it afterwards (088, 110).
+    BORN planned: the ledger refuses changing it afterwards (`post_intents.origin`, approval rules).
     Split out of :func:`seed_workspace_chain` so an API-created workspace can
     be seeded with the same spelling rather than a copy."""
     cur.execute(
@@ -820,104 +724,11 @@ def seed_intent_chain(
     return {"src": src, "iga": iga, "media": mi, "intent": intent}
 
 
-def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
-    """Stand the window up: bootstrap as the owner, then
-    act as ``svc_migration``. Returns the window actor's DSN. The canonical
-    actor hand-off — suites call this, never inline the sequence."""
-    run_bootstrap(admin_conn, as_user(db_dsn, owner_actor))
-    set_test_passwords(admin_conn)
-    return as_user(db_dsn, "svc_migration")
-
-
-# --- production-shaped templates (built once per session, copied per test) --
-
-
-@pytest.fixture(scope="session")
-def at45_template(admin_conn, owner_actor):
-    """The at-45 world (setup + 001–045 hand-applied, no ledger), seeded
-    CONNECTED AS THE OWNER ACTOR: production history was built by hand as
-    the database owner, so the template's legacy tables carry real legacy
-    ownership. Table ownership rides into every TEMPLATE copy."""
-    name = _scratch_name(TPL_DB_PREFIX, "at45_")
-    _create_db(admin_conn, name, owner=owner_actor)
-    psql_apply(as_user(_dsn(name), owner_actor), LEGACY_STANDUP + migration_files(45))
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture(scope="session")
-def at49_template(admin_conn, owner_actor, at45_template):
-    """The at-49 world — built FROM the at-45 template plus 046–049, so the
-    session pays for the shared prefix once."""
-    name = _scratch_name(TPL_DB_PREFIX, "at49_")
-    _create_db(admin_conn, name, template=at45_template, owner=owner_actor)
-    files = [f for f in migration_files(49) if f not in set(migration_files(45))]
-    psql_apply(as_user(_dsn(name), owner_actor), files)
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture(scope="session")
-def replayed_template(admin_conn, owner_actor):
-    """The legacy lineage REPLAYED THROUGH THE RUNNER as the owner — for
-    tests that assert on the resulting schema rather than on the replay
-    report (the report-asserting test builds its own and stays the actual
-    tightening battery)."""
-    from scripts.migration_runner import apply_pending
-
-    name = _scratch_name(TPL_DB_PREFIX, "replayed_")
-    _create_db(admin_conn, name, owner=owner_actor)
-    as_owner = as_user(_dsn(name), owner_actor)
-    psql_apply(as_owner, LEGACY_STANDUP)
-    apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture()
-def at45_db(admin_conn, at45_template, owner_actor):
-    """A private copy of the at-45 shape."""
-    yield from _scratch(admin_conn, template=at45_template, owner=owner_actor)
-
-
-@pytest.fixture()
-def at45_window_db(admin_conn, at45_template, owner_actor):
-    """The at-45 shape plus the service-role bracket (window-actor tests)."""
-    yield from _scratch(admin_conn, template=at45_template, owner=owner_actor, roles=[])
-
-
-@pytest.fixture()
-def at49_db(admin_conn, at49_template, owner_actor):
-    """A private copy of the at-49 shape, safe to mutate."""
-    yield from _scratch(admin_conn, template=at49_template, owner=owner_actor)
-
-
-@pytest.fixture()
-def at49_window_db(admin_conn, at49_template, owner_actor):
-    """The at-49 shape plus the service-role bracket (window-actor tests)."""
-    yield from _scratch(admin_conn, template=at49_template, owner=owner_actor, roles=[])
-
-
-@pytest.fixture()
-def replayed_db(admin_conn, replayed_template, owner_actor):
-    """A private copy of the runner-replayed legacy schema."""
-    yield from _scratch(admin_conn, template=replayed_template, owner=owner_actor)
-
-
-# --- the step-0 window bootstrap (#746) -------------------------------------
-#
-# Service roles are CLUSTER-scoped, so they outlive the per-test scratch
-# databases every other fixture here relies on. That is not an inconvenience to
-# work around — it is why role provisioning cannot be a runner migration in the
-# first place. The helpers below own the lifecycle explicitly instead of
-# leaning on database teardown.
-
-
 def actor_lacks_createrole(admin_conn) -> str | None:
-    """The reason the current actor cannot run the bootstrap, or None.
+    """The reason the current actor cannot provision roles, or None.
 
     Returned as a reason string rather than a bool so the skip names the
-    missing privilege. CI's `postgres:15` service makes `POSTGRES_USER` the
+    missing privilege. CI's PostgreSQL service makes `POSTGRES_USER` the
     cluster superuser, so the gate genuinely runs there; a local PostgreSQL
     whose test role was created by hand usually has neither flag, and a silent
     pass would read as coverage this suite did not have.
@@ -941,17 +752,17 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
     databases actually blocking them (asked of pg_shdepend) and retry once.
 
     THE OWNERSHIP PREDICATE IS ABSOLUTE: `_is_suite_db` gates every drop.
-    The step-0 bootstrap is a deployment artifact — a dev or staging
-    database it was legitimately run against carries these same grants and
-    must never be touched by a test sweep, live backends or not. A non-suite
+    A dev or staging database built from the schema code can carry these
+    same service-role grants. A test sweep never touches those databases,
+    live backends or not. A non-suite
     blocker is therefore named and the failure re-raised, loudly.
 
-    THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` (#808) because
+    THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` because
     this is the primitive all role dropping funnels through, and the other two
     callers are the ones worth covering: `_sweep_leftovers`, which this file's
     own header calls the most destructive thing here, and the `owner_actor`
     teardown. Guarding the public door instead would cover one of three and
-    leave the destructive path on call-path coverage, exactly the #808 shape.
+    leave the destructive path protected only by its current callers.
     Enumerating doors is the shape `SUITE_CLUSTER_LOCK_KEY`'s own docstring
     warns against — coverage by container, not by enumeration.
     """
@@ -994,9 +805,6 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
                     " without the lock?"
                 )
                 continue
-            if stale.startswith(TPL_DB_PREFIX) and _is_mine(stale):
-                print(f"conftest: NOT dropping own template {stale}")
-                continue
             cur.execute(f'DROP DATABASE IF EXISTS "{stale}"')
         _drop_all()
 
@@ -1010,224 +818,44 @@ def drop_service_roles(admin_conn, extra=()) -> None:
     `DependentObjectsStillExist` while that database is still there. Dropping
     the database first discards the dependencies with it.
     Callers must not hand-roll this order; use the role-bracketed fixtures
-    (`roleless_db`, `owner_window_db`, `at49_window_db`, ...), whose shared
+    (`owner_world_db`, `world_db`, ...), whose shared
     `_scratch` lifecycle sequences it correctly.
 
     Having ``admin_conn`` in the signature made this door DECLARE the mutex, not
-    hold one; it is verified in `_drop_roles_hardened`, below (#808).
+    hold one; it is verified in `_drop_roles_hardened`, below.
     """
     with admin_conn.cursor() as cur:
         _drop_roles_hardened(cur, tuple(extra) + SERVICE_ROLES)
 
 
-def run_bootstrap(admin_conn, dsn: str) -> None:
-    """Apply the step-0 artifact as the current (owner) actor.
-
-    Executed through psycopg2 rather than `psql_apply` so a guard's RAISE
-    surfaces as an exception the caller can assert the *message* of — the
-    precondition is the point of the artifact, not an incidental failure mode.
-
-    ``admin_conn`` is the CREATE side of the mutex declaration `drop_service_roles`
-    has on the DROP side (#808), and it is checked rather than merely
-    named — see `assert_holds_cluster_lock`. It is deliberately not the
-    connection the bootstrap RUNS on: the artifact must execute as the owner
-    actor, which is what ``dsn`` carries.
-    """
-    assert_holds_cluster_lock(admin_conn, "run_bootstrap")
+def provision_roles(admin_conn, dsn: str) -> None:
+    """Create the schema's service roles as the database owner under the lock."""
+    assert_holds_cluster_lock(admin_conn, "provision_roles")
     conn = psycopg2.connect(dsn)
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     try:
-        with conn.cursor() as cur:
-            cur.execute(BOOTSTRAP_SQL.read_text())
-            # The step-0 COMPANION (#787), right after the bootstrap:
-            # the door's EXECUTE grant names svc_migration, which the bootstrap
-            # above is what creates. Applied here rather than left to callers so
-            # every window fixture stands the window up whole — a bootstrap
-            # without its door is a window that still dies at 050.
-            cur.execute(DOOR_SQL.read_text())
+        with conn, conn.cursor() as cur:
+            cur.execute(ROLES_SQL.read_text())
     finally:
         conn.close()
 
 
-def bootstrap_via_psql(admin_conn, dsn: str) -> None:
-    """The same artifact through `psql -v ON_ERROR_STOP=1` — how a runbook step
-    actually invokes it.
-
-    A named door rather than a bare `psql_apply(dsn, [BOOTSTRAP_SQL])` call
-    because BOTH routes onto the seven cluster-scoped roles have to verify the
-    mutex or the one left bare is the whole hole (#808). This is the only route
-    that may apply that artifact through psql — `psql_apply` turns it away.
-    """
-    assert_holds_cluster_lock(admin_conn, "bootstrap_via_psql")
-    _psql_run(dsn, [BOOTSTRAP_SQL])
-
-
 @pytest.fixture()
-def roleless_db(admin_conn):
-    """A fresh database with the seven service roles guaranteed ABSENT.
-
-    Yields ``(dsn, extra_roles)`` — append any test-local role name to
-    ``extra_roles`` and teardown drops it in the right order too. Roles are
-    cluster-scoped, so "absent" has to be established at setup rather than
-    assumed from a fresh database.
-    """
-    reason = actor_lacks_createrole(admin_conn)
-    if reason:
-        pytest.skip(reason)
-    # No lock is taken HERE, by design rather than by omission (#785):
-    # depending on `admin_conn` already places this fixture inside the
-    # session-wide `SUITE_CLUSTER_LOCK_KEY`, which is held from before the
-    # first fixture runs until the session ends. The #768 collision is this
-    # fixture's SETUP against another session's in-use roles, and a
-    # session-wide lock covers setup by construction — earlier and wider than
-    # a per-fixture lock, not later or narrower.
-    extra: list[str] = []
-    gen = _scratch(admin_conn, roles=extra)
-    dsn = next(gen)
+def world_db(admin_conn, owner_actor):
+    """A complete schema and adopted base marker in a fresh owner database."""
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
     try:
-        yield dsn, extra
+        yield build_world(db, owner_actor, admin_conn)
     finally:
         gen.close()
 
 
 @pytest.fixture()
-def bootstrapped_db(admin_conn, roleless_db):
-    """A fresh database with the seven service roles provisioned.
-
-    What a policy-carrying table needs: a policy naming `svc_ingress` is
-    uncreatable until the role exists, so every such replay runs through here.
-
-    Built on `roleless_db` so the capability skip and the drop-database-then-
-    drop-roles teardown order have exactly one home — the same reason the
-    scratch fixtures above share `_scratch`.
-    """
-    dsn, _ = roleless_db
-    run_bootstrap(admin_conn, dsn)
-    return dsn
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    """The full-lineage world (legacy schema + target public), once per test.
-
-    The parenthetical still holds after 079. That file carries `runner:manual`,
-    so `apply_pending` — which is all `run_lane` invokes — reports it OWED and
-    never applies it; `test_lineage_lane.py` pins both halves (owed == [79, 80],
-    and `legacy` holds exactly the sixteen inventory tables at the end of the
-    lane). The `DROP SCHEMA legacy CASCADE` belongs to a deploy window and does
-    not run here.
-
-    `run_lane` is imported inside the body rather than at module scope because
-    `tests/scripts/test_lineage_lane.py` imports a dozen names from THIS file:
-    a module-level import would close the cycle and the conftest would fail to
-    load for the whole directory. The six gate files that each carried a copy
-    of this fixture could import it at the top only because none of them is
-    what the lane imports.
-    """
-    from tests.scripts.test_lineage_lane import run_lane
-
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    """A plain psycopg2 connection to the lane world, closed on teardown."""
-    conn = psycopg2.connect(lane_db)
+def sync_conn(world_db):
+    """A plain psycopg2 connection to the built world, closed on teardown."""
+    conn = psycopg2.connect(world_db)
     yield conn
     conn.close()
-
-
-@functools.lru_cache(maxsize=1)
-def advertised_stream():
-    """The expanded advertised stream, NORMALIZED, built once per process.
-
-    ONE SPELLING for the whole suite. Measured on this host: ~36 ms per build
-    of the 257-statement stream, and the two suites between them ask for it
-    roughly ten times a run.
-
-    Cached because callers only ever slice it, and slicing copies — nothing in
-    the suite writes to the source docs or the manifest (every fixture that
-    rewrites either targets `tmp_path`), so there is no invalidation to miss.
-
-    NORMALIZED IS A COMPARISON KEY AND NOT EXECUTABLE SQL, which matters when
-    writing a migration from it: normalization collapses each
-    statement onto one line and keeps a function body whole, so a `--` line
-    inside a body (`fn_clock_tick` carries many) comments out the rest of that
-    body when the normalized statement runs.
-    """
-    from scripts.advertised_ddl import (
-        DEFAULT_DOCS,
-        DEFAULT_MANIFEST,
-        build_stream,
-        load_manifest,
-        normalize_statements,
-    )
-
-    return normalize_statements(
-        build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def migration_files(limit: int):
-    """The real corpus up to ``limit``, selected by the runner's own
-    discovery so the gate cannot drift from production's file set."""
-    from scripts.migration_runner import discover_migrations
-
-    files = [m.path for m in discover_migrations(MIGRATIONS_DIR, limit)]
-    assert files, "no migration files found"
-    return files
-
-
-def psql_apply(dsn: str, files) -> None:
-    """Hand-apply SQL files the way production history was actually built.
-
-    REFUSES ``BOOTSTRAP_SQL`` (#808). That artifact provisions the seven
-    cluster-scoped ``svc_*`` roles, and this door cannot check the suite mutex
-    for the reason the door exists — it holds a DSN, not a connection, and a
-    DSN cannot be asked what locks anyone holds. Rather than guard it (12 of
-    its 13 callers apply `SETUP_SQL` or migration files INTO one scratch
-    database, which is per-database and needs no cluster mutex), the one
-    cluster-scoped file is turned away toward `bootstrap_via_psql`.
-
-    Keying the refusal on the ARTIFACT rather than on a door is what stops the
-    hole reopening: the inventory of ways to reach a file is unbounded and this
-    is the second one already, so the check belongs where the file is named.
-
-    The subprocess gets a MINIMAL environment, not the inherited shell:
-    external code under an ambient environment is how credential names
-    collide into error output. psql
-    needs PATH and its own options; everything else it needs is in the DSN.
-    """
-    if any(Path(f) == BOOTSTRAP_SQL for f in files):
-        raise RuntimeError(
-            "psql_apply: BOOTSTRAP_SQL provisions the CLUSTER-scoped svc_*"
-            " roles, so it must go through `bootstrap_via_psql`, which verifies"
-            " SUITE_CLUSTER_LOCK_KEY (#808). This door only has a DSN, so it"
-            " cannot check the mutex itself."
-        )
-    _psql_run(dsn, files)
-
-
-def _psql_run(dsn: str, files) -> None:
-    """The subprocess invocation itself — the one spelling, shared by the public
-    `psql_apply` door and the guarded `bootstrap_via_psql` one, so the refusal
-    above cannot be sidestepped by rebuilding the command somewhere else."""
-    cmd = ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1"]
-    for f in files:
-        cmd += ["-f", str(f)]
-    # A minimal PATH, widened only by the directory of the psql the developer's
-    # own PATH resolves (a Homebrew keg on a Mac); CI's lives in /usr/bin.
-    found = shutil.which("psql")
-    path = "/usr/bin:/bin" if not found else f"{Path(found).parent}:/usr/bin:/bin"
-    env = {
-        "PATH": path,
-        "PGOPTIONS": "-c client_min_messages=warning",
-        "LC_ALL": "C.UTF-8",
-    }
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    assert result.returncode == 0, f"hand-apply failed: {result.stderr[-2000:]}"
 
 
 # --- plain helpers shared across the runner suites ---
@@ -1339,7 +967,7 @@ def txn(dsn, expect_user=None):
     """A NON-autocommit connection (SET LOCAL needs a transaction block),
     subject-gated when a login is named.
 
-    ONE spelling for the whole suite — the #852 subject discipline every
+    ONE spelling for the whole suite — the subject discipline every
     target-tier suite cites lives in this assertion, and two copies of it is
     how one file learns a stricter version and the other silently does not.
     Rolled back on exit unless the test committed.
@@ -1396,7 +1024,7 @@ async def in_user_plane(dsn, fn, *, actor_user_id=None):
 
     `in_tenant`'s sibling, for the writers that run BEFORE any workspace
     exists. Identity upsert and session mint are user/auth-plane
-    (`058` class 3: role-scoped `USING (true)`), so there is no tenant to
+    (`07_row_security.sql` class 3: role-scoped `USING (true)`), so there is no tenant to
     claim, and `unit_of_work` cannot be borrowed for them: its constructor
     raises `TenantContextRequired` on an empty tenant id by design (a
     tenant-less unit of work would be a widened query). Production opens

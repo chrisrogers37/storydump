@@ -1,4 +1,4 @@
-"""Gate — the credential lifecycle against the real machinery (#942).
+"""Gate — the credential lifecycle against the real machinery.
 
 Two pins pulled: without the refresh executor every credential silently
 reaches `mark_dead` at ~60d, and without arming at store a
@@ -44,7 +44,7 @@ def _due_now(conn, cred_id) -> None:
     """Bring a freshly stored credential's first refresh forward to now.
 
     `store_credential` arms the first refresh ~7 days out — Meta refuses to
-    refresh a long-lived token younger than 24 hours (#1221) — so a test that
+    refresh a long-lived token younger than 24 hours — so a test that
     exercises the refresh leg itself must make the credential due first."""
     with conn.cursor() as cur:
         cur.execute(
@@ -93,10 +93,10 @@ def _jobs_of_kind(conn, kind: str) -> list[dict]:
 
 
 class TestTheClockMintsTheReauthLeg:
-    """Migration 062: fn_clock_tick gains the reauth-prompt cadence leg."""
+    """`fn_clock_tick` mints due reauthentication prompts."""
 
     def test_a_reauth_required_account_is_prompted_and_an_active_one_is_not(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w5de-reauth-mint")
         account_id, ref = _account_of(chain, sync_conn)
@@ -124,7 +124,7 @@ class TestTheClockMintsTheReauthLeg:
             )
             assert cur.fetchone()[0] is not None
 
-    def test_the_weekly_cadence_dedups_and_then_reprompts(self, lane_db, sync_conn):
+    def test_the_weekly_cadence_dedups_and_then_reprompts(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w5de-reauth-cadence")
         account_id, _ = _account_of(chain, sync_conn)
         _set_account_state(sync_conn, account_id, "reauth_required")
@@ -160,36 +160,24 @@ class TestTheClockMintsTheReauthLeg:
 
 
 class TestTheRefreshLegIsProviderGuarded:
-    """Migration 063 (#982, #978).
+    """`fn_clock_tick` refreshes due Instagram credentials and skips Drive grants.
 
-    062's refresh leg selected due credentials on `state`/`next_refresh_at` with
-    NO provider filter, and `ig_refresh` then builds IG-shaped params against
-    graph.instagram.com unconditionally. That was safe BY CONSTRUCTION ONLY:
-    `store_credential` takes no provider argument and binds `PROVIDER =
-    "ig_login"`, and it is the one INSERT site in the tree.
-
-    But `ck_credentials_provider` already admits 'gdrive', so the row is
-    insertable the moment a gdrive writer lands — and an armed gdrive row would
-    have its token posted to Instagram's host, draw a definitive 400, and be
-    wrongly `mark_dead`-ed. Both flips, permanent until reconnect.
-
-    THE GUARD IS ONLY WORTH ANYTHING IF IT CAN GO RED, so this drives both
-    providers through one tick: the ig_login row must still mint (or the guard
-    is refusing everything and would pass by breaking the feature), and the
-    gdrive row must not. Deleting `AND provider = 'ig_login'` from 063 turns the
-    second assertion red.
+    Both providers are legal credential rows. `ig_refresh` sends Instagram
+    parameters to its provider host, so only `ig_login` credentials may reach
+    it. The same tick must mint for Instagram and leave Drive untouched; the
+    positive control prevents a provider filter that rejects every row from
+    passing this gate.
     """
 
     @staticmethod
     def _arm(conn, chain, provider: str, account_id, token_label: str) -> str:
         """Insert an ARMED credential directly — bypassing store_credential.
 
-        Deliberate: `store_credential` cannot produce a gdrive row (that is the
-        construction the guard replaces), so a test routed through it could not
-        reach the state under test at all.
+        `store_credential` accepts only Instagram credentials. Direct insertion
+        supplies both provider shapes so the tick's provider filter is tested.
 
         The owner column differs by provider and the schema enforces it —
-        `ck_credentials_one_owner` (069) requires an `ig_login` credential to
+        `ck_credentials_one_owner` (workspace Drive grant) requires an `ig_login` credential to
         name its account and a `gdrive` credential to name NOTHING (the
         workspace is its owner). Writing a Drive credential account-owned
         raises CheckViolation rather than reaching the leg under test.
@@ -214,7 +202,7 @@ class TestTheRefreshLegIsProviderGuarded:
         conn.commit()
         return str(cred_id)
 
-    def test_a_gdrive_credential_is_never_minted_for_refresh(self, lane_db, sync_conn):
+    def test_a_gdrive_credential_is_never_minted_for_refresh(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w5de-guard")
         account_id, _ = _account_of(chain, sync_conn)
 
@@ -245,14 +233,14 @@ class TestStoreArmsTheTick:
 
     @pytest.mark.asyncio
     async def test_store_credential_arms_next_refresh_at_and_the_tick_mints(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target import ig_login_oauth as oauth
 
         chain = seed_workspace_chain(sync_conn, "w5de-arming")
         account_id, _ = _account_of(chain, sync_conn)
 
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as session:
@@ -284,7 +272,7 @@ class TestStoreArmsTheTick:
         # Armed for LATER, not for now: Meta refuses to refresh a long-lived
         # token younger than 24 hours, so a credential due on the very
         # next tick would be refreshed into a definitive 400 and marked dead
-        # minutes after it was connected (#1221). The first refresh is
+        # minutes after it was connected. The first refresh is
         # one refresh cadence out; the tick must NOT mint yet.
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -309,13 +297,13 @@ class TestStoreArmsTheTick:
         )
 
 
-async def _refresh_cycle(lane_db, refresh_stub):
+async def _refresh_cycle(world_db, refresh_stub):
     """One bulk-lane cycle with a scripted refresh door, on the harness of
     `test_w1_worker_gate.py`."""
     from src.services.target.work_loop import WorkerConfig
     from src.worker import compose
 
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         app = compose(
             engine=engine, config=WorkerConfig(), env={}, refresh=refresh_stub
@@ -332,12 +320,12 @@ async def _refresh_cycle(lane_db, refresh_stub):
         await engine.dispose()
 
 
-async def _store_cred(lane_db, chain) -> str:
+async def _store_cred(world_db, chain) -> str:
     from sqlalchemy import text as sqltext
 
     from src.services.target import ig_login_oauth as oauth
 
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:
@@ -367,14 +355,14 @@ def _cred_row(conn, cred_id):
 class TestRefreshExecutorOnTheRealMachinery:
     @pytest.mark.asyncio
     async def test_success_swaps_in_place_and_the_job_finalizes(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from datetime import datetime, timezone
 
         from src.services.target import ig_login_oauth as oauth
 
         chain = seed_workspace_chain(sync_conn, "w5d-ok")
-        cred_id = await _store_cred(lane_db, chain)
+        cred_id = await _store_cred(world_db, chain)
         _due_now(sync_conn, cred_id)
         _tick(sync_conn)
         assert _jobs_of_kind(sync_conn, "refresh_credential")
@@ -385,7 +373,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             seen_tokens.append(token)
             return "tok-NEW", datetime(2027, 1, 1, tzinfo=timezone.utc)
 
-        wl, claimed = await _refresh_cycle(lane_db, stub)
+        wl, claimed = await _refresh_cycle(world_db, stub)
         assert claimed is True and wl.processed == 1
         assert seen_tokens == ["tok-OLD"], "the door must receive the stored token"
 
@@ -395,7 +383,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
         # The NEW token is what the ring now holds — read it back through the
         # real decrypt path, not by comparing ciphertext.
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as s:
@@ -411,22 +399,22 @@ class TestRefreshExecutorOnTheRealMachinery:
 
     @pytest.mark.asyncio
     async def test_definitive_rejection_flips_both_and_the_cadence_prompts(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """The whole refresh→062→prompt arc, end to end on the real schema."""
+        """The whole refresh→`fn_clock_tick`→prompt arc, end to end on the real schema."""
         import uuid as uuidlib
 
         from src.services.target.credential_lifecycle import RefreshRejected
 
         chain = seed_workspace_chain(sync_conn, "w5d-dead")
-        cred_id = await _store_cred(lane_db, chain)
+        cred_id = await _store_cred(world_db, chain)
         _due_now(sync_conn, cred_id)
         _tick(sync_conn)
 
         async def rejecting(token):
             raise RefreshRejected(401)
 
-        wl, claimed = await _refresh_cycle(lane_db, rejecting)
+        wl, claimed = await _refresh_cycle(world_db, rejecting)
         assert claimed is True and wl.processed == 1
 
         assert _cred_row(sync_conn, cred_id)["state"] == "expired"
@@ -440,7 +428,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             "a definitive rejection is handled work, not a retry"
         )
 
-        # The 062 leg is the single prompt producer: next tick mints.
+        # `fn_clock_tick` is the single prompt producer: next tick mints.
         _tick(sync_conn)
         prompts_minted = _jobs_of_kind(sync_conn, "reauth_prompt")
         assert len(prompts_minted) == 1
@@ -457,7 +445,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             )
         sync_conn.commit()
 
-        wl, claimed = await _refresh_cycle(lane_db, rejecting)
+        wl, claimed = await _refresh_cycle(world_db, rejecting)
         assert claimed is True and wl.processed == 1
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -480,19 +468,19 @@ class TestRefreshExecutorOnTheRealMachinery:
 
     @pytest.mark.asyncio
     async def test_transient_failure_retries_and_never_marks_dead(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target.credential_lifecycle import RefreshTransient
 
         chain = seed_workspace_chain(sync_conn, "w5d-flaky")
-        cred_id = await _store_cred(lane_db, chain)
+        cred_id = await _store_cred(world_db, chain)
         _due_now(sync_conn, cred_id)
         _tick(sync_conn)
 
         async def flaky(token):
             raise RefreshTransient(503)
 
-        wl, claimed = await _refresh_cycle(lane_db, flaky)
+        wl, claimed = await _refresh_cycle(world_db, flaky)
         assert claimed is True
 
         assert _cred_row(sync_conn, cred_id)["state"] == "active", (
@@ -504,10 +492,10 @@ class TestRefreshExecutorOnTheRealMachinery:
 
     @pytest.mark.asyncio
     async def test_undecryptable_payload_is_handled_work_not_a_retry_loop(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w5d-corrupt")
-        cred_id = await _store_cred(lane_db, chain)
+        cred_id = await _store_cred(world_db, chain)
         _due_now(sync_conn, cred_id)
         _tick(sync_conn)
         with sync_conn.cursor() as cur:
@@ -522,7 +510,7 @@ class TestRefreshExecutorOnTheRealMachinery:
         async def must_not_be_called(token):
             raise AssertionError("provider must not be called for an unreadable token")
 
-        wl, claimed = await _refresh_cycle(lane_db, must_not_be_called)
+        wl, claimed = await _refresh_cycle(world_db, must_not_be_called)
         assert claimed is True and wl.processed == 1
         assert _cred_row(sync_conn, cred_id)["state"] == "expired"
         job = _jobs_of_kind(sync_conn, "refresh_credential")[0]
@@ -532,7 +520,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
 
 class TestTheRevokeDispositionIsDecidedByTheCaller:
-    """#1088: `revoke_workspace_credentials` decides its own revoke
+    """`revoke_workspace_credentials` decides its own revoke
     disposition, and this class covers that decision directly: mutate the
     retryable branch to swallow instead of raise and these go red.
 
@@ -548,7 +536,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
     an assertion on the raise alone would be satisfied by any raise at all.
     """
 
-    async def _store_gdrive_cred(self, lane_db, chain) -> str:
+    async def _store_gdrive_cred(self, world_db, chain) -> str:
         """A gdrive credential with a REAL Drive v1 envelope.
 
         `_store_cred` above writes an ig_login payload, and the revoke path
@@ -563,7 +551,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
 
         from src.services.target import google_drive_oauth as gdrive
 
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as session:
@@ -608,7 +596,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
     @pytest.mark.parametrize("status", [429, 500, 503])
     @pytest.mark.asyncio
     async def test_an_unsettled_status_keeps_the_job_alive_on_the_ladder(
-        self, lane_db, sync_conn, monkeypatch, status
+        self, world_db, sync_conn, monkeypatch, status
     ):
         """THE MUTANT THIS EXISTS TO KILL. Swap the `raise RevokeRetryable`
         for a return and this goes red: the job finalizes as `succeeded`, and
@@ -616,7 +604,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
         from src.services.target import google_oidc
 
         chain = seed_workspace_chain(sync_conn, f"w5d-revoke-{status}")
-        cred_id = await self._store_gdrive_cred(lane_db, chain)
+        cred_id = await self._store_gdrive_cred(world_db, chain)
         self._arm(sync_conn, chain, cred_id)
 
         called = []
@@ -626,7 +614,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
             return status
 
         monkeypatch.setattr(google_oidc, "revoke_token", answered)
-        _wl, claimed = await _refresh_cycle(lane_db, None)
+        _wl, claimed = await _refresh_cycle(world_db, None)
         assert claimed is True
 
         assert called == ["1//revoke-me"], (
@@ -642,7 +630,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
     @pytest.mark.parametrize("status,why", [(200, "revoked"), (400, "already invalid")])
     @pytest.mark.asyncio
     async def test_a_settled_status_finalizes_the_job(
-        self, lane_db, sync_conn, monkeypatch, status, why
+        self, world_db, sync_conn, monkeypatch, status, why
     ):
         """The positive control, and it is what stops the test above passing
         for the wrong reason: if every status left the job `ready`, the
@@ -652,7 +640,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
         from src.services.target import google_oidc
 
         chain = seed_workspace_chain(sync_conn, f"w5d-revoke-ok-{status}")
-        cred_id = await self._store_gdrive_cred(lane_db, chain)
+        cred_id = await self._store_gdrive_cred(world_db, chain)
         self._arm(sync_conn, chain, cred_id)
 
         called = []
@@ -662,7 +650,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
             return status
 
         monkeypatch.setattr(google_oidc, "revoke_token", answered)
-        _wl, claimed = await _refresh_cycle(lane_db, None)
+        _wl, claimed = await _refresh_cycle(world_db, None)
         assert claimed is True
 
         assert called == ["1//revoke-me"], "the provider call must have happened"
@@ -671,9 +659,9 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
 
     @pytest.mark.asyncio
     async def test_the_revoke_failed_record_survives_the_workers_transaction(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """#1123. This row is the ONLY trace of the disposition: the payload
+        """This row is the ONLY trace of the disposition: the payload
         cannot be decrypted, so the grant cannot be revoked, and the branch
         deliberately lets the job SUCCEED. Abandoning without a record is the
         swallowed failure this module's own docstring says it exists to stop.
@@ -688,10 +676,10 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
         `undecryptable` branch and Google is never called.
         """
         chain = seed_workspace_chain(sync_conn, "w5d-revoke-audit")
-        cred_id = await _store_cred(lane_db, chain)
+        cred_id = await _store_cred(world_db, chain)
         self._arm(sync_conn, chain, cred_id)
 
-        _wl, claimed = await _refresh_cycle(lane_db, None)
+        _wl, claimed = await _refresh_cycle(world_db, None)
         assert claimed is True
 
         job = _jobs_of_kind(sync_conn, "revoke_workspace_credentials")[0]
@@ -720,7 +708,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
 
 class TestReauthPromptStale:
     @pytest.mark.asyncio
-    async def test_a_reconnected_account_gets_no_prompt(self, lane_db, sync_conn):
+    async def test_a_reconnected_account_gets_no_prompt(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w5e-stale")
         _set_account_state(sync_conn, chain["iga"], "reauth_required")
         _tick(sync_conn)
@@ -730,7 +718,7 @@ class TestReauthPromptStale:
         async def unused(token):
             raise AssertionError("refresh door must not be touched")
 
-        wl, claimed = await _refresh_cycle(lane_db, unused)
+        wl, claimed = await _refresh_cycle(world_db, unused)
         assert claimed is True and wl.processed == 1
         with sync_conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM channel_outbox")

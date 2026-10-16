@@ -1,4 +1,4 @@
-"""The Telegram outbox transport — deliver()'s injected seam, made loud (#942).
+"""The Telegram outbox transport — deliver()'s injected seam, made loud.
 
 Contract (deliver()'s words): takes the claimed outbox row, returns the
 external message ref, raises to signal a lost or refused response — and
@@ -102,7 +102,7 @@ _UPLOAD_BUDGET_S = 120.0
 
 class TelegramSendError(ChannelSendError):
     """The transport could not produce an external ref for this row. Telegram's
-    own code, when it answered with one, rides as ``code`` (101, #1482)."""
+    own code, when it answered with one, rides as ``code`` (outbox failure records)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -146,7 +146,7 @@ class MediaTransient(Exception):
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
     `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
-    recorded as `credential_dead` rather than as a lost response (101, #1482)."""
+    recorded as `credential_dead` rather than as a lost response (outbox failure records)."""
 
 
 class SendReceipt(str):
@@ -170,7 +170,7 @@ _EMPTY_KEYBOARD = {"inline_keyboard": []}
 
 def _with_line(body: Optional[str], line: Optional[str]) -> str:
     """A card's text with its outcome line under it: how an edit writes the
-    line onto a card, and how a card sent settled goes out (#1477) — its
+    line onto a card, and how a card sent settled goes out — its
     payload keeps the card's own text, and the line rides `outcome_text`."""
     if body and line:
         return f"{body}\n{line}"
@@ -368,7 +368,7 @@ class TelegramTransport:
         self, method: str, payload: dict, *, policy: Optional[EgressPolicy] = None
     ) -> None:
         """One editMessage* call. Telegram's "message is not modified" is a
-        400 that means the edit already stands — success here (#682)."""
+        400 that means the edit already stands — success here."""
         try:
             await self._call(method, payload, policy=policy)
         except TelegramRefused as exc:
@@ -380,7 +380,7 @@ class TelegramTransport:
         """A `prompt_supersede` row edits the card it names in ONE call: the
         original header plus the outcome line — a caption for a media card,
         text otherwise — with the keyboard the sender gave the row in the same
-        request: the story's (#1477 — ⚙️ Configure alone on a settled
+        request: the story's ( — ⚙️ Configure alone on a settled
         card), or an empty one for a rejected story, a removed item or an
         invitation. So the decision buttons go as the line lands (one Telegram
         message per tap per binding; the bot's 30/s is the fleet's ceiling).
@@ -395,8 +395,8 @@ class TelegramTransport:
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
         outcome = payload.get("outcome_text")
-        # The story's keyboard, which the sender gave the edit at claim
-        # (#1477); an invitation's edit leaves none.
+        # The story's keyboard, which the sender gave the edit at claim;
+        # an invitation's edit leaves none.
         markup = payload.get("reply_markup") or _EMPTY_KEYBOARD
         if outcome:
             body = _with_line(payload.get("header"), outcome)
@@ -442,7 +442,7 @@ class TelegramTransport:
     ) -> str:
         """One `sendMessage`: the text to the chat, the message id back. The
         outbox's per-binding sender and the `/start` door's acknowledgement
-        (#1224) are both this call."""
+         are both this call."""
         message: dict = {"chat_id": chat_id, "text": text}
         if reply_markup:
             message["reply_markup"] = reply_markup
@@ -460,7 +460,7 @@ class TelegramTransport:
         text: Optional[str] = None,
         markup: Optional[dict] = None,
     ) -> None:
-        """The route's one edit of a tapped message (#1477). With *text*,
+        """The route's one edit of a tapped message. With *text*,
         one `editMessageText` that also sets the keyboard (none unless
         *markup* says): the identity link's prompt, rewritten to its outcome,
         or an admitted waitlist ping, its Admit button gone.
@@ -492,15 +492,15 @@ class TelegramTransport:
         the media, the caption, the keyboard.
         Runs under the upload timeout class with a budget wide enough for the
         bytes. Note the outbox paces inside the sender's transaction, so the
-        global rate row stays locked for the upload's duration (#1260)."""
+        global rate row stays locked for the upload's duration."""
         method, part = _method_for(kind, mime)
         data: dict = {"chat_id": chat_id, "caption": caption[:1024]}
         if reply_markup:
             data["reply_markup"] = json.dumps(reply_markup)
         files = {part: (filename, content, mime or "application/octet-stream")}
         # ONE attempt: the floor retries a POST whose answer was lost, and a
-        # re-sent upload is a second card the supersede path cannot see
-        # (#1259). A lost answer propagates as ambiguous instead.
+        # re-sent upload is a second card the supersede path cannot see.
+        # A lost answer propagates as ambiguous instead.
         policy = _replace(
             self._policy,
             timeout_class="upload",
@@ -546,7 +546,7 @@ class TelegramTransport:
             # An ambiguous approval_prompt returns to pending with
             # no attempts cap, so a provider outage would otherwise
             # loop the card forever; the second attempt sends the
-            # text card (#1259).
+            # text card.
             if int(row.get("attempts") or 1) < 2:
                 raise TelegramSendError(
                     f"media fetch got no answer: {self._redact(str(exc))}"
@@ -650,7 +650,7 @@ class TelegramTransport:
                 row_ws = row.get("workspace_id")
                 if row_ws is None or str(media.get("workspace_id")) != str(row_ws):
                     # The media block is written in-process, but the grant it
-                    # selects is the payload's word alone (BYPASSRLS): a row
+                    # selects must agree with the outbox row's workspace: a row
                     # whose block names another workspace — or a row that
                     # cannot vouch for one at all — is refused, loudly.
                     #

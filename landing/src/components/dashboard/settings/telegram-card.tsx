@@ -24,7 +24,7 @@ import { TONE_CLASS } from "@/components/dashboard/tone";
  * Telegram — the IDENTITY link and the GROUP links, on one card.
  *
  * The two halves look alike and are not the same thing. The identity link is
- * about the PERSON (#1172): it attaches a Telegram account to a
+ * about the PERSON: it attaches a Telegram account to a
  * Storydump user, once, across every workspace. The group link is about THIS
  * WORKSPACE: it binds a chat that this workspace's approval cards
  * go to. That is why they mint through different functions, say different
@@ -32,7 +32,7 @@ import { TONE_CLASS } from "@/components/dashboard/tone";
  *
  * ── Why these stay two blocks and not one component ──────────────────────
  *
- * A shared `OneShotLinkBlock` (#1216) would carry everything that differs
+ * A shared `OneShotLinkBlock` would carry everything that differs
  * between them: the anchor label, the resting button's label AND its class,
  * the wrapper's class, the whole explanatory paragraph (the group's carries
  * a `<code>` with the fallback `/start` command), the error slot, and where
@@ -60,7 +60,7 @@ export function TelegramCard({
 }: {
   workspaceId: string;
   /** Whether the signed-in USER has a Telegram identity attached — a fact
-   *  about the person, not this workspace (#1172). */
+   * about the person, not this workspace. */
   telegramLinked: boolean;
   /** Who that identity is, so a link tapped by the wrong person is visible. */
   telegramDisplayName: string | null;
@@ -114,7 +114,7 @@ export function TelegramCard({
   }
 
   /**
-   * Remove the person's own Telegram identity (099), after the
+   * Remove the person's own Telegram identity (`fn_identity_unlink`), after the
    * confirm step has said what it costs. Memberships stay; the API keeps an
    * identity that is the account's only one and says so.
    */

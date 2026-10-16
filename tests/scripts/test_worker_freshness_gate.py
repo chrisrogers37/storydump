@@ -36,8 +36,8 @@ from src.services.target import scheduling_health
 
 
 @pytest.fixture()
-def conn(lane_db):
-    c = psycopg2.connect(lane_db)
+def conn(world_db):
+    c = psycopg2.connect(world_db)
     yield c
     c.close()
 
@@ -76,8 +76,8 @@ def _seed_system_job(
     return job_id
 
 
-async def _freshness(lane_db):
-    engine = create_async_engine(async_url(lane_db))
+async def _freshness(world_db):
+    engine = create_async_engine(async_url(world_db))
     try:
         async with engine.connect() as c:
             return await scheduling_health.worker_freshness(c)
@@ -88,7 +88,7 @@ async def _freshness(lane_db):
 class TestTheAgeIsComputedFromRealTimestamps:
     @pytest.mark.asyncio
     async def test_a_fourteen_hour_old_success_reads_as_over_the_threshold(
-        self, conn, lane_db
+        self, conn, world_db
     ):
         """The arithmetic the alert rests on, executed against real rows.
 
@@ -105,7 +105,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
             updated_at="- interval '14 hours'",
         )
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["succeeded_ever"] == 1
         age = out["last_success_age_seconds"]
@@ -117,7 +117,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
         )
 
     @pytest.mark.asyncio
-    async def test_the_age_is_finish_time_not_enqueue_time(self, conn, lane_db):
+    async def test_the_age_is_finish_time_not_enqueue_time(self, conn, world_db):
         """`updated_at`, never `created_at` — and production is why.
 
         A system job is enqueued a full cadence before it is worked. Reading
@@ -133,7 +133,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
             updated_at="- interval '2 minutes'",
         )
 
-        age = (await _freshness(lane_db))["last_success_age_seconds"]
+        age = (await _freshness(world_db))["last_success_age_seconds"]
 
         assert 90 < age < 200, age
         assert age < DEFAULT_WORKER_STALE_S, (
@@ -141,7 +141,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
         )
 
     @pytest.mark.asyncio
-    async def test_only_succeeded_rows_count_toward_freshness(self, conn, lane_db):
+    async def test_only_succeeded_rows_count_toward_freshness(self, conn, world_db):
         """The FILTER, exercised. A recent row in another state must not be
         read as proof of life — a worker that claims jobs and never finishes
         them is precisely the outage this axis exists to catch.
@@ -166,7 +166,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
             updated_at="- interval '1 minute'",
         )
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["succeeded_ever"] == 1
         assert out["last_success_age_seconds"] > DEFAULT_WORKER_STALE_S, out
@@ -174,7 +174,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
 
 class TestTheBacklogIsComputedFromRealTimestamps:
     @pytest.mark.asyncio
-    async def test_a_due_unclaimed_job_reads_as_overdue(self, conn, lane_db):
+    async def test_a_due_unclaimed_job_reads_as_overdue(self, conn, world_db):
         _seed_system_job(
             conn,
             kind="alert_stranded_sources",
@@ -184,14 +184,14 @@ class TestTheBacklogIsComputedFromRealTimestamps:
             updated_at="- interval '8 hours'",
         )
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["overdue_ready"] == 1
         assert 7000 < out["max_overdue_seconds"] < 7400, out
         assert out["max_overdue_seconds"] > 900, "below the shipped default"
 
     @pytest.mark.asyncio
-    async def test_a_future_run_at_is_not_a_backlog(self, conn, lane_db):
+    async def test_a_future_run_at_is_not_a_backlog(self, conn, world_db):
         """Production's healthy shape: jobs are minted ~6h ahead, so `ready`
         rows normally sit with `run_at` in the FUTURE. Counting those would
         report a permanent backlog on a perfectly healthy estate."""
@@ -204,16 +204,16 @@ class TestTheBacklogIsComputedFromRealTimestamps:
             updated_at="- interval '1 minute'",
         )
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["overdue_ready"] == 0
         assert out["max_overdue_seconds"] is None
 
     @pytest.mark.asyncio
-    async def test_an_empty_jobs_table_reports_none_not_zero(self, conn, lane_db):
+    async def test_an_empty_jobs_table_reports_none_not_zero(self, conn, world_db):
         """The never-run reading, from a real empty table rather than a dict
         that was handed the answer."""
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out == {
             "succeeded_ever": 0,
@@ -225,7 +225,7 @@ class TestTheBacklogIsComputedFromRealTimestamps:
 
 class TestTheColumnChoiceRestsOnATriggerThatIsMeasuredHere:
     @pytest.mark.asyncio
-    async def test_a_state_transition_stamps_updated_at(self, conn, lane_db):
+    async def test_a_state_transition_stamps_updated_at(self, conn, world_db):
         """`updated_at` IS finish time — because a trigger makes it so.
 
         The whole axis reads `updated_at` on `succeeded` rows and calls the
@@ -247,7 +247,7 @@ class TestTheColumnChoiceRestsOnATriggerThatIsMeasuredHere:
             created_at="- interval '20 hours'",
             updated_at="- interval '20 hours'",
         )
-        before = (await _freshness(lane_db))["last_success_age_seconds"]
+        before = (await _freshness(world_db))["last_success_age_seconds"]
         assert before is None, "a ready row must not count as a success"
 
         with conn.cursor() as cur:
@@ -255,7 +255,7 @@ class TestTheColumnChoiceRestsOnATriggerThatIsMeasuredHere:
             cur.execute("UPDATE jobs SET state = 'succeeded' WHERE id = %s", (job_id,))
         conn.commit()
 
-        after = (await _freshness(lane_db))["last_success_age_seconds"]
+        after = (await _freshness(world_db))["last_success_age_seconds"]
 
         assert after is not None
         # Seeded 20h back, finished just now: the trigger moved the stamp.
@@ -266,7 +266,9 @@ class TestWhichSuccessProvesFreshness:
     """Each of these kills a mutant the tests above let live."""
 
     @pytest.mark.asyncio
-    async def test_the_freshest_success_is_reported_not_the_oldest(self, conn, lane_db):
+    async def test_the_freshest_success_is_reported_not_the_oldest(
+        self, conn, world_db
+    ):
         """`min(age)`, not `max(age)`.
 
         Every earlier test seeds ONE succeeded row, and with one row min and max
@@ -292,7 +294,7 @@ class TestWhichSuccessProvesFreshness:
             updated_at="- interval '2 minutes'",
         )
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["succeeded_ever"] == 2
         age = out["last_success_age_seconds"]
@@ -304,7 +306,7 @@ class TestWhichSuccessProvesFreshness:
 
     @pytest.mark.asyncio
     async def test_a_tenant_jobs_success_is_not_proof_the_system_lane_lives(
-        self, conn, lane_db
+        self, conn, world_db
     ):
         """`WHERE workspace_id IS NULL` — the scope, which no other test exercises.
 
@@ -337,7 +339,7 @@ class TestWhichSuccessProvesFreshness:
             )
         conn.commit()
 
-        out = await _freshness(lane_db)
+        out = await _freshness(world_db)
 
         assert out["succeeded_ever"] == 1, "a tenant job was counted"
         assert out["last_success_age_seconds"] > DEFAULT_WORKER_STALE_S, (

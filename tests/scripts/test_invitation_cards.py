@@ -1,6 +1,6 @@
 """The Telegram arm of invitation delivery, driven against the real schema.
 
-`053` makes an invitation ONE object with a `delivery_channel`, and each arm
+`identity_and_tenancy.py` makes an invitation ONE object with a `delivery_channel`, and each arm
 carries its own acceptance value. So the card is not a broadcast of an
 email invitation — these drive that refusal, the quiet-beat empty case, and the
 fact that a card actually reaches the already-built delivery chain.
@@ -25,7 +25,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -37,7 +37,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             a = seed_workspace_chain(conn, "card-a")
@@ -47,7 +47,7 @@ def world(admin_conn, owner_actor):
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
-            # the sender sweep is the worker's (082: a door granted to
+            # the sender sweep is the worker's (worker sweep functions: a door granted to
             # svc_worker alone), run here the way the worker runs it
             "worker": as_user(db, "svc_worker"),
             "a": a,
@@ -264,7 +264,7 @@ class TestItReachesTheBuiltChain:
         n = run(world, announce)
         assert n >= 2, "one card per binding"
         assert _cards(world) == before + n
-        # The sweep is the worker's (082): its own session, the worker's
+        # The sweep is the worker's (worker sweep functions): its own session, the worker's
         # login, after the announcing transaction has committed.
         assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(

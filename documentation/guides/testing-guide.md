@@ -5,17 +5,20 @@ patterns the tests follow. What is covered and how coverage is measured is
 [`TEST_COVERAGE.md`](TEST_COVERAGE.md), which also has the command that counts
 the tests.
 
-The suite tests the target tier. The legacy lineage's files (migrations
-001–050) are replayed, because a fresh database is built from them
-(`make init-db`): the lineage lane and the database gates build their schema
-the same way. Three suites pin the lineage's own behaviour, rather than a
-fresh database's (#1460).
+The suite tests the target tier. Database gates build their worlds from the
+models and `src/models/target/ddl/`, as `make init-db` does. The owner creates
+the service roles, builds the schema and adopts the empty `000_initial.sql`
+base marker; later migrations apply above that base. No base marker is
+executed. `make reset-db` drops and rebuilds a local database.
 
 ## Quick Start
 
 ```bash
+# A fresh local boot key, also required by tests without a database
+export ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+
 # Everything (coverage of src is measured on every run — pytest.ini's addopts)
-pytest
+pytest tests/ -q
 
 # One area, one file, one test
 pytest tests/src/services/target/
@@ -41,6 +44,24 @@ or `venv/` when `.venv/` holds no `pytest` (`make VENV=<dir>` overrides both):
 | `make test-failed` | `pytest -v --lf` |
 | `make test-watch` | `ptw -- -v` — needs `pytest-watch`, which `requirements.txt` does not install |
 
+### Linux test environment on macOS
+
+The media subprocess tests exercise Linux resource limits. Run the Python
+suite in Linux with FFmpeg installed; on macOS this container provides both:
+
+```bash
+docker run --rm -v "$PWD:/workspace" -w /workspace python:3.10-bookworm bash -lc '
+  apt-get update && apt-get install -y ffmpeg jq libpq-dev gcc &&
+  python -m venv /tmp/storydump-tests &&
+  . /tmp/storydump-tests/bin/activate &&
+  pip install -r requirements.txt pytest-cov && pip install -e ".[cli]" &&
+  ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") pytest tests/ -q
+'
+```
+
+This run has no database configuration, so database-backed tests skip. Use the
+PostgreSQL recipe below for the required-database run.
+
 ## What Needs a Database
 
 | Where | Needs PostgreSQL? |
@@ -49,30 +70,30 @@ or `venv/` when `.venv/` holds no `pytest` (`make VENV=<dir>` overrides both):
 | `tests/` (top level) | The harness's own policy tests: mostly pure; the ones that need a server skip without it |
 | `tests/scripts/` | **Yes** — the DB gates. Each builds its world in a scratch database and acts as the production roles. A few files are database-free (`test_telegram_ratchet.py`, `test_pr_ready.py`) |
 
-With no PostgreSQL at `DB_HOST:DB_PORT` the root suite's database tests
-**skip**, and a gate under `tests/scripts/` that takes a database fixture
-**errors** at `admin_conn` (`tests/scripts/conftest.py:380`). With
+With no PostgreSQL at `DB_HOST:DB_PORT`, database tests in both the root suite
+and `tests/scripts/` **skip** through the root database fixture. With
 `REQUIRE_TEST_DATABASE=1` a missing server fails the session instead: that is
 CI's setting, and the one to use locally whenever a green result is going to be
 reported anywhere.
 
 ### Giving the gates a server
 
-The gates need a PostgreSQL 15, a login that is a superuser or holds
-`CREATEROLE` and `CREATEDB`, and a `psql` on your `PATH` — the fixtures apply
-SQL files through it (`tests/scripts/conftest.py:1093-1108`). A throwaway
-container shaped like CI's is enough, and the Homebrew `postgresql@15` keg
-supplies `psql`:
+The gates need PostgreSQL 15 or 17 and a local superuser that can create
+roles and scratch databases. Use a throwaway container with a fresh Fernet key:
 
 ```bash
 docker run -d --name storydump-test-pg -p 65433:5432 \
-  -e POSTGRES_USER=test_user -e POSTGRES_PASSWORD=<throwaway-password> \
-  -e POSTGRES_DB=storyline_test postgres:15
-PATH="/opt/homebrew/opt/postgresql@15/bin:$PATH" \
-DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=<throwaway-password> \
+  -e POSTGRES_USER=test_user -e POSTGRES_PASSWORD=test_password \
+  -e POSTGRES_DB=storyline_test postgres:17
+DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password \
 DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
+ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') \
   pytest tests/scripts/
+docker rm -f storydump-test-pg
 ```
+
+Use `postgres:15` for the compatibility run. `REQUIRE_TEST_DATABASE=1` makes an
+unavailable server fail the run instead of skipping database-backed tests.
 
 The container and the environment the gates read are written down here once;
 the other pages link to this section.
@@ -83,27 +104,27 @@ Nothing is set up by hand, and nothing is shared between runs.
 
 ### The session database (`tests/conftest.py`)
 
-1. **Probe.** `server_answered` (`:233`) asks whether a PostgreSQL answers at
-   the configured address; `integration_verdict` (`:98`) turns that and
+1. **Probe.** `server_answered` asks whether a PostgreSQL answers at
+   the configured address; `integration_verdict` turns that and
    `REQUIRE_TEST_DATABASE` into run, skip or fail.
 2. **Name.** The database is named per session: `TEST_DB_NAME` plus ten hex
-   characters (`:59-61`), so two checkouts on one cluster never share — and
-   never drop — each other's database (#758).
+   characters, so two checkouts on one cluster never share — and
+   never drop — each other's database.
 3. **Claim, reap, create.** The session takes an advisory lock that marks the
    database as owned (`claim_session_database`, `:485`), reports leftover
    databases of crashed runs — it drops them only with
-   `REAP_ORPHAN_TEST_DATABASES=1` (`:328`) — and creates its own.
-4. **No schema is built here.** `setup_test_database` (`:708`) yields the
+   `REAP_ORPHAN_TEST_DATABASES=1` — and creates its own.
+4. **No schema is built here.** `setup_test_database` yields the
    database's URL and nothing else: the suites that need tables build them —
-   the gates through the migration runner, the app through its own engine.
+   the gates through the schema world builder, the app through its own engine.
 5. **Drop** at the end of the session, then release the lock.
 
 ### The gates' scratch databases (`tests/scripts/conftest.py`)
 
-Each gate gets its own database (`runner_test_…`), dropped at teardown — some
-cloned from a session-scoped template (`runner_tpl_…`) that already holds a
-replayed schema (`replayed_db`, `at45_db`), some replaying the stream
-themselves (`scratch_db`, `owner_db`). Two facts shape how this directory runs:
+Each gate gets its own scratch database, dropped at teardown. The shared world
+builder in `tests/scripts/conftest.py` creates the service roles, runs
+`ddl.build()`, records the base with `runner adopt`, and sets test passwords.
+It uses the owner actor for schema changes and runtime actors for gate work.
 
 - **It serializes.** The seven `svc_*` service roles are cluster-scoped and
   cannot be namespaced per session, so every session takes one cluster-wide
@@ -121,7 +142,7 @@ pytest tests/scripts
 ### Configuration (`.env.test`)
 
 The harness loads `.env.test` over the environment before any application
-import (`tests/conftest.py:39`). It is gitignored.
+import (`tests/conftest.py`). It is gitignored.
 
 ```bash
 DB_HOST=localhost
@@ -144,8 +165,6 @@ tests/
 ├── storydump_cli/              # the `storydump` console against a scripted API (no network)
 ├── scripts/                    # the DB gates, on scratch databases
 │   ├── conftest.py             # scratch databases, templates, actors, the cluster lock
-│   ├── fixtures/               # legacy_by_hand.sql
-│   ├── legacy_inventory.py     # the legacy tables' inventory the legacy-lineage pins read
 │   └── load/                   # the load harness (RUN_LOAD_HARNESS=1)
 ├── src/
 │   ├── api/                    # routes over a fake engine (conftest.py: client, signed_in, tenant)
@@ -215,13 +234,11 @@ def test_whoami_json_is_one_envelope_of_kind_whoami(tmp_path):
 
 ### A DB gate — a world, then the production role
 
-A gate builds a scratch database, replays the schema into it, and acts as the
-role production uses — `tests/scripts/test_ops_views_gate.py:43-59` is the
-shape (`_scratch`, `replay_advertised_stream`, then a `svc_ingress`
-connection). A gate that needs only the owner and `svc_ingress` takes
-`tests/scripts/conftest.py`'s `ingress_world` as its own
-(`world = ingress_world`) instead of building one. Mark a gate `integration`,
-and `slow` where it is.
+A gate builds a scratch database, builds the schema from code, and acts as the
+runtime role. `tests/scripts/conftest.py` supplies `world_db` for a simple
+schema world and `build_world` for a gate that adds actors or custom setup.
+Both build from code and adopt `000`; they never replay a base migration
+chain. Mark database gates `integration`, and `slow` when appropriate.
 
 ### Rules the harness enforces
 
@@ -229,7 +246,7 @@ and `slow` where it is.
   (deprecation and future warnings excepted): an unclosed socket or event loop fails the
   test that happens to be running when it is collected. Close what you open.
 - **`asyncio_mode = auto`**: an `async def test_…` needs no decorator.
-- **A legitimate new skip raises `MAX_EXPECTED_SKIPS`** (`tests/conftest.py:88`)
+- **A legitimate new skip raises `MAX_EXPECTED_SKIPS`** (`tests/conftest.py`)
   on purpose; where the database is required, skips above it fail the run.
 - **Do not make real provider calls.** CI holds no provider credential.
 
@@ -264,7 +281,7 @@ whether the database-backed tests ran.
 ```yaml
 services:
   postgres:
-    image: postgres:15
+    image: postgres:17
     env:
       POSTGRES_USER: test_user
       POSTGRES_PASSWORD: test_password
@@ -303,7 +320,7 @@ brew services start postgresql
 
 The server answered and refused — wrong `DB_USER` / `DB_PASSWORD` in
 `.env.test`, or the role does not exist. The tests run and fail rather than
-skip (#769); fix the credentials.
+skip; fix the credentials.
 
 ### "Permission denied to create database" / a gate skips for want of `CREATEROLE`
 

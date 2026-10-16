@@ -423,7 +423,7 @@ def test_health_outside_ops_user_ids_reports_the_public_liveness(
 def test_an_admission_through_the_real_cli_commits_with_its_one_email(
     world, people, tmp_path, monkeypatch
 ):
-    """`storydump admit` against the real app as `svc_ingress` (#1723): the
+    """`storydump admit` against the real app as `svc_ingress`: the
     route's one transaction commits the admission with its email's job, a
     re-run queues nothing, and `--resend` queues one more once the first email
     has gone. The units' fake engine cannot see a commit; this can."""
@@ -495,7 +495,7 @@ def test_a_workspace_name_resolves_through_the_real_principal(world, people, tmp
 def test_a_planned_story_is_approved_through_the_real_cli_by_its_person(
     world, google_configured, monkeypatch, tmp_path
 ):
-    """088 lets only a person approve a planned story. The CLI's write is a
+    """`post_intents.origin` lets only a person approve a planned story. The CLI's write is a
     person: a person-bound operator token opens the tenant as `user` with the
     token's own user (`principal.open_tenant`), so the trigger admits it.
     Its own workspace, because `people`'s stays in manual mode for the other

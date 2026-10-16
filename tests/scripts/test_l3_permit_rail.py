@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 
 import psycopg2
 import pytest
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from src.services.target import provider_ops
 from src.services.target.provider_ops import PermitRefused
@@ -27,7 +29,7 @@ from tests.scripts.conftest import (
     as_user,
     async_url,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -39,7 +41,7 @@ def ops_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "l3-gate")
@@ -676,6 +678,123 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             )[0][0]
             == "failed"
         )
+
+    @pytest.mark.parametrize("ttl_days", [17, None])
+    def test_posted_verdict_records_rotation_effects_once(self, ops_db, ttl_days):
+        from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
+        from src.services.target import reconciler, unit_of_work
+
+        intent, op = self._ambiguous(ops_db)
+        original_ttl = _exec(
+            ops_db,
+            "SELECT repost_ttl_days FROM workspaces WHERE id = %s",
+            (ops_db["ws"],),
+            fetch=True,
+        )[0][0]
+
+        def effects():
+            return _exec(
+                ops_db,
+                "SELECT m.times_posted, m.last_posted_at, a.last_posted_at,"
+                " l.workspace_id, l.ig_account_id, l.created_by_intent_id,"
+                " l.kind, l.expires_at - m.last_posted_at"
+                " FROM post_intents i"
+                " JOIN media_items m ON m.id = i.media_item_id"
+                " JOIN ig_accounts a ON a.id = i.ig_account_id"
+                " LEFT JOIN post_locks l ON l.created_by_intent_id = i.id"
+                " WHERE i.id = %s",
+                (intent,),
+                fetch=True,
+            )
+
+        async def resolve():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                async with engine.begin() as conn:
+                    await unit_of_work.apply_gucs(
+                        conn, tenant_id=str(ops_db["ws"]), actor_kind="system"
+                    )
+                    return await reconciler.reconcile_intent(
+                        conn,
+                        intent_id=intent,
+                        workspace_id=ops_db["ws"],
+                        status_code="PUBLISHED",
+                    )
+
+        try:
+            _exec(
+                ops_db,
+                "SET app.actor_kind = 'migration';"
+                " UPDATE workspaces SET repost_ttl_days = %s WHERE id = %s",
+                (ttl_days, ops_db["ws"]),
+            )
+            _exec(
+                ops_db,
+                "SET app.actor_kind = 'migration';"
+                " UPDATE media_items SET times_posted = 3"
+                " WHERE id = (SELECT media_item_id FROM post_intents WHERE id = %s)",
+                (intent,),
+            )
+            assert _run(resolve()) == "posted"
+            rows = effects()
+            assert len(rows) == 1
+            count, media_at, account_at, ws, acct, creator, kind, ttl = rows[0]
+            assert count == 4, "a confirmed ambiguous post must advance rotation"
+            assert media_at is not None and account_at == media_at
+            assert (ws, acct, creator, kind) == (
+                str(ops_db["ws"]),
+                str(ops_db["iga"]),
+                str(intent),
+                "recent",
+            )
+            assert ttl == timedelta(days=ttl_days or DEFAULT_REPOST_TTL_DAYS)
+            assert _state(ops_db, "provider_operations", op["id"]) == "succeeded"
+
+            with pytest.raises(DBAPIError, match="terminal"):
+                _run(resolve())
+            assert effects() == rows, "repeated evidence must not count the post twice"
+        finally:
+            _exec(
+                ops_db,
+                "SET app.actor_kind = 'migration';"
+                " UPDATE workspaces SET repost_ttl_days = %s WHERE id = %s",
+                (original_ttl, ops_db["ws"]),
+            )
+
+    def test_posted_effect_failure_rolls_back_the_verdict(self, ops_db):
+        intent, op = self._ambiguous(ops_db)
+        media = _exec(
+            ops_db,
+            "SELECT media_item_id FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        _exec(
+            ops_db,
+            "ALTER TABLE post_locks ADD CONSTRAINT test_reconciler_lock_refusal"
+            " CHECK (media_item_id <> %s)",
+            (media,),
+        )
+        try:
+            with pytest.raises(IntegrityError, match="test_reconciler_lock_refusal"):
+                self._reconcile(
+                    ops_db, intent, status="PUBLISHED", mode="container_verdict"
+                )
+            assert _state(ops_db, "post_intents", intent) == "publishing_ambiguous"
+            assert _state(ops_db, "provider_operations", op["id"]) == "ambiguous"
+            assert _exec(
+                ops_db,
+                "SELECT m.times_posted, m.last_posted_at,"
+                " (SELECT count(*) FROM post_locks WHERE created_by_intent_id = i.id)"
+                " FROM post_intents i JOIN media_items m ON m.id = i.media_item_id"
+                " WHERE i.id = %s",
+                (intent,),
+                fetch=True,
+            ) == [(0, None, 0)]
+        finally:
+            _exec(
+                ops_db,
+                "ALTER TABLE post_locks DROP CONSTRAINT test_reconciler_lock_refusal",
+            )
 
     def test_FINISHED_does_not_terminalize_anything(self, ops_db):
         """The FINISHED trap, driven end to end rather than only unit-tested:

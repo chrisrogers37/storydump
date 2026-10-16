@@ -1,4 +1,4 @@
-"""The target worker — the composition root (#942, #903).
+"""The target worker — the composition root.
 
 `python -m src.worker` is the process the deployed `worker` entrypoint runs:
 `src.main` dispatches here unconditionally. It builds the engine, the per-lane
@@ -17,6 +17,10 @@ sender, no `CLOUDINARY_*` trio parks the publish kind (the transit store goes
 live iff all three are set), a dead or wrong-bot token parks the channel at the
 startup probe. `fn_clock_tick`'s account/credential/source legs are the door's
 own; this process only chooses the recurring singletons it can actually run.
+
+The deployed connection is `svc_worker`. Tenant work sets `app.tenant_id`;
+SECURITY DEFINER functions provide bounded system reads before a tenant is
+known. The owner login is reserved for schema changes.
 
 Configuration the worker cannot run on at all refuses to BOOT instead
 (:func:`main`): no database URL, a credential key ring that cannot load, a lane
@@ -85,13 +89,13 @@ USAGE_PRECHECK_ENV = "TARGET_USAGE_PRECHECK_ENABLED"
 _TRUTHY = ("1", "true", "yes", "on")
 
 
-#: The activation nudge's switch (#1481), default off like the pre-check above.
+#: The activation nudge's switch, default off like the pre-check above.
 #: It is one of three gates: `build_registry` also wants an email provider and
 #: a web origin, and parks the sweep naming whichever is missing.
 ACTIVATION_NUDGE_ENV = "TARGET_ACTIVATION_NUDGE_ENABLED"
 
 #: The nudge's daily cap when set; `WorkerConfig.activation_nudge_limit`, a
-#: small first-run value, when not (#1653). Refused by name as the lane sizes
+#: small first-run value, when not. Refused by name as the lane sizes
 #: are.
 ACTIVATION_NUDGE_LIMIT_ENV = "TARGET_ACTIVATION_NUDGE_LIMIT"
 
@@ -138,7 +142,7 @@ def _conversion_evidence(env):
 
 def _publish_media_fetch(adapters: media_adapters.MediaAdapters):
     """`publish_pipeline`'s ``media_fetch``: the intent row → the file's bytes,
-    read through its source's provider (#1220). The row
+    read through its source's provider. The row
     carries `source_id`, `workspace_id`, `provider_file_ref` and `media_kind`
     from the pipeline's `_load`."""
 
@@ -148,7 +152,7 @@ def _publish_media_fetch(adapters: media_adapters.MediaAdapters):
         # A missing source is gone for good. A Drive folder that is not active
         # still reaches its credential door: a
         # disconnected folder's approved story retries and parks for review
-        # rather than failing (#1477). Any other provider is refused here
+        # rather than failing. Any other provider is refused here
         # while its source is inactive.
         if state is None or (state != "active" and provider != "gdrive"):
             raise media_adapters.MediaTerminalError(
@@ -195,7 +199,7 @@ def _meta_from_env(engine, env):
 
 def _poll_from(engine, meta, *, session_factory=None):
     """`reconcile_ambiguous`'s ladder half: the container's status
-    for an ambiguous intent, asked of Meta (#1220).
+    for an ambiguous intent, asked of Meta.
 
     Returns the `status_code` the reconciler classifies (PUBLISHED → posted,
     ERROR/EXPIRED → failed, anything else inconclusive), or None — inconclusive
@@ -204,7 +208,7 @@ def _poll_from(engine, meta, *, session_factory=None):
     for a human. A typed error is logged by type and returned as None rather
     than raised so one account's dead token cannot abort the whole sweep.
     Reads under the workspace the reconciler's sweep row names, claimed in the
-    poll's own session (082): a tenant-less read would see nothing once the
+    poll's own session (worker sweep functions): a tenant-less read would see nothing once the
     worker runs as `svc_worker`."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -216,7 +220,7 @@ def _poll_from(engine, meta, *, session_factory=None):
     async def poll(*, intent_id, workspace_id) -> Optional[str]:
         async with maker() as session:
             # The reconciler's sweep row names the workspace; the read runs
-            # under it (082) — a fresh session with no tenant sees nothing
+            # under it (worker sweep functions) — a fresh session with no tenant sees nothing
             # under the policies once the worker runs as svc_worker.
             await unit_of_work.apply_gucs(
                 session, tenant_id=str(workspace_id), actor_kind="system"
@@ -276,7 +280,7 @@ class WorkerApp:
     #: before the first connection and closed in the finally. Declared here
     #: with its three siblings rather than appearing out of nowhere as an
     #: attribute assignment, which would make each reader use
-    #: `getattr(..., None)` (#1325).
+    #: `getattr(..., None)`.
     mix_conversion_evidence: object = None
     source_mix_capability: dict = None
     health_server: object = None
@@ -365,7 +369,7 @@ def compose(
     for the archive composition; None, the default, reads it from *env*. *meta*
     and *transit* are test overrides of the seams built from *env*; `main`
     passes neither."""
-    # The publish leg (#1220): the Graph adapter is always built (it
+    # The publish leg: the Graph adapter is always built (it
     # reads each account's token at call time); the media fetch exists only
     # with media adapters; the registry parks the kind naming whichever of
     # the three (fetch, meta, transit) is missing. The same adapter answers the
@@ -382,7 +386,7 @@ def compose(
         media_fetch=_publish_media_fetch(adapters) if adapters else None,
         # None until the worker has RESEND_API_KEY and EMAIL_FROM, and that is
         # the honest state rather than a stub: the kind parks with a reason
-        # naming what is missing (#1092).
+        # naming what is missing.
         email=email_sender.sender_from_env(env),
         transport=transport,
         poll=_poll_from(engine, meta),
@@ -410,14 +414,14 @@ def compose(
     recurring = {
         "v": 1,
         "reap_expired": 60.0,  # every lapsed lease waits for this beat
-        # #1061: a source stranded in `error` is never re-scheduled, so the
+        # a source stranded in `error` is never re-scheduled, so the
         # branch that alerts never runs again. This beat is the only thing
         # that re-opens its mouth. Cadence is the clock's; the per-source
         # bound is `cfg.stranded_alert_after_seconds`.
         "alert_stranded_sources": 6 * 3600.0,
         "retention_sweep": 3600.0,
         # Reconciler cadence + budget: sweep every 60 s, LIMIT 50. The kind is
-        # live regardless of the poll seam (its notify half needs none; #1090),
+        # live regardless of the poll seam (its notify half needs none),
         # so it satisfies the `recurring <= live` assert below.
         #
         # With `reap_expired` it is the fastest unconditional beat, which the
@@ -434,7 +438,7 @@ def compose(
         recurring["reap_transit_assets"] = 6 * 3600.0
     if "activation_nudge_sweep" in live:
         # Daily. Live only when the switch, a provider and an origin are all
-        # there (#1481); said here because an armed nudge emails real people,
+        # there; said here because an armed nudge emails real people,
         # and that must be visible in the deploy log.
         recurring["activation_nudge_sweep"] = 24 * 3600.0
         logger.info(
@@ -622,7 +626,7 @@ def status_line(
 
 class SenderSweeper:
     """The sender-job mint sweep, with the observables its silent death cost
-    us (#958): `sweeps` counts iterations, `mints` counts jobs
+    us: `sweeps` counts iterations, `mints` counts jobs
     minted — both ride the status line, so a sweeper that stops sweeping is
     visible as a counter that stops moving, and a sweeper that DIES is caught
     by run()'s task supervision."""
@@ -654,8 +658,8 @@ class SenderSweeper:
 class PromptSweeper:
     """The prompt sweep on its own cadence: due intents gain their cards
     and advance to `awaiting_approval` in the same pass — the web queue is a
-    surface every workspace has (#1033), so delivery is not what gates the
-    edge. Then the miss leg (089): planned stories that will not be served
+    surface every workspace has, so delivery is not what gates the
+    edge. Then the miss leg (`fn_planned_serve` / `fn_planned_misses`): planned stories that will not be served
     end `expired` and their bound chats are told. The two legs run in two
     transactions, so a fault in one never holds the other back. Counters ride
     the status line — the same absence-is-failure control the sender sweeper
@@ -668,7 +672,7 @@ class PromptSweeper:
         self.sweeps = 0
         self.prompted = 0
         self.advanced = 0
-        self.approved = 0  # stories the serve step approved (#1477)
+        self.approved = 0  # stories the serve step approved
         self.missed = 0
         self.unheard = 0
 
@@ -743,9 +747,8 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
     Returns the dead task: one that raised (regardless of stop), or one that
     exited cleanly before stop was requested. None on legitimate shutdown —
     a clean or cancelled exit after stop fired. The caller owns
-    what loud means; this only guarantees a death can never pass unnoticed —
-    the failure class of #958, where background tasks die while the worker
-    keeps printing healthy status lines.
+    what loud means; this guarantees that a background task that dies while
+    the worker keeps printing healthy status lines is still reported.
     """
     stop_waiter = asyncio.create_task(stop.wait(), name="stop-waiter")
     try:
@@ -756,7 +759,7 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
         if not stop_waiter.done():
             stop_waiter.cancel()
             await asyncio.gather(stop_waiter, return_exceptions=True)
-    # Death is a PER-TASK verdict, never a global-flag one (#958): a blanket
+    # Death is a PER-TASK verdict, never a global-flag one: a blanket
     # stop.is_set() exclusion would mask a real crash that races an external
     # stop. A task is dead when it RAISED (always, stop or no stop), or when
     # it returned cleanly while stop was unset (every supervised body is a
@@ -869,14 +872,14 @@ async def _run(app: WorkerApp, *, stop: asyncio.Event | None) -> None:
 
     # BEFORE the first database connection, deliberately. Railway times the
     # SOCKET, not the program: a listener bound after the slow startup steps
-    # cannot answer during them, and Railway can mark a healthy deploy FAILED
-    # (#1216, #1325). Binding here means the endpoint answers for the whole of
+    # cannot answer during them, and Railway can mark a healthy deploy FAILED.
+    # Binding here means the endpoint answers for the whole of
     # startup however slow the connections and the election turn out to be,
     # which is also why this root needs no startup-grace constant.
     health_server = app.health_server = await worker_health.serve_health(app)
 
     election_conn = await engine.connect()
-    # Who the worker connects as, and whether that login bypasses RLS (#751):
+    # Who the worker connects as, and whether that login bypasses RLS:
     # the runtime posture is verified from this line after a deploy.
     role = await unit_of_work.connection_role(election_conn)
     logger.info("worker database role: %s", role if role is not None else "unknown")
@@ -1134,10 +1137,9 @@ def main() -> None:
     engine = unit_of_work.create_engine(url)
     transport = None
     token = env.get(reg.TOKEN_VAR)
-    # The Drive read leg (#982). Armed unconditionally: it needs no env of its
-    # own (the engine carries the credential lookup, and the token is the
-    # workspace's grant, 069), so an env gate here would be a switch with
-    # nothing to switch on.
+    # The Drive read leg is armed unconditionally. The engine resolves each
+    # workspace's stored Drive grant when a source is read, so this leg needs
+    # no credential environment variable of its own.
     #
     # Safe to arm with no `gdrive` credential stored. A source with no
     # credential raises DriveCredentialDead, which `media_sync` classifies
@@ -1145,13 +1147,13 @@ def main() -> None:
     # and THE JOB SUCCEEDS. So the failure mode is a visible source in `error`,
     # not a poisoned lane.
     #
-    # `media_fetch` IS derived from this (`compose`, #1220), and the registry
-    # gates `publish_pipeline` on media_fetch AND meta AND transit (#982), so a
+    # `media_fetch` IS derived from this (`compose`), and the registry
+    # gates `publish_pipeline` on media_fetch AND meta AND transit, so a
     # missing Cloudinary trio parks the kind by name rather than crashing the
     # ladder.
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
         # Said at startup, once, where an operator looks: without the client
-        # the hourly refresh (#1247) cannot run here, and every folder's
+        # the hourly refresh cannot run here, and every folder's
         # sync will refuse — retryably, in the log, never to a tenant — an
         # hour after the workspace connects.
         logger.warning(

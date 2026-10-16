@@ -52,7 +52,7 @@ HEALTH = {
     "pool": {"size": 10, "checked_out": 1, "checked_out_peak": 3},
     "ingress_workers": 1,
     # `TapMetrics.snapshot()`'s real shape: two scalars and the per-outcome
-    # map nested under `taps` (#1360).
+    # map nested under `taps`.
     "taps": {
         "taps_total": 13,
         "taps": {"executed": 12, "older_card": 1},
@@ -1270,7 +1270,7 @@ def gate(directory: Path, *versions: int) -> None:
 def test_doctor_reports_a_gated_migration_as_owed_not_as_a_deployment_behind(
     tmp_path,
 ):
-    """079 and 080 carry the runner's `manual` directive: every deploy owes
+    """legacy schema removal and schema initialization carry the runner's `manual` directive: every deploy owes
     them and they are applied only by hand (`apply --manual`), so until that
     window runs they are in the checkout and not in the ledger BY DESIGN.
     "Deploy main" would be the wrong fix, and exit 4 a standing false alarm."""
@@ -1307,15 +1307,23 @@ def test_a_mention_of_the_directive_in_prose_does_not_gate_a_file(tmp_path):
     assert ledger["state"] == "wrong" and "078" in ledger["value"]
 
 
-def test_doctor_reads_the_directive_as_the_runner_does():
+def test_doctor_reads_the_directive_as_the_runner_does(tmp_path):
     """The CLI does not import the runner (it depends on psycopg2; this
     package does not), so it reads the directive itself — and this pins the
-    two readings equal over the real corpus."""
-    from scripts.migration_runner import MIGRATIONS_DIR, discover_migrations
+    two readings equal over one directory of files written to the runner's
+    rules: the empty initial marker, ordinary files, two gated ones, and one
+    that mentions the directive in prose."""
+    from scripts.migration_runner import discover_migrations
     from storydump_cli.commands.env import _gated_in
 
-    by_the_runner = {m.version for m in discover_migrations(MIGRATIONS_DIR) if m.manual}
-    assert _gated_in(MIGRATIONS_DIR) == by_the_runner == {79, 80}
+    directory = repo_migrations(tmp_path, *range(1, 9))
+    (directory / "000_initial.sql").write_text("")
+    gate(directory, 3, 7)
+    (directory / "005_something.sql").write_text(
+        "-- the runner:manual directive is what gates the NEXT file\nSELECT 1;\n"
+    )
+    by_the_runner = {m.version for m in discover_migrations(directory) if m.manual}
+    assert _gated_in(directory) == by_the_runner == {3, 7}
 
 
 def test_doctor_outside_a_checkout_skips_the_ledger_comparison(tmp_path):
@@ -1364,7 +1372,7 @@ def test_the_health_renderer_reads_the_taps_real_keys(tmp_path):
     (`TAP_OUTCOMES`). A fixture spelled the renderer's way cannot catch a
     renderer reaching for a key the API does not emit, so this binds the
     renderer to the API's own snapshot, as the pool block's test binds
-    `POOL_FACTS` (#1324)."""
+    `POOL_FACTS`."""
     from src.api.routes.webhooks import TapMetrics
     from storydump_cli.output import TAP_FACTS, TAP_OUTCOMES
 

@@ -1,4 +1,4 @@
-"""Gate — the media-sync executors against the real machinery (#942, #982).
+"""Gate — the media-sync executors against the real machinery.
 
 The clock's leg 4 nulls `next_sync_at` at mint and ONLY the sync executor
 re-arms it; without it a minted sync job parks forever and its source drops
@@ -9,7 +9,7 @@ schema enforces → checkpoint persisted → next_sync_at re-armed with the
 baseline → first_ingest_chunk chained while pages remain → the error/probe
 state machine (the sync IS the probe).
 
-The drive door is the #982 seam; a scripted stub drives every scenario and
+The drive door is the seam; a scripted stub drives every scenario and
 each stub outcome can go red on its own (the controls-can-fail standard).
 """
 
@@ -118,7 +118,7 @@ def _media_row(conn, ws, ref):
 
 
 class ScriptedDrive:
-    """The #982 seam, scripted. `pages` is a list of (items, next_page_token);
+    """The seam, scripted. `pages` is a list of (items, next_page_token);
     an exception instance anywhere in the list is RAISED at that call.
     `final` rides the completed cursor (`{"truncated": True}`: a walk that
     did not see the whole tree)."""
@@ -202,8 +202,8 @@ def _item(ref, h=None, kind="image", name=None, mime=_UNSET, size=None):
     return item
 
 
-async def _drive_cycle(lane_db, drive):
-    engine = create_async_engine(async_url(lane_db))
+async def _drive_cycle(world_db, drive):
+    engine = create_async_engine(async_url(world_db))
     try:
         app = compose(
             engine=engine, config=WorkerConfig(), env={}, adapters={"gdrive": drive}
@@ -222,7 +222,7 @@ async def _drive_cycle(lane_db, drive):
 
 class TestBaselineSyncEndToEnd:
     @pytest.mark.asyncio
-    async def test_mint_list_upsert_checkpoint_and_rearm(self, lane_db, sync_conn):
+    async def test_mint_list_upsert_checkpoint_and_rearm(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-base")
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
@@ -233,7 +233,7 @@ class TestBaselineSyncEndToEnd:
         )
 
         drive = ScriptedDrive([([_item("f1"), _item("f2")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and wl.processed == 1
 
         rows = _items(sync_conn, chain["ws"])
@@ -259,7 +259,7 @@ class TestBaselineSyncEndToEnd:
 
     @pytest.mark.asyncio
     async def test_the_workspace_hash_dedup_is_respected_not_violated(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A second sync offering the same content hash must not crash on
         uq_media_dedup and must not mint a second row."""
@@ -267,12 +267,12 @@ class TestBaselineSyncEndToEnd:
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         drive = ScriptedDrive([([_item("d1", h="samehash")], None)])
-        await _drive_cycle(lane_db, drive)
+        await _drive_cycle(world_db, drive)
 
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         drive2 = ScriptedDrive([([_item("d1-renamed", h="samehash")], None)])
-        wl, _ = await _drive_cycle(lane_db, drive2)
+        wl, _ = await _drive_cycle(world_db, drive2)
         assert wl.processed == 1
         hashes = [r[1] for r in _items(sync_conn, chain["ws"])]
         assert hashes.count("samehash") == 1, "per-workspace dedup by schema"
@@ -280,7 +280,7 @@ class TestBaselineSyncEndToEnd:
 
 
 class TestTheProviderContentTypeReachesTheColumn:
-    """`media_items.mime_type` exists in `054` and the media read already
+    """`media_items.mime_type` exists in `accounts_sources_media.py` and the media read already
     serves it. The seam derived `kind` from `mimeType` and then dropped it, so
     the column was NULL for every provider-sourced row and recoverable only by
     re-listing the folder.
@@ -291,7 +291,7 @@ class TestTheProviderContentTypeReachesTheColumn:
 
     @pytest.mark.asyncio
     async def test_the_mime_lands_on_a_row_whose_name_has_no_extension(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The fixture is extensionless BY DESIGN — this is the whole trap.
 
@@ -320,7 +320,7 @@ class TestTheProviderContentTypeReachesTheColumn:
                 )
             ]
         )
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and wl.processed == 1
 
         row = _media_row(sync_conn, chain["ws"], "f1")
@@ -334,7 +334,7 @@ class TestTheProviderContentTypeReachesTheColumn:
 
     @pytest.mark.asyncio
     async def test_an_adapter_that_states_no_content_type_leaves_it_null(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The column is nullable and the port does not require the key. An
         adapter that cannot know the type must be able to say so and still
@@ -345,7 +345,7 @@ class TestTheProviderContentTypeReachesTheColumn:
         _tick(sync_conn)
 
         drive = ScriptedDrive([([_item("f2", mime=None)], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and wl.processed == 1
 
         row = _media_row(sync_conn, chain["ws"], "f2")
@@ -357,7 +357,7 @@ class TestTheProviderContentTypeReachesTheColumn:
 class TestChunkChaining:
     @pytest.mark.asyncio
     async def test_pages_chain_first_ingest_chunk_and_the_last_rearms(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-chain")
         _arm_source(sync_conn, chain["src"])
@@ -370,19 +370,19 @@ class TestChunkChaining:
                 ([_item("p3")], None),
             ]
         )
-        wl, _ = await _drive_cycle(lane_db, drive)
+        wl, _ = await _drive_cycle(world_db, drive)
         assert wl.processed == 1
         chunks = _jobs(sync_conn, "first_ingest_chunk")
         walk = drive.calls[0]["checkpoint"]["walk"]
         assert len(chunks) == 1 and chunks[0]["payload"]["walk"] == walk, (
             "a page remaining must chain a first_ingest_chunk naming the walk"
         )
-        # #1361: `jobs.enqueue` writes the chain, so a chained chunk carries
-        # the lane's deadline (#1288) beside its attempt budget, and a failing
+        # `jobs.enqueue` writes the chain, so a chained chunk carries
+        # the lane's deadline beside its attempt budget, and a failing
         # chunk ends at whichever bound it reaches first. The lane's budget,
         # both halves, asserted as VALUES. `is not None` would accept any
-        # interval at all — including one measured from the wrong instant
-        # (#1361). Same reason `max_attempts` is compared rather than merely
+        # interval at all — including one measured from the wrong instant.
+        # The same reasoning means `max_attempts` is compared rather than merely
         # checked for presence.
         budget_attempts, budget_seconds = jobs.LANE_BUDGETS["bulk"]
         assert chunks[0]["deadline_at"] - chunks[0]["run_at"] == timedelta(
@@ -399,14 +399,14 @@ class TestChunkChaining:
             "mid-chain must NOT re-arm — the chain is the carrier"
         )
 
-        wl, _ = await _drive_cycle(lane_db, drive)
+        wl, _ = await _drive_cycle(world_db, drive)
         chunks = _jobs(sync_conn, "first_ingest_chunk")
         assert len(chunks) == 2 and chunks[1]["payload"]["walk"] == walk
         assert drive.calls[1]["checkpoint"]["page_token"] == "tok-2", (
             "the chunk resumes the ROW's cursor, token and all"
         )
 
-        wl, _ = await _drive_cycle(lane_db, drive)
+        wl, _ = await _drive_cycle(world_db, drive)
         src = _source_row(sync_conn, chain["src"])
         assert src["next_sync_at"] is not None, "the LAST chunk re-arms"
         assert src["last_sync_success_at"] is not None
@@ -418,7 +418,7 @@ class TestChunkChaining:
 
 
 def _credential(conn, ws, state="active"):
-    """The WORKSPACE's gdrive credential row (069: one per workspace, no
+    """The WORKSPACE's gdrive credential row (workspace Drive grant: one per workspace, no
     owner column), so `connect_purpose` reports `reconnect`."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
@@ -433,7 +433,7 @@ def _credential(conn, ws, state="active"):
     conn.commit()
 
 
-async def _command(lane_db, kind, chain, **args):
+async def _command(world_db, kind, chain, **args):
     """Run one command executor against the real database."""
     from src.services.target import command_executors as ex
     from src.services.target.commands import Command
@@ -443,7 +443,7 @@ async def _command(lane_db, kind, chain, **args):
     # write to oauth_credentials, so a bare session does not merely skip the
     # GUCs — it cannot execute the statement at all. Running the executor any
     # other way would test a path production never takes.
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         uow = unit_of_work(
             engine,
@@ -466,13 +466,13 @@ async def _command(lane_db, kind, chain, **args):
         await engine.dispose()
 
 
-async def _rearm(lane_db, workspace_id, source_id) -> bool:
+async def _rearm(world_db, workspace_id, source_id) -> bool:
     """The connect flow's re-arm against the real database."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.services.target import media_sync
 
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
@@ -485,13 +485,13 @@ async def _rearm(lane_db, workspace_id, source_id) -> bool:
         await engine.dispose()
 
 
-async def _sweep(lane_db, *, age_seconds=0, limit=200) -> int:
-    """Run the #1061 re-alert beat against the real database."""
+async def _sweep(world_db, *, age_seconds=0, limit=200) -> int:
+    """Run the re-alert beat against the real database."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.services.target import media_sync
 
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
@@ -541,7 +541,7 @@ def _strand(conn, source_id, *, state="error", alerted="now()"):
 
 
 class TestAStrandedSourceKeepsSayingSo:
-    """#1061 — the self-silencing stranded source.
+    """— the self-silencing stranded source.
 
     The persistent branch alerts once. Recovery to `active` happens only on a
     successful sync, and the clock enqueues only `active` sources, so the
@@ -552,7 +552,7 @@ class TestAStrandedSourceKeepsSayingSo:
 
     @pytest.mark.asyncio
     async def test_a_failed_source_stays_stuck_and_the_sweep_re_alerts(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Reaches `error` through the REAL failure path, not a hand-UPDATE.
 
@@ -566,7 +566,7 @@ class TestAStrandedSourceKeepsSayingSo:
         binding = _bind(sync_conn, chain["ws"])
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
-        await _drive_cycle(lane_db, ScriptedDrive([DriveSourceGone("folder deleted")]))
+        await _drive_cycle(world_db, ScriptedDrive([DriveSourceGone("folder deleted")]))
 
         assert _source_row(sync_conn, chain["src"])["state"] == "error"
         assert len(_notifications(sync_conn, binding)) == 1, "the one alert it gets"
@@ -580,11 +580,11 @@ class TestAStrandedSourceKeepsSayingSo:
         )
 
         # The re-alert: a beat that does not need the source scheduled.
-        assert await _sweep(lane_db, age_seconds=0) == 1
+        assert await _sweep(world_db, age_seconds=0) == 1
         assert len(_notifications(sync_conn, binding)) == 2
 
     @pytest.mark.asyncio
-    async def test_the_sweep_re_alerts_but_does_not_re_arm(self, lane_db, sync_conn):
+    async def test_the_sweep_re_alerts_but_does_not_re_arm(self, world_db, sync_conn):
         """The scope fence, as an assertion.
 
         Re-arming belongs to the connect flow. If this beat ever set
@@ -596,7 +596,7 @@ class TestAStrandedSourceKeepsSayingSo:
         _strand(sync_conn, chain["src"], alerted="now() - interval '30 days'")
         jobs_before = len(_jobs(sync_conn, "sync_media_source"))
 
-        assert await _sweep(lane_db, age_seconds=3600) == 1
+        assert await _sweep(world_db, age_seconds=3600) == 1
 
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "error", "still errored — the beat does not revive"
@@ -607,7 +607,7 @@ class TestAStrandedSourceKeepsSayingSo:
 
     @pytest.mark.asyncio
     async def test_a_recent_alert_is_not_repeated_until_the_bound_passes(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """`alerted_at` is a real dedup bound: a sweep inside the bound
         sends nothing, and one past it alerts again."""
@@ -615,16 +615,16 @@ class TestAStrandedSourceKeepsSayingSo:
         binding = _bind(sync_conn, chain["ws"])
         _strand(sync_conn, chain["src"], alerted="now()")
 
-        assert await _sweep(lane_db, age_seconds=3600) == 0
+        assert await _sweep(world_db, age_seconds=3600) == 0
         assert _notifications(sync_conn, binding) == []
 
         _strand(sync_conn, chain["src"], alerted="now() - interval '2 hours'")
-        assert await _sweep(lane_db, age_seconds=3600) == 1
+        assert await _sweep(world_db, age_seconds=3600) == 1
         assert len(_notifications(sync_conn, binding)) == 1
 
     @pytest.mark.asyncio
     async def test_a_stranded_source_with_no_alerted_at_is_picked_up(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """`alerted_at` is nullable and rows written by paths that never
         stamped it are the realistic case. NULL must mean overdue, not
@@ -633,13 +633,13 @@ class TestAStrandedSourceKeepsSayingSo:
         binding = _bind(sync_conn, chain["ws"])
         _strand(sync_conn, chain["src"], alerted="NULL")
 
-        assert await _sweep(lane_db, age_seconds=3600) == 1
+        assert await _sweep(world_db, age_seconds=3600) == 1
         assert len(_notifications(sync_conn, binding)) == 1
         assert _source_row(sync_conn, chain["src"])["alerted_at"] is not None
 
     @pytest.mark.asyncio
     async def test_paused_is_the_acknowledgement_and_it_is_silent(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Why a paused source is silent rather than recurring noise.
 
@@ -652,12 +652,12 @@ class TestAStrandedSourceKeepsSayingSo:
         binding = _bind(sync_conn, chain["ws"])
         _strand(sync_conn, chain["src"], state="paused", alerted="NULL")
 
-        assert await _sweep(lane_db, age_seconds=0) == 0
+        assert await _sweep(world_db, age_seconds=0) == 0
         assert _notifications(sync_conn, binding) == []
 
     @pytest.mark.asyncio
     async def test_a_row_the_connect_flow_cleared_is_never_alerted(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The connect-flow seam.
 
@@ -673,12 +673,12 @@ class TestAStrandedSourceKeepsSayingSo:
         _strand(sync_conn, chain["src"], state="active", alerted="NULL")
         _arm_source(sync_conn, chain["src"])
 
-        assert await _sweep(lane_db, age_seconds=0) == 0
+        assert await _sweep(world_db, age_seconds=0) == 0
         assert _notifications(sync_conn, binding) == []
 
     @pytest.mark.asyncio
     async def test_the_reconnect_wins_the_row_and_leaves_no_stale_stamp(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The connect-flow seam, as a real interleaving rather than argued.
 
@@ -720,7 +720,7 @@ class TestAStrandedSourceKeepsSayingSo:
             " WHERE id = %s"
         )
 
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
@@ -730,7 +730,7 @@ class TestAStrandedSourceKeepsSayingSo:
                 assert alerted == 1
 
                 # (1) The re-arm cannot proceed while the sweep holds the row.
-                blocked = psycopg2.connect(lane_db)
+                blocked = psycopg2.connect(world_db)
                 try:
                     with blocked.cursor() as cur:
                         cur.execute("SET app.actor_kind = 'migration'")
@@ -760,11 +760,11 @@ class TestAStrandedSourceKeepsSayingSo:
 
         # (3) exactly one message, and (4) the beat stops.
         assert len(_notifications(sync_conn, binding)) == 1
-        assert await _sweep(lane_db, age_seconds=0) == 0
+        assert await _sweep(world_db, age_seconds=0) == 0
         assert len(_notifications(sync_conn, binding)) == 1
 
     @pytest.mark.asyncio
-    async def test_only_the_stranded_workspace_is_told(self, lane_db, sync_conn):
+    async def test_only_the_stranded_workspace_is_told(self, world_db, sync_conn):
         """A second workspace with its own binding hears nothing. Two, not one,
         for the same reason every tenancy assertion needs two: "it went to A"
         is only a claim if there was a B it could have gone to."""
@@ -774,21 +774,21 @@ class TestAStrandedSourceKeepsSayingSo:
         bind_b = _bind(sync_conn, b["ws"])
         _strand(sync_conn, a["src"], alerted="NULL")
 
-        assert await _sweep(lane_db, age_seconds=0) == 1
+        assert await _sweep(world_db, age_seconds=0) == 1
         assert len(_notifications(sync_conn, bind_a)) == 1
         assert _notifications(sync_conn, bind_b) == []
 
 
 class TestTheConnectReArmMeetsTheAlertBeat:
-    """The connect re-arm against #1061's beat — the two halves meeting.
+    """The connect re-arm and stranded-source alert beat work together.
 
-    The beat keeps a stranded source from going silent (#1061); the re-arm
+    The beat keeps a stranded source from going silent; the re-arm
     lets it recover. Both directions are checked against the real re-arm.
     """
 
     @pytest.mark.asyncio
     async def test_the_re_arm_makes_the_clock_see_the_source_again(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Asserted against the CLOCK, not against the UPDATE.
 
@@ -805,7 +805,7 @@ class TestTheConnectReArmMeetsTheAlertBeat:
             "before-state: an errored source is invisible to the clock"
         )
 
-        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert await _rearm(world_db, chain["ws"], chain["src"]) is True
 
         row = _source_row(sync_conn, chain["src"])
         assert row["state"] == "active"
@@ -821,7 +821,7 @@ class TestTheConnectReArmMeetsTheAlertBeat:
 
     @pytest.mark.asyncio
     async def test_the_beat_cannot_re_alert_a_row_the_re_arm_just_cleared(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Direction 1, against real code.
 
@@ -834,16 +834,16 @@ class TestTheConnectReArmMeetsTheAlertBeat:
         binding = _bind(sync_conn, chain["ws"])
         _strand(sync_conn, chain["src"], alerted="now() - interval '30 days'")
 
-        assert await _sweep(lane_db, age_seconds=3600) == 1, "overdue before recovery"
+        assert await _sweep(world_db, age_seconds=3600) == 1, "overdue before recovery"
         assert len(_notifications(sync_conn, binding)) == 1
 
-        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert await _rearm(world_db, chain["ws"], chain["src"]) is True
 
-        assert await _sweep(lane_db, age_seconds=0) == 0, "recovered — nothing to say"
+        assert await _sweep(world_db, age_seconds=0) == 0, "recovered — nothing to say"
         assert len(_notifications(sync_conn, binding)) == 1, "no second alert"
 
     @pytest.mark.asyncio
-    async def test_a_reconnect_leaves_no_orphaned_alert_job(self, lane_db, sync_conn):
+    async def test_a_reconnect_leaves_no_orphaned_alert_job(self, world_db, sync_conn):
         """Direction 2, against the real re-arm.
 
         The beat is a SINGLETON — leg 1 keys it on the kind itself, one row for
@@ -854,8 +854,8 @@ class TestTheConnectReArmMeetsTheAlertBeat:
         """
         chain = seed_workspace_chain(sync_conn, "p4-orphan")
         _strand(sync_conn, chain["src"], alerted="NULL")
-        await _sweep(lane_db, age_seconds=0)
-        await _rearm(lane_db, chain["ws"], chain["src"])
+        await _sweep(world_db, age_seconds=0)
+        await _rearm(world_db, chain["ws"], chain["src"])
 
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -871,26 +871,26 @@ class TestTheConnectReArmMeetsTheAlertBeat:
             )
 
     @pytest.mark.asyncio
-    async def test_a_paused_source_is_re_armed_too(self, lane_db, sync_conn):
+    async def test_a_paused_source_is_re_armed_too(self, world_db, sync_conn):
         """A reconnect is the explicit undo of a deliberate disconnect (which
         leaves the source `paused`), so the re-arm must not filter on `error`.
         A state filter would no-op on exactly the case a user is reversing."""
         chain = seed_workspace_chain(sync_conn, "p4-paused")
         _strand(sync_conn, chain["src"], state="paused", alerted="NULL")
 
-        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert await _rearm(world_db, chain["ws"], chain["src"]) is True
         assert _source_row(sync_conn, chain["src"])["state"] == "active"
 
     @pytest.mark.asyncio
-    async def test_the_re_arm_is_bound_to_its_tenant(self, lane_db, sync_conn):
-        """RLS is inert under the deployed owner role (#751), so the WHERE
+    async def test_the_re_arm_is_bound_to_its_tenant(self, world_db, sync_conn):
+        """The explicit workspace predicate supplements runtime RLS, so the WHERE
         clause is what binds the row to its workspace. Another tenant's id must
         move nothing — and the row must be left exactly as it was."""
         a = seed_workspace_chain(sync_conn, "p4-tenant-a")
         b = seed_workspace_chain(sync_conn, "p4-tenant-b")
         _strand(sync_conn, a["src"], alerted="now()")
 
-        assert await _rearm(lane_db, b["ws"], a["src"]) is False
+        assert await _rearm(world_db, b["ws"], a["src"]) is False
         row = _source_row(sync_conn, a["src"])
         assert row["state"] == "error" and row["next_sync_at"] is None
 
@@ -904,14 +904,14 @@ class TestTheConnectTrioIsThinAndTenantBound:
 
     @pytest.mark.asyncio
     async def test_disconnect_revokes_the_credential_and_pauses_the_source(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Revoke, KEEP the row, pause. `paused` not `error` — a
         disconnect is a decision, not a fault."""
         chain = seed_workspace_chain(sync_conn, "p4-disc")
         _credential(sync_conn, chain["ws"])
 
-        res = await _command(lane_db, "disconnect_account", chain)
+        res = await _command(world_db, "disconnect_account", chain)
         assert res.outcome == "executed"
 
         assert _source_row(sync_conn, chain["src"])["state"] == "paused"
@@ -929,31 +929,31 @@ class TestTheConnectTrioIsThinAndTenantBound:
 
     @pytest.mark.asyncio
     async def test_a_disconnected_source_is_silent_to_the_alerting_beat(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """Why a disconnect pauses and why it matters to the beat (#1061): it
+        """Why a disconnect pauses and why it matters to the beat: it
         scans `error`. A user who disconnects on purpose must not then be
         alerted daily about it — that is how a real alert gets silenced."""
         chain = seed_workspace_chain(sync_conn, "p4-disc-quiet")
         _bind(sync_conn, chain["ws"])
         _credential(sync_conn, chain["ws"])
 
-        await _command(lane_db, "disconnect_account", chain)
-        assert await _sweep(lane_db, age_seconds=0) == 0
+        await _command(world_db, "disconnect_account", chain)
+        assert await _sweep(world_db, age_seconds=0) == 0
 
     @pytest.mark.asyncio
     async def test_a_disconnect_touches_only_this_workspaces_grant_and_folders(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """069: the grant is the workspace's, so the disconnect names no
+        """workspace Drive grant: the grant is the workspace's, so the disconnect names no
         source — and the executor's own WHERE is the tenant bind (RLS is inert
-        under the deployed owner role, #751): B's disconnect leaves A whole."""
+        on the deployed runtime connection): B's disconnect leaves A whole."""
         a = seed_workspace_chain(sync_conn, "p4-x-a")
         b = seed_workspace_chain(sync_conn, "p4-x-b")
         _credential(sync_conn, a["ws"])
         _credential(sync_conn, b["ws"])
 
-        res = await _command(lane_db, "disconnect_account", b)
+        res = await _command(world_db, "disconnect_account", b)
         assert res.outcome == "executed"
         assert res.data["credential_revoked"] is True
         assert res.data["sources_paused"] == 1
@@ -971,13 +971,13 @@ class TestTheConnectTrioIsThinAndTenantBound:
         assert rows == {str(a["ws"]): "active", str(b["ws"]): "revoked"}
 
         # A repeat disconnect flips nothing and says so.
-        again = await _command(lane_db, "disconnect_account", b)
+        again = await _command(world_db, "disconnect_account", b)
         assert again.data["credential_revoked"] is False
         assert again.data["sources_paused"] == 0
 
     @pytest.mark.asyncio
     async def test_connect_on_a_credentialed_source_is_refused_not_silently_reconnected(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The split is the SCHEMA's answer, not the caller's. A reconnect run
         as a connect would skip `issue_state`'s invalidate-prior-states step
@@ -987,21 +987,21 @@ class TestTheConnectTrioIsThinAndTenantBound:
         _credential(sync_conn, chain["ws"])
 
         with pytest.raises(CommandRefused) as exc:
-            await _command(lane_db, "connect_account", chain)
+            await _command(world_db, "connect_account", chain)
         assert exc.value.reason == "illegal_transition"
 
     @pytest.mark.asyncio
     async def test_connect_mints_the_state_the_callback_will_consume(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Initiating IS minting the state row: `connect_account` is the start
-        leg of a Drive connect, and the callback (#1065) consumes what it mints.
+        leg of a Drive connect, and the callback consumes what it mints.
         The result carries the state and NOT a URL: composing one needs the
         redirect URI that `src/api/google_client.py` owns, and no service
         module imports from `src.api`."""
         chain = seed_workspace_chain(sync_conn, "p4-mint")
 
-        res = await _command(lane_db, "connect_account", chain)
+        res = await _command(world_db, "connect_account", chain)
         assert res.outcome == "executed"
         assert res.data["purpose"] == "connect"
         assert res.data["provider"] == "gdrive"
@@ -1041,13 +1041,13 @@ def _remove_source(conn, source_id):
 
 
 class TestASyncLandingAfterARemovalChangesNothing:
-    """Remove is a first-class button (#1246), and a job minted
+    """Remove is a first-class button, and a job minted
     before the click still runs. Neither its success stamp nor its error
     branch may un-pause the folder — or alert about it."""
 
     @pytest.mark.asyncio
     async def test_the_success_stamp_does_not_revive_a_removed_folder(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-removed-ok")
         _arm_source(sync_conn, chain["src"])
@@ -1056,7 +1056,7 @@ class TestASyncLandingAfterARemovalChangesNothing:
         _remove_source(sync_conn, chain["src"])
 
         drive = ScriptedDrive([([_item("f1")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and wl.processed == 1
 
         src = _source_row(sync_conn, chain["src"])
@@ -1067,7 +1067,7 @@ class TestASyncLandingAfterARemovalChangesNothing:
 
     @pytest.mark.asyncio
     async def test_the_error_branch_neither_flips_nor_alerts_a_removed_folder(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target.media_sync import DriveCredentialDead
 
@@ -1078,7 +1078,7 @@ class TestASyncLandingAfterARemovalChangesNothing:
         _remove_source(sync_conn, chain["src"])
 
         drive = ScriptedDrive([DriveCredentialDead("grant gone")])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True
 
         src = _source_row(sync_conn, chain["src"])
@@ -1095,13 +1095,13 @@ class TestASyncLandingAfterARemovalChangesNothing:
 class TestFailureRouting:
     @pytest.mark.asyncio
     async def test_transient_failure_rides_the_ladder_and_arms_nothing(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-flaky")
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         drive = ScriptedDrive([RuntimeError("network blip")])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "active"
@@ -1111,7 +1111,7 @@ class TestFailureRouting:
 
     @pytest.mark.asyncio
     async def test_persistent_failure_flips_error_alerts_once_and_succeeds(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target.media_sync import DriveSourceGone
 
@@ -1128,7 +1128,7 @@ class TestFailureRouting:
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         drive = ScriptedDrive([DriveSourceGone("folder deleted")])
-        wl, _ = await _drive_cycle(lane_db, drive)
+        wl, _ = await _drive_cycle(world_db, drive)
         assert wl.processed == 1
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "error", "persistent failure is the error state"
@@ -1147,7 +1147,7 @@ class TestFailureRouting:
 
     @pytest.mark.asyncio
     async def test_an_error_source_recovers_to_active_on_a_successful_sync(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Error → active on successful sync — the sync IS the probe."""
         chain = seed_workspace_chain(sync_conn, "w6-probe")
@@ -1172,7 +1172,7 @@ class TestFailureRouting:
             )
         sync_conn.commit()
         drive = ScriptedDrive([([_item("back")], None)])
-        wl, _ = await _drive_cycle(lane_db, drive)
+        wl, _ = await _drive_cycle(world_db, drive)
         assert wl.processed == 1
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "active", "recovery is the successful sync itself"
@@ -1198,7 +1198,7 @@ class TestSubfoldersAreCategories:
 
     @pytest.mark.asyncio
     async def test_items_carry_their_subfolder_and_a_move_is_followed(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-cats")
         _arm_source(sync_conn, chain["src"])
@@ -1210,7 +1210,7 @@ class TestSubfoldersAreCategories:
         loose = _item("loose-1")
         loose["folder_path"] = ""
         drive = ScriptedDrive([([first, clip, loose], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and wl.processed == 1
         assert self._categories(sync_conn, chain["ws"]) == [
             ("loose-1", None, ""),
@@ -1223,7 +1223,7 @@ class TestSubfoldersAreCategories:
         _tick(sync_conn)
         moved = _item("photo-1")
         moved["category"], moved["folder_path"] = "tips", "tips/extra"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([moved], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([moved], None)]))
         assert claimed is True
         assert ("photo-1", "tips", "tips/extra") in self._categories(
             sync_conn, chain["ws"]
@@ -1234,7 +1234,7 @@ class TestSubfoldersAreCategories:
         _tick(sync_conn)
         deeper = _item("video-1", kind="video")
         deeper["category"], deeper["folder_path"] = "tips", "tips/2026"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([deeper], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([deeper], None)]))
         assert claimed is True
         assert ("video-1", "tips", "tips/2026") in self._categories(
             sync_conn, chain["ws"]
@@ -1242,7 +1242,7 @@ class TestSubfoldersAreCategories:
 
     @pytest.mark.asyncio
     async def test_a_different_file_with_the_same_bytes_never_relabels_the_row(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The dedup is per workspace by content hash; only the SAME file
         (source + provider ref) moving may change the row's label or path."""
@@ -1251,14 +1251,14 @@ class TestSubfoldersAreCategories:
         _tick(sync_conn)
         a = _item("dup-a", h="samehash")
         a["category"], a["folder_path"] = "news", "news"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([a], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([a], None)]))
         assert claimed is True
 
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         b = _item("dup-b", h="samehash")
         b["category"], b["folder_path"] = "tips", "tips"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([b], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([b], None)]))
         assert claimed is True
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -1271,7 +1271,7 @@ class TestSubfoldersAreCategories:
 
     @pytest.mark.asyncio
     async def test_a_pre_v2_cursor_stored_mid_walk_starts_the_walk_over(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The one-level cursor still in flight at deploy is not
         resumed: the sync mints a token and the adapter starts over."""
@@ -1289,7 +1289,7 @@ class TestSubfoldersAreCategories:
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         drive = ScriptedDrive([([_item("n1")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True
         start = drive.calls[0]["checkpoint"]
         assert start["v"] == 2 and start["walk"] and "current" not in start
@@ -1307,7 +1307,7 @@ def _set_cursor(conn, src, cursor):
 
 def _enqueue_chunk(conn, ws, src, walk, *, payload=None):
     """A first_ingest_chunk as the sync chains it (media_sync `_run_sync`);
-    `payload` overrides the shape (the pre-#1256 chunk carried a page token)."""
+    `payload` overrides the shape (the pre- chunk carried a page token)."""
     body = payload if payload is not None else {"v": 2, "source_id": src, "walk": walk}
     with conn.cursor() as cur:
         cur.execute(
@@ -1336,19 +1336,19 @@ IN_FLIGHT = {
 
 
 class TestAChunkCarriesOneWalk:
-    """#1256: a chunk is a carrier for the walk it names. On another
+    """A chunk is a carrier for the walk it names. On another
     walk, or a completed one, it does nothing — above all it never mints a
     walk, which would re-walk the whole tree once per stray chunk."""
 
     @pytest.mark.asyncio
     async def test_a_chunk_for_another_walk_is_dropped_without_a_provider_call(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-stale-chunk")
         _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
         _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-old")
         drive = ScriptedDrive([([_item("never")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and drive.calls == [], (
             "no provider call for a stale chunk"
         )
@@ -1359,13 +1359,13 @@ class TestAChunkCarriesOneWalk:
 
     @pytest.mark.asyncio
     async def test_a_chunk_after_completion_does_not_start_a_new_walk(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-late-chunk")
         _set_cursor(sync_conn, chain["src"], {"v": 2, "walk": "w-done", "seen": 2})
         _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-done")
         drive = ScriptedDrive([([_item("never")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and drive.calls == []
         assert _source_row(sync_conn, chain["src"])["sync_checkpoint"] == {
             "v": 2,
@@ -1374,7 +1374,7 @@ class TestAChunkCarriesOneWalk:
         }
 
     @pytest.mark.asyncio
-    async def test_a_paused_source_ends_its_chain(self, lane_db, sync_conn):
+    async def test_a_paused_source_ends_its_chain(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-paused-chain")
         _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
         with sync_conn.cursor() as cur:
@@ -1385,16 +1385,16 @@ class TestAChunkCarriesOneWalk:
         sync_conn.commit()
         _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-row")
         drive = ScriptedDrive([([_item("never")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and drive.calls == [], "a removed folder's chain stops"
         assert _source_row(sync_conn, chain["src"])["state"] == "paused"
         assert _jobs(sync_conn, "first_ingest_chunk")[0]["state"] == "succeeded"
 
     @pytest.mark.asyncio
     async def test_a_pre_v2_chain_in_flight_at_deploy_starts_over_from_its_chunk(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """#1256: the one-level chain still in flight at deploy has a chunk
+        """The one-level chain still in flight at deploy has a chunk
         queued with no walk and a row with `next_sync_at` NULL. That chunk is
         the chain's only carrier, so it starts the walk over rather than being
         dropped as stale — which would leave the source silently dead."""
@@ -1417,7 +1417,7 @@ class TestAChunkCarriesOneWalk:
             payload={"v": 1, "source_id": chain["src"], "page_token": "p"},
         )
         drive = ScriptedDrive([([_item("n2")], None)])
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and len(drive.calls) == 1
         start = drive.calls[0]["checkpoint"]
         assert start["v"] == 2 and start["walk"] and "current" not in start
@@ -1428,7 +1428,7 @@ class TestAChunkCarriesOneWalk:
 
     @pytest.mark.asyncio
     async def test_a_cursor_moved_under_a_carrier_is_not_overwritten(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The cursor write is a compare-and-swap against what the carrier
         read: a re-pick, a reset or a parallel carrier that moved it first wins,
@@ -1443,7 +1443,7 @@ class TestAChunkCarriesOneWalk:
             _set_cursor(sync_conn, chain["src"], other)
 
         drive = ScriptedDrive([([_item("c1")], "tok-2")], on_call=moved_under)
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and len(drive.calls) == 1
         assert _source_row(sync_conn, chain["src"])["sync_checkpoint"] == other, (
             "the other carrier's cursor stands"
@@ -1494,8 +1494,8 @@ def _second_source(conn, ws, name):
     return sid
 
 
-async def _in_session(lane_db, fn):
-    engine = create_async_engine(async_url(lane_db))
+async def _in_session(world_db, fn):
+    engine = create_async_engine(async_url(world_db))
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:
@@ -1515,7 +1515,7 @@ class TestMediaFollowsTheConnectedFolder:
 
     @pytest.mark.asyncio
     async def test_removing_a_folder_retires_its_media_and_a_re_pick_revives_it(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target import media_sync as ms, provisioning
 
@@ -1527,7 +1527,7 @@ class TestMediaFollowsTheConnectedFolder:
                 session, workspace_id=chain["ws"], source_id=chain["src"]
             )
 
-        assert await _in_session(lane_db, remove) is True
+        assert await _in_session(world_db, remove) is True
         assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {"removed"}
 
         async def repick(session):
@@ -1535,14 +1535,14 @@ class TestMediaFollowsTheConnectedFolder:
                 session, workspace_id=chain["ws"], source_id=chain["src"]
             )
 
-        assert await _in_session(lane_db, repick) == 1
+        assert await _in_session(world_db, repick) == 1
         assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {
             "available"
         }
 
     @pytest.mark.asyncio
     async def test_a_connected_folder_that_lists_the_same_bytes_adopts_a_retired_row(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target import provisioning
 
@@ -1557,13 +1557,15 @@ class TestMediaFollowsTheConnectedFolder:
                 session, workspace_id=chain["ws"], source_id=chain["src"]
             )
 
-        await _in_session(lane_db, remove)
+        await _in_session(world_db, remove)
         child = _second_source(sync_conn, chain["ws"], "news")
         _arm_source(sync_conn, child)
         _tick(sync_conn)
         same_bytes = _item("news-copy", h=parent_rows[0]["hash"])
         same_bytes["category"], same_bytes["folder_path"] = "news", "news/2026"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([same_bytes], None)]))
+        wl, claimed = await _drive_cycle(
+            world_db, ScriptedDrive([([same_bytes], None)])
+        )
         assert claimed is True
         rows = _media_rows(sync_conn, chain["ws"])
         assert len(rows) == 1, "the same item, not a second row"
@@ -1575,7 +1577,7 @@ class TestMediaFollowsTheConnectedFolder:
 
     @pytest.mark.asyncio
     async def test_the_same_bytes_in_two_connected_folders_stay_with_the_first(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-twoowners")
         first = _media_rows(sync_conn, chain["ws"])[0]
@@ -1584,7 +1586,7 @@ class TestMediaFollowsTheConnectedFolder:
         _tick(sync_conn)
         dup = _item("dup", h=first["hash"])
         dup["category"], dup["folder_path"] = "tips", "tips"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([dup], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([dup], None)]))
         assert claimed is True
         rows = _media_rows(sync_conn, chain["ws"])
         assert len(rows) == 1 and rows[0]["source_id"] == str(chain["src"])
@@ -1592,7 +1594,7 @@ class TestMediaFollowsTheConnectedFolder:
 
     @pytest.mark.asyncio
     async def test_a_remove_landing_mid_walk_keeps_the_rows_retired(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The removed folder's own in-flight chunk must not land its page: the
         cursor CAS is fenced on `state <> 'paused'`, and a source never adopts
@@ -1621,7 +1623,7 @@ class TestMediaFollowsTheConnectedFolder:
         drive = ScriptedDrive(
             [([same_file, _item("brand-new")], None)], on_call=remove_between_phases
         )
-        wl, claimed = await _drive_cycle(lane_db, drive)
+        wl, claimed = await _drive_cycle(world_db, drive)
         assert claimed is True and len(drive.calls) == 1
         rows = _media_rows(sync_conn, chain["ws"])
         assert {r["state"] for r in rows} == {"removed"}, (
@@ -1633,7 +1635,7 @@ class TestMediaFollowsTheConnectedFolder:
 
     @pytest.mark.asyncio
     async def test_a_removed_source_with_available_media_is_reconciled_by_the_next_walk(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A removed parent can keep its rows `available` (the source is
         marked, its media is not); a connected subfolder listing the same bytes
@@ -1666,7 +1668,7 @@ class TestMediaFollowsTheConnectedFolder:
         _tick(sync_conn)
         same_file = _item("news-ref", h=first["hash"])
         same_file["category"], same_file["folder_path"] = "news", "news"
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([same_file], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([same_file], None)]))
         assert claimed is True
         rows = {r["hash"]: r for r in _media_rows(sync_conn, chain["ws"])}
         assert len(rows) == 2
@@ -1679,7 +1681,7 @@ class TestMediaFollowsTheConnectedFolder:
 
     @pytest.mark.asyncio
     async def test_a_connected_folders_walk_revives_its_own_row_found_retired(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A row retired under a CONNECTED folder is an anomaly (a reconcile
         racing a re-pick); the folder's own walk heals it, even when the file
@@ -1700,7 +1702,7 @@ class TestMediaFollowsTheConnectedFolder:
             first["category"],
             first["path"],
         )
-        wl, claimed = await _drive_cycle(lane_db, ScriptedDrive([([unchanged], None)]))
+        wl, claimed = await _drive_cycle(world_db, ScriptedDrive([([unchanged], None)]))
         assert claimed is True
         rows = _media_rows(sync_conn, chain["ws"])
         assert len(rows) == 1 and rows[0]["state"] == "available"
@@ -1727,13 +1729,13 @@ def _insert_row(conn, ws, src, ref, *, state="available"):
     conn.commit()
 
 
-async def _walk(lane_db, sync_conn, src, drive, *, jobs_to_run=1):
+async def _walk(world_db, sync_conn, src, drive, *, jobs_to_run=1):
     """Arm the source, let the clock mint its sync, and run `jobs_to_run`
     bulk claims: one per page of the walk."""
     _arm_source(sync_conn, src)
     _tick(sync_conn)
     for _ in range(jobs_to_run):
-        await _drive_cycle(lane_db, drive)
+        await _drive_cycle(world_db, drive)
 
 
 #: What the Drive adapter's last cursor says after a walk that skipped nothing
@@ -1742,9 +1744,9 @@ async def _walk(lane_db, sync_conn, src, drive, *, jobs_to_run=1):
 _WHOLE = {"whole": True}
 
 
-async def _whole_walk(lane_db, sync_conn, src, items):
+async def _whole_walk(world_db, sync_conn, src, items):
     """One single-page walk of *src* that saw the whole tree, listing *items*."""
-    await _walk(lane_db, sync_conn, src, ScriptedDrive([(items, None)], final=_WHOLE))
+    await _walk(world_db, sync_conn, src, ScriptedDrive([(items, None)], final=_WHOLE))
 
 
 #: The publish's byte caps. The gate pins the comparison (a file AT the cap
@@ -1755,7 +1757,7 @@ _VIDEO_CAP = vocabulary.PUBLISH_MAX_BYTES["video"]
 
 
 class TestTheSyncRetiresWhatThePublishCanNeverFetch:
-    """#1545: a Drive file the publish can never fetch — deleted from Drive
+    """A Drive file the publish can never fetch — deleted from Drive
     after it synced, or over the publish's byte cap — stalled its folder:
     every slot redrew it until someone tapped Skip. The sync, where Drive's
     state enters, records each file's size, lands a file over the cap
@@ -1763,29 +1765,29 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     longer lists (`missing`). The draw takes `available` rows only."""
 
     @pytest.mark.asyncio
-    async def test_the_listings_size_lands_on_the_row(self, lane_db, sync_conn):
+    async def test_the_listings_size_lands_on_the_row(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-size")
         drive = ScriptedDrive([([_item("s1", size=1234), _item("s2")], None)])
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         sizes = {r["ref"]: r["size"] for r in _media_rows(sync_conn, chain["ws"])}
         assert sizes["s1"] == 1234
         assert sizes["s2"] is None, "an adapter that states no size leaves it NULL"
 
     @pytest.mark.asyncio
     async def test_a_relisting_that_states_no_size_keeps_the_stored_size(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-size-kept")
         drive = ScriptedDrive([([_item("s1", size=1234)], None)])
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         drive = ScriptedDrive([([_item("s1")], None)])
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         rows = {r["ref"]: r for r in _media_rows(sync_conn, chain["ws"])}
         assert (rows["s1"]["state"], rows["s1"]["size"]) == ("available", 1234)
 
     @pytest.mark.asyncio
     async def test_a_file_over_the_publish_cap_lands_unsupported(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-cap")
         page = [
@@ -1794,7 +1796,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             _item("vid-at-cap", kind="video", size=_VIDEO_CAP),
             _item("vid-over", kind="video", size=_VIDEO_CAP + 1),
         ]
-        await _walk(lane_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
+        await _walk(world_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
         states = _states(sync_conn, chain["ws"])
         assert {item["ref"]: states[item["ref"]] for item in page} == {
             "img-at-cap": "available",
@@ -1805,42 +1807,42 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_row_synced_before_sizes_were_kept_is_judged_when_next_listed(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        """Every row synced before #1545 has no size. The next walk that lists
+        """Every row synced before has no size. The next walk that lists
         it records the size and, past the cap, takes it out of the draw."""
         chain = seed_workspace_chain(sync_conn, "w6-judged")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         assert (seeded["state"], seeded["size"]) == ("available", None)
         same_file = _item(seeded["ref"], h=seeded["hash"], size=_IMAGE_CAP + 1)
         await _walk(
-            lane_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
+            world_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
         )
         [after] = _media_rows(sync_conn, chain["ws"])
         assert (after["state"], after["size"]) == ("unsupported", _IMAGE_CAP + 1)
 
     @pytest.mark.asyncio
     async def test_a_complete_walk_tombstones_what_it_no_longer_lists(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The first whole walk judges nothing, since no whole walk came
         before it. Each one after tombstones what it and the one before both
         missed."""
         chain = seed_workspace_chain(sync_conn, "w6-tomb")
         [seeded] = _media_rows(sync_conn, chain["ws"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("t1"), _item("t2")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("t1"), _item("t2")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "available",
             "t1": "available",
             "t2": "available",
         }, "one whole walk missed the seeded file: nothing is judged yet"
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("t1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("t1")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "t1": "available",
             "t2": "available",
         }, "two whole walks missed the seeded file, one missed t2"
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("t1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("t1")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "t1": "available",
@@ -1850,7 +1852,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("case", ["moved_inside_the_tree", "trashed_and_restored"])
     async def test_a_file_one_whole_walk_missed_is_not_tombstoned(
-        self, lane_db, sync_conn, case
+        self, world_db, sync_conn, case
     ):
         """A file that still exists can miss one whole walk: moved from a
         folder the walk had not reached into one it had already listed, or
@@ -1860,15 +1862,15 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         chain = seed_workspace_chain(sync_conn, f"w6-one-miss-{case}")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         kept = _item(seeded["ref"], h=seeded["hash"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept, _item("f1")])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept, _item("f1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept])
         assert _states(sync_conn, chain["ws"])["f1"] == "available", (
             "one whole walk missed a file that still exists: not judged"
         )
         back = _item("f1")
         if case == "moved_inside_the_tree":
             back["category"], back["folder_path"] = "later", "later"
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept, back])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept, back])
         [row] = [r for r in _media_rows(sync_conn, chain["ws"]) if r["ref"] == "f1"]
         assert (row["state"], row["category"], row["path"]) == (
             "available",
@@ -1878,15 +1880,15 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_an_over_cap_file_deleted_from_drive_ends_missing(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-tomb-over-cap")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         drive = ScriptedDrive([([_item("big", size=_IMAGE_CAP + 1)], None)])
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         assert _states(sync_conn, chain["ws"])["big"] == "unsupported"
         for _ in range(2):
-            await _whole_walk(lane_db, sync_conn, chain["src"], [_item("t1")])
+            await _whole_walk(world_db, sync_conn, chain["src"], [_item("t1")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "big": "missing",
@@ -1895,7 +1897,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_whole_walk_leaves_an_unlisted_retired_row_retired(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The tombstone moves `available` and `unsupported` rows and nothing
         else. A row found retired under a connected folder (the anomaly of a
@@ -1911,21 +1913,21 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             )
         sync_conn.commit()
         for _ in range(2):
-            await _whole_walk(lane_db, sync_conn, chain["src"], [_item("t1")])
+            await _whole_walk(world_db, sync_conn, chain["src"], [_item("t1")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "removed",
             "t1": "available",
         }
 
     @pytest.mark.asyncio
-    async def test_a_tombstoned_file_listed_again_comes_back(self, lane_db, sync_conn):
+    async def test_a_tombstoned_file_listed_again_comes_back(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-back")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         for _ in range(2):
-            await _whole_walk(lane_db, sync_conn, chain["src"], [_item("b1")])
+            await _whole_walk(world_db, sync_conn, chain["src"], [_item("b1")])
         assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "missing"
         again = _item(seeded["ref"], h=seeded["hash"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [again, _item("b1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [again, _item("b1")])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "available",
             "b1": "available",
@@ -1933,7 +1935,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_deleted_twins_row_is_adopted_by_the_twin_still_listed(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Identical bytes twice in one folder are one row, under the reference
         listed first. Deleting that file leaves the row `missing` once two
@@ -1944,19 +1946,19 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         twin_a = _item("twin-a", h="hash-twin")
         twin_b = _item("twin-b", h="hash-twin")
         drive = ScriptedDrive([([twin_a, twin_b], None)])
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "available",
             "twin-a": "available",
         }
         # twin-a is deleted from Drive; twin-b stays.
         for _ in range(2):
-            await _whole_walk(lane_db, sync_conn, chain["src"], [twin_b])
+            await _whole_walk(world_db, sync_conn, chain["src"], [twin_b])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "twin-a": "missing",
         }
-        await _whole_walk(lane_db, sync_conn, chain["src"], [twin_b])
+        await _whole_walk(world_db, sync_conn, chain["src"], [twin_b])
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "twin-b": "available",
@@ -1964,12 +1966,12 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_file_two_connected_folders_list_keeps_one_owner(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """One Drive file reachable from two connected folders (two parents,
         or a folder connected inside another) keeps its first owner while
         that folder still lists it: four whole walks, alternating between the
-        folders, and no owner flip (#1645)."""
+        folders, and no owner flip."""
         chain = seed_workspace_chain(sync_conn, "w6-two-parents")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         other = _second_source(sync_conn, chain["ws"], "tips")
@@ -1978,7 +1980,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         there["category"], there["folder_path"] = "tips", ""
         owners = []
         for src, item in ((chain["src"], here), (other, there)) * 2:
-            await _whole_walk(lane_db, sync_conn, src, [item])
+            await _whole_walk(world_db, sync_conn, src, [item])
             [row] = _media_rows(sync_conn, chain["ws"])
             owners.append(row["source_id"])
         assert owners == [str(chain["src"])] * 4, (
@@ -1987,26 +1989,26 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_file_moved_to_another_connected_folder_is_adopted_there(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A move keeps the Drive id. The old folder's whole walk misses the
         file once, which judges nothing, and the new folder's walk takes the
         live row over by that id, because a whole walk of the old folder has
-        missed it (#1645). The file never passes through `missing`, and the
+        missed it. The file never passes through `missing`, and the
         old folder's walks no longer judge it."""
         chain = seed_workspace_chain(sync_conn, "w6-moved")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         other = _second_source(sync_conn, chain["ws"], "tips")
         listed = _item(seeded["ref"], h=seeded["hash"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [listed, _item("kept")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [listed, _item("kept")])
         # The file moves to the other connected folder.
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("kept")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("kept")])
         assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "available", (
             "one whole walk of the old folder missed it: not judged"
         )
         moved = _item(seeded["ref"], h=seeded["hash"])
         moved["category"], moved["folder_path"] = "tips", ""
-        await _walk(lane_db, sync_conn, other, ScriptedDrive([([moved], None)]))
+        await _walk(world_db, sync_conn, other, ScriptedDrive([([moved], None)]))
         rows = {r["hash"]: r for r in _media_rows(sync_conn, chain["ws"])}
         adopted = rows[seeded["hash"]]
         assert (adopted["source_id"], adopted["state"]) == (other, "available")
@@ -2015,7 +2017,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             "tips",
             "",
         )
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("kept")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("kept")])
         assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "available", (
             "the new folder's row: the old folder's walks no longer judge it"
         )
@@ -2030,16 +2032,16 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         ],
     )
     async def test_a_walk_not_known_to_be_whole_tombstones_nothing(
-        self, lane_db, sync_conn, case, final
+        self, world_db, sync_conn, case, final
     ):
         """An adapter that does not say `whole` (silent), or says a skip
         beside it, saw part of the tree at best: nothing is judged, even
         after a whole walk that missed the same file."""
         chain = seed_workspace_chain(sync_conn, f"w6-notwhole-{case}")
         [seeded] = _media_rows(sync_conn, chain["ws"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("q1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("q1")])
         drive = ScriptedDrive([([_item("q1")], None)], final=final)
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "available",
             "q1": "available",
@@ -2047,53 +2049,53 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_partial_walk_between_two_whole_ones_keeps_the_two_walk_rule(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A partial walk judges nothing and is not a whole walk's start: the
         next whole walk still judges against the whole walk before the partial
-        one, so a file one whole walk missed stays (#1628)."""
+        one, so a file one whole walk missed stays."""
         chain = seed_workspace_chain(sync_conn, "w6-partial-between")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         kept = _item(seeded["ref"], h=seeded["hash"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept, _item("f1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept, _item("f1")])
         await _walk(
-            lane_db,
+            world_db,
             sync_conn,
             chain["src"],
             ScriptedDrive([([kept], None)], final={"partial": True}),
         )
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept])
         assert _states(sync_conn, chain["ws"])["f1"] == "available"
 
     @pytest.mark.asyncio
     async def test_a_file_deleted_before_a_whole_walk_is_retired_across_a_partial_one(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A partial walk carries the last whole walk's start on, so a file
         two whole walks missed is retired even with a partial walk between
-        them (#1628)."""
+        them."""
         chain = seed_workspace_chain(sync_conn, "w6-partial-carry")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         kept = _item(seeded["ref"], h=seeded["hash"])
         await _walk(
-            lane_db,
+            world_db,
             sync_conn,
             chain["src"],
             ScriptedDrive([([kept, _item("gone")], None)]),
         )
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept])
         await _walk(
-            lane_db,
+            world_db,
             sync_conn,
             chain["src"],
             ScriptedDrive([([kept], None)], final={"partial": True}),
         )
-        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        await _whole_walk(world_db, sync_conn, chain["src"], [kept])
         assert _states(sync_conn, chain["ws"])["gone"] == "missing"
 
     @pytest.mark.asyncio
     async def test_a_row_listed_on_an_earlier_page_of_the_walk_is_kept(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A walk spans chunks, one page each in its own transaction: what an
         earlier page listed stays, and what no page listed goes."""
@@ -2105,7 +2107,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             drive = ScriptedDrive(
                 [(first_page, "tok-2"), ([_item("m2")], None)], final=_WHOLE
             )
-            await _walk(lane_db, sync_conn, chain["src"], drive, jobs_to_run=2)
+            await _walk(world_db, sync_conn, chain["src"], drive, jobs_to_run=2)
             assert len(drive.calls) == 2, "two pages, two chunks"
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "available",
@@ -2115,7 +2117,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_row_landed_after_the_walk_began_is_not_tombstoned(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The device-native drop relay lands a row outside any walk. A walk
         that listed the folder before the upload and completes after it must
@@ -2123,7 +2125,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         judged."""
         chain = seed_workspace_chain(sync_conn, "w6-race")
         [seeded] = _media_rows(sync_conn, chain["ws"])
-        await _whole_walk(lane_db, sync_conn, chain["src"], [_item("r1")])
+        await _whole_walk(world_db, sync_conn, chain["src"], [_item("r1")])
 
         def relay_lands_a_drop():
             _insert_row(sync_conn, chain["ws"], chain["src"], "dropped")
@@ -2131,7 +2133,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         drive = ScriptedDrive(
             [([_item("r1")], None)], on_call=relay_lands_a_drop, final=_WHOLE
         )
-        await _walk(lane_db, sync_conn, chain["src"], drive)
+        await _walk(world_db, sync_conn, chain["src"], drive)
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "r1": "available",
@@ -2140,7 +2142,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_walk_minted_without_a_start_time_tombstones_nothing(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A walk in flight at the deploy carries no start time: it finishes
         without judging anything, and the next walk does the judging."""
@@ -2149,7 +2151,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
         _enqueue_chunk(sync_conn, chain["ws"], chain["src"], IN_FLIGHT["walk"])
         drive = ScriptedDrive([([_item("n1")], None)], final=_WHOLE)
-        await _drive_cycle(lane_db, drive)
+        await _drive_cycle(world_db, drive)
         assert len(drive.calls) == 1 and not checkpoint_incomplete(
             _source_row(sync_conn, chain["src"])["sync_checkpoint"]
         ), "the walk completed"
@@ -2160,17 +2162,17 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
 
     @pytest.mark.asyncio
     async def test_a_re_pick_revives_retired_rows_but_not_a_tombstone(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """`removed` is the folder's retirement, and a re-pick undoes it;
         `missing` is the file's own absence, and only a listing undoes that."""
         chain = seed_workspace_chain(sync_conn, "w6-repick")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         for _ in range(2):
-            await _whole_walk(lane_db, sync_conn, chain["src"], [_item("k1")])
+            await _whole_walk(world_db, sync_conn, chain["src"], [_item("k1")])
         assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "missing"
         _insert_row(sync_conn, chain["ws"], chain["src"], "retired", state="removed")
-        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert await _rearm(world_db, chain["ws"], chain["src"]) is True
         assert _states(sync_conn, chain["ws"]) == {
             seeded["ref"]: "missing",
             "k1": "available",
@@ -2178,11 +2180,11 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         }
 
     @pytest.mark.asyncio
-    async def test_a_listing_never_moves_the_stamp_backwards(self, lane_db, sync_conn):
+    async def test_a_listing_never_moves_the_stamp_backwards(self, world_db, sync_conn):
         """now() is a transaction's start: a writer through this upsert that
         opened before a walk and lands after a page re-stamped the row would
         write an older stamp. The stamp is monotonic, so the newer one
-        stands (#1548)."""
+        stands."""
         chain = seed_workspace_chain(sync_conn, "w6-monotonic")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         with sync_conn.cursor() as cur:
@@ -2196,7 +2198,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         sync_conn.commit()
         same_file = _item(seeded["ref"], h=seeded["hash"])
         await _walk(
-            lane_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
+            world_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
         )
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -2214,7 +2216,7 @@ def _thumbnail_links(conn, ws):
 
 
 class TestTheThumbnailLinkReachesTheColumn:
-    """#1634: the sync stores the provider's thumbnail link in
+    """The sync stores the provider's thumbnail link in
     `media_items.thumbnail_url`, which only the thumbnail route reads. The
     link is short-lived, so each listing's replaces the stored one, and a
     listing without one clears it. Asserted at the database: a key carried as
@@ -2225,18 +2227,18 @@ class TestTheThumbnailLinkReachesTheColumn:
 
     @pytest.mark.asyncio
     async def test_a_listed_link_lands_and_an_unlisted_one_stays_null(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-thumb")
         page = [_item("t1") | {"thumbnail_link": self.LINK}, _item("t2")]
-        await _walk(lane_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
+        await _walk(world_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
         links = _thumbnail_links(sync_conn, chain["ws"])
         assert links["t1"] == self.LINK
         assert links["t2"] is None
 
     @pytest.mark.asyncio
     async def test_each_listing_replaces_the_link_and_one_without_clears_it(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-thumb-moves")
         for listed in (self.LINK, self.NEXT, None):
@@ -2244,6 +2246,6 @@ class TestTheThumbnailLinkReachesTheColumn:
             if listed is not None:
                 item["thumbnail_link"] = listed
             await _walk(
-                lane_db, sync_conn, chain["src"], ScriptedDrive([([item], None)])
+                world_db, sync_conn, chain["src"], ScriptedDrive([([item], None)])
             )
             assert _thumbnail_links(sync_conn, chain["ws"])["t1"] == listed

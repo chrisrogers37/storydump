@@ -1,20 +1,21 @@
-"""The RLS runtime harness against the full schema (#751).
+"""The RLS runtime harness against the full schema.
 
 `test_rls_harness.py` proves the PREMISE on a one-table probe (owner bypasses,
 login confined, the schema gate structurally blind, tenant context leaks
 across connection reuse). This module is the other half: the DECLARED RUNTIME
-LOGINS against the schema production runs — the full advertised stream, which
-arm (b) of `advertised_ddl_replay` holds equal to the migration files,
-replayed under the declared actors.
+LOGINS against the schema built from code under its non-superuser owner.
 
-EXERCISED, not asserted-present: the policy census below is every row of
-`pg_policies` (58), asserted equal to the live catalog at (table, cmd, roles)
+EXERCISED, not asserted-present: the policy census below includes all 115 rows of
+`pg_policies`, asserted equal to the live catalog at (table, cmd, roles)
 grain — so a smuggled permissive policy on an already-covered table is a red
 test — and every census row carries a DISPOSITION naming how this module
 drives it (matrix read+write as both logins, a door's definer body, a direct
 machinery probe) or disclosing that it is evaluated-but-not-effect-driven in
-this world (the zero-row sweeps). Every zero/denial assertion is paired with
-a positive control on its own axis.
+this world (the zero-row sweeps). Maintenance witnesses identify their exercised
+commands and explicitly disclose granted commands they do not exercise. Owner
+sessions assume the maintenance role for isolated probes and roll back their
+writes; runtime logins do not assume that role. Every zero/denial assertion is
+paired with a positive control on its own axis.
 
 Two schema truths asserted rather than assumed:
 - ABSENT tenant context yields an EMPTY SET on the tenant tables (the
@@ -29,7 +30,7 @@ Two schema truths asserted rather than assumed:
 Out of CI reach, stated rather than faked: the clause "runtime
 deployment env contains connection strings for exactly svc_ingress and
 svc_worker" is a deployment property (an ops gate), and whether any prod path
-connects as an owner-equivalent role (#751) needs prod credentials the test
+connects as an owner-equivalent role needs prod credentials the test
 suite does not hold.
 """
 
@@ -45,7 +46,7 @@ from tests.scripts.conftest import (
     SERVICE_ROLES,
     _scratch,
     as_user,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -57,18 +58,21 @@ WS_B_NAME = "f4-tenant-b"
 LOGINS = ("svc_worker", "svc_ingress")
 T = ("svc_ingress", "svc_worker")  # the tenant-policy TO-list, alphabetical
 
-#: THE ORACLE — every policy in 058/060 at (policy, table, cmd, roles) grain,
+#: THE ORACLE — every policy in `07_row_security.sql`/`auth_plane.py` at (policy, table, cmd, roles) grain,
 #: with its disposition in this module. Asserted equal to pg_policies by
 #: test_the_census_matches_the_catalog_exactly; dispositions are asserted
 #: complete (every row has one) and honest (the disclosed set is pinned).
 #: Disposition vocabulary:
-#:   matrix        — read AND write driven as both logins via the isolation matrix
-#:   matrix-read   — read-only policy driven via the matrix SELECT leg
-#:   insert-pair   — INSERT policy driven by an own-succeeds/foreign-refused pair
-#:   door:<fn>     — evaluated inside that SECURITY DEFINER body; "armed" doors
-#:                   move rows under it, the rest evaluate it over this world
-#:   machinery     — driven by a direct probe as the granted login
-#:   auth          — driven by the auth-plane tests (ingress inserts + sweep)
+#: matrix — read AND write driven as both logins via the isolation matrix
+#: matrix-read — read-only policy driven via the matrix SELECT leg
+#: insert-pair — INSERT policy driven by an own-succeeds/foreign-refused pair
+#: door:<fn> — evaluated inside that SECURITY DEFINER body; "armed" doors
+#: move rows under it, the rest evaluate it over this world
+#: door-read:<fn> — SELECT driven by an allowed login through a definer
+#: maintenance — read or write driven as svc_maintenance, then rolled back
+#: unevaluated — retained policy without an exercised command in this module
+#: machinery — driven by a direct probe as the granted login
+#: auth — driven by the auth-plane tests (ingress inserts + sweep)
 POLICY_CENSUS = {
     ("p_tenant_workspaces", "workspaces", "ALL", T): "matrix",
     ("p_clock_ws", "workspaces", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
@@ -123,7 +127,7 @@ POLICY_CENSUS = {
     ("p_tenant", "ig_accounts", "ALL", T): "matrix",
     ("p_clock_acct_s", "ig_accounts", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
     ("p_clock_acct_u", "ig_accounts", "UPDATE", ("svc_clock",)): "door:fn_clock_tick",
-    # 081: the one table svc_maintenance lacked for the estate-health doors
+    # fleet health functions: the one table svc_maintenance lacked for the estate-health doors
     # (fn_health_destinations and fn_health_scheduling_lag read it).
     (
         "p_maint_accts",
@@ -131,7 +135,7 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_maintenance",),
     ): "door:fn_health_destinations",
-    # 082: the three tables svc_maintenance lacked for the worker's doors.
+    # worker sweep functions: the three tables svc_maintenance lacked for the worker's doors.
     (
         "p_maint_bindings",
         "channel_bindings",
@@ -150,14 +154,14 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_maintenance",),
     ): "door:fn_stranded_sources",
-    # 086: the reaper re-arms the source of a sync it ends past its deadline.
+    # `fn_reaper_sweep` deadline leg: the reaper re-arms the source of a sync it ends past its deadline.
     (
         "p_maint_sources_rearm",
         "media_sources",
         "UPDATE",
         ("svc_maintenance",),
     ): "door:fn_reaper_sweep",
-    # 104: the two tables svc_maintenance lacked for the activation funnel.
+    # `fn_activation_funnel`: the two tables svc_maintenance lacked for the activation funnel.
     (
         "p_maint_users",
         "users",
@@ -203,7 +207,7 @@ POLICY_CENSUS = {
     ("p_tenant", "instagram_artifacts", "ALL", T): "matrix",
     ("p_tenant", "instagram_intent_provenance", "ALL", T): "matrix",
     ("p_tenant", "instagram_operation_provenance", "ALL", T): "matrix",
-    # 138: the selected-preparation discovery door reads current bound proof.
+    # `fn_source_asset_suitability`: the selected-preparation discovery door reads current bound proof.
     (
         "p_selected_preparation_read",
         "instagram_intent_provenance",
@@ -222,7 +226,7 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_maintenance",),
     ): "door:fn_selected_preparation_due",
-    # 142: verified Meta identity mappings — the logins' own tenant rows (the
+    # `meta_identity_mappings`: verified Meta identity mappings — the logins' own tenant rows (the
     # write half is the current flag alone, `SELF_ASSIGN`), the deauthorize
     # door's read and the reconciliation discovery's read.
     ("p_tenant", "meta_identity_mappings", "ALL", T): "matrix",
@@ -238,8 +242,8 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_clock",),
     ): "door:fn_archive_reconcile_jobs",
-    # 144: the redaction door reads and deletes immutable captures of fenced
-    # generations (the intent provenance read is 138's policy).
+    # archive lifecycle cleanup: the redaction door reads and deletes immutable captures of fenced
+    # generations (the intent provenance read is `fn_source_asset_suitability`'s policy).
     (
         "p_maint_redact_read",
         "instagram_operation_provenance",
@@ -311,31 +315,31 @@ POLICY_CENSUS = {
         "audit_events",
         "SELECT",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_activation_funnel",
     (
         "p_audit_retention_del",
         "audit_events",
         "DELETE",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "unevaluated",
     ("p_tenant", "daily_post_counts", "ALL", T): "matrix",
     (
         "p_maint_dpc",
         "daily_post_counts",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_health_publish_attempts",
     ("p_jobs", "jobs", "ALL", T): "matrix",
     ("p_claim_jobs", "jobs", "ALL", ("svc_claim",)): "door:fn_claim_job",
     ("p_clock_jobs", "jobs", "ALL", ("svc_clock",)): "door:fn_clock_tick",
-    ("p_maint_jobs", "jobs", "ALL", ("svc_maintenance",)): "door:fn_retention_batch",
+    ("p_maint_jobs", "jobs", "ALL", ("svc_maintenance",)): "maintenance",
     ("p_tenant", "channel_outbox", "ALL", T): "matrix",
     (
         "p_maint_outbox",
         "channel_outbox",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_health_outbox_pending",
     (
         "p_member_outbox",
         "channel_outbox",
@@ -348,7 +352,7 @@ POLICY_CENSUS = {
         "provider_operations",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "maintenance",
     ("p_dedup", "command_dedup", "ALL", ("svc_ingress",)): "machinery",
     (
         "p_maint_dedup",
@@ -368,7 +372,7 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
-    # 141: an Instagram connect's applied result, the API's alone — its
+    # OAuth archive choice: an Instagram connect's applied result, the API's alone — its
     # callback inserts one and the initiating member session reads it.
     (
         "p_ingress_connection_results",
@@ -376,7 +380,7 @@ POLICY_CENSUS = {
         "ALL",
         ("svc_ingress",),
     ): "insert-pair",
-    # 090: the removals record, the membership doors' alone (102 revoked the
+    # workspace member removal: the removals record, the membership doors' alone (workspace_membership removal checks revoked the
     # logins' read and dropped their policy).
     (
         "p_member_removals",
@@ -384,28 +388,28 @@ POLICY_CENSUS = {
         "ALL",
         ("svc_membership",),
     ): "door:fn_member_remove",
-    # 092: the owner's sign-up admissions — global, and read only by the door.
+    # `fn_signup_admitted`: the owner's sign-up admissions — global, and read only by the door.
     (
         "p_member_admissions",
         "signup_admissions",
         "SELECT",
         ("svc_membership",),
     ): "door:fn_signup_admitted",
-    # 100: the marketing waitlist — the API may add an address, nothing else.
+    # `waitlist_entries`: the marketing waitlist — the API may add an address, nothing else.
     (
         "p_ingress_waitlist",
         "waitlist_entries",
         "INSERT",
         ("svc_ingress",),
     ): "machinery",
-    # 099: a person's own Telegram unlink — the door's read and delete.
+    # `fn_identity_unlink`: a person's own Telegram unlink — the door's read and delete.
     (
         "p_member_identities",
         "user_identities",
         "ALL",
         ("svc_membership",),
     ): "door:fn_identity_unlink",
-    # 098: the doors read an inviter's account state — users' id and state
+    # invitation legitimacy checks: the doors read an inviter's account state — users' id and state
     # only, by column grant.
     (
         "p_member_users",
@@ -413,7 +417,7 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_membership",),
     ): "door:fn_invitation_accept",
-    # 129: the admission doors write the admissions and read the waitlist —
+    # signup admission functions: the admission doors write the admissions and read the waitlist —
     # global tables the runtime logins still hold no grant on.
     (
         "p_member_admissions_ins",
@@ -421,7 +425,7 @@ POLICY_CENSUS = {
         "INSERT",
         ("svc_membership",),
     ): "door:fn_signup_admit",
-    # 133's trigger-only definer (`TRIGGER_DEFINERS`) updates through it too,
+    # `trg_signup_admission_consume`'s trigger-only definer (`TRIGGER_DEFINERS`) updates through it too,
     # with no policy of its own.
     (
         "p_member_admissions_upd",
@@ -437,7 +441,7 @@ POLICY_CENSUS = {
     ): "door:fn_waitlist",
 }
 
-# 143: the Meta deletion receipts are the doors' alone — svc_maintenance's
+# Meta deletion receipt functions: the Meta deletion receipts are the doors' alone — svc_maintenance's
 # receive, status, scope and progress doors, and the clock's cleanup sweep.
 for _name, _table in (
     ("p_maint_meta_receipts", "meta_deletion_receipts"),
@@ -459,7 +463,7 @@ for _name, _table, _cmd in (
         "door:fn_meta_receipt_cleanup_jobs"
     )
 
-# 110: metadata and row-lock predicates evaluated by the canonical job doors.
+# approval rules: metadata and row-lock predicates evaluated by the canonical job doors.
 _SOURCE_READ_ROLES = ("svc_claim", "svc_clock", "svc_maintenance")
 for _table in (
     "workspaces",
@@ -503,10 +507,10 @@ MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
 
 #: The column the write leg self-assigns where the logins' UPDATE grant is a
 #: column grant: a mapping's current flag is the only column they may write
-#: (142). Every other table self-assigns its tenant key.
+#: (`meta_identity_mappings`). Every other table self-assigns its tenant key.
 SELF_ASSIGN = {"meta_identity_mappings": "is_current"}
 
-#: Governance tables (055's tg_audit_* attach list): mutations need actors.
+#: Governance tables (`intent_ledger.py`'s tg_audit_* attach list): mutations need actors.
 GOVERNANCE = {
     "workspaces",
     "workspace_members",
@@ -514,6 +518,18 @@ GOVERNANCE = {
     "ig_accounts",
     "oauth_credentials",
 }
+
+# These witnesses partition each affected policy's granted commands. An ALL
+# policy can have a read witness without claiming that its delete path runs.
+MAINTENANCE_COMMAND_COVERAGE = {
+    "p_audit_retention_sel": ({"SELECT"}, set()),
+    "p_audit_retention_del": (set(), {"DELETE"}),
+    "p_maint_dpc": ({"SELECT"}, {"DELETE"}),
+    "p_maint_jobs": ({"SELECT", "UPDATE"}, {"INSERT", "DELETE"}),
+    "p_maint_outbox": ({"SELECT"}, {"DELETE"}),
+    "p_maint_ops": ({"SELECT"}, {"DELETE"}),
+}
+
 
 #: Doors: name -> (permitted login, exercising call). One registry, so the
 #: pairing cannot drift; the catalog census asserts the keyset and grants.
@@ -547,7 +563,7 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_reaper_sweep(5, interval '1 day', interval '1 day')",
     ),
-    # The fourteenth door (076): the
+    # The fourteenth door (`post_intent_transitions`): the
     # reaper's listing of stale approved stories, read across tenants for the
     # reap executor's per-row park.
     "fn_reaper_stale_approved": (
@@ -556,7 +572,7 @@ DOORS = {
     ),
     "fn_retention_batch": (
         "svc_worker",
-        "SELECT * FROM fn_retention_batch('jobs_ok', interval '90 days', 5)",
+        "SELECT * FROM fn_retention_batch('rate_counters', interval '90 days', 5)",
     ),
     "fn_offboard_finalize": (
         "svc_worker",
@@ -580,11 +596,11 @@ DOORS = {
         "SELECT * FROM fn_invitation_accept('nope',"
         " '00000000-0000-0000-0000-000000000000'::uuid, 'telegram', NULL, 1, 'web')",
     ),
-    # The tenth door (064, #1037): a user-plane READ, so its exercising call
+    # The tenth door (`fn_memberships_for_caller`): a user-plane READ, so its exercising call
     # carries no arguments — the caller is app.actor_user_id, read inside the
     # body, and an unclaimed session reads zero rows rather than anyone's.
-    # The thirteenth door (068, #1242): the revoke for every join edge. Three
-    # uuids that name nobody. The door checks its caller first (102), so
+    # The thirteenth door (`fn_channel_join` / `fn_channel_leave`): the revoke for every join edge. Three
+    # uuids that name nobody. The door checks its caller first (workspace_membership removal checks), so
     # in an unclaimed session the body raises (by message); the call only runs
     # as the denied login, whose missing EXECUTE refuses it before the body.
     "fn_member_remove": (
@@ -597,20 +613,20 @@ DOORS = {
         "svc_ingress",
         "SELECT * FROM fn_memberships_for_caller()",
     ),
-    # 092: may a new Google account create its user? One boolean
+    # `fn_signup_admitted`: may a new Google account create its user? One boolean
     # for one address — an address nobody admitted or invited answers false.
     "fn_signup_admitted": (
         "svc_ingress",
         "SELECT fn_signup_admitted('nobody@example.com')",
     ),
-    # 099: a person unlinks their own Telegram identity. A uuid
+    # `fn_identity_unlink`: a person unlinks their own Telegram identity. A uuid
     # that names nobody answers not_linked, never a raise.
     "fn_identity_unlink": (
         "svc_ingress",
         "SELECT fn_identity_unlink('00000000-4000-4000-8000-000000000099'::uuid,"
         " 'telegram')",
     ),
-    # 115: an invited person's own invitations, and a fresh link.
+    # invitee invitation functions: an invited person's own invitations, and a fresh link.
     # An address nobody invited lists nothing and rotates nothing.
     "fn_invitations_for": (
         "svc_ingress",
@@ -622,7 +638,7 @@ DOORS = {
         "SELECT * FROM fn_invitation_reissue("
         "'00000000-4000-4000-8000-000000000099'::uuid, 'nobody@example.com', 'x')",
     ),
-    # 129 (#1723): admitting from the waitlist. The list, the
+    # signup admission functions: admitting from the waitlist. The list, the
     # admission and the claim are the API's; storing the link the email
     # carried is the worker's. Each call runs only as the login denied it, so
     # nothing is ever admitted, stored or claimed here.
@@ -642,7 +658,7 @@ DOORS = {
         "svc_ingress",
         "SELECT fn_signup_claim('x')",
     ),
-    # The estate-health doors (081, #751): the estate-wide reads behind
+    # The estate-health doors (fleet health functions): the estate-wide reads behind
     # /health/posting and /health/scheduling, each a health-module query.
     # The four posting/lag reads are the API's alone; the three backpressure
     # reads are shared with the worker, whose status line renders the same
@@ -685,7 +701,7 @@ DOORS = {
         "svc_ingress",
         "SELECT * FROM fn_meta_accounts_for_ref('no-such-ref')",
     ),
-    # The worker's doors (082, #751): the tenant-less
+    # The worker's doors (worker sweep functions): the tenant-less
     # sweeps' reads. The sender sweep is one door (its INSERT … SELECT is one
     # statement); the other four return rows with their workspace ids and the
     # worker writes per workspace under that tenant.
@@ -710,13 +726,13 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_stranded_sources(0, 10)",
     ),
-    # 089 (#1413): the planned stories that will not be served —
+    # `fn_planned_serve` / `fn_planned_misses`: the planned stories that will not be served —
     # the prompt sweeper's miss leg reads them and ends each under its tenant.
     "fn_planned_misses": (
         "svc_worker",
         "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
     ),
-    # 101 (#1482): the outbox's delivery failures and deliveries in
+    # outbox failure records: the outbox's delivery failures and deliveries in
     # a window, estate-wide, behind /health/delivery. Counts only, shared with
     # the worker like the backpressure reads.
     "fn_health_outbox_failures": (
@@ -727,21 +743,21 @@ DOORS = {
         ("svc_ingress", "svc_worker"),
         "SELECT fn_health_outbox_sent(3600)",
     ),
-    # 104 (#1481): the activation funnel, counts only across every
+    # `fn_activation_funnel`: the activation funnel, counts only across every
     # workspace. The worker's login alone, the one the psql escape hatch
-    # connects as; no API principal until an operator principal exists (#1124).
+    # connects as; no API principal until an operator principal exists.
     "fn_activation_funnel": (
         "svc_worker",
         "SELECT * FROM fn_activation_funnel(now() - interval '30 days')",
     ),
-    # 106 (#1481): who is owed the activation nudge, user ids and a
+    # `users.activation_nudge_at`: who is owed the activation nudge, user ids and a
     # stage. The worker's login alone, which runs the sweep; never the API's.
     "fn_activation_stalled": (
         "svc_worker",
         "SELECT * FROM fn_activation_stalled("
         "now() - interval '30 days', interval '72 hours', 20)",
     ),
-    # 142-145 (#1644): the Meta callbacks' tenant-free doors are
+    # Meta callback functions: the Meta callbacks' tenant-free doors are
     # the API's; the receipt scope reads, progress, redaction and the two
     # job-minting doors are the worker's. No call writes: the reads name
     # nobody, and the writers get an invalid input, an empty scope or a bound
@@ -793,7 +809,7 @@ DOORS = {
 #: asks for EXECUTE on a trigger's function when the trigger is created, never
 #: when a write fires it.
 TRIGGER_DEFINERS = {
-    # 133 (#1740): an account created at an admitted address uses
+    # `trg_signup_admission_consume`: an account created at an admitted address uses
     # the admission up, whichever login inserts the user.
     "trg_users_consume_admission": ("svc_membership", "users"),
 }
@@ -843,7 +859,7 @@ def _seed_tenant(conn, name: str) -> dict:
     with conn.cursor() as cur:
         archive = seed_archive_evidence(cur, ids)
         insert_asset(cur, archive, item=archive["item"])
-        # 142: one verified mapping on the archive's credential, so the
+        # `meta_identity_mappings`: one verified mapping on the archive's credential, so the
         # mappings' matrix positives read a row of the tenant's own.
         cur.execute(
             "INSERT INTO meta_identity_mappings (workspace_id, ig_account_id,"
@@ -864,7 +880,7 @@ def _seed_tenant(conn, name: str) -> dict:
     ids["invite_hash"] = hashlib.sha256(f"invite-{name}".encode()).hexdigest()
     with conn.cursor() as cur:
         cur.execute(
-            # 098: an invitation admits only while its inviter is still an
+            # invitation legitimacy checks: an invitation admits only while its inviter is still an
             # owner or admin there, so the seeded one is the owner's.
             "INSERT INTO workspace_invitations (workspace_id, token_hash,"
             " delivery_channel, expires_at, role, invited_by_user_id)"
@@ -883,7 +899,7 @@ def _seed_tenant(conn, name: str) -> dict:
             (ws, f"ig:quarantined-{name}"),
         )
         cur.execute(
-            # 069: a gdrive credential is the WORKSPACE's — no owner column.
+            # workspace Drive grant: a gdrive credential is the WORKSPACE's — no owner column.
             "INSERT INTO oauth_credentials"
             " (workspace_id, provider, encrypted_payload)"
             " VALUES (%s, 'gdrive', 'ct')",
@@ -895,8 +911,8 @@ def _seed_tenant(conn, name: str) -> dict:
             (ws, mi),
         )
         cur.execute(
-            # 090: a removed person per tenant — the rows the logins are
-            # denied (102), so that denial is not an empty table read.
+            # workspace member removal: a removed person per tenant — the rows the logins are
+            # denied (workspace_membership removal checks), so that denial is not an empty table read.
             "INSERT INTO workspace_member_removals (workspace_id, user_id)"
             " VALUES (%s, %s)",
             (ws, ids["user"]),
@@ -944,8 +960,8 @@ def _seed_tenant(conn, name: str) -> dict:
 def _arm_world(conn, a: dict) -> None:
     """Rows that make the armed doors do observable work: a system job (also
     the p_jobs OR-IS-NULL pin), a slot-due ig_account for the clock, and a
-    retention-eligible succeeded job (updated_at is writable at INSERT — the
-    touch trigger is BEFORE UPDATE only)."""
+    succeeded job old enough to be a retention sentinel. The rate-counter
+    sweep must leave that job intact."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
         cur.execute(
@@ -978,13 +994,13 @@ def target(admin_conn, owner_actor):
     Module-scoped (the per-test template idiom cannot hold a role-carrying
     template: grants to cluster roles make drop_service_roles destroy it —
     see conftest's hardened-drop notes). ``_scratch`` is driven directly the
-    way ``roleless_db`` does; everything after the first ``next`` sits inside
+    way the shared database fixtures do; everything after the first ``next`` sits inside
     the try so a failed replay or seed cannot leak the scratch DB and roles
     into the session (the documented cascade class)."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
-    owner_window_db = next(gen)
+    owner_world_db = next(gen)
     try:
-        dsn = replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
+        dsn = build_world(owner_world_db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             a = _seed_tenant(conn, WS_A_NAME)
@@ -993,8 +1009,8 @@ def target(admin_conn, owner_actor):
         finally:
             conn.close()
         yield {
-            "worker": as_user(owner_window_db, "svc_worker"),
-            "ingress": as_user(owner_window_db, "svc_ingress"),
+            "worker": as_user(owner_world_db, "svc_worker"),
+            "ingress": as_user(owner_world_db, "svc_ingress"),
             "owner_stream": dsn,
             "a": a,
             "b": b,
@@ -1126,7 +1142,7 @@ class TestRuntimeTenantIsolationMatrix:
             )
 
     def test_connection_results_are_the_apis_own_tenant_rows(self, target):
-        """141: the API inserts a result into its own tenant only and reads
+        """OAuth archive choice: the API inserts a result into its own tenant only and reads
         only that tenant's, never with no tenant set; a result is never
         rewritten (no UPDATE grant), and the worker holds no grant at all.
         Each refusal beside its positive on the same axis."""
@@ -1183,7 +1199,7 @@ class TestRuntimeTenantIsolationMatrix:
         """The `true`-predicate login policies, driven at their grants:
         user-plane reads as both logins; rate_counters as both; command_dedup
         as ingress only — svc_worker holds no grant there, which is asserted
-        as the denial it is. waitlist_entries (100) is ingress's to add to and
+        as the denial it is. waitlist_entries (`waitlist_entries`) is ingress's to add to and
         no one's to read: the INSERT lands and a read back is refused."""
         for login in LOGINS:
             dsn = _login_dsn(target, login)
@@ -1245,9 +1261,9 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        # 138 adds two selected-proof maintenance reads; 141 the API's
-        # connection results; 142 the mappings' three, 143 the receipts'
-        # nine, 144 the redaction door's five, and 146 the asset's two.
+        # `fn_source_asset_suitability` adds two selected-proof maintenance reads; OAuth archive choice the API's
+        # connection results; `meta_identity_mappings` has' three, the receipt tables have'
+        # nine, the redaction function has five, and `instagram_media_assets` has two.
         assert len(POLICY_CENSUS) == 115
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
@@ -1260,23 +1276,167 @@ class TestRuntimeTenantIsolationMatrix:
             "matrix-userplane",
             "insert-pair",
             "door",
+            "door-read",
+            "maintenance",
+            "unevaluated",
             "machinery",
             "auth",
         }
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 26
-        # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm; 090: the removals record; 092: the sign-up
-        # admissions; 098: the inviter's account state; 099: the Telegram
-        # unlink; 104: the activation funnel's two reads; 129: the admission
-        # doors' two writes and their read of the waitlist; 142: the mappings'
-        # two reads; 143: the receipts' nine; 144: the redaction door's five.
-        assert len(by_kind["door"]) == 74
+        # fleet health functions: p_maint_accts; worker sweep functions: the three maintenance reads; `fn_reaper_sweep` deadline leg: the
+        # reaper's source re-arm; workspace member removal: the removals record; `fn_signup_admitted`: the sign-up
+        # admissions; invitation legitimacy checks: the inviter's account state; `fn_identity_unlink`: the Telegram
+        # unlink; the activation funnel's two reads; the admission
+        # doors' two writes and their read of the waitlist; the identity mapping functions'
+        # two reads; the receipt functions' nine; the redaction function's five.
+        assert len(by_kind["door"]) == 68
+        assert len(by_kind["door-read"]) == 3
+        assert len(by_kind["maintenance"]) == 2
+        assert len(by_kind["unevaluated"]) == 1
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():
-            if disp.startswith("door:"):
+            if disp.startswith(("door:", "door-read:")):
                 assert disp.split(":", 1)[1] in DOORS, row
+
+
+class TestMaintenancePolicyWitnesses:
+    """Reads through runtime doors and isolated probes disclose their scope."""
+
+    def test_granted_maintenance_commands_have_an_explicit_coverage_status(
+        self, target
+    ):
+        affected = {
+            name: (table, command, roles, disposition)
+            for (name, table, command, roles), disposition in POLICY_CENSUS.items()
+            if name in MAINTENANCE_COMMAND_COVERAGE
+        }
+        assert set(affected) == set(MAINTENANCE_COMMAND_COVERAGE)
+        for name, (exercised, unevaluated) in MAINTENANCE_COMMAND_COVERAGE.items():
+            table, command, roles, disposition = affected[name]
+            assert roles == ("svc_maintenance",)
+            granted = {
+                row[0]
+                for row in _exec(
+                    target["owner_stream"],
+                    "SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) privilege WHERE has_table_privilege('svc_maintenance', %s, privilege)",
+                    params=(f"public.{table}",),
+                    fetch=True,
+                )
+            }
+            if command != "ALL":
+                granted &= {command}
+            assert exercised.isdisjoint(unevaluated), name
+            assert exercised | unevaluated == granted, (name, granted)
+            assert (disposition == "unevaluated") is (not exercised), name
+        retained = {
+            row[0]
+            for row, disposition in POLICY_CENSUS.items()
+            if disposition == "door:fn_retention_batch"
+        }
+        assert retained == {"p_maint_rate"}
+
+    def test_audit_select_runs_through_the_activation_door(self, target):
+        before = _exec(target["worker"], DOORS["fn_activation_funnel"][1], fetch=True)
+        assert before[-1][0] == 5 and before[-1][2] == 0
+        connection = psycopg2.connect(target["owner_stream"])
+        audit_id = None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO audit_events (workspace_id, entity_kind, entity_id, from_state, to_state, actor_kind) VALUES (%s, 'post_intent', %s, 'awaiting_approval', 'approved', 'system') RETURNING id",
+                    (str(target["a"]["ws"]), str(target["a"]["intent"])),
+                )
+                audit_id = cursor.fetchone()[0]
+            connection.commit()
+            after = _exec(
+                target["worker"], DOORS["fn_activation_funnel"][1], fetch=True
+            )
+            assert after[-1][2] == before[-1][2] + 1
+        finally:
+            # Remove only this probe's sentinel as the seeding owner; this
+            # cleanup does not claim to exercise the maintenance DELETE policy.
+            try:
+                connection.rollback()
+                if audit_id is not None:
+                    with connection, connection.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM audit_events WHERE id=%s", (audit_id,)
+                        )
+            finally:
+                connection.close()
+
+    def test_cap_select_runs_through_the_posting_attempts_door(self, target):
+        expected = _exec(
+            target["owner_stream"],
+            "SELECT coalesce(sum(count),0), count(*) FROM daily_post_counts",
+            fetch=True,
+        )
+        assert expected[0][0] > 0 and expected[0][1] > 0
+        assert (
+            _exec(target["ingress"], DOORS["fn_health_publish_attempts"][1], fetch=True)
+            == expected
+        )
+
+    @pytest.mark.parametrize("login", LOGINS)
+    def test_outbox_select_runs_through_the_pending_door(self, target, login):
+        expected = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM channel_outbox WHERE state='pending'",
+        )
+        assert expected > 0
+        assert (
+            _scalar(_login_dsn(target, login), DOORS["fn_health_outbox_pending"][1])
+            == expected
+        )
+
+    def test_maintenance_probes_read_both_tenants_and_update_jobs_without_owner_bypass(
+        self, target
+    ):
+        before = _exec(
+            target["owner_stream"],
+            "SELECT id, updated_at FROM jobs ORDER BY id",
+            fetch=True,
+        )
+        connection = psycopg2.connect(target["owner_stream"])
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL ROLE svc_maintenance")
+                cursor.execute(
+                    "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user"
+                )
+                assert cursor.fetchone() == ("svc_maintenance", False, False)
+                for table in ("jobs", "provider_operations"):
+                    cursor.execute(
+                        "SELECT relowner=current_user::regrole FROM pg_class WHERE oid=%s::regclass",
+                        (f"public.{table}",),
+                    )
+                    assert cursor.fetchone() == (False,)
+                    cursor.execute(
+                        f"SELECT DISTINCT workspace_id FROM public.{table} WHERE workspace_id=ANY(%s::uuid[])",
+                        ([str(target["a"]["ws"]), str(target["b"]["ws"])],),
+                    )
+                    assert {str(row[0]) for row in cursor.fetchall()} == {
+                        str(target["a"]["ws"]),
+                        str(target["b"]["ws"]),
+                    }
+                cursor.execute(
+                    "UPDATE jobs SET locked_by=locked_by WHERE workspace_id=%s RETURNING id",
+                    (str(target["a"]["ws"]),),
+                )
+                assert cursor.fetchall(), "maintenance UPDATE must touch a seeded job"
+        finally:
+            connection.rollback()
+            connection.close()
+        assert (
+            _exec(
+                target["owner_stream"],
+                "SELECT id, updated_at FROM jobs ORDER BY id",
+                fetch=True,
+            )
+            == before
+        )
 
 
 class TestAbsentContextAndConnectionReuse:
@@ -1370,17 +1530,33 @@ class TestDoorsAreExercisedAndExclusive:
         )
         assert plan_jobs >= 2, "the tick's enqueues must be visible in jobs"
 
-    def test_fn_retention_batch_reaps_the_aged_succeeded_job(self, target):
-        world = _exec(
+    def test_fn_retention_batch_reaps_only_aged_rate_counters(self, target):
+        jobs_before = _exec(
             target["owner_stream"],
-            "SELECT kind, lane, state, now() - updated_at > interval '90 days'"
-            " FROM jobs ORDER BY created_at",
+            "SELECT id, state, updated_at FROM jobs WHERE serialization_key LIKE 'old:%'",
             fetch=True,
         )
+        assert len(jobs_before) == 1
+        _exec(
+            target["owner_stream"],
+            "INSERT INTO rate_counters (scope, key, window_start, count) VALUES"
+            " ('ws_admission', 'retention-probe-old', now() - interval '365 days', 1),"
+            " ('ws_admission', 'retention-probe-recent', now(), 1)",
+        )
         reaped = _exec(target["worker"], DOORS["fn_retention_batch"][1], fetch=True)
-        assert reaped == [(1,)], (
-            f"exactly the year-old succeeded job should age out, got {reaped};"
-            f" jobs world before sweep: {world}"
+        assert reaped == [(1,)]
+        assert _exec(
+            target["owner_stream"],
+            "SELECT key FROM rate_counters WHERE scope = 'ws_admission' AND key LIKE 'retention-probe-%'",
+            fetch=True,
+        ) == [("retention-probe-recent",)]
+        assert (
+            _exec(
+                target["owner_stream"],
+                "SELECT id, state, updated_at FROM jobs WHERE serialization_key LIKE 'old:%'",
+                fetch=True,
+            )
+            == jobs_before
         )
 
     def test_fn_reconciler_sweep_finds_nothing_ambiguous_here(self, target):
@@ -1464,7 +1640,7 @@ class TestDoorsAreExercisedAndExclusive:
 
     def test_the_membership_doors_name_pg_temp_last_on_their_path(self, target):
         """Both membership doors run under `search_path = pg_catalog,
-        public, pg_temp` — the join door by 102's ALTER, the remove door by the
+        public, pg_temp` — the join door by workspace_membership removal checks' ALTER, the remove door by the
         SET clause its CREATE OR REPLACE restates (a replace without one would
         clear it). Read off `proconfig`, the setting each door runs under."""
         rows = _exec(
@@ -1489,7 +1665,7 @@ class TestDoorsAreExercisedAndExclusive:
         permitted, call = DOORS[door]
         allowed = {permitted} if isinstance(permitted, str) else set(permitted)
         others = {"svc_ingress", "svc_worker"} - allowed
-        # 081's three backpressure doors are granted to BOTH logins — the one
+        # fleet health functions' three backpressure doors are granted to BOTH logins — the one
         # shape with no other login to deny; their denial to PUBLIC is the
         # catalog test's (grantees == exactly the permitted set).
         assert others or door.startswith("fn_health_"), door
@@ -1591,7 +1767,7 @@ class TestDoorsAreExercisedAndExclusive:
     def test_every_definer_function_pins_its_search_path_with_pg_temp_last(
         self, target
     ):
-        """The census of `public`'s SECURITY DEFINER functions (103): each one
+        """The census of `public`'s SECURITY DEFINER functions (SECURITY DEFINER search_path): each one
         pins `search_path = pg_catalog, public, pg_temp`, with pg_temp named
         and last, as PostgreSQL's guidance for definer functions asks. A door
         added later carries the path in its own CREATE, or this names it."""
@@ -1689,22 +1865,33 @@ class TestDirectPathsAreShut:
         for role in sorted(set(SERVICE_ROLES) - {"svc_worker"}):
             with pytest.raises(psycopg2.errors.InsufficientPrivilege):
                 _exec(target["worker"], f'SET ROLE "{role}"')
+        version = int(_scalar(target["owner_stream"], "SHOW server_version_num"))
+        options = ", m.inherit_option, m.set_option" if version >= 160000 else ""
         rows = _exec(
             target["owner_stream"],
-            "SELECT r.rolname, g.rolname FROM pg_auth_members m"
+            "SELECT r.rolname, g.rolname, m.admin_option"
+            + options
+            + " FROM pg_auth_members m"
             " JOIN pg_roles r ON r.oid = m.roleid"
             " JOIN pg_roles g ON g.oid = m.member"
             " WHERE r.rolname LIKE 'svc_%' OR g.rolname LIKE 'svc_%'",
             fetch=True,
         )
-        # The bootstrap's two documented grants, exactly, and nothing else:
-        # door-owner roles to the window actor (function-ownership machinery)
-        # and the transient owner self-grant (revoked by the stand-down a
-        # test world never runs). The runtime logins appear on neither side
-        # of any membership.
-        assert set(rows) == {(r, "svc_migration") for r in NOLOGIN_ROLES} | {
+        creator_grants = {
+            row
+            for row in rows
+            if version >= 160000
+            and row[1] == owner_actor
+            and row[2:] == (True, False, False)
+        }
+        if version >= 160000:
+            assert {row[0] for row in creator_grants} == set(SERVICE_ROLES)
+        # PostgreSQL's creator grants carry administration without inheritance
+        # or SET ROLE. The schema's memberships provide the operational access.
+        memberships = {(row[0], row[1]) for row in rows if row not in creator_grants}
+        assert memberships == {(r, "svc_migration") for r in NOLOGIN_ROLES} | {
             ("svc_migration", owner_actor)
-        }, f"unexpected service-role memberships: {sorted(rows)}"
+        }, f"unexpected service-role memberships: {sorted(memberships)}"
 
 
 class TestAuthPlaneMaintenanceOnlyThroughTheSweep:
@@ -1727,7 +1914,7 @@ class TestAuthPlaneMaintenanceOnlyThroughTheSweep:
             "        ('f4-live', %s, now() + interval '2 days')",
             params=(str(user), str(user)),
         )
-        # 077: a token has exactly one subject — this one is the user's.
+        # `ck_service_token_subject`: a token has exactly one subject — this one is the user's.
         _exec(
             target["ingress"],
             "INSERT INTO service_tokens (name, token_hash, role, user_id)"

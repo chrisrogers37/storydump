@@ -4,7 +4,7 @@ import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { botName } from "./telegram-bot";
 
 /**
- * Linking a Telegram identity, browser side (#1172; #1157).
+ * Linking a Telegram identity, browser side.
  *
  * The API mints a one-shot `t.me/<bot>?start=link-<state>` link for the
  * signed-in user (`POST /api/v1/me/telegram/link`); tapping it in Telegram
@@ -52,7 +52,7 @@ export type TelegramLinkResult =
   | { ok: false; error: string; status: number };
 
 /** Ask for a fresh link. Returns it rather than opening it: the caller owns
- *  the navigation, so a refusal renders instead of a page that did nothing. */
+ * the navigation, so a refusal renders instead of a page that did nothing. */
 export async function requestTelegramLink(): Promise<TelegramLinkResult> {
   const result = await callBff("/api/me/telegram/link", postJson({}));
   if (!result.ok) {
@@ -92,7 +92,7 @@ export type TelegramUnlinkResult =
   | { ok: false; error: string; status: number };
 
 /**
- * Remove the signed-in user's own Telegram identity (099). Nothing
+ * Remove the signed-in user's own Telegram identity (`fn_identity_unlink`). Nothing
  * linked answers ok too: the account ends with no Telegram either way.
  */
 export async function unlinkTelegram(): Promise<TelegramUnlinkResult> {

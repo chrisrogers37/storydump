@@ -5,11 +5,9 @@ boots, so it imports nothing from ``src`` (a predeploy step must not depend on
 the application's import closure or its configuration) and depends only on the
 standard library plus psycopg2. The database is addressed by ``DATABASE_URL`` or ``--database-url``.
 
-The ledger lives in a dedicated ``runner`` schema — never ``public`` — because
-the schema-move file renames ``public`` wholesale, and a ledger living there
-would ride into ``legacy`` mid-run, severing the migration history from the
-very invocation writing it. The ``runner`` schema is invariant across every
-schema-level operation, identically in CI and production.
+The ledger lives in the dedicated `runner` schema, separate from application
+objects in `public`. Schema operations therefore preserve the ledger and the
+history that the current runner invocation records.
 
 Conventions a migration file may carry (this list is the contract; the ops
 runbook cites it):
@@ -25,32 +23,28 @@ runbook cites it):
   postconditions also needs no adoption-manifest entry: its adoption probe
   derives from them (one predicate, one home).
 - ``-- runner:reapply-safe`` — for idempotent data migrations whose applied
-  state is undecidable in place (048's class): adopt may leave them pending
+  state is undecidable in place: adopt may leave them pending
   below an adopted head without calling the chain incoherent, and apply
   re-runs them there.
-- ``-- runner:schema-move`` — the one file that renames ``public`` to
-  ``legacy`` and re-creates an empty ``public``. It is the
-  corpus's **lineage boundary**: below it is the legacy lineage, above it the
-  target schema. Exactly one file may carry it. Callers needing the boundary
-  call ``legacy_lineage_max`` and let the marker locate it — the boundary is
-  never written down as a version, because a written-down number is a second
-  enumeration that drifts from the file it describes.
+``000_initial.sql`` is empty and is never executed. A database built from the
+schema code (``src.models.target.ddl``) enters the ledger at it through
+``adopt``, whose probe for it is in the adoption manifest; every later file
+applies on top of it.
 
 The three doors that WRITE from the corpus — ``discover_migrations``,
-``apply_pending`` and ``adopt`` — take an optional ``max_version``: a bound
-callers use to replay one *lineage* rather than the whole tree. ``status``
-deliberately does not: an operator asking what is pending wants the whole
-answer, target lineage included. Production never passes a bound either — a
-deploy is one invocation in file order.
+``apply_pending`` and ``adopt`` — take an optional ``max_version``, a bound for
+a caller that replays the tree only up to a version. ``status`` deliberately
+does not: an operator asking what is pending wants the whole answer.
+Production never passes a bound.
 
 A file's execution mode is a declared discovery-time fact — ``wrapped`` (the
 runner owns one transaction, ledger row inside it), ``self-managed`` (the file
 carries its own BEGIN/COMMIT, the legacy corpus shape, run with psql
 semantics), or ``no-transaction`` — visible in ``status`` output. New files
-(051+) should be ``wrapped``.
+use ``wrapped`` unless their SQL requires another mode.
 
 A wrapped file's lock waits are bounded, and a failure on one is tried again
-(``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``; #1515). Self-managed and
+(``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``). Self-managed and
 no-transaction files run without the bound: their statements and their
 transactions are their own.
 """
@@ -79,14 +73,25 @@ RUNNER_LOCK_KEY = 712_050_2026
 #: The corpus, relative to this file — the home for the path the suites import.
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
-#: The longest a wrapped file waits for any one lock (#1515). A file that
+#: The initial marker's version: ``000_initial.sql``, empty, recorded by
+#: ``adopt`` on a database built from the schema code and never executed.
+INITIAL_VERSION = 0
+RETIRED_CHAIN_LAST_VERSION = 149
+# The retired files that overlap the two pending versions. Their identities
+# remain evidence of retired history even when a current initial row is mixed in.
+RETIRED_COLLIDING_CHECKSUMS = {
+    1: "f75f8a5b999673786d5bc79fca214a6bc7cc7360104fc6ab7703d440f03767c1",
+    2: "8e2d5502c1f1ba613c598982824f9588d94f8a3a7fc167df36f310d8cfc136bc",
+}
+
+#: The longest a wrapped file waits for any one lock. A file that
 #: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
 #: and every later statement on the table, readers included, queues behind
 #: it. Bounded, the file fails with SQLSTATE 55P03 instead, having stalled the
 #: table for at most this long: under the app's own lock bound (the tap
 #: path's 2 s), so a statement queued behind it does not fail on its own. A
-#: failed apply aborts the deploy with the old version serving (078's
-#: header), so failing fast on a lock is safe.
+#: failed apply aborts the deploy with the old version serving, so a lock
+#: timeout preserves the running service.
 LOCK_TIMEOUT = "1s"
 
 #: The pauses before each new attempt at a wrapped file that failed on its
@@ -99,16 +104,10 @@ LOCK_RETRY_DELAYS_S = (1.0, 2.0, 4.0, 8.0)
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
 REAPPLY_SAFE_MARKER = "-- runner:reapply-safe"
-SCHEMA_MOVE_MARKER = "-- runner:schema-move"
-#: The file acts on `legacy`/`archive` and is NOT advertised DDL: the prefix
-#: ratchet (`scripts/advertised_ddl.py::target_lineage_files`) leaves it out of
-#: the lineage it diffs against the stream; the runner applies it like any
-#: other.
-UNADVERTISED_MARKER = "-- runner:unadvertised"
-#: A file the deploy must never run by itself: `apply` skips it where it
-#: stands and reports it as OWED,
-#: exit 0; `apply --manual <version>` applies it by name, below the head
-#: if need be, exactly like any file — ledger row, postconditions, lock.
+#: A file the deploy must never run by itself: `apply` skips it where it stands
+#: and reports it as OWED, exit 0; `apply --manual <version>` applies it by
+#: name, below the head if need be, exactly like any file — ledger row,
+#: postconditions, lock.
 MANUAL_MARKER = "-- runner:manual"
 
 #: Every `-- runner:<word>` the runner knows. A line that looks like a marker
@@ -119,8 +118,6 @@ KNOWN_MARKERS = (
     NO_TRANSACTION_MARKER,
     POSTCONDITION_MARKER,
     REAPPLY_SAFE_MARKER,
-    SCHEMA_MOVE_MARKER,
-    UNADVERTISED_MARKER,
     MANUAL_MARKER,
 )
 #: The marker grammar, matched ONCE per line and case-insensitively on the
@@ -133,10 +130,10 @@ _KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
 #: in a frame the grammar does not read — three dashes, a doubled `-- --` (an
 #: editor's "comment this line" on a comment), a `/* */` or `#` frame, a
 #: missing colon or a dash or `=` in its place, a marker after code on the
-#: same line. Each of these once
-#: read as PROSE, which for a `manual` file is the whole hazard: the next
-#: predeploy applies it. Refused at discovery instead. A mention mid-sentence
-#: (`-- the runner:schema-move marker is what …`) is not a near miss: the
+#: same line. Discovery refuses these forms because treating a malformed
+#: `manual` marker as prose would let a predeploy apply a gated file.
+#: A mention mid-sentence
+#: (`-- the runner:manual marker is what …`) is not a near miss: the
 #: opener is followed by a word, not by `runner`.
 _NEAR_MISS_RE = re.compile(
     r"(?:^|\s)(?:-{2,}|/\*|#)\s*runner\b\s*[:=\-]?\s*("
@@ -175,8 +172,6 @@ class Migration:
     reapply_safe: bool
     postconditions: tuple
     execution_mode: str  # wrapped | self-managed | no-transaction
-    schema_move: bool
-    unadvertised: bool
     manual: bool
 
     @property
@@ -206,8 +201,6 @@ def _parse_markers(text: str):
     flags = {
         "no-transaction": False,
         "reapply-safe": False,
-        "schema-move": False,
-        "unadvertised": False,
         "manual": False,
     }
     postconditions = []
@@ -245,8 +238,6 @@ def _parse_markers(text: str):
     return (
         flags["no-transaction"],
         flags["reapply-safe"],
-        flags["schema-move"],
-        flags["unadvertised"],
         flags["manual"],
         tuple(postconditions),
     )
@@ -274,9 +265,11 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
     Reads, checksums, splits, and mode-classifies each file exactly once —
     every later stage works from the returned records.
 
-    ``max_version`` bounds the result to files at or below that version. It is
-    how a caller replays one *lineage* out of a tree that holds two (see
-    ``legacy_lineage_max``); production never passes it.
+    ``max_version`` bounds the result to files at or below that version;
+    production never passes it.
+
+    ``000_initial.sql`` must be empty: it marks the schema built from code, so
+    a byte in it is refused here, before any caller can apply it.
     """
     migrations_dir = Path(migrations_dir)
     by_version = {}
@@ -291,6 +284,11 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
                 f" {by_version[version].path.name} and {path.name}"
             )
         raw = path.read_bytes()
+        if version == INITIAL_VERSION and raw:
+            raise MigrationRunnerError(
+                f"{version:03d} ({path.name}) must be empty: it marks the schema"
+                " built from code and holds no SQL"
+            )
         try:
             # `utf-8-sig`: a byte-order mark at the start of the file is dropped,
             # so a marker on line 1 is still at the start of its line; the
@@ -314,8 +312,6 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             (
                 no_transaction,
                 reapply_safe,
-                schema_move,
-                unadvertised,
                 manual,
                 postconditions,
             ) = _parse_markers(sql)
@@ -332,8 +328,6 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             reapply_safe=reapply_safe,
             postconditions=postconditions,
             execution_mode=_execution_mode(no_transaction, statements),
-            schema_move=schema_move,
-            unadvertised=unadvertised,
             manual=manual,
         )
     return _within([by_version[v] for v in sorted(by_version)], max_version)
@@ -346,55 +340,6 @@ def _within(migrations, max_version: int | None):
     if max_version is None:
         return list(migrations)
     return [m for m in migrations if m.version <= max_version]
-
-
-def schema_move_migration(migrations_dir):
-    """The corpus's one lineage-boundary file, located by its own marker.
-
-    The single home of the "find the boundary" rule, so the three questions
-    callers actually ask — which file is it, what is below it, what does it
-    assert — cannot answer from three different scans.
-
-    Loud in both directions. **No move file is a hard failure, not an
-    unbounded pass**: callers are asking "where does the legacy lineage end",
-    and answering "nowhere, take all of it" when the boundary cannot be found
-    hands back the whole target schema under the legacy one's name — absence of
-    evidence read as evidence of absence, on a door that licenses a replay.
-    Two move files is a hard failure because the corpus then has no single
-    boundary to derive.
-
-    Cardinality is checked here rather than in ``discover_migrations`` so that
-    a corpus is refused to the caller that needs a boundary, not to every
-    caller that merely reads files. Moving it into discovery would be a
-    stronger invariant; it is also a behavioural change to ``apply_pending``
-    and ``adopt``, so it belongs to whoever decides that deliberately.
-    """
-    moves = [m for m in discover_migrations(migrations_dir) if m.schema_move]
-    if not moves:
-        raise MigrationRunnerError(
-            f"no migration in {migrations_dir} carries {SCHEMA_MOVE_MARKER!r} —"
-            " the legacy/target lineage boundary is derived from that marker"
-            " and cannot be guessed"
-        )
-    if len(moves) > 1:
-        names = ", ".join(m.path.name for m in moves)
-        raise MigrationRunnerError(
-            f"{len(moves)} migrations carry {SCHEMA_MOVE_MARKER!r} ({names}) —"
-            " the corpus has exactly one lineage boundary"
-        )
-    return moves[0]
-
-
-def legacy_lineage_max(migrations_dir) -> int:
-    """The last version of the LEGACY lineage — one below the schema move.
-
-    Derived from the marker, never declared: the move file says which file it
-    is, so renumbering it moves the boundary with it and there is no second
-    inventory to keep in step. That is the same property `TargetBase` rests on
-    (#746) — a check whose input is derived cannot drift from
-    the artifact it describes, and a check whose input is written down will.
-    """
-    return schema_move_migration(migrations_dir).version - 1
 
 
 def split_statements(sql: str) -> list:
@@ -432,12 +377,10 @@ def _acquire_lock(conn) -> None:
         cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
 
 
-#: The API reads the ledger for `storydump posture`: the grant is the
-#: runner's own, made where the ledger is made and
-#: re-asserted on every run, because the advertised stream replays into a
-#: database that has no `runner` schema — a GRANT there would fail every
-#: gate — and because the role may not exist yet the first time the ledger
-#: is created (057 creates it). Idempotent; guarded on the role.
+#: The API reads the ledger for `storydump posture`. The runner creates the
+#: ledger independently of the application schema and grants read access on
+#: every run when `svc_ingress` exists. Schema construction creates the role
+#: in `ddl/01_roles.sql`; the conditional also supports an earlier ledger run.
 LEDGER_GRANT_SQL = """
 DO $$
 BEGIN
@@ -462,6 +405,48 @@ def _ledger_rows(conn) -> dict:
         return {version: (checksum, status) for version, checksum, status in cur}
 
 
+def _retired_history_issue(ledger, migrations):
+    """Keep retired or mixed history out of the replacement version namespace."""
+    by_version = {m.version: m for m in migrations}
+    if not ledger or INITIAL_VERSION not in by_version:
+        return None
+    has_unknown = any(version not in by_version for version in ledger)
+    lacks_initial = INITIAL_VERSION not in ledger
+    has_collision = any(
+        version in by_version and checksum != by_version[version].checksum
+        for version, (checksum, _status) in ledger.items()
+    )
+    known_retired_collision = any(
+        RETIRED_COLLIDING_CHECKSUMS.get(version) == checksum
+        for version, (checksum, _status) in ledger.items()
+    )
+    replacement_corpus = {
+        "000_initial.sql",
+        "001_catalog_text.sql",
+        "002_drop_archive_snapshots.sql",
+    } <= {migration.path.name for migration in migrations}
+    if known_retired_collision or (
+        replacement_corpus and lacks_initial and (has_unknown or has_collision)
+    ):
+        return (
+            "the ledger holds retired or mixed migration history; run"
+            " `migration_runner convert-ledger --confirm-legacy-ledger` as the"
+            " database owner; conversion refuses current chain rows and"
+            f" versions above {RETIRED_CHAIN_LAST_VERSION}"
+        )
+    return None
+
+
+def _refuse_retired_history(conn, migrations):
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('runner.schema_migrations')")
+        if cur.fetchone()[0] is None:
+            return
+    issue = _retired_history_issue(_ledger_rows(conn), migrations)
+    if issue:
+        raise MigrationRunnerError(issue)
+
+
 @contextmanager
 def _transaction(conn):
     """One explicit transaction on an otherwise-autocommit connection."""
@@ -482,6 +467,9 @@ def ledger_discrepancies(ledger: dict, migrations: list) -> list:
     version must still exist in-tree with its recorded checksum. ``status``
     reports this list; ``apply``/``adopt`` refuse on it — the two doors
     cannot disagree because they share it."""
+    retired = _retired_history_issue(ledger, migrations)
+    if retired:
+        return [(min(ledger), retired)]
     by_version = {m.version: m for m in migrations}
     issues = []
     for version, (checksum, _status) in sorted(ledger.items()):
@@ -539,7 +527,7 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def _apply_one(conn, migration) -> None:
+def _apply_one(conn, migration, *, confirm_archive_backup: bool = False) -> None:
     started = time.monotonic()
     if migration.execution_mode == "wrapped":
         # One migration = one transaction, ledger row included: applied and
@@ -548,6 +536,12 @@ def _apply_one(conn, migration) -> None:
             # Bounded lock waits; `true` keeps the setting local to this
             # transaction (SET LOCAL), as the tap path's is.
             cur.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_TIMEOUT,))
+            # Set inside this transaction on the runner's own connection. An
+            # ambient session setting cannot replace the operator's flag.
+            cur.execute(
+                "SELECT set_config('app.archive_snapshot_backup_confirmed', %s, true)",
+                ("on" if confirm_archive_backup else "off",),
+            )
             cur.execute(migration.sql)
             _run_postconditions(cur, migration)
             _record(cur, migration, _elapsed_ms(started), "applied")
@@ -568,16 +562,17 @@ def _apply_one(conn, migration) -> None:
             raise
 
 
-def _apply_guarded(conn, migration) -> None:
+def _apply_guarded(conn, migration, *, confirm_archive_backup: bool = False) -> None:
     """`_apply_one`, with a database failure named by the file — the one
     wrap both doors share. A wrapped file is one transaction, so one that
     failed on its lock wait alone is tried again after each pause in
     `LOCK_RETRY_DELAYS_S`; the last attempt's failure is final."""
     pauses = LOCK_RETRY_DELAYS_S if migration.execution_mode == "wrapped" else ()
+    confirmation = {"confirm_archive_backup": True} if confirm_archive_backup else {}
     try:
         for pause in pauses:
             try:
-                _apply_one(conn, migration)
+                _apply_one(conn, migration, **confirmation)
                 return
             except psycopg2.errors.LockNotAvailable:
                 print(
@@ -586,7 +581,7 @@ def _apply_guarded(conn, migration) -> None:
                     file=sys.stderr,
                 )
                 time.sleep(pause)
-        _apply_one(conn, migration)
+        _apply_one(conn, migration, **confirmation)
     except MigrationRunnerError:
         raise
     except Exception as exc:
@@ -600,26 +595,36 @@ def apply_pending(
 ) -> ApplyReport:
     """Apply every pending migration in version order.
 
-    ``max_version`` replays one lineage out of the tree (``legacy_lineage_max``
-    derives the legacy one). Production leaves it unset — a deploy is a
-    single unbounded invocation in file order.
+    ``max_version`` stops the run at that version; production leaves it unset.
+
+    ``000_initial.sql`` is never applied: an unrecorded ``000`` is refused,
+    because the database it stands for is built from the schema code and
+    recorded with ``adopt``.
 
     A pending ``runner:manual`` file is OWED, not applied: it is left where it
     stands, reported on ``owed``, and exempt from the below-head rule — an
     ordinary file numbered above it applies as if it were not there. Its door
     is :func:`apply_manual`.
     """
-    migrations = discover_migrations(migrations_dir, max_version)
+    corpus = discover_migrations(migrations_dir)
+    migrations = _within(corpus, max_version)
     report = ApplyReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
         _verify_integrity(ledger, migrations)
 
         applied_head = max(ledger, default=0)
         pending = [m for m in migrations if m.version not in ledger]
+        for migration in pending:
+            if migration.version == INITIAL_VERSION:
+                raise MigrationRunnerError(
+                    f"{migration.label} is not recorded: build the schema from"
+                    " code and record it with `adopt`; it is never applied"
+                )
         report.owed = [m for m in pending if m.manual]
         pending = [m for m in pending if not m.manual]
         for migration in pending:
@@ -639,7 +644,9 @@ def apply_pending(
     return report
 
 
-def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
+def apply_manual(
+    dsn: str, migrations_dir, version: int, *, confirm_archive_backup: bool = False
+) -> ApplyReport:
     """Apply ONE gated file by version — the operator's door, never a deploy's.
 
     The file must carry ``runner:manual`` (an ordinary pending file is
@@ -653,7 +660,13 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
     an ORDINARY file still pending below it refuses the door: the tree the
     gated file was written against is the one with everything before it
     applied, so `apply` runs first.
+
+    ``confirm_archive_backup`` acknowledges that the sixteen snapshot tables
+    have been exported or backed up. It is accepted only for wrapped 002 and
+    reaches its SQL as a transaction-local setting on this runner connection.
     """
+    if confirm_archive_backup and version != 2:
+        raise MigrationRunnerError("archive backup confirmation requires --manual 002")
     migrations = discover_migrations(migrations_dir)
     by_version = {m.version: m for m in migrations}
     migration = by_version.get(version)
@@ -666,10 +679,13 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
             f"{migration.label} carries no runner:manual directive — it is"
             " `apply`'s to run in order; --manual is the door for gated files only"
         )
+    if confirm_archive_backup and migration.execution_mode != "wrapped":
+        raise MigrationRunnerError("archive backup confirmation requires wrapped 002")
     report = ApplyReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, migrations)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
         _verify_integrity(ledger, migrations)
@@ -688,7 +704,7 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
                 f"{migration.label} cannot run over a pending ordinary file below"
                 f" it ({', '.join(below)}); run `apply` first"
             )
-        _apply_guarded(conn, migration)
+        _apply_guarded(conn, migration, confirm_archive_backup=confirm_archive_backup)
         report.applied.append(migration)
     finally:
         conn.close()
@@ -716,13 +732,14 @@ def _load_manifest(manifest_path, window, corpus):
       the probe derives from them, so the predicate has one home.
 
     **The two checks below ask different questions and take different lists,
-    and conflating them is what made a bounded adopt lie** (#746). One
-    list serving both looks harmless until a bound exists:
+    and conflating them makes a bounded adopt lie.** One list serving both
+    looks harmless until a bound exists:
 
     - *unpaired* is a **window** question — "does everything I am about to
       decide on have a probe?" Adopt decides nothing about files outside the
-      window, so demanding evidence for them would fail a legacy-lineage adopt
-      because a *target* file lacks a probe: true, and about the wrong files.
+      window, so demanding evidence for them would fail a bounded adopt
+      because a file above the bound lacks a probe: true, and about the wrong
+      files.
     - *orphans* is a **corpus** question — "does every manifest key name a
       real file?" Asked against the window instead, every entry above the
       bound is reported as having *no migration file* when the file is right
@@ -780,6 +797,71 @@ def _load_manifest(manifest_path, window, corpus):
     return required_through, entries
 
 
+def _adoption_plan(conn, migrations, required_through, entries):
+    """Probe the current chain on a caller-owned connection before recording it."""
+    report = AdoptReport()
+    ledger = _ledger_rows(conn)
+    _verify_integrity(ledger, migrations)
+
+    report.already = [m for m in migrations if m.version in ledger]
+    candidates = [m for m in migrations if m.version not in ledger]
+
+    results = {}
+    asserted_versions = set()
+    with conn.cursor() as cur:
+        for migration in candidates:
+            kind, payload = entries[migration.version]
+            if kind == "asserted":
+                results[migration.version] = True
+                asserted_versions.add(migration.version)
+                continue
+            verdict = True
+            for probe in payload:
+                try:
+                    cur.execute(probe)
+                    row = cur.fetchone()
+                except Exception as exc:
+                    raise MigrationRunnerError(
+                        f"adoption probe for migration {migration.label}"
+                        f" errored — a broken probe is not evidence of"
+                        f" anything: {probe}: {exc}"
+                    ) from exc
+                if row is None or row[0] is not True:
+                    verdict = False
+                    break
+            results[migration.version] = verdict
+
+    for migration in candidates:
+        if migration.version <= required_through and not results[migration.version]:
+            _kind, payload = entries[migration.version]
+            raise MigrationRunnerError(
+                f"migration {migration.label} is required applied"
+                f" (floor {required_through:03d}) but its probe returned"
+                f" false: {'; '.join(payload)}"
+            )
+
+    head = max((v for v, ok in results.items() if ok), default=0)
+    for migration in candidates:
+        if (
+            migration.version < head
+            and not results[migration.version]
+            and not migration.reapply_safe
+        ):
+            raise MigrationRunnerError(
+                f"incoherent chain: migration {migration.label} probes"
+                f" unapplied while later migration {head:03d} probes"
+                " applied — a gap under applied history needs a human"
+                " ruling (runner repair), not a guess"
+            )
+
+    to_record = [m for m in candidates if results[m.version]]
+    report.pending = [m for m in candidates if not results[m.version]]
+
+    report.adopted = [m for m in to_record if m.version not in asserted_versions]
+    report.asserted = [m for m in to_record if m.version in asserted_versions]
+    return report, to_record
+
+
 def adopt(
     dsn: str, migrations_dir, manifest_path, max_version: int | None = None
 ) -> AdoptReport:
@@ -787,84 +869,125 @@ def adopt(
 
     Probe-decided per file, never trusted: a probe returning true adopts the
     file; a false probe leaves it pending **only** when every later probe is
-    also false (a contiguous unapplied tail — the at-45 world). A false at or
+    also false (a contiguous unapplied tail). A false at or
     below the manifest's required floor, a false below a true (an incoherent
     chain), or a probe that errors is a hard failure naming the version — and
     a failed adopt writes nothing, so there is no partial adoption to reason
-    about. The legacy ``schema_version`` table is never read; its known
-    010/034 gaps are exactly the hazard this replaces.
+    about. Adoption reads schema probes and never trusts the legacy
+    `schema_version` table as evidence that a migration is present.
     """
     corpus = discover_migrations(migrations_dir)
     migrations = _within(corpus, max_version)
     required_through, entries = _load_manifest(manifest_path, migrations, corpus)
-    report = AdoptReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
-        ledger = _ledger_rows(conn)
-        _verify_integrity(ledger, migrations)
-
-        report.already = [m for m in migrations if m.version in ledger]
-        candidates = [m for m in migrations if m.version not in ledger]
-
-        results = {}
-        asserted_versions = set()
-        with conn.cursor() as cur:
-            for migration in candidates:
-                kind, payload = entries[migration.version]
-                if kind == "asserted":
-                    results[migration.version] = True
-                    asserted_versions.add(migration.version)
-                    continue
-                verdict = True
-                for probe in payload:
-                    try:
-                        cur.execute(probe)
-                        row = cur.fetchone()
-                    except Exception as exc:
-                        raise MigrationRunnerError(
-                            f"adoption probe for migration {migration.label}"
-                            f" errored — a broken probe is not evidence of"
-                            f" anything: {probe}: {exc}"
-                        ) from exc
-                    if row is None or row[0] is not True:
-                        verdict = False
-                        break
-                results[migration.version] = verdict
-
-        for migration in candidates:
-            if migration.version <= required_through and not results[migration.version]:
-                _kind, payload = entries[migration.version]
-                raise MigrationRunnerError(
-                    f"migration {migration.label} is required applied"
-                    f" (floor {required_through:03d}) but its probe returned"
-                    f" false: {'; '.join(payload)}"
-                )
-
-        head = max((v for v, ok in results.items() if ok), default=0)
-        for migration in candidates:
-            if (
-                migration.version < head
-                and not results[migration.version]
-                and not migration.reapply_safe
-            ):
-                raise MigrationRunnerError(
-                    f"incoherent chain: migration {migration.label} probes"
-                    f" unapplied while later migration {head:03d} probes"
-                    " applied — a gap under applied history needs a human"
-                    " ruling (runner repair), not a guess"
-                )
-
-        to_record = [m for m in candidates if results[m.version]]
-        report.pending = [m for m in candidates if not results[m.version]]
-
+        report, to_record = _adoption_plan(conn, migrations, required_through, entries)
         # All-or-nothing: every adoption row lands in one transaction.
         with _transaction(conn) as cur:
             for migration in to_record:
                 _record(cur, migration, None, "adopted")
-        report.adopted = [m for m in to_record if m.version not in asserted_versions]
-        report.asserted = [m for m in to_record if m.version in asserted_versions]
+    finally:
+        conn.close()
+    return report
+
+
+def convert_ledger(
+    dsn: str,
+    migrations_dir,
+    manifest_path,
+    *,
+    confirm_legacy_ledger: bool = False,
+) -> AdoptReport:
+    """Preserve the retired ledger and adopt the current chain atomically.
+
+    Only the database owner may confirm this conversion. The retired table
+    keeps its complete rows, ownership, and grants under its new name; it is
+    never dropped. The replacement ledger is populated only by adoption
+    probes, and a failed adoption rolls the rename back.
+    """
+    if not confirm_legacy_ledger:
+        raise MigrationRunnerError("convert-ledger requires --confirm-legacy-ledger")
+    migrations = discover_migrations(migrations_dir)
+    required_through, entries = _load_manifest(manifest_path, migrations, migrations)
+    checksums = {migration.checksum for migration in migrations}
+    filenames = {migration.path.name for migration in migrations}
+    conn = _connect(dsn)
+    try:
+        _acquire_lock(conn)
+        with _transaction(conn) as cur:
+            # A writer may commit while the table lock waits. Read its rows
+            # after that wait even when the DSN defaults to repeatable read.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            cur.execute(
+                "SELECT current_user = pg_get_userbyid(datdba) FROM pg_database"
+                " WHERE datname = current_database()"
+            )
+            if not cur.fetchone()[0]:
+                raise MigrationRunnerError(
+                    "convert-ledger must run as the database owner"
+                )
+            cur.execute("SELECT to_regclass('runner.schema_migrations_legacy')")
+            if cur.fetchone()[0] is not None:
+                raise MigrationRunnerError(
+                    "runner.schema_migrations_legacy already exists"
+                )
+            cur.execute("SELECT to_regclass('runner.schema_migrations')")
+            if cur.fetchone()[0] is None:
+                raise MigrationRunnerError(
+                    "convert-ledger requires an existing retired ledger"
+                )
+            cur.execute("LOCK TABLE runner.schema_migrations IN ACCESS EXCLUSIVE MODE")
+            cur.execute("SELECT * FROM runner.schema_migrations LIMIT 0")
+            columns = {column.name for column in cur.description}
+            required = {
+                "version",
+                "checksum",
+                "applied_at",
+                "applied_by",
+                "execution_ms",
+                "status",
+            }
+            if not required <= columns:
+                raise MigrationRunnerError(
+                    "convert-ledger refuses an unsupported ledger layout"
+                )
+            cur.execute("SELECT to_jsonb(m) FROM runner.schema_migrations m")
+            rows = [row[0] for row in cur.fetchall()]
+            if not rows:
+                raise MigrationRunnerError(
+                    "convert-ledger requires nonempty retired history"
+                )
+            if any(row["version"] > RETIRED_CHAIN_LAST_VERSION for row in rows):
+                raise MigrationRunnerError("convert-ledger refuses versions above 149")
+            if any(
+                row["version"] == INITIAL_VERSION
+                or row["checksum"] in checksums
+                or any(
+                    value in filenames
+                    for value in row.values()
+                    if isinstance(value, str)
+                )
+                for row in rows
+            ):
+                raise MigrationRunnerError(
+                    "convert-ledger refuses any row from the current chain"
+                )
+            if any(row["version"] < 1 for row in rows):
+                raise MigrationRunnerError(
+                    "convert-ledger requires retired versions 1 through 149"
+                )
+            cur.execute(
+                "ALTER TABLE runner.schema_migrations RENAME TO schema_migrations_legacy"
+            )
+            _ensure_ledger(conn)
+            report, to_record = _adoption_plan(
+                conn, migrations, required_through, entries
+            )
+            for migration in to_record:
+                _record(cur, migration, None, "adopted")
     finally:
         conn.close()
     return report
@@ -886,6 +1009,7 @@ def repair(dsn: str, migrations_dir, version: int, reason: str) -> None:
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, list(migrations.values()))
         _ensure_ledger(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -976,6 +1100,12 @@ def main(argv=None) -> int:
         help="apply ONE gated (runner:manual) file by version, below the head if"
         " need be — the operator's door, never a deploy's",
     )
+    apply_parser.add_argument(
+        "--confirm-archive-backup",
+        action="store_true",
+        help="confirm the sixteen archive snapshot tables were exported or backed up;"
+        " requires --manual 002",
+    )
     adopt_parser = subparsers.add_parser(
         "adopt",
         help="enter a pre-ledger live database into the ledger, probe-decided",
@@ -986,6 +1116,20 @@ def main(argv=None) -> int:
         help="adoption manifest path; defaults to"
         " <migrations-dir>/adoption_manifest.json",
     )
+    convert_parser = subparsers.add_parser(
+        "convert-ledger",
+        help="preserve the retired ledger and adopt the current chain as database owner",
+    )
+    convert_parser.add_argument(
+        "--confirm-legacy-ledger",
+        action="store_true",
+        help="confirm the existing ledger belongs to the retired migration chain",
+    )
+    convert_parser.add_argument(
+        "--manifest",
+        default=None,
+        help="adoption manifest path; defaults to <migrations-dir>/adoption_manifest.json",
+    )
     repair_parser = subparsers.add_parser(
         "repair", help="record a deliberate checksum exception"
     )
@@ -994,20 +1138,27 @@ def main(argv=None) -> int:
     subparsers.add_parser("status", help="read-only ledger vs tree report")
     parity_parser = subparsers.add_parser(
         "parity",
-        help="compare this database's public schema against another's",
+        help="compare the full catalog against a database built from schema code",
     )
     parity_parser.add_argument(
         "--against", required=True, help="connection string to compare against"
     )
 
     args = parser.parse_args(argv)
+    if args.command == "apply" and args.confirm_archive_backup and args.manual != 2:
+        parser.error("--confirm-archive-backup requires --manual 002")
     if not args.database_url:
         print("no database: set DATABASE_URL or pass --database-url", file=sys.stderr)
         return 2
 
     try:
         if args.command == "apply" and args.manual is not None:
-            report = apply_manual(args.database_url, args.migrations_dir, args.manual)
+            report = apply_manual(
+                args.database_url,
+                args.migrations_dir,
+                args.manual,
+                confirm_archive_backup=args.confirm_archive_backup,
+            )
             for migration in report.applied:
                 print(f"applied {migration.label}")
             print(f"{len(report.applied)} applied (--manual)")
@@ -1023,11 +1174,22 @@ def main(argv=None) -> int:
                     f"{len(report.owed)} owed (manual): waiting for an operator's"
                     " `apply --manual <version>`; a deploy never runs them"
                 )
-        elif args.command == "adopt":
+        elif args.command in ("adopt", "convert-ledger"):
             manifest = args.manifest or str(
                 Path(args.migrations_dir) / "adoption_manifest.json"
             )
-            adopt_report = adopt(args.database_url, args.migrations_dir, manifest)
+            if args.command == "convert-ledger":
+                adopt_report = convert_ledger(
+                    args.database_url,
+                    args.migrations_dir,
+                    manifest,
+                    confirm_legacy_ledger=args.confirm_legacy_ledger,
+                )
+                print(
+                    "preserved runner.schema_migrations as runner.schema_migrations_legacy"
+                )
+            else:
+                adopt_report = adopt(args.database_url, args.migrations_dir, manifest)
             for migration in adopt_report.adopted:
                 print(f"adopted {migration.label}")
             for migration in adopt_report.asserted:
@@ -1068,17 +1230,12 @@ def main(argv=None) -> int:
             if status_report.discrepancies:
                 return 1
         elif args.command == "parity":
-            from scripts.schema_parity import schema_diff, schema_signature
+            from scripts.schema_parity import print_comparison, schema_signature
 
-            diffs = schema_diff(
-                schema_signature(args.database_url),
-                schema_signature(args.against),
+            return print_comparison(
+                schema_signature(args.database_url, read_only=True),
+                schema_signature(args.against, read_only=True),
             )
-            for diff in diffs:
-                print(diff)
-            print(f"{len(diffs)} difference(s)")
-            if diffs:
-                return 1
     except MigrationRunnerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

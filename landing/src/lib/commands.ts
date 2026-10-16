@@ -1,7 +1,7 @@
 /**
  * The web adapter's command schema — one entry per command the dashboard offers.
  *
- * ## Why this exists (#1057 / #1063)
+ * ## Why this exists
  *
  * One route fronts every command, and commands differ in body: an intent
  * command carries `intent_id`, a settings write carries a settings object and
@@ -69,9 +69,9 @@ function intentCommand(): CommandSpec {
 }
 
 /**
- * A story's Cancel (#1413): keyed on the intent, like the CLI's
+ * A story's Cancel: keyed on the intent, like the CLI's
  * `cancel:<intent_id>`, so asking twice is one request. With `stop_repeat`
- * (#485) it also ends a repeating story's series, and is keyed apart, as
+ * it also ends a repeating story's series, and is keyed apart, as
  * `cancel:<intent_id>:stop_repeat` (the CLI's key too): a plain cancel and
  * one that ends the series are two requests, and under one key the second
  * would be refused as a conflict rather than answered.
@@ -98,7 +98,7 @@ function cancelCommand(): CommandSpec {
 }
 
 /**
- * A `repeat` field as a spec admits it (#485): absent, null (no rule, or the
+ * A `repeat` field as a spec admits it: absent, null (no rule, or the
  * clear), or an object riding as the person chose it, its shape and bounds
  * the port's to judge.
  */
@@ -115,7 +115,7 @@ function isRepeatField(value: unknown): boolean {
  * every click is exactly the double execution `Idempotency-Key` exists to
  * prevent. The server backstops a mistake rather than trusting this: it stores a
  * SHA256 fingerprint of the payload beside the key, so a key reused with
- * DIFFERENT content is refused rather than silently applied (`056`:219-222).
+ * DIFFERENT content is refused rather than silently applied (`machinery.py`:219-222).
  */
 type BodyResult =
   { ok: true; body: Record<string, unknown> } | { ok: false; error: string };
@@ -191,8 +191,8 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   mark_posted: intentCommand(),
   skip: intentCommand(),
   reject: intentCommand(),
-  // A planned story's Cancel (#1413), and with `stop_repeat` the end of its
-  // series (#485).
+  // A planned story's Cancel, and with `stop_repeat` the end of its
+  // series.
   cancel: cancelCommand(),
   // The review card's resolutions.
   resolve_review: resolveReviewCommand(),
@@ -214,7 +214,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * The workspace's own name. The port's floor is `admin`, satisfied by an
    * owner.
    *
-   * `/welcome` tells people "You can rename it later" (#1152); this row is
+   * `/welcome` tells people "You can rename it later"; this row is
    * what keeps that promise.
    *
    * Shape only, as everywhere here: the port owns the length rule and does its
@@ -235,7 +235,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * end's half of an owner action that is explicit and confirmed; this is the
    * shape check that keeps an accidental empty POST from spending a round trip.
    *
-   * The executor is at the port (#1135); this row offers it (#1127).
+   * The executor is at the port; this row offers it.
    * Irreversible once the 30-day grace window closes.
    */
   offboard_workspace: submissionCommand((raw) => {
@@ -245,7 +245,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
 
   /**
    * The way back, inside the grace window. No body: the workspace is the URL
-   * and the deadline is the port's to enforce (#1185), not this file's to
+   * and the deadline is the port's to enforce, not this file's to
    * pre-judge.
    */
   restore_workspace: submissionCommand(() => ({ ok: true, body: {} })),
@@ -256,7 +256,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   resume_workspace: submissionCommand(() => ({ ok: true, body: {} })),
 
   /**
-   * Disconnect the WORKSPACE's Google Drive (069, #1165): the one grant is
+   * Disconnect the WORKSPACE's Google Drive (workspace Drive grant): the one grant is
    * revoked and every folder paused. No arguments — the grant is the
    * workspace's, so there is nothing to name.
    */
@@ -274,7 +274,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
-   * Invite a person by email (#1563). Only the address and the role are
+   * Invite a person by email. Only the address and the role are
    * forwarded: the web makes email invitations, so the Telegram arm's
    * `delivery_channel` and `invited_tg_user_id` never ride along. The port
    * owns what a valid address and an invitable role are; this checks only
@@ -364,7 +364,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
-   * Plan one item onto one account at a wall time (#1413):
+   * Plan one item onto one account at a wall time:
    * the Media Library's Schedule…. `local_at` is the date and time a person
    * picked, with no offset; the port reads it in the ACCOUNT's zone, so it
    * rides as typed.
@@ -373,7 +373,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * one the clocks skip, one past the horizon) and the lock rule, and refuses
    * each by name; a second copy of either here is one that could disagree.
    * `override_locks` is forwarded only when it is `true`, which is how the CLI
-   * sends it. A `repeat` rule (#485) is forwarded when it is an object.
+   * sends it. A `repeat` rule is forwarded when it is an object.
    */
   schedule_item: submissionCommand((raw) => {
     if (!isUuid(raw.ig_account_id)) {
@@ -402,7 +402,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
-   * Move a planned story to another wall time (#1413): the Queue's
+   * Move a planned story to another wall time: the Queue's
    * Reschedule…. The same row moves; its account cannot change. `local_at`
    * rides as typed, because the port reads it in the story's own zone.
    *
@@ -410,7 +410,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * it back is two acts, and an intent key would replay the first as the
    * second. The CLI mints a fresh key per run for the same reason.
    *
-   * It also sets a story's repeat rule, or clears it with `null` (#485): the
+   * It also sets a story's repeat rule, or clears it with `null`: the
    * Queue's Edit series and Stop repeating. A time, a rule or both; `null` is
    * forwarded explicitly, because it is the clear, never a missing rule.
    */
@@ -436,7 +436,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
-   * Give an item the link its stories ask a person to add by hand (#1413),
+   * Give an item the link its stories ask a person to add by hand,
    * or clear it with `null`: the Media Library's Link…. The link
    * belongs to the item, so every story of it shows the same one.
    *
@@ -463,13 +463,13 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
 
   /**
    * One folder's own approval position, or `null` for Workspace default
-   * (#1477): the Approvals card's folder select. An admin's, like
+   *: the Approvals card's folder select. An admin's, like
    * every position; the port holds the floor.
    *
    * Shape only, as everywhere here: a non-blank string, or `null`. The port
    * refuses a value outside the three positions by name, before it writes
    * (`set_source_approval`: `invalid_args`), and `ck_source_approval_mode`
-   * (110) bounds it again, so this keeps no copy of the three. `null` is
+   * (approval rules) bounds it again, so this keeps no copy of the three. `null` is
    * forwarded explicitly, as `set_item_link`'s clear is: a missing key is a
    * mistake, never Workspace default.
    *
@@ -488,7 +488,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
-   * An item's Auto-approve flag, on or off (#1477): the Media Library's
+   * An item's Auto-approve flag, on or off: the Media Library's
    * toggle, and the Telegram card's Configure. Any member's, because the flag
    * is a standing Approve.
    *

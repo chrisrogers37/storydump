@@ -1,4 +1,4 @@
-"""The calendar's upcoming read (#1634), as `svc_ingress` on the replayed schema.
+"""The calendar's upcoming read, as `svc_ingress` on the replayed schema.
 
 What only a database can say about `upcoming.upcoming`: that a predicted slot
 is one the clock will mint. The clock's side is measured apart from the read:
@@ -10,7 +10,7 @@ Covered: accounts in different time zones, a day the clocks change, an account
 with no posting hours of its own, a planned story and predicted slots on one
 day, the accounts and workspaces the clock does not post for, a cursor that is
 overdue, one far behind the range, and one off the grid, a repeating series'
-later occurrences (#485), another workspace's rows, and the bounds.
+later occurrences, another workspace's rows, and the bounds.
 
 Most ranges are fixed days in 2031, so no result depends on the day the suite
 runs: the read leaves out a slot whose time has come, and none of these has.
@@ -33,7 +33,7 @@ from tests.scripts.conftest import (
     as_user,
     in_tenant,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 from tests.scripts.test_ops_views_gate import _sql
@@ -76,7 +76,12 @@ def _daily(at: time) -> dict:
 
 
 #: A cadence as `fn_next_slot` takes it: (zone, start hour, end hour, posts per day).
-WS_DEFAULT = (NY, 14, 2, 3)  # what a workspace is born with (053), read in New York
+WS_DEFAULT = (
+    NY,
+    14,
+    2,
+    3,
+)  # what a workspace is born with (`identity_and_tenancy.py`), read in New York
 FOUR_A_DAY = (NY, 9, 21, 4)
 HOURLY = (NY, 0, 0, 24)
 
@@ -88,7 +93,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
@@ -156,7 +161,7 @@ def _story(
     world, ws: dict, account: dict, name: str, slot_at, *, origin="planned", **columns
 ) -> str:
     """A story for *account* at *slot_at* with a media item of its own, born
-    with *origin* (088 fixes it at birth). Returns its id."""
+    with *origin* (`post_intents.origin` fixes it at birth). Returns its id."""
     ((media,),) = _sql(
         world["stream"],
         "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
@@ -195,7 +200,7 @@ def _daily_story(
     **columns,
 ) -> str:
     """A planned story at *hour*:*minute* on *day* on *zone*'s wall clock,
-    repeating daily at that time (#485)."""
+    repeating daily at that time."""
     slot = _at(day, hour, minute, zone)
     return _story(
         world, ws, account, name, slot, **_daily(time(hour, minute)), **columns
@@ -205,7 +210,7 @@ def _daily_story(
 def _served(world, name: str) -> dict:
     """A workspace on New York time with the schedule a workspace is born
     with, one account the clock posts for, and one story planned for 10:30 on
-    JUNE, which repeats daily (#485)."""
+    JUNE, which repeats daily."""
     ws = _workspace(world, name, tz=NY)
     account = _account(
         world, ws, f"acct-{name}", cursor=_next_slot(world, EVE, WS_DEFAULT)
@@ -307,7 +312,7 @@ def _slots(rows, account: dict | None = None) -> list:
 
 
 def _projected_from(rows) -> set[str]:
-    """The stories a series' rows were projected from (#485), as text."""
+    """The stories a series' rows were projected from, as text."""
     return {str(row["intent_id"]) for row in rows}
 
 
@@ -822,7 +827,7 @@ class TestOneWorkspaceOnly:
         self._assert_only(asyncio.run(main()), mine)
 
 
-# --- a series' later occurrences (#485) ----------------------------------------------------
+# --- a series' later occurrences ----------------------------------------------------
 
 
 class TestARepeatingSeries:
@@ -885,7 +890,7 @@ class TestARepeatingSeries:
             "has_thumbnail",
             "thumbnail_version",
             "repeat",
-            # the Queue's projection, as on the planned list (#1644): None for
+            # the Queue's projection, as on the planned list: None for
             # a Drive story, the archive's origin for an archive one
             "provenance",
         )

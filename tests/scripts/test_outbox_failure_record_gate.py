@@ -1,4 +1,4 @@
-"""101 against PostgreSQL (#1482): the outbox's failure record and its doors.
+"""outbox failure records against PostgreSQL: the outbox's failure record and its doors.
 
 What only the database can say, each against the replayed schema as the
 production roles:
@@ -36,7 +36,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -53,7 +53,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chains = {

@@ -403,6 +403,7 @@ class _Conn:
         return _Result(self._row)
 
 
+@pytest.mark.integration
 class TestTheWorkerSessionsAreCoveredToo:
     """The two worker factories set the discipline flag as `begin()` does, and
     so does `email_sender.system_session`, which the API's invitation email
@@ -424,6 +425,12 @@ class TestTheWorkerSessionsAreCoveredToo:
     so arming this refuses a violation rather than breaking four production
     paths.
     """
+
+    @pytest.fixture(autouse=True)
+    def _require_db(self, setup_test_database):
+        """Use the session database and honor the suite's availability policy."""
+        if setup_test_database is None:
+            pytest.skip("Database not available - skipping integration test")
 
     async def _refuses_inside(self, opener):
         import httpx

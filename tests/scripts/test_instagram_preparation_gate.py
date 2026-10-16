@@ -907,7 +907,7 @@ async def test_posted_rule_archive_card_sends_text_outcome_without_selected_fetc
     assert result["state"] == "sent" and poller.sent == 1 and poller.deferred == 0
     assert len(sent) == 1 and sent[0][0].endswith("/sendMessage")
     assert card["outcome_text"] in sent[0][1]["text"]
-    # The settled card goes out with Configure alone (#1477).
+    # The settled card goes out with Configure alone.
     assert sent[0][1]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "⚙️ Configure", "callback_data": f"v1:cfg:{intent}"}]
@@ -995,12 +995,12 @@ async def test_claim_then_terminal_late_no_send_finishes_on_next_rerender(
     assert poller.sent == 1 and poller.deferred == 1 and len(calls) == 2
 
 
-async def _selected_discovery(lane_db, limit=2):
+async def _selected_discovery(world_db, limit=2):
     """Use the worker-only cross-tenant door, regardless of seed actor role."""
     from sqlalchemy.ext.asyncio import create_async_engine
     from tests.scripts.conftest import as_user, async_url
 
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT current_user")) == "svc_worker"
@@ -1033,7 +1033,7 @@ def _selected_discovery_chain(sync_conn):
 
 
 async def test_selected_discovery_drive_heads_cannot_fill_archive_batch(
-    archive_engine, origin, lane_db, sync_conn
+    archive_engine, origin, world_db, sync_conn
 ):
     from tests.scripts.conftest import seed_workspace_chain
 
@@ -1042,14 +1042,14 @@ async def test_selected_discovery_drive_heads_cannot_fill_archive_batch(
         for _ in range(3)
     ]
     src, item, intent = await selected(archive_engine, origin)
-    due = await _selected_discovery(lane_db)
+    due = await _selected_discovery(world_db)
     assert intent in due
     assert not due.intersection(str(h["intent"]) for h in heads)
     assert len(due) <= 2
 
 
 async def test_selected_discovery_ready_card_heads_cannot_fill_archive_batch(
-    archive_engine, origin, lane_db, sync_conn
+    archive_engine, origin, world_db, sync_conn
 ):
     from src.services.target import outbox
 
@@ -1088,7 +1088,7 @@ async def test_selected_discovery_ready_card_heads_cannot_fill_archive_batch(
             )
         heads.append(intent)
     src, item, newer = await selected(archive_engine, origin)
-    due = await _selected_discovery(lane_db)
+    due = await _selected_discovery(world_db)
     assert newer in due and not due.intersection(heads) and len(due) <= 2
 
 
@@ -1104,14 +1104,14 @@ async def test_selected_discovery_ready_card_heads_cannot_fill_archive_batch(
     ],
 )
 async def test_selected_discovery_partial_or_stale_bound_proof_remains_due(
-    archive_engine, origin, lane_db, sync_conn, change
+    archive_engine, origin, world_db, sync_conn, change
 ):
     src, item, intent = await selected(archive_engine, origin)
     prepared, calls = service(archive_engine, origin)
     await prepared.selected_prepare(
         engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
     )
-    assert intent not in await _selected_discovery(lane_db, 100)
+    assert intent not in await _selected_discovery(world_db, 100)
     if change == "generation":
         await foundation.ensure(archive_engine, origin, foundation.authorization())
     elif change == "reobserve":
@@ -1141,11 +1141,11 @@ async def test_selected_discovery_partial_or_stale_bound_proof_remains_due(
                     (origin["ws"], item.media_item_id),
                 )
         sync_conn.commit()
-    assert intent in await _selected_discovery(lane_db, 100)
+    assert intent in await _selected_discovery(world_db, 100)
 
 
 async def test_selected_discovery_epoch_only_renewal_does_not_repeat_byte_work(
-    archive_engine, origin, lane_db
+    archive_engine, origin, world_db
 ):
     src, item, intent = await selected(archive_engine, origin)
     prepared, calls = service(archive_engine, origin)
@@ -1160,7 +1160,7 @@ async def test_selected_discovery_epoch_only_renewal_does_not_repeat_byte_work(
             ),
             {"sid": src["source_id"]},
         )
-    assert intent not in await _selected_discovery(lane_db, 100)
+    assert intent not in await _selected_discovery(world_db, 100)
     assert (await proof(archive_engine, origin, intent))["capture_epoch"] == before[
         "capture_epoch"
     ]
@@ -1186,7 +1186,7 @@ async def test_selected_discovery_owner_has_only_required_archive_read_grants(
                 ),
                 {"table": table},
             )
-        # 144: the redaction door, which svc_maintenance owns, deletes the intent
+        # archive lifecycle cleanup: the redaction door, which svc_maintenance owns, deletes the intent
         # provenance of fenced generations; the assets stay read-only.
         delete = "SELECT has_table_privilege('svc_maintenance',:table,'DELETE')"
         assert await conn.scalar(text(delete), {"table": "instagram_intent_provenance"})

@@ -1,6 +1,6 @@
-"""The offboarding workflow against a real database (#1090).
+"""The offboarding workflow against a real database.
 
-`fn_offboard_finalize` (`059`) and the `offboard_workspace` job kind (`056`)
+`fn_offboard_finalize` (`04_functions.sql`) and the `offboard_workspace` job kind (`machinery.py`)
 run here end to end, so the load-bearing assertion is the happy path: it
 runs, the row goes, and the cascade takes the tenant's data with it.
 
@@ -43,7 +43,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -55,7 +55,7 @@ def off_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner_stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner_stream = build_world(db, owner_actor, admin_conn)
         yield {
             "owner_stream": owner_stream,
             "ingress": as_user(db, "svc_ingress"),
@@ -451,10 +451,10 @@ class TestTheWorkflow:
         )
         assert successor == (True,), "the finalizer is scheduled for the window's end"
 
-        # #1361: `_mint_successor` writes its own INSERT — a self-excluding,
+        # `_mint_successor` writes its own INSERT — a self-excluding,
         # kind-scoped successor mint at a computed `run_at`, which
         # `jobs.enqueue` does not model — and carries the lane's deadline
-        # (#1288) all the same, measured from `run_at`, NOT from `now()`.
+        # all the same, measured from `run_at`, NOT from `now()`.
         # Asserted as the exact interval rather than as `IS NOT NULL`, because
         # `IS NOT NULL` is satisfied by `now() + 6 h`, the failure this test
         # exists to catch: the finalizer is minted up to
@@ -596,7 +596,7 @@ class TestTheWorkflow:
         assert asyncio.run(_go()) == {"outcome": "already_finalized"}
 
     def test_a_refused_cancel_does_not_abort_the_rest_of_the_drain(self, off_db, ws):
-        """#1422: the drain promises "a refusal on one intent is recorded and the
+        """The drain promises "a refusal on one intent is recorded and the
         rest continue". A refusal is a Postgres error and aborts the
         transaction, so without a savepoint per row the NEXT cancel fails on
         the aborted transaction and the whole offboard fails with it.
@@ -620,7 +620,7 @@ class TestTheWorkflow:
         state = "SELECT state FROM post_intents WHERE id = %s"
         assert _one(off_db, state, (refused,))[0] == "approved"
         assert _one(off_db, state, (cancelled,))[0] == "cancelled"
-        # #1441: the refusal leaves a durable record, not only a log line.
+        # the refusal leaves a durable record, not only a log line.
         assert _refusals(off_db, ws, refused) == 1
 
     def test_a_refusals_record_survives_a_run_that_then_raises(self, off_db, ws):
@@ -637,7 +637,7 @@ class TestTheWorkflow:
 
 
 class TestTheDrainIsBoundedBySubtransactions:
-    """#1441: each cancel rides its own savepoint, and a backend caches 64
+    """Each cancel rides its own savepoint, and a backend caches 64
     subtransaction ids. A run that wrote in more would mark every other
     backend's snapshot suboverflowed until it ended."""
 
@@ -862,7 +862,7 @@ class TestTheTransitSeam:
 
 
 class TestTheRestore:
-    """The way back (#1127). The interlock tests are the load-bearing
+    """The way back. The interlock tests are the load-bearing
     ones: flipping the workspace back is the obvious half and the harmless
     half."""
 

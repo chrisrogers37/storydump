@@ -7,7 +7,7 @@ fixed-name `svc_*` roles are shared by every session reaching this cluster.
 
 The failure that leaves is the mirror of a false PASS (#758): tests that never
 run, reported green. This is a false FAIL —
-`roleless_db`'s **setup** drops all seven roles cluster-wide, unconditionally,
+`world_db`'s **setup** drops all seven roles cluster-wide, unconditionally,
 so a second session tears the roles out from under a first one that is actively
 using them, and each `DROP ROLE` can equally fail with
 `DependentObjectsStillExist` because the other session's database still holds
@@ -35,6 +35,9 @@ from tests.scripts.conftest import (
     lock_holder,
     maintenance_conn,
 )
+
+
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("admin_conn")]
 
 
 def _try_take(key: int) -> bool:

@@ -1,9 +1,9 @@
-"""The vocabulary module: the closed sets are the migrations' CHECK lists, the
+"""The vocabulary module: the closed sets are the models' CHECK lists, the
 command port re-exports them, every reason has a sentence in the CLI's own
 words, and the envelope checker refuses every malformed document.
 
-The CHECK lists are parsed from the migration files rather than typed twice:
-a value added to a migration without the module — or the reverse — fails
+The CHECK lists are read from the models' constraints rather than typed twice:
+a value added to a model's CHECK without the module — or the reverse — fails
 here instead of at a CLI that prints a state it has never heard of.
 """
 
@@ -14,91 +14,48 @@ import re
 from pathlib import Path
 
 import pytest
+from sqlalchemy import CheckConstraint
 
+from src.models.target import TargetBase
 from src.services.target import commands, vocabulary
 
-MIGRATIONS = Path(__file__).resolve().parents[4] / "scripts" / "migrations"
 
-
-def _check_values(migration: str, constraint: str) -> tuple[str, ...]:
-    text = (MIGRATIONS / migration).read_text()
-    match = re.search(
-        rf"CONSTRAINT {constraint}\s+CHECK\s*\(\s*\w+\s+IN\s*\(([^)]*)\)", text, re.S
-    )
-    assert match, f"{constraint} not found in {migration}"
+def _check_values(constraint: str) -> tuple[str, ...]:
+    """The values the model CHECK named *constraint* allows, in its order. The
+    constraint is one column `IN` a list of literals, and nothing else."""
+    found = [
+        c
+        for table in TargetBase.metadata.tables.values()
+        for c in table.constraints
+        if isinstance(c, CheckConstraint) and c.name == constraint
+    ]
+    assert len(found) == 1, f"{len(found)} model CHECK constraints named {constraint}"
+    text = str(found[0].sqltext)
+    match = re.fullmatch(r"\s*\w+\s+IN\s*\(([^)]*)\)\s*", text)
+    assert match, f"{constraint} is not one column IN a list: {text}"
     return tuple(re.findall(r"'([^']+)'", match.group(1)))
 
 
 class TestTheClosedSets:
     @pytest.mark.parametrize(
-        "values, migration, constraint",
+        "values, constraint",
         [
-            (
-                vocabulary.INTENT_ORIGINS,
-                "088_intent_origin_planned.sql",
-                "ck_intent_origin",
-            ),
-            (
-                vocabulary.APPROVAL_POSITIONS,
-                "110_approval_positions.sql",
-                "ck_ws_approval_mode",
-            ),
-            (
-                vocabulary.APPROVAL_POSITIONS,
-                "110_approval_positions.sql",
-                "ck_source_approval_mode",
-            ),
-            (
-                vocabulary.APPROVAL_RULES,
-                "110_approval_positions.sql",
-                "ck_intent_approval_rule",
-            ),
-            (
-                vocabulary.MEDIA_STATES,
-                "105_media_item_missing_and_last_listed.sql",
-                "ck_media_state",
-            ),
-            (
-                vocabulary.REPEAT_UNITS,
-                "116_intent_repeat.sql",
-                "ck_intent_repeat_unit",
-            ),
-            (
-                vocabulary.INTENT_STATES,
-                "055_intent_ledger_tables.sql",
-                "ck_intent_state",
-            ),
-            (
-                vocabulary.PUBLISH_STEPS,
-                "055_intent_ledger_tables.sql",
-                "ck_intent_step",
-            ),
-            (
-                vocabulary.AUDIT_ACTOR_KINDS,
-                "055_intent_ledger_tables.sql",
-                "ck_audit_actor",
-            ),
-            (
-                vocabulary.AUDIT_CHANNELS,
-                "055_intent_ledger_tables.sql",
-                "ck_audit_channel",
-            ),
-            (
-                vocabulary.TOKEN_ROLES,
-                "060_auth_plane_tables.sql",
-                "ck_service_token_role",
-            ),
-            (
-                vocabulary.OUTBOX_FAILURE_CLASSES,
-                "101_outbox_failure_record.sql",
-                "ck_outbox_failure_class",
-            ),
+            (vocabulary.INTENT_ORIGINS, "ck_intent_origin"),
+            (vocabulary.APPROVAL_POSITIONS, "ck_ws_approval_mode"),
+            (vocabulary.APPROVAL_POSITIONS, "ck_source_approval_mode"),
+            (vocabulary.APPROVAL_RULES, "ck_intent_approval_rule"),
+            (vocabulary.MEDIA_STATES, "ck_media_state"),
+            (vocabulary.REPEAT_UNITS, "ck_intent_repeat_unit"),
+            (vocabulary.INTENT_STATES, "ck_intent_state"),
+            (vocabulary.PUBLISH_STEPS, "ck_intent_step"),
+            (vocabulary.AUDIT_ACTOR_KINDS, "ck_audit_actor"),
+            (vocabulary.AUDIT_CHANNELS, "ck_audit_channel"),
+            (vocabulary.TOKEN_ROLES, "ck_service_token_role"),
+            (vocabulary.OUTBOX_FAILURE_CLASSES, "ck_outbox_failure_class"),
         ],
     )
-    def test_each_set_is_its_migrations_check_list_in_order(
-        self, values, migration, constraint
-    ):
-        assert values == _check_values(migration, constraint)
+    def test_each_set_is_its_check_list_in_order(self, values, constraint):
+        assert values == _check_values(constraint)
 
     def test_every_rule_has_its_label(self):
         """#1477: the by-line names each rule, and nothing else."""
@@ -115,9 +72,7 @@ class TestTheClosedSets:
         """#1413: a lock kind either blocks a planned story or warns of
         it, never both and never neither — a new kind in `ck_locks_kind` is a
         failing test until someone decides which."""
-        kinds = set(
-            _check_values("054_accounts_sources_media_tables.sql", "ck_locks_kind")
-        )
+        kinds = set(_check_values("ck_locks_kind"))
         blocking, warning = (
             set(vocabulary.BLOCKING_LOCKS),
             set(vocabulary.WARNING_LOCKS),
@@ -147,22 +102,16 @@ class TestTheClosedSets:
         assert set(vocabulary.MISSING_SENTENCES) == {"account", "item"}
         assert set(vocabulary.REPEAT_SENTENCES) == {"invalid", "off_day"}
 
-    def test_the_provider_names_are_the_migrations_check_lists(self):
+    def test_the_provider_names_are_the_check_lists(self):
         """One spelling of `"ig_login"` and `"gdrive"`, pinned against the
         DDL (#1325)."""
         assert vocabulary.PROVIDER_IG_LOGIN == "ig_login"
         assert vocabulary.PROVIDER_GDRIVE == "gdrive"
         assert vocabulary.PROVIDER_GOOGLE == "google"
         assert vocabulary.PROVIDER_TELEGRAM == "telegram"
-        credentials = _check_values(
-            "054_accounts_sources_media_tables.sql", "ck_credentials_provider"
-        )
-        sources = _check_values(
-            "054_accounts_sources_media_tables.sql", "ck_sources_provider"
-        )
-        oauth_states = _check_values(
-            "060_auth_plane_tables.sql", "ck_oauth_state_provider"
-        )
+        credentials = _check_values("ck_credentials_provider")
+        sources = _check_values("ck_sources_provider")
+        oauth_states = _check_values("ck_oauth_state_provider")
         assert vocabulary.PROVIDER_IG_LOGIN in credentials
         assert vocabulary.PROVIDER_GDRIVE in credentials
         assert vocabulary.PROVIDER_GDRIVE in sources

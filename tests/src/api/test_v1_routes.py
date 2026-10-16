@@ -122,7 +122,7 @@ class TestTenantlessReads:
     def test_me_says_whether_the_person_is_an_operator(
         self, client, signed_in, user_plane, monkeypatch, ops_user_ids, ops
     ):
-        """`ops` is `OPS_USER_IDS` asked of the person (#1723): their own
+        """`ops` is `OPS_USER_IDS` asked of the person: their own
         fact, a boolean either way, and it opens nothing."""
         from src.config.settings import settings
 
@@ -204,7 +204,7 @@ class TestWorkspaceReads:
         self, client, signed_in, tenant, monkeypatch
     ):
         """What is coming is the Queue read filtered to planned stories: no
-        endpoint of its own (#1413)."""
+        endpoint of its own."""
         seen = {}
 
         async def list_intents(
@@ -241,7 +241,7 @@ class TestWorkspaceReads:
     def test_a_date_range_is_local_days_both_or_neither_and_bounded(
         self, client, signed_in, tenant, monkeypatch
     ):
-        """The calendar's day view (#1634): ``from`` and ``to`` are the
+        """The calendar's day view: ``from`` and ``to`` are the
         workspace's local days, half-open, and reach the read as dates."""
         seen = {}
 
@@ -275,7 +275,7 @@ class TestWorkspaceReads:
     def test_the_month_read_needs_a_state_and_a_range_and_bounds_its_names(
         self, client, signed_in, tenant, monkeypatch
     ):
-        """``GET …/intents/days`` (#1634): the month's count and newest names
+        """``GET …/intents/days``: the month's count and newest names
         per local day. Registered before ``/intents/{intent_id}``, which would
         otherwise read ``days`` as an id."""
         seen = {}
@@ -756,7 +756,7 @@ def issued(monkeypatch):
 
 class TestDestinationConnect:
     """`POST /workspaces/{ws}/accounts/{id}/connect` — start the Instagram
-    Login grant for ONE destination (#1220, #1041). The Drive connect
+    Login grant for ONE destination. The Drive connect
     route's shape: admin floor, a state row pinned to the account, and the
     URL the browser goes to."""
 
@@ -977,7 +977,7 @@ class TestTypedDestination:
 class TestTelegramGroupBindLink:
     """`POST /workspaces/{ws}/telegram/bind-link` — the admin's one-shot link
     that opens Telegram's group picker and binds the chosen group to THIS
-    workspace (#1175: a token, and the same flow for the Nth group). Admin
+    workspace. It issues a token for each group through the same flow. Admin
     floor: deciding where a workspace's cards go is an admin act."""
 
     URL = f"/api/v1/workspaces/{WS}/telegram/bind-link"
@@ -1103,10 +1103,11 @@ class TestRemoveTelegramGroup:
 
 
 class TestTelegramLink:
-    """`POST /me/telegram/link` — the link a signed-in user taps to attach
-    their Telegram identity (only from an authenticated session; the row pins
-    the user). The service half is `identity_link` (#1180); this is its route
-    (#1172, #1157)."""
+    """`POST /me/telegram/link` attaches the signed-in user's Telegram identity.
+
+    The authenticated session pins the user. The service half is
+    `identity_link`; this test exercises its route.
+    """
 
     URL = "/api/v1/me/telegram/link"
 
@@ -1197,7 +1198,7 @@ class TestTelegramLink:
 
 class TestTelegramUnlink:
     """`DELETE /me/telegram` — the signed-in user removes their own Telegram
-    identity (099). Tenant-less; the door's outcome is the answer,
+    identity (`fn_identity_unlink`). Tenant-less; the door's outcome is the answer,
     and `last_identity` is the one refusal."""
 
     URL = "/api/v1/me/telegram"
@@ -1235,7 +1236,7 @@ class TestTelegramUnlink:
 
 
 class TestTheInviteesOwnInvitations:
-    """`/me/invitations` (115): the signed-in person's invitations,
+    """`/me/invitations` (invitee invitation functions): the signed-in person's invitations,
     and "Email me the link again". Tenant-less, like `/me`; the service's answer
     is the response, and an invitation that is not theirs is one 404."""
 
@@ -1337,7 +1338,7 @@ def drive_configured(monkeypatch):
 
 class TestDriveConnect:
     """`POST /workspaces/{ws}/drive/connect` — the workspace connects Google
-    Drive ONCE (#1165). Admin floor; the state pins the workspace
+    Drive ONCE. Admin floor; the state pins the workspace
     as its own target, so last-issued-wins retires a stale connect per
     workspace."""
 
@@ -1448,7 +1449,7 @@ class TestDriveConnect:
 class TestDriveFolders:
     """`GET /workspaces/{ws}/drive/folders` — the browser the picker reads,
     through the workspace's grant. Admin floor: the grant is the workspace's,
-    the tree is a person's Drive. Every refusal by name (#1246)."""
+    the tree is a person's Drive. Every refusal by name."""
 
     URL = f"/api/v1/workspaces/{WS}/drive/folders"
 
@@ -1569,7 +1570,7 @@ class TestDriveFolders:
     def test_an_admin_who_did_not_grant_it_is_403_drive_not_yours(
         self, client, signed_in, tenant, browser
     ):
-        """091: the tree is the granter's Drive. Another admin passes the
+        """`oauth_credentials.granted_by_user_id`: the tree is the granter's Drive. Another admin passes the
         admin floor and is refused by name — with `reason`, the web's one
         code carrier — before any request reaches Google."""
         browser["mine"] = False
@@ -1714,7 +1715,7 @@ class TestSourcesUnderTheWorkspaceGrant:
     def test_an_admin_who_did_not_grant_it_adds_nothing(
         self, client, signed_in, tenant, grant, created
     ):
-        """091: a pick reads the granter's Drive and adds a folder from it, so
+        """`oauth_credentials.granted_by_user_id`: a pick reads the granter's Drive and adds a folder from it, so
         it is the folder browser's rule — refused by name, nothing created."""
         grant["mine"] = False
         resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
@@ -1933,11 +1934,11 @@ class TestCategoryMix:
     def test_get_reads_the_view_and_carries_ONLY_the_protocol_1_card(
         self, client, signed_in, tenant, monkeypatch
     ):
-        """The body is the protocol-1 card's four keys and nothing else (#1263).
+        """The body is the protocol-1 card's four keys and nothing else.
 
         The keys `mix` (by folder NAME) and `categories` are not in it: the
         web reads `protocol_version` to choose the card, and the protocol-1
-        card (#1262) reads `rows`. They are asserted ABSENT rather than simply
+        card reads `rows`. They are asserted ABSENT rather than simply
         unasserted, because an unasserted key is one a change can quietly
         add."""
 
@@ -2007,7 +2008,7 @@ class TestCategoryMix:
 
 
 class TestMediaThumbnail:
-    """`GET /workspaces/{ws}/media/{media_id}/thumbnail` (#1634): the picture,
+    """`GET /workspaces/{ws}/media/{media_id}/thumbnail`: the picture,
     fetched on the server through the row's stored link, behind the member
     gate the media reads use. Every way of having no picture is the 404 an
     unknown item gets, and the page draws its placeholder."""
@@ -2154,7 +2155,7 @@ class _FailOnCall:
 
 
 class TestArchiveThumbnail:
-    """`GET …/media/{media_id}/thumbnail` for an archive item (#1644):
+    """`GET …/media/{media_id}/thumbnail` for an archive item:
     an explicit preview through the port a trusted composition root injects,
     asked only with the row's current `thumbnail_version`. Every answer is
     no-store and carries no validator, so a browser keeps nothing and is

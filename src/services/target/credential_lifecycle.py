@@ -1,8 +1,8 @@
-"""The credential lifecycle executors (#942).
+"""The credential lifecycle executors.
 
 Two executors and one provider door. `refresh_credential` consumes the clock's
 weekly mints: load the token, ask the provider for a fresh one, swap in place.
-`reauth_prompt` consumes the 062 cadence leg's mints: tell the human, through
+`reauth_prompt` consumes `fn_clock_tick`'s reauthentication mints: tell the human, through
 the workspace's own bindings, that posting for an account is paused until they
 reconnect. Between them, a credential cannot die silently.
 
@@ -21,11 +21,11 @@ here is loud, not latent.
 - **Definitive auth-class rejection** (:class:`RefreshRejected` — the provider
   ANSWERED and the answer is "this credential is bad"): `mark_dead` performs
   both flips in one transaction — credential → ``expired``, account →
-  ``reauth_required``. No inline prompt mint: the 062 clock leg is the single
+  ``reauth_required``. No inline prompt mint: the `fn_clock_tick` is the single
   producer of `reauth_prompt` jobs and picks the account up on its next tick
   (marker NULL = immediately eligible), so prompting has exactly one door.
   The flips run under the account's source prefix and are bound to what the
-  token was issued under (#1644): a rejection that outlived a
+  token was issued under: a rejection that outlived a
   reauthorization flips nothing.
 - **Transient** (network faults, 429, 5xx — no definitive answer): raise, and
   the lane's ladder retries with the attempt consumed. Never `mark_dead` on a
@@ -136,12 +136,12 @@ async def ig_refresh(
 #: invalid. The SECOND IS THE OUTCOME WE WANTED — a user who disconnects twice,
 #: or whose token Google already dropped, ends in exactly the state the revoke
 #: was for. Collapsing them into "failed" would event a false alarm on the
-#: commonest repeat path (#1083).
+#: commonest repeat path.
 _REVOKE_SETTLED = frozenset({200, 400})
 
 
 async def revoke_workspace_credentials(deps, session, job) -> str:
-    """Best-effort Google revoke for a disconnected Drive source (#1083).
+    """Best-effort Google revoke for a disconnected Drive source.
 
     `disconnect_account` marks the credential `revoked` locally and stops
     using it; this job tells Google, so the refresh token does not stay valid
@@ -181,7 +181,7 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
     factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
     keys = oauth_states.ring()
 
-    # Phase 1 — read and decrypt in its own transaction, committed before any
+    # The source read — read and decrypt in its own transaction, committed before any
     # provider talk. Same ordering as `refresh_credential` and for the same
     # reason: a held transaction across a network call is a lock on a stranger.
     async with factory() as s:
@@ -274,7 +274,7 @@ async def refresh_credential(deps, session, job) -> str:
     workspace_id = str(job["workspace_id"])
     factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
 
-    # Phase 1 — load, own transaction, committed before any provider talk.
+    # The source read — load, own transaction, committed before any provider talk.
     try:
         async with factory() as s:
             # A credential revoked since this job was minted — a removed
@@ -318,12 +318,12 @@ async def refresh_credential(deps, session, job) -> str:
         )
         return "missing"
 
-    # Phase 2 — the provider call, outside any transaction (floor-enforced).
+    # The provider call — the provider call, outside any transaction (floor-enforced).
     try:
         new_token, expires_at = await deps.refresh(token)
     except RefreshRejected as exc:
-        # Phase 3b — the liveness edge: both flips, one transaction, under
-        # the account's source prefix. The 062 clock leg mints the reauth
+        # The liveness checkpoint — the liveness edge: both flips, one transaction, under
+        # the account's source prefix. The `fn_clock_tick` mints the reauth
         # prompt on its next tick.
         async with factory() as s:
             outcome = await archive_lifecycle.credential_rejected(
@@ -351,7 +351,7 @@ async def refresh_credential(deps, session, job) -> str:
         )
         return "rejected"
 
-    # Phase 3a — swap in place (same row id, no zero-credential
+    # The token checkpoint — swap in place (same row id, no zero-credential
     # window). The next tick's mint re-arms next_refresh_at.
     async with factory() as s:
         await oauth.swap_credential(
@@ -362,7 +362,7 @@ async def refresh_credential(deps, session, job) -> str:
 
 
 async def reauth_prompt(deps, session, job) -> str:
-    """Executor for the 062 cadence leg's mints.
+    """Executor for `fn_clock_tick`'s reauthentication mints.
 
     Enqueues one `notification` outbox row per push binding. No provider call
     happens here — the sender delivers; this executor only writes rows, so a

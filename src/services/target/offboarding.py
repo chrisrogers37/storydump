@@ -1,8 +1,8 @@
 """The `offboard_workspace` job — the five offboarding legs, orchestrated.
 
 The executor orchestrates the legs — drain → revoke → transit reap → grace →
-`fn_offboard_finalize` — and the command only enqueues it. The door (`059`)
-and the job kind (`056`) are what it calls, in order.
+`fn_offboard_finalize` — and the command only enqueues it. The door (`04_functions.sql`)
+and the job kind (`machinery.py`) are what it calls, in order.
 
 ## Leg order is load-bearing, and it is not the obvious one
 
@@ -27,7 +27,7 @@ marker: the rows are the progress.
 ## Two interactions with the work loop, and how the job handles each
 
 **The finalize leg deletes its own job row.** `jobs.workspace_id` is
-``REFERENCES workspaces(id) ON DELETE CASCADE`` (`056:91`), so the moment
+``REFERENCES workspaces(id) ON DELETE CASCADE`` (`machinery.py`), so the moment
 `fn_offboard_finalize` deletes the workspace the job disappears with it. If that
 DELETE rode the loop's session, the loop's own `finalize_job` would then match
 zero rows, raise `JobFenced` **inside** the session context, and the context
@@ -127,7 +127,7 @@ DRAINING_STATES = ("publishing", "publishing_ambiguous")
 #: savepoint that writes takes a subtransaction id; a backend caches 64 of them
 #: (`PGPROC_MAX_CACHED_SUBXIDS`). Past that, every other backend's snapshot is
 #: marked suboverflowed until this transaction ends, and their visibility
-#: checks fall back to `pg_subtrans` (#1441). The drain's are the only
+#: checks fall back to `pg_subtrans`. The drain's are the only
 #: savepoints its transaction takes. A refused cancel's savepoint rolls back
 #: and its id leaves the cache, so only a cancel counts.
 MAX_WRITING_SAVEPOINTS = 64
@@ -161,7 +161,7 @@ def restorable_until(offboarding_at: Optional[datetime]) -> Optional[datetime]:
 
     The dashboard shows this date and `restore_workspace` enforces the same
     arithmetic in SQL; both read `GRACE_SECONDS_DEFAULT`, so the screen never
-    carries a copied "30 days" that could drift from the guard (#1127).
+    carries a copied "30 days" that could drift from the guard.
     """
     if offboarding_at is None:
         return None
@@ -227,7 +227,7 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
             break
         processed += 1
         # A refusal aborts the transaction; the savepoint is what lets the drain
-        # go on to the next intent after one (`intent_ledger.transition`, #1422).
+        # go on to the next intent after one (`intent_ledger.transition`).
         try:
             async with session.begin_nested():
                 await intent_ledger.transition(session, intent_id, "cancelled")
@@ -249,7 +249,7 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
 
 
 async def fence_archives(factory, workspace_id: str) -> int:
-    """Leg 2's archive half, before the credentials go (#1644): every
+    """Leg 2's archive half, before the credentials go: every
     archive is fenced through the epoch writer (`archive_lifecycle.offboard_fence`),
     so no new admission or permit outlives the revoke. Returns how many.
 
@@ -271,7 +271,7 @@ async def fence_archives(factory, workspace_id: str) -> int:
 
 async def revoke_credentials(session, workspace_id: str) -> int:
     """Leg 2 — every credential goes `revoked` here, and the best-effort
-    provider call rides its own job (`revoke_workspace_credentials`, #1083). A
+    provider call rides its own job (`revoke_workspace_credentials`). A
     revocation that still fails is recorded and abandoned, because the row
     dies with the workspace and the provider token expires on its own.
     """
@@ -532,7 +532,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
     if refusals:
         await _audit(own_tx, workspace_id, "offboard_cancel_refused", *refusals)
     # A run the write bound stopped drains again now, not at the recheck or the
-    # end of the grace window (#1441). A run that stopped for any other reason
+    # end of the grace window. A run that stopped for any other reason
     # does not: a read window of refusals would otherwise turn into back-to-back
     # runs of a few cancels each, recording its refusals every time.
     again = drained["more"] and drained["cancelled"] == MAX_WRITING_SAVEPOINTS

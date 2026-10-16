@@ -81,10 +81,10 @@ STRANGER = "5550001"
 
 
 @pytest.fixture
-async def worker(lane_db, admin_conn):
+async def worker(world_db, admin_conn):
     """The worker's own login."""
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT current_user"))).scalar_one() == (
@@ -511,16 +511,16 @@ async def test_removing_an_account_with_no_archive_writes_no_mix(ingress, origin
 
 
 async def test_account_removal_takes_the_source_prefix_before_any_credential_row(
-    ingress, origin, lane_db, tmp_path
+    ingress, origin, world_db, tmp_path
 ):
     await converted_with_archive(ingress, origin, tmp_path, on=False)
     async with holding_credential(ingress, origin):
         removing = asyncio.create_task(disable(ingress, origin))
-        await until_blocked(lane_db)
-        assert prefix_held(lane_db, origin["ws"]), (
+        await until_blocked(world_db)
+        assert prefix_held(world_db, origin["ws"]), (
             "the removal reached a credential row before the source prefix"
         )
-        assert row_locked(lane_db, "ig_accounts", origin["iga"])
+        assert row_locked(world_db, "ig_accounts", origin["iga"])
         assert not removing.done()
     result = await asyncio.wait_for(removing, timeout=30)
     assert result.outcome == "executed"
@@ -879,7 +879,7 @@ async def test_an_archive_held_by_another_authorization_still_bumps_its_epoch(
 
 
 async def test_a_deauthorize_takes_the_source_prefix_before_the_credential_row(
-    ingress, origin, sync_conn, lane_db
+    ingress, origin, sync_conn, world_db
 ):
     at = datetime.now(timezone.utc) - timedelta(days=2)
     map_identity(
@@ -891,8 +891,8 @@ async def test_a_deauthorize_takes_the_source_prefix_before_the_credential_row(
                 ingress, app_identity=APP, subject=SUBJECT, issued_at=int(time.time())
             )
         )
-        await until_blocked(lane_db)
-        assert prefix_held(lane_db, origin["ws"]), (
+        await until_blocked(world_db)
+        assert prefix_held(world_db, origin["ws"]), (
             "the deauthorize reached a credential row before the source prefix"
         )
         assert not revoking.done()
@@ -1090,18 +1090,18 @@ async def test_an_undecryptable_credential_flips_through_the_rejection_wrapper(
 
 
 async def test_an_undecryptable_credential_locks_the_account_before_the_credential(
-    ingress, worker, origin, lane_db
+    ingress, worker, origin, world_db
 ):
     """`mark_dead` writes the credential, then the account: the unreadable
     payload's flip is wrapped like the rejection's, so the account's prefix is
     taken first."""
     async with holding_credential(worker, origin):
         refreshing = asyncio.create_task(refresh(worker, origin, never_called))
-        await until_blocked(lane_db)
-        assert prefix_held(lane_db, origin["ws"]), (
+        await until_blocked(world_db)
+        assert prefix_held(world_db, origin["ws"]), (
             "the flip reached the credential row before the source prefix"
         )
-        assert row_locked(lane_db, "ig_accounts", origin["iga"])
+        assert row_locked(world_db, "ig_accounts", origin["iga"])
         assert not refreshing.done()
     assert await asyncio.wait_for(refreshing, timeout=30) == "undecryptable"
     assert await credential_state(worker, origin) == "expired"
@@ -1147,16 +1147,16 @@ async def test_an_undecryptable_credential_reconnected_since_it_was_read_flips_n
 
 
 async def test_a_refresh_rejection_locks_the_account_before_the_credential(
-    ingress, worker, origin, lane_db
+    ingress, worker, origin, world_db
 ):
     """`mark_dead` writes the credential, then the account, and is not
     reordered: it is wrapped, so the account's prefix is taken first."""
     await store_token(ingress, origin, "tok-OLD")
     async with holding_credential(worker, origin):
         refreshing = asyncio.create_task(refresh(worker, origin, rejecting))
-        await until_blocked(lane_db)
-        assert prefix_held(lane_db, origin["ws"])
-        assert row_locked(lane_db, "ig_accounts", origin["iga"]), (
+        await until_blocked(world_db)
+        assert prefix_held(world_db, origin["ws"])
+        assert row_locked(world_db, "ig_accounts", origin["iga"]), (
             "the rejection reached the credential before the account"
         )
         assert not refreshing.done()
@@ -1471,7 +1471,7 @@ def midway(request):
 
 
 @asynccontextmanager
-async def listing_in_flight(lane_db, ingress, origin, sync_conn, *, revoke, shape):
+async def listing_in_flight(world_db, ingress, origin, sync_conn, *, revoke, shape):
     """An archive read over a fake Graph. Its first listing lands one post. Its
     next listing is in flight when *revoke* (an async callable, or None) runs,
     and the provider then answers with *shape*: a page of one more post, or an
@@ -1480,7 +1480,9 @@ async def listing_in_flight(lane_db, ingress, origin, sync_conn, *, revoke, shap
     the provider saw, and `retry()`, which runs that turn's job once more."""
     m = sync_gate.service()
     await store_token(ingress, origin, "tok-OLD")
-    src, runner, job, capture = await sync_gate.quality_source(lane_db, ingress, origin)
+    src, runner, job, capture = await sync_gate.quality_source(
+        world_db, ingress, origin
+    )
     authorization = await fact(
         ingress,
         origin,
@@ -1535,13 +1537,13 @@ async def listing_in_flight(lane_db, ingress, origin, sync_conn, *, revoke, shap
 
 @pytest.mark.parametrize("shape", ["a_page", "an_empty_page"])
 async def test_the_second_listing_lands_when_nothing_is_revoked(
-    lane_db, ingress, origin, sync_conn, shape
+    world_db, ingress, origin, sync_conn, shape
 ):
     """The control: with nothing revoked, the same listing lands. A page of one
     more post is indexed and the checkpoint moves; an empty page is followed by
     the walk's probe for older history."""
     async with listing_in_flight(
-        lane_db, ingress, origin, sync_conn, revoke=None, shape=shape
+        world_db, ingress, origin, sync_conn, revoke=None, shape=shape
     ) as read:
         first, listed = read.first, read.listed
         assert (first.outcome, first.committed_observations) == ("committed", 1)
@@ -1566,7 +1568,7 @@ async def test_the_second_listing_lands_when_nothing_is_revoked(
     ],
 )
 async def test_a_revocation_during_a_graph_listing_lands_nothing_and_is_refused_by_name(
-    lane_db, ingress, worker, origin, sync_conn, revocation, reason, shape
+    world_db, ingress, worker, origin, sync_conn, revocation, reason, shape
 ):
     """The person disconnects (Meta's deauthorize) or the refresh is rejected
     while a listing call is in flight. The provider answers all the same: the
@@ -1586,7 +1588,7 @@ async def test_a_revocation_during_a_graph_listing_lands_nothing_and_is_refused_
             done.append(await refresh(worker, origin, rejecting))
 
     async with listing_in_flight(
-        lane_db, ingress, origin, sync_conn, revoke=revoke, shape=shape
+        world_db, ingress, origin, sync_conn, revoke=revoke, shape=shape
     ) as read:
         # The revocation happened, mid-call, and did what it does.
         if revocation == "deauthorize":
@@ -1765,7 +1767,7 @@ async def test_offboarding_leaves_an_archive_working_while_publishing_drains(
 
 
 async def test_the_offboarding_fence_waits_behind_the_source_prefix(
-    worker, origin, sync_conn, lane_db
+    worker, origin, sync_conn, world_db
 ):
     from src.services.target import source_state
 
@@ -1776,7 +1778,7 @@ async def test_the_offboarding_fence_waits_behind_the_source_prefix(
             holder, workspace_id=str(origin["ws"])
         )
         running = asyncio.create_task(offboard_run(worker, origin))
-        await until_blocked(lane_db)
+        await until_blocked(world_db)
         await asyncio.sleep(0.5)
         assert not running.done(), "the offboarding fence ran without the source prefix"
     out = await asyncio.wait_for(running, timeout=30)

@@ -1,8 +1,8 @@
-"""The history choice an Instagram connect carries through OAuth (#1644).
+"""The history choice an Instagram connect carries through OAuth.
 
 Before OAuth a person chooses whether the account's past posts
 become a content source. The start records that choice in its one-shot state
-(`oauth_states`, 141), the callback applies it through
+(`oauth_states`), the callback applies it through
 `source_membership.connect_archive` in the unit of work that lands the
 destination and its credential, and one `oauth_connection_results` row
 records what was applied, for the Settings banner to read back.

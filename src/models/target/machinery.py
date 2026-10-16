@@ -1,28 +1,11 @@
-"""The execution machinery models (migration 056).
+"""The execution machinery table definitions.
 
-The mirror of `056_machinery_tables.sql`, on the terms `identity_and_tenancy`
-set: the second side of the parity gate, not an independent design.
-
-**One of 056's indexes is NOT here, and that is correct.** `ix_intents_parked`
-is created by 056 on `post_intents`, which 055 owns, so it is declared on
-`PostIntent` in `intent_ledger.py` — the model side renders indexes from the
-table's own `__table_args__`, so there is nowhere else it could come from. It
-is marked there as created by 056.
-
-**`jobs.workspace_id` is NULLABLE, alone among the tenant columns in this
-module**, and `ck_jobs_system_kinds` is what makes that safe: it asserts the
-equivalence "no workspace exactly when the kind is a system kind", so a
-tenant-scoped job cannot lose its tenant and a system sweep cannot acquire one.
-
-**`command_dedup` and `rate_counters` carry no `updated_at`** and no touch
-trigger — both are write-once coordination records rather than mutable rows, so
-`timestamps()` is deliberately not uniform across this module.
-
-**Two `intent_id` columns carry no foreign key.** `channel_outbox.intent_id` is
-nullable and `provider_operations.intent_id` is not, but neither references
-`post_intents`: an outbox row or a provider operation is evidence of an effect
-that was attempted, and it must survive the intent being reaped. The migration
-declares no FK on either and none is invented here.
+`ddl.build()` creates these tables through `TargetBase.metadata`.
+`ck_jobs_system_kinds` permits a NULL workspace exactly for system job kinds.
+The partial unique index `uq_jobs_serialized_lease` permits one live lease per
+serialization key. Outbox and provider-operation intent references carry no
+foreign key so delivery evidence can outlive an intent. Functions, triggers
+and row policies live in `src/models/target/ddl/`.
 """
 
 from sqlalchemy import (
@@ -68,8 +51,8 @@ class Job(TargetBase):
     locked_until = Column(TZ, nullable=True)
     lease_token = Column(UUID(as_uuid=True), nullable=True)
     # Backslash-escaped colon: `text()` reads `:1` as a bind parameter and would
-    # emit `DEFAULT '{"v"NULL}'`, so the table would not create. The parity gate
-    # never compares defaults, so this fails at `create_all`, not as drift.
+    # emit `DEFAULT '{"v"NULL}'`, so the table would not create. Escaping
+    # preserves valid DDL; catalog parity compares the stored default.
     payload = Column(JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'"""))
     created_at, updated_at = timestamps()
 
@@ -123,7 +106,7 @@ class Job(TargetBase):
                 "state IN ('succeeded','cancelled','failed','review_required')"
             ),
         ),
-        # 074: `fn_claim_job`'s per-workspace count
+        # `ix_jobs_leased_lane_ws`: `fn_claim_job`'s per-workspace count
         # of leased rows runs K times as often under K claimers per lane.
         Index(
             "ix_jobs_leased_lane_ws",
@@ -149,14 +132,14 @@ class ChannelOutbox(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'pending'"))
     attempts = Column(Integer, nullable=False, server_default=text("0"))
     external_message_ref = Column(Text, nullable=True)
-    # The row's LAST failed attempt, not how it ended (101, #1482): the class
+    created_at, updated_at = timestamps()
+    # The row's LAST failed attempt, not how it ended (outbox failure records): the class
     # (`vocabulary.OUTBOX_FAILURE_CLASSES`), the provider's own code for it
     # (Telegram's `error_code`; NULL when no answer came back) and when. A later
     # success does not clear them; `state` says how the row ended.
     last_failure_class = Column(Text, nullable=True)
     last_error_code = Column(Integer, nullable=True)
     last_failed_at = Column(TZ, nullable=True)
-    created_at, updated_at = timestamps()
 
     __table_args__ = (
         CheckConstraint(
@@ -193,7 +176,7 @@ class ChannelOutbox(TargetBase):
             "last_failed_at",
             postgresql_where=text("last_failed_at IS NOT NULL"),
         ),
-        # 072: the tap's supersede-everywhere and the settled-card sweep select
+        # `ix_outbox_intent`: the tap's supersede-everywhere and the settled-card sweep select
         # by intent.
         Index(
             "ix_outbox_intent",
@@ -207,7 +190,7 @@ class ChannelOutbox(TargetBase):
                 "state IN ('sent','superseded','failed','ambiguous')"
             ),
         ),
-        # 075 (#1297): a binding's `ambiguous` rows older than the
+        # `ix_outbox_ambiguous_age`: a binding's `ambiguous` rows older than the
         # resolution backoff — the sender sweep and the sender's own tick.
         Index(
             "ix_outbox_ambiguous_age",

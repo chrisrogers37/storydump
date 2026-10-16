@@ -4,7 +4,7 @@ behind seams.
 The properties that matter: sign-in refuses (503) rather than half-works when
 unconfigured; the redirect carries a state the database issued and a nonce
 derived from it, and the CSRF cookie the callback will demand; the pre-auth
-counter keys on the ATTRIBUTED client (#776); every callback failure lands on
+counter keys on the ATTRIBUTED client; every callback failure lands on
 the front end's error page with a closed reason; success sets the session
 cookie with `HttpOnly`, `Secure`, `SameSite=lax` and `Path=/`; sign-out
 revokes.
@@ -148,7 +148,7 @@ class TestSignin:
         self, app, configured, counter, state_store
     ):
         """A caller who is NOT a trusted proxy cannot choose their own bucket
-        by writing X-Forwarded-For: the key is the raw peer (#726/#776)."""
+        by writing X-Forwarded-For: the key is the raw peer."""
         client = TestClient(app, client=("203.0.113.9", 4321))
         client.get(
             "/auth/google",
@@ -330,7 +330,7 @@ class TestCallback:
     def test_a_new_account_nobody_admitted_lands_on_the_sign_in_page(
         self, client, configured, counter, state_store, monkeypatch
     ):
-        """092: the refusal is named, lands where the waitlist is, and sets no
+        """`fn_signup_admitted`: the refusal is named, lands where the waitlist is, and sets no
         session cookie."""
         resp, _ = self._refused_signup(client, monkeypatch)
         assert resp.status_code == 302
@@ -382,7 +382,7 @@ def _assert_claim_cookie(resp, value: str, *, max_age: int) -> None:
 
 
 class TestTheClaimStart:
-    """`POST /auth/google/claim` (#1723, 129): the claim page's form posts the
+    """`POST /auth/google/claim` (`signup_admissions`): the claim page's form posts the
     link's token. The API starts the sign-in as `GET /auth/google` does and
     keeps the token in `sd_claim` for the callback. It reads nothing about the
     claim, so this route has no claim seam to patch."""
@@ -483,7 +483,7 @@ class TestTheClaimStart:
 
 
 class TestTheClaimAtTheCallback:
-    """The callback with a claim (#1723, 129). A claim is asked only
+    """The callback with a claim (`signup_admissions`). A claim is asked only
     when the upsert refuses a new account with a verified email, inside one
     savepoint with the second upsert, which skips the gate. Everything is
     behind a seam: the upsert, `signup_admissions.claim`, the session mint,
@@ -562,7 +562,7 @@ class TestTheClaimAtTheCallback:
         the order of the calls is all this pins. Whether the claim's link
         survives is the database's to answer, and a mock cannot: an account
         created at its admission's own address uses that admission up, link
-        and all (133), while an unrelated claim is left unspent. The gates
+        and all (`trg_signup_admission_consume`), while an unrelated claim is left unspent. The gates
         hold both (`tests/scripts/test_signup_gate.py`)."""
         world["upsert"] = "admitted"
         resp = self._callback(client, monkeypatch)
@@ -737,7 +737,7 @@ class TestSignout:
 
 
 class TestSessionDelivery:
-    """#1117 — sign-in refuses rather than minting a session the front end can
+    """— sign-in refuses rather than minting a session the front end can
     never read.
 
     With the session cookie host-only on the API host and the front end on a
@@ -749,7 +749,7 @@ class TestSessionDelivery:
     def test_a_host_only_cookie_with_a_separate_front_end_refuses(
         self, client, configured, monkeypatch
     ):
-        """The #1117 shape exactly: everything else configured, cookie host-only."""
+        """The shape exactly: everything else configured, cookie host-only."""
         monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
         resp = client.get("/auth/google", follow_redirects=False)
         assert resp.status_code == 503
@@ -848,7 +848,7 @@ CALLBACK_FLOOR_CASES = [
 
 class TestInstagramCallback:
     """`GET /auth/instagram-login/callback` — the return half of the destination
-    connect (#1220). The Drive callback's shape: the state row is
+    connect. The Drive callback's shape: the state row is
     trusted for what it pins, the provider call sits between two
     transactions, and every failure lands on the error page with
     `flow=instagram` — plus the two callback-time checks this leg adds:
@@ -1207,7 +1207,7 @@ class TestInstagramCallback:
 
 class TestDriveCallback:
     """`GET /auth/google-drive/callback` — the return half of the WORKSPACE's
-    Drive connect (069). The state row is trusted for what it pins,
+    Drive connect (workspace Drive grant). The state row is trusted for what it pins,
     which is the workspace itself; the returning browser must carry the
     state user's session and that user must still be admin (the Instagram
     leg's two checks); the provider call sits between the two transactions;
@@ -1311,7 +1311,7 @@ class TestDriveCallback:
         assert writes == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin"),
-            # 091: the state's user — the returning browser, checked — is
+            # `oauth_credentials.granted_by_user_id`: the state's user — the returning browser, checked — is
             # the granter, the one person who may browse this Drive.
             ("store", WS, "ya29.access", USER),
             ("rearm", WS, None),
@@ -1452,7 +1452,7 @@ class TestDriveCallback:
 
 
 def test_an_open_sign_up_is_said_at_startup(monkeypatch):
-    """TARGET_SIGNUP_OPEN is a local stack's switch (092); a process that runs
+    """TARGET_SIGNUP_OPEN is a local stack's switch (`fn_signup_admitted`); a process that runs
     with it says so, so production never has it on unnoticed. The app logger
     does not propagate, so a handler on it records the lines."""
     import logging

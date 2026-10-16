@@ -1,4 +1,4 @@
-"""The two verbs that make a planned story (#1413), EXECUTED — as
+"""The two verbs that make a planned story, EXECUTED — as
 `svc_ingress`, through the real port, on the replayed target schema.
 
 `schedule_item` creates one: this item, to this account, at a wall time in
@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
 from src.services.target import (
@@ -721,7 +722,7 @@ class TestTheLockAndItemRule:
         serve = _door(world, "fn_prompts_due")
         assert intent_ledger.LIVE_ACCOUNT in serve
         assert "m.state = 'available'" in serve
-        # a repeating story's successor is made only on a live account (116)
+        # a repeating story's successor is made only on a live account (repeat rules)
         assert intent_ledger.LIVE_ACCOUNT in _door(world, "trg_intent_repeat")
 
 
@@ -967,7 +968,7 @@ def _refused_as_owner(world, w, kind, foreign, **args) -> CommandRefused:
                 go,
                 channel="cli",
                 # the login that ran the schema's DDL, so the tables' owner
-                expect_user="svc_migration",
+                expect_user=make_url(world["owner"]).username,
             )
         )
     return err.value
@@ -1068,7 +1069,7 @@ class TestTheQueueRead:
 
     def test_a_scheduler_who_has_left_the_workspace_is_named_no_more(self, world):
         """A series outlives the person who planned it, and the Queue names them
-        only while they are still a member (#485)."""
+        only while they are still a member."""
         w = _workspace(world, "queue-left")
         member = _member(world, w)
         _sql(
@@ -1269,7 +1270,7 @@ class TestAWriteAtTheDueInstant:
     ):
         """The worker's sweep and `plan_slot`'s fast path can read one due row.
         The second reads it served and goes on; its transition would be
-        refused (a same-state write, 061, or an edge the guard does not
+        refused (a same-state write, `trg_intent_guard`, or an edge the guard does not
         allow) and would take the whole beat with it."""
         intent = self._due(world, f"race-twice-{winner_ended}", "10 seconds")
         control = self._due(world, f"race-twice-{winner_ended}-ctl", "10 seconds")

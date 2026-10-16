@@ -541,8 +541,9 @@ def _gated_in(directory: Path) -> set[int]:
     (``apply --manual``), so its absence from the ledger is not a deployment
     behind the repository. Read here rather than imported: the runner depends
     on psycopg2 and this package does not. ``test_env.py`` pins the two
-    readings equal over the real corpus. A file that cannot be read is not
-    gated — the runner's own discovery is what refuses it."""
+    readings equal over files written to the runner's rules. A file that
+    cannot be read is not gated — the runner's own discovery is what refuses
+    it."""
     gated = set()
     for path in directory.iterdir():
         name = _MIGRATION_FILE.match(path.name)

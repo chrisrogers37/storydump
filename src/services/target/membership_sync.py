@@ -1,4 +1,4 @@
-"""The Telegram join path (#1242): a message in a BOUND group from a
+"""The Telegram join path: a message in a BOUND group from a
 Telegram user whose identity is linked makes that user a workspace member.
 
 Message-driven, because the Bot API has no "list the members" for a group:
@@ -75,7 +75,7 @@ async def observe(
     )
     if user_id is None:
         return StartResult(outcome="unknown_identity", handled=False)
-    # A disabled account keeps its memberships (053) but is minted no new
+    # A disabled account keeps its memberships (`identity_and_tenancy.py`) but is minted no new
     # ones. `users` is user-plane and readable here; the door holds no grant
     # on it, so this is the caller's refusal.
     state = await readers.row(conn, "SELECT state FROM users WHERE id = :u", u=user_id)

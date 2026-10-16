@@ -1,9 +1,9 @@
-"""The estate-health surfaces read the whole estate under the ingress role (#751).
+"""The estate-health surfaces read the whole estate under the ingress role.
 
 `/health/scheduling` and `/health/posting` count across every workspace —
 stalled cursors, active destinations, landings, the debited cap ledger — and
 the operating details read the ready lanes and the pending outbox; and external monitors take their verdicts
-from those counts. They read through 081's definer doors: a direct read of the
+from those counts. They read through fleet health functions' definer doors: a direct read of the
 tenant tables with no tenant set works only for the owner login, because it
 bypasses row-level security. The runtime login cannot: under `svc_ingress`
 with no tenant set those reads come back empty, so a live estate would read as
@@ -37,7 +37,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -54,11 +54,11 @@ def world(admin_conn, owner_actor):
     intent, one debited cap-ledger day, one ready tenant job on the
     interactive lane and one pending outbox row — seeded as the migration
     actor, the one actor the ledger's insert guard lets write a terminal
-    state (055: "post_intents are born scheduled" for the runtime)."""
+    state (`intent_ledger.py`: "post_intents are born scheduled" for the runtime)."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             chain = seed_workspace_chain(conn, "fleet")
@@ -112,10 +112,8 @@ def world(admin_conn, owner_actor):
             "iga": str(iga),
             "ingress": as_user(db, "svc_ingress"),
             "worker": as_user(db, "svc_worker"),
-            # The database-owner actor: the login production connects as,
-            # which owns the tables (so reads them past the policies) and holds
-            # EXECUTE on the doors only through its memberships — the path the
-            # deploy of 081 depends on BEFORE any switch, and the control arm.
+            # The database owner applies schema changes and is the control
+            # for bounded runtime reads through SECURITY DEFINER functions.
             "owner": as_user(db, owner_actor),
         }
     finally:
@@ -266,7 +264,7 @@ def test_the_scheduling_surfaces_see_the_estate_as_svc_ingress(world):
 
 def test_the_worker_login_reads_the_backpressure_signal_too(world):
     """The worker's own status line renders the same snapshot (`worker.py`);
-    after its switch it runs as `svc_worker`."""
+    it runs as `svc_worker`."""
     got = _run(_worker_signal(world["worker"]))
     assert got["lanes"]["interactive"]["ready"] == 1
     assert got["outbox_pending"] == 1
@@ -289,28 +287,24 @@ def test_the_doors_answer_what_a_direct_read_by_the_owner_answers(world):
 
 
 def test_the_owner_login_executes_the_doors_it_deploys(world):
-    """Production connects as the owner; 081 lands under that login and
-    the consumers call the doors unconditionally. The owner holds EXECUTE only
-    through membership of the door's owner — here the bootstrap's chain
-    (`owner → svc_migration → svc_maintenance`, `step0_bootstrap.sql`), or a
-    deployment owner's direct membership of every service role. Proved on the owner actor, not on a superuser."""
+    """The schema owner can execute the functions it deploys.
+
+    Runtime consumers use `svc_ingress` or `svc_worker`. The owner control
+    checks inherited EXECUTE through service-role membership.
+    """
     got = _run(_surfaces(world["owner"]))
     assert got["posting"]["posted_ever"] == 1
     assert got["destinations"]["accounts_active"] == 1
 
 
 def test_the_live_door_filters_landings_from_every_posting_signal(world):
-    """The one `posted` row `ck_posted_complete` accepts with no provider
-    evidence (`legacy_backfill`) and a dry run are excluded from every posting
-    signal. The filter lives in the door's body, read here from the LIVE
-    function in the replayed world rather than from the migration file: a later
-    DROP+CREATE with another filter would pass a file pin and fail this one."""
+    """The live function excludes dry runs from the posting count and age."""
     src = _run(_door_source(world["owner"]))
-    assert src.count("published_via NOT IN ('legacy_backfill', 'dry_run')") == 2
+    assert src.count("published_via <> 'dry_run'") == 2
 
 
 def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(world):
-    """081's one read that NAMES a tenant — the longest-waiting workspace, for
+    """fleet health functions' one read that NAMES a tenant — the longest-waiting workspace, for
     the worker's log — is the worker's door alone; the API's login reads the
     wait through a door that names nothing, and asks for no name."""
     api = _run(_worker_signal(world["ingress"]))
@@ -338,7 +332,7 @@ def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(wor
 
 
 def test_a_meta_deauthorize_revokes_the_credential_as_svc_ingress(world):
-    """The third tenant-less read the switch would have blinded. A Meta
+    """The deauthorization lookup reads through a tenant-free function. A Meta
     callback names no workspace: the account lookup goes through
     `fn_meta_accounts_for_ref`, and the revoke claims each account's own
     tenant before its UPDATE — so under `svc_ingress` the credential Meta

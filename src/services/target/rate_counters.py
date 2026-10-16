@@ -1,12 +1,12 @@
-"""The durable counter idiom over `rate_counters` (#859).
+"""The durable counter idiom over `rate_counters`.
 
-`056` shipped the table (composite PK ``(scope, key, window_start)``,
+`machinery.py` defines the table (composite PK ``(scope, key, window_start)``,
 `ck_rate_scope`, `ck_rate_nonneg`); the limit is deliberately NOT in the
 database. There is no function, trigger, or CHECK enforcing it — the
 advertised-DDL manifest classes the increment-and-check "illustrative" —
 because the limit must be compared against the CURRENT config value on every
 hit: counters have no refunds, so nothing needs a frozen copy, and "an abuse
-limit tightened mid-attack should bite immediately, not next window" (#859).
+limit tightened mid-attack should bite immediately, not next window".
 
 So THE guard is the statement below — the `WHERE rc.count < :limit` inside the
 UPSERT, atomic under the row lock, never check-then-act. This module's only
@@ -47,7 +47,7 @@ async def count(session, *, scope: str, key: str, window_start: datetime) -> int
     assert by scripting this name as a tripwire and requiring it stay
     untouched ("no read before the flip"). Kept as that tripwire's subject
     and as the one spelling of the read, should a check that must not spend
-    ever want one (#1325; the tripwire is a reference). A caller would still
+    ever want one (the tripwire is a reference). A caller would still
     debit through :func:`increment`, whose `WHERE rc.count < :limit` is the
     backstop when two callers race this read.
     """

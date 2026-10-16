@@ -1,4 +1,4 @@
-"""Did a post actually LAND? (#1268)
+"""Did a post actually LAND?
 
 ## The axis this module watches
 
@@ -26,7 +26,7 @@ landed*, which is what this module measures.
 
 ## THE EVIDENCE IS `post_intents`, NOT the cap ledger
 
-The cap ledger, `daily_post_counts`, is read here and returned (#1268). But
+The cap ledger, `daily_post_counts`, is read here and returned. But
 it **cannot be the thing the verdict rests on**, because of when it is
 written.
 
@@ -37,12 +37,11 @@ Instagram*. A publish loop that debits and fails every time moves that number
 and lands nothing. A monitor resting on it would go green on exactly the failure
 it exists to catch, one layer inward.
 
-`post_intents.state = 'posted'` is the landing, and the DATABASE enforces that
-it carries proof. `ck_posted_complete` refuses a `posted` row unless it is
-`legacy_backfill`, or `manual` with a debited cap, or `api` with
-`ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed'`. The
-strongest available assertion that a post reached Instagram is a constraint the
-schema will not let a row violate.
+`post_intents.state = 'posted'` is the landing. `ck_posted_complete` requires a
+debited cap for every posted row. API posts also require an Instagram container
+ID and `publish_step = 'effect_confirmed'`; dry runs require the confirmed
+effect step and are excluded from the aggregates below. The database enforces
+the evidence each publication mode requires.
 
 So both are returned and each answers something the other cannot:
 
@@ -55,30 +54,11 @@ So both are returned and each answers something the other cannot:
 The middle row is invisible to either signal alone, and it is the sharper
 diagnosis of the two.
 
-## `legacy_backfill` is EXCLUDED — for a LIVE schema reason, not the migration
+## Dry runs do not prove a post reached Instagram
 
-The obvious justification is the history transform, and it is **wrong**: no
-transform file exists. Nothing produces these rows, and a comment claiming
-otherwise would be exactly the authoritative-sounding-and-false reading this
-whole instrument exists to stop.
-
-The filter is here because of what the SCHEMA permits, which is the stronger
-reason. `published_via` accepts `legacy_backfill` (`ck_intent_via`), and
-`ck_posted_complete` **exempts** such a row from every evidence requirement:
-
-    state <> 'posted'
-    OR published_via = 'legacy_backfill'          <-- no evidence required
-    OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)
-    OR (published_via = 'api' AND ig_container_id IS NOT NULL
-        AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)
-
-So it is the one `posted` row the database will accept **with no proof that
-anything reached Instagram** — precisely the row this module must not count.
-Any future bulk insert (a re-imagined backfill, a repair script, a test
-fixture that escapes) would carry a fresh `entered_state_at` and read as *a post
-just landed*, announcing a recovery nobody observed and then going quiet for a
-full threshold. The filter is the module refusing to be an instance of its own
-subject.
+Both posting aggregates exclude `published_via = 'dry_run'`. The schema
+requires a cap debit and completed effect evidence for a dry run, but the
+worker's simulated publish does not create a real Instagram Story.
 
 ## Why an age is `None` rather than `0` when nothing has ever posted
 
@@ -104,23 +84,18 @@ poller must not consult it for the verdict.
 ## Bounds, stated because they will not be obvious later
 
 **Cross-tenant reach is a door, not a privilege.** Each read here is a
-SECURITY DEFINER function owned by `svc_maintenance` (081) with
+SECURITY DEFINER function owned by `svc_maintenance` (fleet health functions) with
 EXECUTE for the runtime logins — the same footing `scheduling_lag` and the
 backpressure snapshot stand on. Without it, under `svc_ingress` every
 policy-covered table reads empty to these tenant-less queries, `posted_ever`
 reads 0 for a live estate, and a poller's verdict becomes *never-posted* —
-the alarm direction, but for the wrong reason, and blind to a real silence
-(#751). `tests/scripts/test_fleet_health_doors_gate.py`
+the alarm direction, but for the wrong reason, and blind to a real silence.
+`tests/scripts/test_fleet_health_doors_gate.py`
 runs this module as `svc_ingress` against a seeded estate.
 
-**A retention door exists for the cap ledger, and nothing runs it.**
-`059`'s `fn_retention_batch` holds a `DELETE FROM daily_post_counts`, but
-the `retention_sweep` executor runs only the `rate_counters` class
-(`scheduler.execute_retention_sweep`), so no cap-ledger row has ever aged
-out. If that class is ever swept, `debited_total` and `ledger_days` become
-windowed rather than all-time and the attempt/landing contrast below weakens
-for old estates. `posted_ever` is
-unaffected: the class list does not name `post_intents`.
+**The cap ledger has no retention sweep.** `fn_retention_batch` accepts only
+`rate_counters`, the class `scheduler.execute_retention_sweep` calls.
+`debited_total` and `ledger_days` therefore summarize all retained cap rows.
 
 **Nothing identifying is returned.** Counts and ages, never a workspace, an
 account, a handle or a permalink. The endpoint serving this is unauthenticated
@@ -153,7 +128,7 @@ async def posting_freshness(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # The door's body (081): min-of-ages, not max-of-times,
+                    # The door's body (fleet health functions): min-of-ages, not max-of-times,
                     # because FILTER binds to the AGGREGATE — the freshest
                     # landing is the SMALLEST age.
                     "SELECT o_posted_ever AS posted_ever,"
@@ -178,7 +153,7 @@ async def posting_freshness(executor) -> dict[str, Any]:
 
 
 async def publish_attempts(executor) -> dict[str, Any]:
-    """The cap ledger (#1268) — what TRIED, against what landed.
+    """The cap ledger — what TRIED, against what landed.
 
     `daily_post_counts` is debited at the `approved → publishing` flip, before
     the publish call, and refunded on a failure after debit. So this is the
@@ -249,7 +224,7 @@ async def destinations(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # max-of-ages, not min-of-times, inside the door (081):
+                    # max-of-ages, not min-of-times, inside the door (fleet health functions):
                     # the OLDEST destination is the LARGEST age, and it is the
                     # rung that dates the estate's expectation to post.
                     "SELECT o_accounts_active AS accounts_active,"

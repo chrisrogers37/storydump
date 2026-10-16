@@ -1,4 +1,4 @@
-"""Why a delivery failed, recorded on the outbox row (101, #1482).
+"""Why a delivery failed, recorded on the outbox row (outbox failure records).
 
 `settle` maps what the transport raised to a class and the provider's code, and
 writes both, with the time, in the SAME CAS update that moves the row out of
@@ -184,7 +184,7 @@ class TestTheClassAndCodeRideTheOneCAS:
         assert result["external_message_ref"] is None
 
     async def test_a_dead_tokens_failed_row_keeps_the_binding(self):
-        """A 401 fails its row (#1493; the 401 case above), but it is the bot's
+        """A 401 fails its row (the 401 case above), but it is the bot's
         credential, not the chat: the result names no gone destination, which
         is what the sender reads before it retires a binding. The failure is
         asserted too, because a row that never failed keeps its binding

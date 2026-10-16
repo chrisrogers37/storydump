@@ -1,6 +1,6 @@
-"""The Telegram half of an invitation's delivery (#1172).
+"""The Telegram half of an invitation's delivery.
 
-An invitation has two delivery arms and `053` makes them one object:
+An invitation has two delivery arms and `identity_and_tenancy.py` makes them one object:
 `workspace_invitations.delivery_channel` is closed at `email | telegram`, and
 each carries its OWN acceptance value — `email` for a verified Google
 claim, `invited_tg_user_id` for the provider's immutable numeric id. The email
@@ -13,7 +13,7 @@ mechanisms, one credential.
 
 An email invitation's token is minted for one inbox. Posting it into a group
 chat would be a credential broadcast — and it would **degrade quietly rather
-than refuse**, which is worse: `053` makes `email` the acceptance value, so
+than refuse**, which is worse: `identity_and_tenancy.py` makes `email` the acceptance value, so
 a Telegram tapper fails the identity match, takes the recorded-skip path, and
 lands `member` plus an elevation-pending notification. It would look like it
 worked. So this producer announces `delivery_channel = 'telegram'` invitations
@@ -30,7 +30,7 @@ elevate anyone**, which is what makes the shape safe.
 
 **Invitations are per person, by email.** A member can approve stories, and
 approving one posts to Instagram, so an open card is an open link, and
-`invite_member` refuses the Telegram channel (#1331).
+`invite_member` refuses the Telegram channel.
 
 It does mean the payload must carry nothing person-identifying. The invitee's
 email address is the OTHER arm's delivery address and is never put in a card.
@@ -47,7 +47,7 @@ seam claims a completeness the pair does not have — a surface that is built,
 reachable in principle, and connected to nothing.
 
 Its caller belongs in the transaction of the invitation write,
-`invitations.create` (#1325).
+`invitations.create`.
 
 ## The empty case is a quiet beat, not `UNDELIVERABLE`
 
@@ -80,7 +80,7 @@ from typing import Any, Mapping
 from src.exceptions.base import StorydumpError
 from src.services.target import outbox, prompts
 
-#: The channel this producer serves. `053`'s `ck_invite_channel` closes the
+#: The channel this producer serves. `identity_and_tenancy.py`'s `ck_invite_channel` closes the
 #: set; this names the half we announce.
 TELEGRAM = "telegram"
 

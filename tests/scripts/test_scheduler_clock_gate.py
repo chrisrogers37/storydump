@@ -1,4 +1,4 @@
-"""Gate — scheduler-as-clock, dispatcher, recurring system jobs (#864).
+"""Gate — scheduler-as-clock, dispatcher, recurring system jobs.
 
 *"Clock tick is O(due) by EXPLAIN; killing the clock mid-tick loses nothing; a
 duplicate `plan_slot` execution mints no second intent (key 1 proves it); the
@@ -7,7 +7,7 @@ seeded fixtures, riding the reap indexes by EXPLAIN."*
 
 THE CLAIM THIS GATE EXISTS TO TEST. The outbox needs no guard of its own
 because `uq_jobs_serialized_lease` admits one live sender and holding the lease
-proves the predecessor does not (#897). **That argument does not extend to
+proves the predecessor does not. **That argument does not extend to
 recurring work**, and `TestTheClockElectionIsExclusive` proves the gap rather
 than asserting it: `fn_clock_tick`'s recurring leg guards on
 `NOT EXISTS (… state IN ('ready','leased'))`, a SNAPSHOT read, and the index
@@ -16,7 +16,7 @@ double-insert happens at `state = 'ready'`. Two concurrent ticks both insert —
 measured here with the election removed — so the election is the mechanism, and
 it is proven by removal like every other guard in this suite.
 
-Concurrency rules (#883/#890/#897):
+Concurrency rules:
 
 * Every race runs on REAL concurrent connections at **READ COMMITTED**,
   asserted in its own test — a race test can pass at REPEATABLE READ while
@@ -47,7 +47,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -97,7 +97,7 @@ def clock_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "l7-gate")
@@ -194,7 +194,7 @@ def _new_media(clock_db):
 
 class TestTheLevelIsReadCommitted:
     """Pinned as a fact: every concurrency claim below holds at the level
-    production runs, and most such proofs keep passing at stricter levels (#890)
+    production runs, and most such proofs keep passing at stricter levels
     — so without this they could stop describing production."""
 
     def test_worker_connections_run_read_committed(self, clock_db):
@@ -349,17 +349,17 @@ class TestTheClockElectionIsExclusive:
 
 
 class TestAFailingTickIsVisibleInBothTheCounterAndTheLog:
-    """#1074: a failing tick shows in both a counter and the log.
+    """A failing tick shows in both a counter and the log.
 
     `ticks` increments BEFORE the try, so it counts ATTEMPTS: a clock failing
     every single tick satisfies an assertion on `ticks`, a check which cannot
     fail in the direction it exists to detect. `consecutive_failures` counts
     the failures and the log names the kind and the constraint, so a failing
     tick does not surface five layers away as `assert bulk.processed >= 1`
-    failing `0 >= 1` instead of as a named constraint violation (#1069).
+    failing `0 >= 1` instead of as a named constraint violation.
 
     The failure is induced with a recurring kind absent from `ck_jobs_kind`,
-    which is not a contrived fault: it is #1069's defect exactly.
+    exercising a worker that is alive but cannot dispatch jobs.
     """
 
     def _clock(self, engine, clock_db, conn, *, recurring):
@@ -739,7 +739,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 )
 
     def test_the_shipped_key_is_cadence_only(self, clock_db):
-        """089's contract, read from the catalog: one slot key,
+        """`fn_planned_serve` / `fn_planned_misses`'s contract, read from the catalog: one slot key,
         `uq_intent_slot`, with the cadence predicate."""
         defs = _owner_exec(
             clock_db,
@@ -754,8 +754,8 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         assert definition.startswith("CREATE UNIQUE INDEX uq_intent_slot ON ")
         assert definition.endswith("WHERE (origin = 'cadence'::text)"), definition
 
-    #: `plan_slot`'s insert as raw SQL, and the predicate-less conflict target
-    #: every worker ran before 088 (the real spelling runs through `plan_slot`).
+    #: `plan_slot`'s insert as raw SQL, paired with an invalid conflict target
+    #: that omits the partial index's origin predicate.
     SLOT_INSERT = (
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, origin)"
@@ -771,7 +771,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         return (clock_db["ws"], account, _new_media(clock_db), ref, slot, origin)
 
     def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, clock_db):
-        """Why 089 ships only once every worker runs 088's spelling: against
+        """Why `fn_planned_serve` / `fn_planned_misses` ships only once every worker runs `post_intents.origin`'s spelling: against
         the partial key alone the predicate-less one finds no arbiter, so every
         cadence mint of a worker still running it raises."""
         account = _new_account(clock_db)
@@ -783,7 +783,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
     @pytest.mark.asyncio
     async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
-        """088's spelling as `plan_slot` runs it, on 089's cadence-only key: a
+        """`post_intents.origin`'s spelling as `plan_slot` runs it, on `fn_planned_serve` / `fn_planned_misses`'s cadence-only key: a
         duplicate execution still mints one intent, and a planned row at the
         slot's instant does not absorb the cadence mint. The predicate-less
         spelling would raise on the first execution here: no arbiter is left
@@ -826,11 +826,11 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
 
 class TestEveryLegMintsWithADeadline:
-    """083 (#1381): the clock's five legs mint `deadline_at`, from `run_at`.
+    """fn_clock_tick deadlines: the clock's five legs mint `deadline_at`, from `run_at`.
 
-    `jobs.enqueue` writes a deadline (#1288) and `budget_exhausted` ends a job
+    `jobs.enqueue` writes a deadline and `budget_exhausted` ends a job
     on either bound; `fn_clock_tick` hand-writes its INSERTs, so its legs mint
-    the deadline themselves (#1361).
+    the deadline themselves.
 
     THE ASSERTION IS THE ORIGIN, not the presence. A deadline of
     `now() + 6 hours` is also non-NULL, and for four of the five legs it is
@@ -838,7 +838,7 @@ class TestEveryLegMintsWithADeadline:
     that separates them: its `run_at` is the last completion plus the cadence,
     so a deadline anchored at mint is spent before the job is claimable and
     ends the job on its first run. The offboarding successor guards against
-    the same defect (#1361), and the only way to see it here is to tick a
+    the same defect, and the only way to see it here is to tick a
     clock whose next singleton is due well in the FUTURE.
     """
 
@@ -1083,7 +1083,7 @@ class TestTheTickAndTheSweepAreBounded:
             "SELECT id FROM post_intents"
             " WHERE state IN ('scheduled','prompt_pending')"
             "   AND schedule_slot_at < now()"
-            "   AND origin = 'cadence'",  # 089: the leg takes cadence rows only
+            "   AND origin = 'cadence'",  # `fn_planned_serve` / `fn_planned_misses`: the leg takes cadence rows only
         )
         assert "Seq Scan" not in plan, plan
         definition = self._index_def(clock_db, "ix_intents_reap_slot")

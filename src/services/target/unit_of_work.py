@@ -1,4 +1,4 @@
-"""The async unit of work (#857).
+"""The async unit of work.
 
 The transaction substrate the target tier runs on. Three things
 live here because they are one contract, not three: the async engine, the
@@ -12,10 +12,10 @@ to 0 — because a pool slot is an asyncio task rather than a connection,
 `pool_size` is already sized for the spike case, so overflow un-bounds the
 invariant for nothing. The invariant it protects:
 
-    Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50  ≥  peak DB-active tasks
+    Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50 ≥ peak DB-active tasks
 
 Pinning the async engine to the seam constant, never to a setting, is what
-keeps the target substrate correct whatever the environment says (#1216),
+keeps the target substrate correct whatever the environment says,
 and the gate asserts the constant rather than trusting the config.
 
 ## The UoW is unconstructible without a tenant
@@ -109,7 +109,7 @@ POOL_TIMEOUT_SEAM = 3.0
 #: tap must be answered within 2 s end to end, redelivery included.
 INGRESS_POOL_TIMEOUT_SEAM = 1.0
 
-#: Set explicitly to 300 alongside pre-ping (#1216): `pool_pre_ping` catches a
+#: Set explicitly to 300 alongside pre-ping: `pool_pre_ping` catches a
 #: dead connection, and recycling runs IN ADDITION rather than at the -1
 #: (never) default.
 POOL_RECYCLE_SEAM = 300
@@ -367,11 +367,11 @@ async def apply_gucs(
 
     One statement, not one per GUC: a tenant-scoped request pays this on every
     unit of work, and four round trips for four `set_config` calls are the
-    largest avoidable cost on the read path (#1028). Only the non-None pairs
+    largest avoidable cost on the read path. Only the non-None pairs
     are sent — `set_config(x, NULL, true)` stores the empty string. An unset
     actor can read `''` regardless: a pooled connection that set
     `app.actor_kind` in an earlier transaction reads it back as `''`, not
-    NULL. The audit triggers treat `''` as unset for that reason (085, #1421).
+    NULL. The audit triggers treat `''` as unset for that reason (audit actor checks).
 
     Known coverage note: the permit path's raw-connection transaction does not
     enter `transaction_discipline()`, so the discipline tripwire does not
@@ -379,7 +379,7 @@ async def apply_gucs(
     returning, so no provider call can happen inside it — named here because
     this is where the next reader will look.
     """
-    # `lock_timeout` rides the same statement (#1286): a tap bounds its wait on
+    # `lock_timeout` rides the same statement: a tap bounds its wait on
     # another tap's row lock, and a separate `SET LOCAL` would cost a second
     # round trip.
     pairs = [("app.tenant_id", tenant_id)] + [
@@ -405,14 +405,14 @@ class WorkspaceClaims:
     """Per-workspace tenant claims INSIDE a caller's transaction, and the
     caller's own scope handed back at the end.
 
-    A sweep that reads the estate through a door (081, 082) and then writes
+    A sweep that reads the estate through a door (fleet health functions, worker sweep functions) and then writes
     each row under its workspace's tenant claims several tenants in one
     transaction. Each claim is `SET LOCAL` (:func:`apply_gucs`), so it dies
     with the transaction — but not before the rest of the transaction runs.
     `plan_slot` runs the prompt sweep inside a TENANT job's transaction and
     then finalizes its own job; a sweep that left the session under the last
     workspace it prompted would fence that finalization under the policies
-    (`jobs.JobFenced`, #1349). So the first claim records the caller's scope
+    (`jobs.JobFenced`). So the first claim records the caller's scope
     and :meth:`release` restores it; a sweep that claimed nothing pays
     nothing.
 
@@ -470,7 +470,7 @@ def make_session_for(engine):
     is `system`, the worker actor. Lives here beside `apply_gucs`,
     which is the whole of its body: in `work_loop` it would force six service
     modules to import the work loop from inside a function, because
-    `work_loop` imports them at module level (#1216).
+    `work_loop` imports them at module level.
     """
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -501,7 +501,7 @@ def poller_session_factory(engine, tenant_id: str):
     The poller opens its own transaction per tick and commits it; SET LOCAL
     inside that transaction is what keeps pool reuse safe (`apply_gucs`).
     Lives here beside `apply_gucs` for the same reason `make_session_for`
-    does (#1216).
+    does.
     """
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -522,7 +522,7 @@ def poller_session_factory(engine, tenant_id: str):
 #: Who is this connection, and does that login bypass row-level security?
 #: Asked of the catalog, never read off the URL: the configured login and the
 #: effective one can disagree, and only the effective one decides whether
-#: `p_tenant` policies apply (#751).
+#: `p_tenant` policies apply.
 CONNECTION_ROLE_SQL = (
     "SELECT current_user::text AS login,"
     " COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user),"

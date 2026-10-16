@@ -26,7 +26,7 @@ from tests.scripts.conftest import (
     _dsn,
     _scratch,
     as_user,
-    replay_advertised_stream,
+    build_world,
     seed_intent_chain,
 )
 from tests.src.api import conftest as api_conftest
@@ -44,7 +44,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
@@ -664,10 +664,11 @@ def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
 def test_the_predicates_confine_rows_even_without_row_level_security(
     world, google_configured, seeded
 ):
-    """Production's API connects as the owner role with BYPASSRLS, so every
-    view must confine rows by its own WHERE — the policies are the belt,
-    the predicate the braces. The same reads through a superuser: only A's
-    rows, and B's story is not readable through A's route."""
+    """Each view's workspace predicates also confine a privileged caller.
+
+    The deployed API uses `svc_ingress` with RLS. This superuser control
+    proves the predicates independently: A's route returns only A's rows.
+    """
     a, b = seeded["a"], seeded["b"]
 
     async def main():
@@ -731,9 +732,9 @@ def test_posture_shows_rls_drift_and_every_ledger_state(
     world, google_configured, seeded, operator_a
 ):
     """`posture` exists for two facts: a tenant table whose RLS was dropped,
-    and the runner's ledger under the runner's grant. A replayed
-    database has no ledger (absent); one created without the grant is
-    unreadable, not guessed; with the grant it is present and listed."""
+    and the runner's ledger under the runner's grant. The built world's
+    adopted base marker is readable. A missing ledger is absent; a ledger
+    without the grant is unreadable; restoring the grant lists its rows."""
     a = seeded["a"]
 
     async def main():
@@ -746,7 +747,13 @@ def test_posture_shows_rls_drift_and_every_ledger_state(
                 return resp.json()["data"]
 
             before = await read()
-            assert before["ledger"] == "absent" and before["migrations"] == []
+            assert before["ledger"] == "present"
+            from scripts.migration_runner import MIGRATIONS_DIR, discover_migrations
+
+            assert [m["version"] for m in before["migrations"]] == [
+                migration.version for migration in discover_migrations(MIGRATIONS_DIR)
+            ]
+            assert all(m["status"] == "adopted" for m in before["migrations"])
             tables = {r["table"]: r for r in before["rls"]}
             assert tables["post_locks"]["enabled"] is True
             assert "rate_counters" not in tables, (
@@ -766,12 +773,18 @@ def test_posture_shows_rls_drift_and_every_ledger_state(
 
             _sql(
                 world["bypass"],
+                "DROP SCHEMA runner CASCADE",
+            )
+            absent = await read()
+            assert absent["ledger"] == "absent" and absent["migrations"] == []
+            _sql(
+                world["bypass"],
                 "CREATE SCHEMA runner;"
                 " CREATE TABLE runner.schema_migrations (version INT PRIMARY KEY,"
                 " checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
                 " applied_by TEXT NOT NULL, execution_ms INT, status TEXT);"
                 " INSERT INTO runner.schema_migrations (version, checksum, applied_by, status)"
-                " VALUES (77, 'a062', 'gate', 'applied')",
+                " VALUES (1, 'example-checksum', 'gate', 'applied')",
             )
             unreadable = await read()
             assert (
@@ -784,6 +797,6 @@ def test_posture_shows_rls_drift_and_every_ledger_state(
             )
             present = await read()
             assert present["ledger"] == "present"
-            assert [m["version"] for m in present["migrations"]] == [77]
+            assert [m["version"] for m in present["migrations"]] == [1]
 
     _run(main())

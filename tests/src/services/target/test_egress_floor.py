@@ -1,4 +1,4 @@
-"""Egress-floor proofs (#857).
+"""Egress-floor proofs.
 
 The four floor proofs, each written as a PAIR: the guard refuses, and with that
 one guard disabled the same input is accepted. The pair is the point. A floor
@@ -228,7 +228,7 @@ class TestProofFourARedirectTowardAPrivateAddressIsRefused:
             resolver=self._resolver({"graph.instagram.com": ["10.0.0.5"]}),
         )
         assert approved.host == "graph.instagram.com"
-        # Nothing was RESOLVED, so there is nothing to pin (#871). Empty here
+        # Nothing was RESOLVED, so there is nothing to pin. Empty here
         # means "not checked", never "checked and found none" — a host that
         # resolves to no addresses is refused, and that is a separate proof.
         assert approved.addresses == ()
@@ -514,7 +514,7 @@ class TestAGzipReplyStaysReadableThroughTheFloor:
 
 
 # ---------------------------------------------------------------------------
-# #871 — the validated address is PINNED to the connection.
+# — the validated address is PINNED to the connection.
 #
 # Without the pin, validation and connection resolve INDEPENDENTLY, so a
 # resolver answering public-then-private opens a TOCTOU/DNS-rebind window. A
@@ -831,7 +831,7 @@ class TestTheSecondResolutionCannotHappen:
 
 
 class TestTlsSurvivesThePin:
-    """`Done requires` #2 — SNI and certificate verification unchanged.
+    """`Done requires` — SNI and certificate verification unchanged.
 
     The certificate is valid for the NAME and never for the address, so a
     successful handshake is only possible if verification was performed against
@@ -924,7 +924,7 @@ class TestRetriesStayInsideTheApprovedSet:
 
 
 # ---------------------------------------------------------------------------
-# #1109 — real-socket probes of the egress floor.
+# — real-socket probes of the egress floor.
 #
 # Each test pins one property of `egress.py` against live loopback servers.
 #
@@ -982,7 +982,7 @@ def _free_port_on_both_loopbacks() -> int:
 
 
 class TestARetryCannotRebind:
-    """A retry cannot rebind (#1108).
+    """A retry cannot rebind.
 
     The rebind proof above succeeds on attempt 1, so the retry loop body runs
     exactly ONCE there — which makes "does `validate_target` sit inside the

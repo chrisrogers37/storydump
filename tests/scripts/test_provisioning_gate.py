@@ -1,5 +1,5 @@
 """Provisioning of destinations and sources, EXECUTED — as `svc_ingress`, on the
-replayed target schema, with the real clock door as the judge (#1041).
+replayed target schema, with the real clock door as the judge.
 
 **What this file is for, stated so its green cannot be read as more than it
 is.** The claim behind this file is not "an INSERT works". It is that a
@@ -20,24 +20,11 @@ login `fn_clock_tick` is granted to), and ground truth is read back as the
 schema owner. A single-role version of this file would prove the statements
 run, not that a least-privilege identity may run them.
 
-**`svc_ingress` is the role the RLS posture INTENDS, not the one production
-connects as, and the tenant-isolation assertions here therefore do not transfer
-to the deployed configuration.** The deployed API connects as the database
-owner, which owns all of `ig_accounts`, `media_sources`, `workspaces`
-and `workspace_members` and carries BYPASSRLS; no migration sets FORCE ROW
-LEVEL SECURITY, and nothing in `src/` issues `SET ROLE`. So `p_tenant` is inert
-on the deployed path and `test_a_source_is_not_visible_from_the_other_tenant`
-(and its destination sibling) prove a property of `svc_ingress`, not of
-production. It is deliberate — ENABLE without FORCE is allowed — and closing the
-gap (#751) takes the runtime-login posture ("runtime-login + definer-door, no
-owner role, no BYPASSRLS"), which the deployed API does not run.
-
-What does hold in production is `tenant_resolution.authorize_member`, which
-binds both keys in its WHERE and documents itself as safe on a privileged
-connection. Isolation on these two endpoints rests on that gate, not on RLS.
-Running this file under `svc_ingress` is still worth doing — it is the only
-place the intended posture is exercised at all — but it must not be read as
-evidence about the running system.
+The deployed API connects as `svc_ingress`; the worker connects as
+`svc_worker`. The owner role applies schema changes. These tests exercise the
+API's row policies and its explicit membership and workspace predicates.
+`tenant_resolution.authorize_member` checks both the user and workspace before
+a write, and RLS confines the runtime connection to its claimed tenant.
 
 **Not claimed here:** nothing about credentials, Meta, or publishing. A
 destination is not a connection — see `provisioning`'s module docstring.
@@ -64,7 +51,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -88,7 +75,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             a = seed_workspace_chain(conn, "prov-a")
@@ -429,7 +416,7 @@ class TestDestinationsAreIdempotentAndTenantBound:
 
 
 class TestATypedHandleBecomesADestination:
-    """#1089 — the settings form's path. It has no Meta id to send, so the port
+    """— the settings form's path. It has no Meta id to send, so the port
     derives a provisional reference. Everything here is about what LANDS."""
 
     def test_a_handle_alone_creates_a_scheduled_destination(self, world):
@@ -520,7 +507,7 @@ class TestATypedHandleBecomesADestination:
 class TestDestinationRefusals:
     @pytest.mark.parametrize("bad", ["", "   ", None, 17841, {"a": 1}])
     def test_a_missing_reference_is_refused_by_name(self, world, bad):
-        """With no handle supplied, #1089's derivation never applies: every
+        """With no handle supplied's derivation never applies: every
         one of these lands on `account_ref_from`, so a caller who supplies
         nothing sees `account_ref_required`."""
         with pytest.raises(ProvisioningRefused) as exc:
@@ -582,7 +569,7 @@ class TestSourcesLandInTheShapeTheSchemaDocuments:
         assert row[2] == folder
         assert row[3] == "Stories"
         assert row[4] == "active"
-        # Not due: the Drive seam (#982) is what schedules a first ingest, and
+        # Not due: the Drive seam is what schedules a first ingest, and
         # a source that queued a sync nothing can run would park a job forever.
         assert row[5] is None
 
@@ -633,7 +620,7 @@ class TestSourcesLandInTheShapeTheSchemaDocuments:
         assert seen == 0
 
 
-# --- #1078: the sources payload can say whether a source is CONNECTED ---------
+# ---: the sources payload can say whether a source is CONNECTED ---------
 
 
 def _sources(world, ids=None):
@@ -650,7 +637,7 @@ def _sources(world, ids=None):
 
 def _credential(world, *, state="active", expires_at=None, ids=None):
     """Set the WORKSPACE's gdrive credential straight in — one row per
-    workspace (069, `uq_credential_per_workspace`), so this upserts: each test
+    workspace (workspace Drive grant, `uq_credential_per_workspace`), so this upserts: each test
     below puts the workspace's grant in the state it needs."""
     ids = ids or world["a"]
 
@@ -689,7 +676,7 @@ def _drive(world, ids=None) -> dict:
 
 
 class TestTheWorkspaceDriveStatus:
-    """The WORKSPACE answers "is Google connected" (069, #1165):
+    """The WORKSPACE answers "is Google connected" (workspace Drive grant):
     one grant, every folder under it. `media_sources.state` still cannot
     answer it — a folder picked and then paused is `paused`, a healthy one
     `active` — and the source list does not pretend to: it carries the
@@ -705,7 +692,7 @@ class TestTheWorkspaceDriveStatus:
         assert status["status"] == "active" and status["connected_at"] is not None
 
     def test_a_past_access_token_expiry_still_reads_active(self, world):
-        """For `gdrive` (#1247), `expires_at` is the ACCESS token's hourly
+        """For `gdrive`, `expires_at` is the ACCESS token's hourly
         expiry and the read door refreshes it on demand, so the projection
         reads `state` alone — a grant whose token lapsed is still connected.
         (The Instagram projection keeps its expiry clause: its refresh is the
@@ -742,7 +729,7 @@ class TestTheWorkspaceDriveStatus:
             assert not any("not-a-real-token" == str(v) for v in row.values())
 
 
-# --- #1090: is scheduling still advancing? -----------------------------------
+# ---: is scheduling still advancing? -----------------------------------
 
 
 def _rewind(world, account_id, *, hours):
@@ -791,9 +778,9 @@ def _lag(world, ids=None):
 
 
 class TestSchedulingLagSeesBothOutageShapes:
-    """The scheduling-lag detector (#1090), gated against the two outage shapes.
+    """The scheduling-lag detector, gated against the two outage shapes.
 
-    They have OPPOSITE mechanisms — a dead worker (#1026), and a live worker
+    They have OPPOSITE mechanisms — a dead worker, and a live worker
     whose every tick aborts — and exactly one observable in common, which is
     what these pin. A test that only reproduces one of them would certify the
     detector that misses the other, which is the whole failure mode here.
@@ -814,7 +801,7 @@ class TestSchedulingLagSeesBothOutageShapes:
     def test_a_cursor_left_in_the_past_is_stalled(self, world):
         """The shape BOTH outages produce, and the only thing they share.
 
-        Whatever stops the advance — a dead worker (#1026) or a tick that runs
+        Whatever stops the advance — a dead worker or a tick that runs
         and aborts — the cursor sits due and unmoved. This asserts the
         footprint, not either cause, which is why one test covers both.
         """

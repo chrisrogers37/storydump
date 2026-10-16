@@ -1,4 +1,4 @@
-"""The real Drive read leg (#982) — `list_changes` against a mock transport.
+"""The real Drive read leg — `list_changes` against a mock transport.
 
 No test here reaches Google. Every request is served by `httpx.MockTransport`,
 so the shapes asserted are the shapes the adapter actually builds rather than
@@ -228,7 +228,7 @@ class TestListChanges:
 
     @pytest.mark.asyncio
     async def test_both_ids_reach_the_token_provider(self):
-        """The workspace id is the credential's key (069) and the source id
+        """The workspace id is the credential's key (workspace Drive grant) and the source id
         names the folder; an adapter that dropped either would resolve the
         wrong tenant's grant or mislabel the folder it was syncing."""
         record: list = []
@@ -478,7 +478,7 @@ class TestCredentialFailurePropagates:
 
 
 class TestListFolders:
-    """The folder browser (#1165): the same `drive.readonly` grant,
+    """The folder browser: the same `drive.readonly` grant,
     the same floored transport, one more `q`."""
 
     FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -577,7 +577,7 @@ class TestListFolders:
 
 class TestOneRemintOnARefusedToken:
     """A token the door handed out can die inside the request it was minted
-    for (#1247). Google's 401 buys exactly one re-mint (`fresh=True`) and one
+    for. Google's 401 buys exactly one re-mint (`fresh=True`) and one
     retry; a second refusal is the grant's and propagates."""
 
     @pytest.mark.asyncio
@@ -810,7 +810,7 @@ class TestTheWalkOverSubfolders:
 
 
 class TestAWalkSurvivesWhatDriveDoesMidWalk:
-    """#1251: a subfolder deleted or unshared while the walk is on
+    """A subfolder deleted or unshared while the walk is on
     it must not wedge the source, and an expired page token must not either."""
 
     ROOT = "FOLDER123"
@@ -853,7 +853,7 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
         assert [i["ref"] for i in items] == ["k1"] and not checkpoint_incomplete(cp)
-        # #1545: a folder the walk could not list leaves it partial, never whole.
+        # a folder the walk could not list leaves it partial, never whole.
         assert cp.get("partial") is True and "whole" not in cp
 
     @pytest.mark.asyncio
@@ -1229,7 +1229,7 @@ class TestTheWalkGoesToAnyDepth:
         )
         assert cursors[-1].get("truncated") is True
 
-    # #1545: the sync tombstones what a walk that saw the WHOLE tree no longer
+    # the sync tombstones what a walk that saw the WHOLE tree no longer
     # lists, so every way a walk skips part of the tree rides the completed
     # cursor (the folder cap as `truncated`, every other skip as `partial`),
     # and only a walk that skipped nothing ends `whole`. The vanished-folder
@@ -1376,7 +1376,7 @@ class TestFetchBytes:
     async def test_the_adapter_built_without_a_policy_still_fetches(self, monkeypatch):
         """The worker constructs the adapter with no policy (the floor's
         default applies per call); the media policy must derive from that,
-        never from None (#1259), which would fail the fetch on every card.
+        never from None, which would fail the fetch on every card.
 
         That default resolves each host before any request, so the lookup is
         answered through the floor's own `resolver=` seam rather than by real
@@ -1575,7 +1575,7 @@ class TestFolderAncestors:
 
 
 class TestFetchThumbnail:
-    """The thumbnail route's fetch (#1634): the stored link, under the
+    """The thumbnail route's fetch: the stored link, under the
     workspace grant. A dead link is re-read from Drive once and that link
     tried once. Nothing that is not a raster picture within the cap comes
     back, and the token reaches only Drive's thumbnail hosts and its API."""

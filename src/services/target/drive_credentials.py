@@ -1,4 +1,4 @@
-"""Resolve a media source's Drive access token (#982).
+"""Resolve a media source's Drive access token.
 
 Kept out of :mod:`google_drive_adapter` on purpose: the adapter is a transport,
 and mixing decryption and the credential state machine into it would put three
@@ -7,13 +7,13 @@ and hands the adapter a token or a typed refusal.
 
 ## It resolves by WORKSPACE, never by file id, and not by source
 
-A `gdrive` credential is the WORKSPACE's (069, #1165): one Google grant, every
+A `gdrive` credential is the WORKSPACE's (workspace Drive grant): one Google grant, every
 folder under it, and the row names no owner column. So a source's token is its
 workspace's grant, and the source id plays no part in the lookup (it is kept in
 the provider's signature because the adapter names the source it is syncing).
 Resolving from a Drive file id instead would be a cross-tenant hazard — Drive
 ids are global, so one workspace's id would happily select another workspace's
-credential (#982).
+credential.
 
 ## The writer, and the envelope it writes
 
@@ -21,7 +21,7 @@ credential (#982).
 payload shape — a versioned envelope carrying both tokens, and why.
 It is decoded here through the writer's own :func:`google_drive_oauth.decode_payload`
 so the two modules cannot drift, and a payload that is not a v1 envelope is
-refused by name, never sent onward as a bearer. This door (#1247)
+refused by name, never sent onward as a bearer. This door
 hands back the stored access token while it is still good, and mints a fresh
 one from the refresh token when it is not (:func:`_refresh`, below).
 
@@ -31,10 +31,10 @@ the source flips to ``error``, the disconnect alert fires once under its
 `alerted_at` dedup, and **the job SUCCEEDS** as handled work — a visible
 source in `error` rather than a poisoned lane.
 
-## The refresh door lives HERE, on the read path (#1247)
+## The refresh door lives HERE, on the read path
 
 `credential_lifecycle` ships `ig_refresh` and no Google analogue, and the
-refresh clock is fenced to `ig_login` (`063`) by design: gdrive rows carry
+refresh clock is fenced to `ig_login` (`fn_clock_tick` provider guards) by design: gdrive rows carry
 `next_refresh_at = NULL` and are minted on the READ path, not by the clock.
 That is this module's `_refresh`: an access token at or past its expiry (less
 `REFRESH_SKEW`) is exchanged for a fresh one with the stored refresh token,
@@ -78,7 +78,7 @@ REFRESH_SKEW = timedelta(minutes=5)
 async def token_for_source(
     engine, source_id, *, workspace_id: str, fresh: bool = False
 ) -> str:
-    """The source's Drive access token — its WORKSPACE's grant (069) — or
+    """The source's Drive access token — its WORKSPACE's grant (workspace Drive grant) — or
     :class:`DriveCredentialDead`. `source_id` is not consulted: the adapter
     passes it for its own messages, and `None` is the folder browser.
     `fresh` forces a refresh — the adapter's one retry after Google refused a
@@ -114,11 +114,9 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
             (
                 await session.execute(
                     text(
-                        # BOTH the tenant GUC (RLS, when live) and the WHERE:
-                        # production connects as the owner role with BYPASSRLS
-                        # (`app.py`), so this predicate is what binds the row to
-                        # its workspace — the same convention every other
-                        # query on this table keeps (#1246).
+                        # The deployed runtime roles enforce RLS under the
+                        # tenant GUC. This explicit workspace predicate also
+                        # confines the read when an owner calls it.
                         "SELECT encrypted_payload, state, expires_at"
                         " FROM oauth_credentials"
                         " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE
@@ -165,7 +163,7 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
         and expires_at <= datetime.now(timezone.utc) + REFRESH_SKEW
     )
     if fresh or stale:
-        # #1247: the ACCESS token expires hourly; the grant does
+        # the ACCESS token expires hourly; the grant does
         # not. Mint here, on the read path — the one place it happens.
         return await _refresh(
             engine, str(workspace_id), payload, seen=row["encrypted_payload"]

@@ -1,15 +1,23 @@
 # GitHub Actions CI/CD
 
+A new database starts with `make init-db`: build from the models and
+`src/models/target/ddl/`, adopt the empty `000_initial.sql` base marker,
+then apply later migrations. The marker is never executed. The owner
+role performs schema changes; the API uses `svc_ingress` and the worker
+uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
+
 ## Overview
 
-Storydump uses GitHub Actions for continuous integration and Railway for continuous deployment. Since the project is hosted on a public repository, all CI runs on GitHub's cloud runners (`ubuntu-latest`).
+The CI workflow defines jobs on GitHub-hosted runners (`ubuntu-latest`).
+GitHub Actions is disabled for this private repository, so validation runs
+locally and its results are recorded in the pull request.
 
 ---
 
 ## CI Pipeline (Automated)
 
 `.github/workflows/ci.yml` runs on every push to `main`, `develop` and
-`feature/*`, and on every pull request into `main` or `develop`. It has six
+`feature/*`, and on every pull request into `main` or `develop`. It has seven
 jobs, and none is path-filtered — every job runs on every PR:
 
 ```yaml
@@ -27,12 +35,15 @@ jobs:
   telegram-ratchet: # python scripts/telegram_ratchet.py      (stdlib only, no install)
   test:             # pip install -e '.[cli]'
                     # pytest tests/ -v --cov=src --cov=storydump_cli
-                    # against a postgres:15 service, REQUIRE_TEST_DATABASE=1
+                    # against a postgres:17 service, REQUIRE_TEST_DATABASE=1
   security:         # pip-audit -r requirements.txt               (GATES)
                     # bandit -r src/ storydump_cli/               (advisory)
   front-end:        # in landing/: npm ci, npm test, npx tsc --noEmit, npm run lint
                     # npm audit --omit=dev                        (GATES)
   changelog-check:  # pull requests only: the rule in changelog.d/README.md
+  schema-consistency: # python -m scripts.schema_consistency
+                      # current code vs pinned schema-code base + migration tail
+                      # two independent disposable postgres:17 clusters
 ```
 
 ### What CI Checks
@@ -42,20 +53,17 @@ jobs:
 | Linting | `ruff check .` | Code style and errors, over the whole repository — `tests/` included |
 | Formatting | `ruff format . --check` | Consistent code formatting |
 | Telegram ratchet | `scripts/telegram_ratchet.py` | An allowlist of the modules permitted to reference Telegram: a reference outside it fails. Stdlib-only, so it runs without the app's dependencies |
-| Tests | `pytest` | The whole suite against a PostgreSQL 15 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced, and the upload is advisory: it continues on error and times out after five minutes, so it never fails the job |
+| Tests | `pytest` | The whole suite against a PostgreSQL 17 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced, and the upload is advisory: it continues on error and times out after five minutes, so it never fails the job |
 | Security | `pip-audit`, `bandit` | Vulnerability scanning. `pip-audit` GATES: a known-vulnerable pin in `requirements.txt` fails the job. `bandit` is advisory (`\|\| true` + `continue-on-error`): its findings on this tree have not been triaged, so read the uploaded report rather than the step's colour. The npm dependencies of `landing/` are audited in Front end, below |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint`, `npm audit --omit=dev` | The web app in `landing/` (Node 22). The audit GATES: a known advisory against a runtime dependency, direct or transitive, fails the job. It runs on every PR, so a newly published advisory turns every PR red until a bump lands; the step's note in `ci.yml` has its scope, why it has no severity floor, and how to clear an advisory. `next build` is left to Vercel, which builds every PR |
 | Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
+| Schema consistency | `python -m scripts.schema_consistency` | Compares the catalog built from current schema code with the pinned schema-code base plus its migration tail. Two independent disposable PostgreSQL 17 clusters keep roles and memberships separate. Catalog snapshots and differences are uploaded as an artifact |
 
-`main` is guarded by a repository ruleset: no force-push, no deletion, a pull
-request for every change (no approval count), and six required checks: Lint,
-Telegram ratchet, Test, Security Scan, Front End and Changelog Check.
-"Branch up to date" is not required. The ruleset has no bypass list, so an
-emergency merge means disabling it by hand. Vercel and GitGuardian report on
-every PR but are not required. Renaming a required job strands open PRs on a
-check that never arrives, so the ruleset changes with it (`ci.yml`'s note on
-`Front End` says the same). A red check also makes Railway skip a deploy
-(below).
+The local `scripts/pr_ready.sh` helper expects all seven declared jobs by name:
+Lint, Telegram ratchet, Test, Security Scan, Front End, Changelog Check and
+Schema consistency. It checks that this list matches the workflow. GitHub
+rulesets govern merge policy; review that configuration when changing job
+names. The helper's expectations do not establish the remote ruleset settings.
 
 ---
 
@@ -69,7 +77,9 @@ Railway deploys both services from `main` (`ci.yml:4`). For each service,
    migrations are applied first, under the runner's advisory lock, so the two
    services' pre-deploys serialize and the second finds nothing pending. A
    failing migration aborts the deploy with the old version still serving. A
-   gated file (`-- runner:manual`) is listed as owed and is not applied
+   gated file (`-- runner:manual`), including `001` and `002`, is listed as
+   owed and is not applied. The owner follows the
+   [cutover runbook](../operations/schema-cutover.md).
 3. **Start**, and the health check: `GET /health` must answer within 30 s
 4. **Restart policy** — `ON_FAILURE`, 10 retries; the old deployment gets 60 s to drain
 
@@ -82,6 +92,9 @@ whose `Test` job is red. Merge on green.
 |---------|--------------|---------|
 | `worker` | `python -m src.main` | The target worker (`src.worker`): the clock, the job lanes — planning slots, sending Telegram cards, publishing to Instagram, syncing Drive, refreshing credentials — and its own `/health` listener |
 | `storydump` | `uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}` | The API: `/api/v1`, sign-in and the OAuth callbacks under `/auth`, the Telegram webhook, Meta's callbacks, the health surfaces |
+
+Set each service's dashboard Start Command explicitly as described in the
+[required start-command settings](cloud-deployment.md#required-dashboard-start-commands).
 
 The web front end (`landing/`) deploys to Vercel, not Railway
 ([`landing-vercel-deployment.md`](landing-vercel-deployment.md)).
@@ -106,11 +119,9 @@ storydump burst --since <the deploy's time> --watch
 
 ---
 
-## Security for Public Repos
+## CI and Deployment Credentials
 
-Since this is a public repository:
-
-- All CI runs on **GitHub cloud runners** (`ubuntu-latest`) -- safe for public repos
+- The CI workflow uses **GitHub-hosted runners** (`ubuntu-latest`)
 - No self-hosted runners are used (avoids exposing infrastructure to malicious PRs)
 - All production secrets are stored in **Railway environment variables** (never in code)
 - Deployment is performed by Railway's GitHub integration, not by a CI job: no workflow holds a deploy credential
@@ -190,7 +201,7 @@ railway logs --service worker
 - **Python 3.10** in every job (`setup.py` `python_requires=">=3.10"`); Railway
   builds with NIXPACKS' default Python, so the pin is CI's, not the deploy's
 - **Node 22** for the front end (mirrored by `engines` in `landing/package.json`)
-- **PostgreSQL 15** as the Test job's service container
+- **PostgreSQL 17** for the Test job and both Schema consistency clusters
 
 ## Cost
 

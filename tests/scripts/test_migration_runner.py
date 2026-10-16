@@ -7,6 +7,7 @@ never the shared storyline_test database.
 """
 
 import hashlib
+import json
 import threading
 import time
 
@@ -15,8 +16,10 @@ import pytest
 
 import scripts.migration_runner as runner_module
 from scripts.migration_runner import (
+    INITIAL_VERSION,
     RUNNER_LOCK_KEY,
     MigrationRunnerError,
+    adopt,
     apply_manual,
     apply_pending,
     discover_migrations,
@@ -152,7 +155,7 @@ class TestMarkers:
             "-- Runner:gated",  # a capital R
             "--runner:gated",  # no space after the dashes
             "-- runner:MANUAL",  # a capital word: the words are exact
-            "-- runner:unadvertised because it snapshots",  # a flag with an argument
+            "-- runner:reapply-safe because it re-runs",  # a flag with an argument
         ],
     )
     def test_every_spelling_that_reads_as_a_marker_reaches_the_known_set(
@@ -187,7 +190,7 @@ class TestMarkers:
         write_migration(
             tmp_path,
             1,
-            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
+            "-- The runner:manual marker is what keeps a file out of the deploy.\n"
             "-- see runner:postcondition lines below\n"
             "CREATE TABLE t_a (id INT);",
         )
@@ -207,22 +210,6 @@ class TestMarkers:
         [m] = discover_migrations(tmp_path)
         assert m.postconditions == ("SELECT tru",)
 
-    def test_unadvertised_is_read_off_the_file(self, tmp_path):
-        write_migration(
-            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
-        )
-        write_migration(tmp_path, 2, "CREATE TABLE t_b (id INT);")
-        a, b = discover_migrations(tmp_path)
-        assert a.unadvertised is True
-        assert b.unadvertised is False
-
-    def test_an_unadvertised_file_is_applied_like_any_other(self, scratch_db, tmp_path):
-        write_migration(
-            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
-        )
-        apply_pending(scratch_db, tmp_path)
-        assert [row[0] for row in fetch_ledger(scratch_db)] == [1]
-
     @pytest.mark.parametrize(
         "line",
         [
@@ -232,7 +219,7 @@ class TestMarkers:
             "# runner:manual",  # a shell-style frame
             "-- runner manual",  # no colon
             "DROP TABLE t_gone; -- runner:manual",  # after code on the same line
-            "-- RUNNER unadvertised",  # another word, upper case, no colon
+            "-- RUNNER reapply-safe",  # another word, upper case, no colon
             "-- runner-manual",  # a dash for the colon
             "-- runner=manual",  # an equals sign for the colon
         ],
@@ -253,12 +240,12 @@ class TestMarkers:
         write_migration(
             tmp_path,
             1,
-            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
-            "-- python -m scripts.migration_runner apply --manual 79 is the door.\n"
+            "-- The runner:manual marker is what keeps a file out of the deploy.\n"
+            "-- python -m scripts.migration_runner apply --manual 5 is the door.\n"
             "CREATE TABLE t_a (id INT);",
         )
         [m] = discover_migrations(tmp_path)
-        assert m.manual is False and m.schema_move is False
+        assert m.manual is False
 
     def test_a_byte_order_mark_does_not_hide_a_marker_on_line_one(self, tmp_path):
         path = tmp_path / "001_bom.sql"
@@ -407,7 +394,7 @@ class TestSelfManagedTransactions:
     def test_file_with_own_begin_commit_and_post_commit_concurrently(
         self, scratch_db, tmp_path
     ):
-        """The legacy-corpus shape (023): the file manages its own
+        """The legacy-corpus shape (account-scoped settings): the file manages its own
         transaction and follows it with CREATE INDEX CONCURRENTLY. The
         runner must execute it with psql semantics — statement by statement —
         not wrap it in a second transaction."""
@@ -536,7 +523,7 @@ def _apply_in_thread(dsn, migrations_dir):
 
 
 class TestTheLockWaitIsBounded:
-    """#1515: a wrapped file's lock waits are bounded (`LOCK_TIMEOUT`), and a
+    """A wrapped file's lock waits are bounded (`LOCK_TIMEOUT`), and a
     lock-wait failure, and no other, is tried again (`LOCK_RETRY_DELAYS_S`).
 
     A holder reads the table in an open transaction (ACCESS SHARE until it
@@ -672,10 +659,29 @@ class TestManual:
         )
         write_migration(tmp_path, 3, "CREATE TABLE t_three (id INT);")
 
+    @pytest.mark.parametrize("manual", [[], ["--manual", "001"]])
+    def test_backup_confirmation_refuses_anything_except_manual_002(
+        self, tmp_path, capsys, manual
+    ):
+        with pytest.raises(SystemExit) as caught:
+            main(
+                [
+                    "--database-url",
+                    "postgresql://unused.invalid/unused",
+                    "--migrations-dir",
+                    str(tmp_path),
+                    "apply",
+                    *manual,
+                    "--confirm-archive-backup",
+                ]
+            )
+        assert caught.value.code == 2
+        assert "requires --manual 002" in capsys.readouterr().err
+
     def test_apply_owes_the_manual_file_and_applies_the_ordinary_ones_above_it(
         self, scratch_db, tmp_path
     ):
-        """THE LOAD-BEARING HALF: with the manual 002 pending, 003 — numbered
+        """THE LOAD-BEARING HALF: with the manual 002 pending, the later DDL file — numbered
         above it — applies and nothing raises. Without the exemption every
         predeploy after the next ordinary file would raise on every push."""
         self._corpus(tmp_path)
@@ -686,8 +692,8 @@ class TestManual:
         assert [m.version for m in report.owed] == [2]
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 3]
         assert table_exists(scratch_db, "t_one"), "the manual file must not have run"
-        # THE NEXT DEPLOY, in production's exact shape: an ordinary 004 lands
-        # while 002 is still owed BELOW the head. 004 applies, 002 is owed
+        # THE NEXT DEPLOY, in production's exact shape: a new ordinary file lands
+        # while 002 is still owed BELOW the head. The new ordinary file applies, 002 is owed
         # again, nothing raises.
         write_migration(tmp_path, 4, "CREATE TABLE t_four (id INT);")
         again = apply_pending(scratch_db, tmp_path)
@@ -698,7 +704,7 @@ class TestManual:
     def test_apply_manual_applies_it_below_the_head_with_a_ledger_row(
         self, scratch_db, tmp_path
     ):
-        """THE OTHER HALF: after 003 is the head, `--manual 002` applies 002
+        """THE OTHER HALF: after the later DDL file is the head, `--manual 002` applies 002
         below it — the below-head rule is for files inserted under history by
         mistake, and a gated file is under it by design."""
         self._corpus(tmp_path)
@@ -818,3 +824,62 @@ class TestManual:
 
         assert main(argv + ["apply", "--manual", "3"]) == 1
         assert "runner:manual" in capsys.readouterr().err
+
+
+class TestTheInitialMarker:
+    """`000_initial.sql` is empty and never executed; `adopt` records it on a
+    database built from the schema code, and later files apply on top."""
+
+    def test_an_empty_initial_marker_is_discovered_with_no_statements(self, tmp_path):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        [m] = discover_migrations(tmp_path)
+        assert m.version == INITIAL_VERSION
+        assert m.statements == ()
+
+    def test_a_byte_in_the_initial_marker_is_refused_at_discovery(self, tmp_path):
+        (tmp_path / "000_initial.sql").write_text("SELECT 1;")
+        with pytest.raises(
+            MigrationRunnerError, match=r"000 \(000_initial\.sql\) must be empty"
+        ):
+            discover_migrations(tmp_path)
+
+    def test_an_unrecorded_initial_marker_is_refused_never_applied(
+        self, scratch_db, tmp_path
+    ):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        write_migration(tmp_path, 1, "CREATE TABLE t_a (id INT);")
+        with pytest.raises(
+            MigrationRunnerError, match="not recorded: build the schema"
+        ):
+            apply_pending(scratch_db, tmp_path)
+        assert fetch_ledger(scratch_db) == []
+        assert not table_exists(scratch_db, "t_a")
+
+    def test_adopt_records_the_marker_then_apply_runs_what_is_above_it(
+        self, scratch_db, tmp_path
+    ):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        write_migration(
+            tmp_path,
+            1,
+            "-- runner:postcondition SELECT to_regclass('public.t_a') IS NOT NULL\n"
+            "CREATE TABLE t_a (id INT);",
+        )
+        manifest = tmp_path / "adoption_manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "required_through": 0,
+                    "entries": [{"version": 0, "probe": "SELECT true"}],
+                }
+            )
+        )
+        report = adopt(scratch_db, tmp_path, manifest)
+        assert [m.version for m in report.adopted] == [0]
+        assert [m.version for m in report.pending] == [1]
+        applied = apply_pending(scratch_db, tmp_path)
+        assert [m.version for m in applied.applied] == [1]
+        assert [row[0] for row in fetch_ledger(scratch_db)] == [0, 1]
+        again = adopt(scratch_db, tmp_path, manifest)
+        assert [m.version for m in again.already] == [0, 1]
+        assert again.adopted == [] and again.pending == []

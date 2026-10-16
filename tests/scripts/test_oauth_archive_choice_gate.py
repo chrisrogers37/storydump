@@ -1,5 +1,5 @@
 """The OAuth history choice, from the preview to the applied result, AS THE
-PRODUCTION ROLE (#1644, migration 141).
+PRODUCTION ROLE (OAuth archive choice).
 
 The OAuth choice and its applied result form a matrix of
 entry points against account states. Every row is driven here through the REAL
@@ -68,7 +68,7 @@ from tests.scripts.conftest import (
     execute,
     fetch_all,
     in_tenant,
-    replay_advertised_stream,
+    build_world,
     set_test_passwords,
 )
 from tests.scripts.test_versioned_mix_gate import evidence as conversion_evidence
@@ -120,7 +120,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         set_test_passwords(admin_conn)
         yield {"stream": stream, "ingress": as_user(db, "svc_ingress")}
     finally:

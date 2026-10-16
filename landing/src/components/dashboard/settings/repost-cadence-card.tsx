@@ -14,7 +14,7 @@ interface Props {
   repostTtlDays: number | null;
   skipTtlDays: number | null;
   /** The deployment's fallbacks, served on the config payload — never typed
-   *  here. A copy in this file is the #1366 defect. */
+   * here. A copy in this file is the defect. */
   defaults: { repost_ttl_days: number; skip_ttl_days: number };
   onError: (message: string | null) => void;
 }
@@ -25,12 +25,12 @@ interface Props {
  * NULL means "no workspace value — the deployment's defaults apply"
  * (`DEFAULT_REPOST_TTL_DAYS`, `DEFAULT_SKIP_TTL_DAYS`), which is not the same
  * as zero and not the same as any particular number. The per-chat TTL columns
- * on `chat_settings` (migration 029) are not read by this tier.
+ * on `chat_settings` (chat lock TTL settings) are not read by this tier.
  *
  * The fields SHOW that fallback, marked as a default, and it arrives on the
- * payload rather than being written here (#1366). Both halves matter: a copy
+ * payload rather than being written here. Both halves matter: a copy
  * in this file can drift — reading 30 while a worker publish locks for 7
- * (#1365) — and as the baseline for change-detection it would make the
+ * — and as the baseline for change-detection it would make the
  * default, typed with nothing stored, read as "no change" and never save.
  */
 export function RepostCadenceCard({
@@ -52,7 +52,7 @@ export function RepostCadenceCard({
   const skipChanged = skipField.isChanged(skip);
 
   /**
-   * The write goes through the command client (#1057). Both keys are
+   * The write goes through the command client. Both keys are
    * `settings_change` columns, so the key name goes through unchanged and
    * the port validates it.
    *

@@ -119,7 +119,7 @@ def _describe_estate(data: dict) -> str:
     if posted > 0:
         # THE `silent` PATH. Every branch below diagnoses an estate that has
         # NEVER posted, and appending one to a silence verdict makes it
-        # contradict itself — "N post(s) landed in total, and ... nothing is
+        # contradict itself — "N post(s) landed in total, and... nothing is
         # landing". The useful context here is the arithmetic instead: debits
         # far above landings means publishing is being reached and failing,
         # debits level with landings means nothing is reaching it at all.
@@ -145,7 +145,7 @@ def _describe_estate(data: dict) -> str:
     # day-bucket row survives that at `count = 0` (`ck_dpc_nonneg`), so it is
     # what tells "never tried" from "tried and gave it all back".
     #
-    # It would NOT survive `059`'s retention purge, which deletes the row
+    # It would NOT survive `04_functions.sql`'s retention purge, which deletes the row
     # outright — but `retention_sweep` sweeps only `rate_counters`, never this
     # table. If this class is ever swept, this distinction goes with it.
     if debited == 0 and buckets == 0:
@@ -229,7 +229,7 @@ def classify(
     # Not reachable from the SQL — each pair is one `count(*)` and one
     # `max(...)` over one population in one statement. It becomes reachable the
     # moment a filter lands on one side of a pair, which `posting_health`
-    # already does deliberately once (the landing filter in `fn_health_posting_freshness`, 081), so the precedent for the
+    # already does deliberately once (the landing filter in `fn_health_posting_freshness`, fleet health functions), so the precedent for the
     # decoupling lives in the very file that produces these fields.
     for count_key, age_key in _PAIRS:
         count, paired_age = data[count_key], data[age_key]

@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: postgres:17
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -82,6 +82,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Migration tests build the pinned schema-code base from history.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -137,8 +140,8 @@ jobs:
         run: |
           pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
-      # Test is a required check on main, and the upload gates nothing (no
-      # coverage threshold). `fail_ci_if_error: false` does not cover the
+      # The coverage upload gates nothing (no coverage threshold).
+      # `fail_ci_if_error: false` does not cover the
       # action itself crashing, for example on a TLS handshake failure to
       # Codecov. An outage at Codecov must not block every merge.
       - name: Upload coverage to Codecov
@@ -207,11 +210,11 @@ jobs:
     # `Test`, so it adds nothing to the wall-clock a person waits for, and a
     # gate that costs nothing is a gate nobody routes around.
     #
-    # REQUIRED: the `main` ruleset requires a pull request and every job in
-    # this workflow by name (Lint, Telegram ratchet, Test, Security
-    # Scan, Front End, Changelog Check). Renaming a job here strands every
-    # open PR on a check that never arrives, so a rename changes the ruleset
-    # in the same breath.
+    # scripts/pr_ready.sh expects all seven declared jobs by name: Lint,
+    # Telegram ratchet, Test, Security Scan, Front End, Changelog Check and
+    # Schema consistency. It checks that its list matches this workflow.
+    # GitHub rulesets govern merge policy; review that configuration when
+    # changing job names.
     #
     # `next build` is deliberately ABSENT: Vercel already builds every PR, so
     # duplicating it here buys nothing but minutes.
@@ -280,3 +283,53 @@ jobs:
       # no fragment. changelog.d/README.md states the rule; the script holds it.
       - name: Check the changelog fragment
         run: python scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"
+
+  schema-consistency:
+    name: Schema consistency
+    runs-on: ubuntu-latest
+    services:
+      postgres-code:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: storyline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-replay:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: storyline_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compare schema code with the migration tail
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/storyline_test
+          REPLAY_DATABASE_URL: postgresql://test_user:test_password@localhost:5433/storyline_test
+        run: python -m scripts.schema_consistency --out schema-consistency
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: schema-consistency
+          path: schema-consistency/
