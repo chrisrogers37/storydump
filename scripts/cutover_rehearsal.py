@@ -375,6 +375,7 @@ def run(
         return 0
     finally:
         failures = []
+        primary_error = sys.exc_info()[1]
         for admin, name in reversed(created):
             try:
                 with admin.cursor() as cur:
@@ -395,9 +396,17 @@ def run(
             except psycopg2.Error as exc:
                 failures.append(str(exc))
         for admin in administrators:
-            admin.close()
+            try:
+                admin.close()
+            except psycopg2.Error as exc:
+                failures.append(str(exc))
         if failures:
-            raise RuntimeError("rehearsal cleanup failed: " + "; ".join(failures))
+            cleanup_error = RuntimeError(
+                "rehearsal cleanup failed: " + "; ".join(failures)
+            )
+            if primary_error is not None:
+                raise primary_error from cleanup_error
+            raise cleanup_error
 
 
 def main(argv=None):

@@ -6,7 +6,8 @@ Archive and runner relations, extension members and system objects
 are excluded. Comments, outside-role grants and membership options are reported
 for review; raw function bodies remain part of the comparison.
 Memberships held by service roles or the database owner are compared regardless
-of the granted role or grantor.
+of the granted role. Grantor provenance is reported separately; admin power is
+compared across every grant of the same membership edge.
 """
 
 from __future__ import annotations
@@ -170,6 +171,7 @@ def extract(conn, *, read_only=False):
             "outside_roles": {},
             "comments": [],
             "membership_options": [],
+            "membership_grants": [],
             "function_bodies": {},
             "archive_relations": [],
             "reference_metadata": {},
@@ -348,10 +350,15 @@ def extract(conn, *, read_only=False):
                 if row is None:
                     continue
                 if row["member"] == "<owner>" or row["member"].startswith("svc_"):
-                    row["key"] = (
-                        row["role"] + "->" + row["member"] + "@" + row["grantor"]
-                    )
-                    put("memberships", row)
+                    reported["membership_grants"].append(dict(row))
+                    row.pop("grantor")
+                    key = row["role"] + "->" + row["member"]
+                    existing = catalog["memberships"].get(key)
+                    if existing is not None:
+                        # PostgreSQL 16+ can retain grants from several grantors.
+                        # Any admin grant supplies administration of this edge.
+                        row["admin_option"] |= existing["admin_option"]
+                    catalog["memberships"][key] = row
                 elif any(
                     r == "<owner>" or r.startswith("svc_")
                     for r in (row["role"], row["member"])
