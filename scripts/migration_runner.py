@@ -76,6 +76,13 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 #: The initial marker's version: ``000_initial.sql``, empty, recorded by
 #: ``adopt`` on a database built from the schema code and never executed.
 INITIAL_VERSION = 0
+RETIRED_CHAIN_LAST_VERSION = 149
+# The retired files that overlap the two pending versions. Their identities
+# remain evidence of retired history even when a current initial row is mixed in.
+RETIRED_COLLIDING_CHECKSUMS = {
+    1: "f75f8a5b999673786d5bc79fca214a6bc7cc7360104fc6ab7703d440f03767c1",
+    2: "8e2d5502c1f1ba613c598982824f9588d94f8a3a7fc167df36f310d8cfc136bc",
+}
 
 #: The longest a wrapped file waits for any one lock. A file that
 #: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
@@ -398,6 +405,48 @@ def _ledger_rows(conn) -> dict:
         return {version: (checksum, status) for version, checksum, status in cur}
 
 
+def _retired_history_issue(ledger, migrations):
+    """Keep retired or mixed history out of the replacement version namespace."""
+    by_version = {m.version: m for m in migrations}
+    if not ledger or INITIAL_VERSION not in by_version:
+        return None
+    has_unknown = any(version not in by_version for version in ledger)
+    lacks_initial = INITIAL_VERSION not in ledger
+    has_collision = any(
+        version in by_version and checksum != by_version[version].checksum
+        for version, (checksum, _status) in ledger.items()
+    )
+    known_retired_collision = any(
+        RETIRED_COLLIDING_CHECKSUMS.get(version) == checksum
+        for version, (checksum, _status) in ledger.items()
+    )
+    replacement_corpus = {
+        "000_initial.sql",
+        "001_catalog_text.sql",
+        "002_drop_archive_snapshots.sql",
+    } <= {migration.path.name for migration in migrations}
+    if known_retired_collision or (
+        replacement_corpus and lacks_initial and (has_unknown or has_collision)
+    ):
+        return (
+            "the ledger holds retired or mixed migration history; run"
+            " `migration_runner convert-ledger --confirm-legacy-ledger` as the"
+            " database owner; conversion refuses current chain rows and"
+            f" versions above {RETIRED_CHAIN_LAST_VERSION}"
+        )
+    return None
+
+
+def _refuse_retired_history(conn, migrations):
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('runner.schema_migrations')")
+        if cur.fetchone()[0] is None:
+            return
+    issue = _retired_history_issue(_ledger_rows(conn), migrations)
+    if issue:
+        raise MigrationRunnerError(issue)
+
+
 @contextmanager
 def _transaction(conn):
     """One explicit transaction on an otherwise-autocommit connection."""
@@ -418,6 +467,9 @@ def ledger_discrepancies(ledger: dict, migrations: list) -> list:
     version must still exist in-tree with its recorded checksum. ``status``
     reports this list; ``apply``/``adopt`` refuse on it — the two doors
     cannot disagree because they share it."""
+    retired = _retired_history_issue(ledger, migrations)
+    if retired:
+        return [(min(ledger), retired)]
     by_version = {m.version: m for m in migrations}
     issues = []
     for version, (checksum, _status) in sorted(ledger.items()):
@@ -475,7 +527,7 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def _apply_one(conn, migration) -> None:
+def _apply_one(conn, migration, *, confirm_archive_backup: bool = False) -> None:
     started = time.monotonic()
     if migration.execution_mode == "wrapped":
         # One migration = one transaction, ledger row included: applied and
@@ -484,6 +536,12 @@ def _apply_one(conn, migration) -> None:
             # Bounded lock waits; `true` keeps the setting local to this
             # transaction (SET LOCAL), as the tap path's is.
             cur.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_TIMEOUT,))
+            # Set inside this transaction on the runner's own connection. An
+            # ambient session setting cannot replace the operator's flag.
+            cur.execute(
+                "SELECT set_config('app.archive_snapshot_backup_confirmed', %s, true)",
+                ("on" if confirm_archive_backup else "off",),
+            )
             cur.execute(migration.sql)
             _run_postconditions(cur, migration)
             _record(cur, migration, _elapsed_ms(started), "applied")
@@ -504,16 +562,17 @@ def _apply_one(conn, migration) -> None:
             raise
 
 
-def _apply_guarded(conn, migration) -> None:
+def _apply_guarded(conn, migration, *, confirm_archive_backup: bool = False) -> None:
     """`_apply_one`, with a database failure named by the file — the one
     wrap both doors share. A wrapped file is one transaction, so one that
     failed on its lock wait alone is tried again after each pause in
     `LOCK_RETRY_DELAYS_S`; the last attempt's failure is final."""
     pauses = LOCK_RETRY_DELAYS_S if migration.execution_mode == "wrapped" else ()
+    confirmation = {"confirm_archive_backup": True} if confirm_archive_backup else {}
     try:
         for pause in pauses:
             try:
-                _apply_one(conn, migration)
+                _apply_one(conn, migration, **confirmation)
                 return
             except psycopg2.errors.LockNotAvailable:
                 print(
@@ -522,7 +581,7 @@ def _apply_guarded(conn, migration) -> None:
                     file=sys.stderr,
                 )
                 time.sleep(pause)
-        _apply_one(conn, migration)
+        _apply_one(conn, migration, **confirmation)
     except MigrationRunnerError:
         raise
     except Exception as exc:
@@ -547,11 +606,13 @@ def apply_pending(
     ordinary file numbered above it applies as if it were not there. Its door
     is :func:`apply_manual`.
     """
-    migrations = discover_migrations(migrations_dir, max_version)
+    corpus = discover_migrations(migrations_dir)
+    migrations = _within(corpus, max_version)
     report = ApplyReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
         _verify_integrity(ledger, migrations)
@@ -583,7 +644,9 @@ def apply_pending(
     return report
 
 
-def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
+def apply_manual(
+    dsn: str, migrations_dir, version: int, *, confirm_archive_backup: bool = False
+) -> ApplyReport:
     """Apply ONE gated file by version — the operator's door, never a deploy's.
 
     The file must carry ``runner:manual`` (an ordinary pending file is
@@ -597,7 +660,13 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
     an ORDINARY file still pending below it refuses the door: the tree the
     gated file was written against is the one with everything before it
     applied, so `apply` runs first.
+
+    ``confirm_archive_backup`` acknowledges that the sixteen snapshot tables
+    have been exported or backed up. It is accepted only for wrapped 002 and
+    reaches its SQL as a transaction-local setting on this runner connection.
     """
+    if confirm_archive_backup and version != 2:
+        raise MigrationRunnerError("archive backup confirmation requires --manual 002")
     migrations = discover_migrations(migrations_dir)
     by_version = {m.version: m for m in migrations}
     migration = by_version.get(version)
@@ -610,10 +679,13 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
             f"{migration.label} carries no runner:manual directive — it is"
             " `apply`'s to run in order; --manual is the door for gated files only"
         )
+    if confirm_archive_backup and migration.execution_mode != "wrapped":
+        raise MigrationRunnerError("archive backup confirmation requires wrapped 002")
     report = ApplyReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, migrations)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
         _verify_integrity(ledger, migrations)
@@ -632,7 +704,7 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
                 f"{migration.label} cannot run over a pending ordinary file below"
                 f" it ({', '.join(below)}); run `apply` first"
             )
-        _apply_guarded(conn, migration)
+        _apply_guarded(conn, migration, confirm_archive_backup=confirm_archive_backup)
         report.applied.append(migration)
     finally:
         conn.close()
@@ -725,6 +797,71 @@ def _load_manifest(manifest_path, window, corpus):
     return required_through, entries
 
 
+def _adoption_plan(conn, migrations, required_through, entries):
+    """Probe the current chain on a caller-owned connection before recording it."""
+    report = AdoptReport()
+    ledger = _ledger_rows(conn)
+    _verify_integrity(ledger, migrations)
+
+    report.already = [m for m in migrations if m.version in ledger]
+    candidates = [m for m in migrations if m.version not in ledger]
+
+    results = {}
+    asserted_versions = set()
+    with conn.cursor() as cur:
+        for migration in candidates:
+            kind, payload = entries[migration.version]
+            if kind == "asserted":
+                results[migration.version] = True
+                asserted_versions.add(migration.version)
+                continue
+            verdict = True
+            for probe in payload:
+                try:
+                    cur.execute(probe)
+                    row = cur.fetchone()
+                except Exception as exc:
+                    raise MigrationRunnerError(
+                        f"adoption probe for migration {migration.label}"
+                        f" errored — a broken probe is not evidence of"
+                        f" anything: {probe}: {exc}"
+                    ) from exc
+                if row is None or row[0] is not True:
+                    verdict = False
+                    break
+            results[migration.version] = verdict
+
+    for migration in candidates:
+        if migration.version <= required_through and not results[migration.version]:
+            _kind, payload = entries[migration.version]
+            raise MigrationRunnerError(
+                f"migration {migration.label} is required applied"
+                f" (floor {required_through:03d}) but its probe returned"
+                f" false: {'; '.join(payload)}"
+            )
+
+    head = max((v for v, ok in results.items() if ok), default=0)
+    for migration in candidates:
+        if (
+            migration.version < head
+            and not results[migration.version]
+            and not migration.reapply_safe
+        ):
+            raise MigrationRunnerError(
+                f"incoherent chain: migration {migration.label} probes"
+                f" unapplied while later migration {head:03d} probes"
+                " applied — a gap under applied history needs a human"
+                " ruling (runner repair), not a guess"
+            )
+
+    to_record = [m for m in candidates if results[m.version]]
+    report.pending = [m for m in candidates if not results[m.version]]
+
+    report.adopted = [m for m in to_record if m.version not in asserted_versions]
+    report.asserted = [m for m in to_record if m.version in asserted_versions]
+    return report, to_record
+
+
 def adopt(
     dsn: str, migrations_dir, manifest_path, max_version: int | None = None
 ) -> AdoptReport:
@@ -742,74 +879,115 @@ def adopt(
     corpus = discover_migrations(migrations_dir)
     migrations = _within(corpus, max_version)
     required_through, entries = _load_manifest(manifest_path, migrations, corpus)
-    report = AdoptReport()
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
-        ledger = _ledger_rows(conn)
-        _verify_integrity(ledger, migrations)
-
-        report.already = [m for m in migrations if m.version in ledger]
-        candidates = [m for m in migrations if m.version not in ledger]
-
-        results = {}
-        asserted_versions = set()
-        with conn.cursor() as cur:
-            for migration in candidates:
-                kind, payload = entries[migration.version]
-                if kind == "asserted":
-                    results[migration.version] = True
-                    asserted_versions.add(migration.version)
-                    continue
-                verdict = True
-                for probe in payload:
-                    try:
-                        cur.execute(probe)
-                        row = cur.fetchone()
-                    except Exception as exc:
-                        raise MigrationRunnerError(
-                            f"adoption probe for migration {migration.label}"
-                            f" errored — a broken probe is not evidence of"
-                            f" anything: {probe}: {exc}"
-                        ) from exc
-                    if row is None or row[0] is not True:
-                        verdict = False
-                        break
-                results[migration.version] = verdict
-
-        for migration in candidates:
-            if migration.version <= required_through and not results[migration.version]:
-                _kind, payload = entries[migration.version]
-                raise MigrationRunnerError(
-                    f"migration {migration.label} is required applied"
-                    f" (floor {required_through:03d}) but its probe returned"
-                    f" false: {'; '.join(payload)}"
-                )
-
-        head = max((v for v, ok in results.items() if ok), default=0)
-        for migration in candidates:
-            if (
-                migration.version < head
-                and not results[migration.version]
-                and not migration.reapply_safe
-            ):
-                raise MigrationRunnerError(
-                    f"incoherent chain: migration {migration.label} probes"
-                    f" unapplied while later migration {head:03d} probes"
-                    " applied — a gap under applied history needs a human"
-                    " ruling (runner repair), not a guess"
-                )
-
-        to_record = [m for m in candidates if results[m.version]]
-        report.pending = [m for m in candidates if not results[m.version]]
-
+        report, to_record = _adoption_plan(conn, migrations, required_through, entries)
         # All-or-nothing: every adoption row lands in one transaction.
         with _transaction(conn) as cur:
             for migration in to_record:
                 _record(cur, migration, None, "adopted")
-        report.adopted = [m for m in to_record if m.version not in asserted_versions]
-        report.asserted = [m for m in to_record if m.version in asserted_versions]
+    finally:
+        conn.close()
+    return report
+
+
+def convert_ledger(
+    dsn: str,
+    migrations_dir,
+    manifest_path,
+    *,
+    confirm_legacy_ledger: bool = False,
+) -> AdoptReport:
+    """Preserve the retired ledger and adopt the current chain atomically.
+
+    Only the database owner may confirm this conversion. The retired table
+    keeps its complete rows, ownership, and grants under its new name; it is
+    never dropped. The replacement ledger is populated only by adoption
+    probes, and a failed adoption rolls the rename back.
+    """
+    if not confirm_legacy_ledger:
+        raise MigrationRunnerError("convert-ledger requires --confirm-legacy-ledger")
+    migrations = discover_migrations(migrations_dir)
+    required_through, entries = _load_manifest(manifest_path, migrations, migrations)
+    checksums = {migration.checksum for migration in migrations}
+    filenames = {migration.path.name for migration in migrations}
+    conn = _connect(dsn)
+    try:
+        _acquire_lock(conn)
+        with _transaction(conn) as cur:
+            # A writer may commit while the table lock waits. Read its rows
+            # after that wait even when the DSN defaults to repeatable read.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            cur.execute(
+                "SELECT current_user = pg_get_userbyid(datdba) FROM pg_database"
+                " WHERE datname = current_database()"
+            )
+            if not cur.fetchone()[0]:
+                raise MigrationRunnerError(
+                    "convert-ledger must run as the database owner"
+                )
+            cur.execute("SELECT to_regclass('runner.schema_migrations_legacy')")
+            if cur.fetchone()[0] is not None:
+                raise MigrationRunnerError(
+                    "runner.schema_migrations_legacy already exists"
+                )
+            cur.execute("SELECT to_regclass('runner.schema_migrations')")
+            if cur.fetchone()[0] is None:
+                raise MigrationRunnerError(
+                    "convert-ledger requires an existing retired ledger"
+                )
+            cur.execute("LOCK TABLE runner.schema_migrations IN ACCESS EXCLUSIVE MODE")
+            cur.execute("SELECT * FROM runner.schema_migrations LIMIT 0")
+            columns = {column.name for column in cur.description}
+            required = {
+                "version",
+                "checksum",
+                "applied_at",
+                "applied_by",
+                "execution_ms",
+                "status",
+            }
+            if not required <= columns:
+                raise MigrationRunnerError(
+                    "convert-ledger refuses an unsupported ledger layout"
+                )
+            cur.execute("SELECT to_jsonb(m) FROM runner.schema_migrations m")
+            rows = [row[0] for row in cur.fetchall()]
+            if not rows:
+                raise MigrationRunnerError(
+                    "convert-ledger requires nonempty retired history"
+                )
+            if any(row["version"] > RETIRED_CHAIN_LAST_VERSION for row in rows):
+                raise MigrationRunnerError("convert-ledger refuses versions above 149")
+            if any(
+                row["version"] == INITIAL_VERSION
+                or row["checksum"] in checksums
+                or any(
+                    value in filenames
+                    for value in row.values()
+                    if isinstance(value, str)
+                )
+                for row in rows
+            ):
+                raise MigrationRunnerError(
+                    "convert-ledger refuses any row from the current chain"
+                )
+            if any(row["version"] < 1 for row in rows):
+                raise MigrationRunnerError(
+                    "convert-ledger requires retired versions 1 through 149"
+                )
+            cur.execute(
+                "ALTER TABLE runner.schema_migrations RENAME TO schema_migrations_legacy"
+            )
+            _ensure_ledger(conn)
+            report, to_record = _adoption_plan(
+                conn, migrations, required_through, entries
+            )
+            for migration in to_record:
+                _record(cur, migration, None, "adopted")
     finally:
         conn.close()
     return report
@@ -831,6 +1009,7 @@ def repair(dsn: str, migrations_dir, version: int, reason: str) -> None:
     conn = _connect(dsn)
     try:
         _acquire_lock(conn)
+        _refuse_retired_history(conn, list(migrations.values()))
         _ensure_ledger(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -921,6 +1100,12 @@ def main(argv=None) -> int:
         help="apply ONE gated (runner:manual) file by version, below the head if"
         " need be — the operator's door, never a deploy's",
     )
+    apply_parser.add_argument(
+        "--confirm-archive-backup",
+        action="store_true",
+        help="confirm the sixteen archive snapshot tables were exported or backed up;"
+        " requires --manual 002",
+    )
     adopt_parser = subparsers.add_parser(
         "adopt",
         help="enter a pre-ledger live database into the ledger, probe-decided",
@@ -930,6 +1115,20 @@ def main(argv=None) -> int:
         default=None,
         help="adoption manifest path; defaults to"
         " <migrations-dir>/adoption_manifest.json",
+    )
+    convert_parser = subparsers.add_parser(
+        "convert-ledger",
+        help="preserve the retired ledger and adopt the current chain as database owner",
+    )
+    convert_parser.add_argument(
+        "--confirm-legacy-ledger",
+        action="store_true",
+        help="confirm the existing ledger belongs to the retired migration chain",
+    )
+    convert_parser.add_argument(
+        "--manifest",
+        default=None,
+        help="adoption manifest path; defaults to <migrations-dir>/adoption_manifest.json",
     )
     repair_parser = subparsers.add_parser(
         "repair", help="record a deliberate checksum exception"
@@ -946,13 +1145,20 @@ def main(argv=None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.command == "apply" and args.confirm_archive_backup and args.manual != 2:
+        parser.error("--confirm-archive-backup requires --manual 002")
     if not args.database_url:
         print("no database: set DATABASE_URL or pass --database-url", file=sys.stderr)
         return 2
 
     try:
         if args.command == "apply" and args.manual is not None:
-            report = apply_manual(args.database_url, args.migrations_dir, args.manual)
+            report = apply_manual(
+                args.database_url,
+                args.migrations_dir,
+                args.manual,
+                confirm_archive_backup=args.confirm_archive_backup,
+            )
             for migration in report.applied:
                 print(f"applied {migration.label}")
             print(f"{len(report.applied)} applied (--manual)")
@@ -968,11 +1174,22 @@ def main(argv=None) -> int:
                     f"{len(report.owed)} owed (manual): waiting for an operator's"
                     " `apply --manual <version>`; a deploy never runs them"
                 )
-        elif args.command == "adopt":
+        elif args.command in ("adopt", "convert-ledger"):
             manifest = args.manifest or str(
                 Path(args.migrations_dir) / "adoption_manifest.json"
             )
-            adopt_report = adopt(args.database_url, args.migrations_dir, manifest)
+            if args.command == "convert-ledger":
+                adopt_report = convert_ledger(
+                    args.database_url,
+                    args.migrations_dir,
+                    manifest,
+                    confirm_legacy_ledger=args.confirm_legacy_ledger,
+                )
+                print(
+                    "preserved runner.schema_migrations as runner.schema_migrations_legacy"
+                )
+            else:
+                adopt_report = adopt(args.database_url, args.migrations_dir, manifest)
             for migration in adopt_report.adopted:
                 print(f"adopted {migration.label}")
             for migration in adopt_report.asserted:

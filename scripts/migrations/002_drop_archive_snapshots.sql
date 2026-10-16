@@ -1,6 +1,14 @@
 -- Drop the sixteen archive snapshots without touching retention exports.
 -- The runner wraps the drops and its ledger row in one transaction.
+-- runner:manual
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'archive' AND c.relname LIKE '%pre_cutover%')
+
+DO $backup_guard$
+BEGIN
+  IF current_setting('app.archive_snapshot_backup_confirmed', true) IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION 'archive snapshot tables must be exported or backed up; rerun apply --manual 002 --confirm-archive-backup';
+  END IF;
+END $backup_guard$;
 
 DROP TABLE IF EXISTS archive.api_tokens_pre_cutover_20260917;
 DROP TABLE IF EXISTS archive.audit_log_pre_cutover_20260917;

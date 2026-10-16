@@ -16,6 +16,7 @@ from scripts.migration_runner import (
     MIGRATIONS_DIR,
     MigrationRunnerError,
     adopt,
+    apply_manual,
     apply_pending,
     discover_migrations,
     split_statements,
@@ -121,6 +122,39 @@ def test_new_build_adopts_catalog_refresh_and_apply_is_empty(world_db):
     assert apply_pending(world_db, MIGRATIONS_DIR).applied == []
 
 
+def test_predeploy_leaves_both_cutover_migrations_owed(base_world, capsys):
+    from scripts.migration_runner import main
+    from tests.scripts.test_archive_snapshot_migration import snapshot_names
+
+    with psycopg2.connect(base_world) as conn, conn.cursor() as cur:
+        for name in snapshot_names():
+            cur.execute(f'CREATE TABLE archive."{name}" (sentinel integer)')
+        cur.execute("COMMENT ON FUNCTION public.fn_safe_tz(text) IS 'cutover sentinel'")
+
+    report = apply_pending(base_world, MIGRATIONS_DIR)
+
+    assert report.applied == []
+    assert [migration.version for migration in report.owed] == [1, 2]
+    assert fetch_one(
+        base_world,
+        "SELECT count(*) FROM runner.schema_migrations WHERE version IN (1, 2)",
+    ) == (0,)
+    assert fetch_one(
+        base_world,
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = 'archive' AND c.relname LIKE '%pre_cutover%'",
+    ) == (16,)
+    assert fetch_one(
+        base_world,
+        "SELECT obj_description('public.fn_safe_tz(text)'::regprocedure, 'pg_proc')",
+    ) == ("cutover sentinel",)
+    assert main(["--database-url", base_world, "apply"]) == 0
+    output = capsys.readouterr().out
+    assert "0 applied" in output
+    assert "owed (manual) 001" in output
+    assert "owed (manual) 002" in output
+
+
 def test_fresh_schema_adopts_two_versions_before_the_archive_drop(
     owner_world_db, owner_actor
 ):
@@ -172,7 +206,7 @@ def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
     )[0]
     before_schema = schema_signature(base_world)
     with pytest.raises(MigrationRunnerError, match=guard):
-        apply_pending(base_world, MIGRATIONS_DIR, max_version=1)
+        apply_manual(base_world, MIGRATIONS_DIR, 1)
     assert (
         fetch_one(
             base_world,
@@ -246,6 +280,28 @@ def test_partial_schema_does_not_adopt_catalog_refresh(base_world):
     assert report.adopted == []
 
 
+def test_catalog_checks_are_validated_in_a_separate_transaction(base_world):
+    validation_query = (
+        "SELECT conname, convalidated FROM pg_constraint"
+        " WHERE conrelid = 'public.post_intents'::regclass"
+        " AND conname IN ('ck_intent_via', 'ck_posted_complete') ORDER BY conname"
+    )
+    apply_manual(base_world, MIGRATIONS_DIR, 1)
+
+    assert fetch_all(base_world, validation_query) == [
+        {"conname": "ck_intent_via", "convalidated": False},
+        {"conname": "ck_posted_complete", "convalidated": False},
+    ]
+    with psycopg2.connect(base_world) as conn, conn.cursor() as cur:
+        cur.execute(
+            (REPO_ROOT / "scripts/validate_catalog_constraints.sql").read_text()
+        )
+    assert fetch_all(base_world, validation_query) == [
+        {"conname": "ck_intent_via", "convalidated": True},
+        {"conname": "ck_posted_complete", "convalidated": True},
+    ]
+
+
 def test_guard_observes_a_writer_that_commits_while_the_migration_waits(base_world):
     writer = psycopg2.connect(base_world)
     try:
@@ -256,9 +312,7 @@ def test_guard_observes_a_writer_that_commits_while_the_migration_waits(base_wor
                 (chain["intent"],),
             )
         with ThreadPoolExecutor(max_workers=1) as pool:
-            migration = pool.submit(
-                apply_pending, base_world, MIGRATIONS_DIR, max_version=1
-            )
+            migration = pool.submit(apply_manual, base_world, MIGRATIONS_DIR, 1)
             deadline = time.monotonic() + 10
             try:
                 while not fetch_one(
@@ -319,8 +373,12 @@ def test_base_with_catalog_refresh_equals_current_code(
 ):
     from scripts.schema_parity import schema_diff, schema_signature
 
-    report = apply_pending(base_world, MIGRATIONS_DIR, max_version=1)
+    report = apply_manual(base_world, MIGRATIONS_DIR, 1)
     assert [migration.version for migration in report.applied] == [1]
+    with psycopg2.connect(base_world) as conn, conn.cursor() as cur:
+        cur.execute(
+            (REPO_ROOT / "scripts/validate_catalog_constraints.sql").read_text()
+        )
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)
     try:

@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 import psycopg2
@@ -31,6 +32,7 @@ if __package__ in (None, ""):
 from scripts.migration_runner import (
     MigrationRunnerError,
     adopt,
+    apply_manual,
     apply_pending,
     discover_migrations,
 )
@@ -162,9 +164,24 @@ def run(
                     max_version=0 if directory == root else None,
                 )
             replay = apply_pending(dsns[1], root / "scripts/migrations")
-            if replay.owed:
-                raise ValueError("schema consistency cannot skip manual migrations")
-            if sorted(m.version for m in replay.applied) != later:
+            replayed = list(replay.applied)
+            for migration in replay.owed:
+                manual = apply_manual(
+                    dsns[1],
+                    root / "scripts/migrations",
+                    migration.version,
+                    confirm_archive_backup=migration.version == 2,
+                )
+                replayed.extend(manual.applied)
+                if migration.version == 1:
+                    with closing(psycopg2.connect(dsns[1])) as connection:
+                        with connection, connection.cursor() as cursor:
+                            cursor.execute(
+                                (
+                                    root / "scripts/validate_catalog_constraints.sql"
+                                ).read_text()
+                            )
+            if sorted(m.version for m in replayed) != later:
                 raise ValueError("the runner did not apply exactly the migration tail")
             first, second = [schema_signature(dsn, read_only=True) for dsn in dsns]
             if output_dir:
@@ -174,7 +191,7 @@ def run(
                         json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
                         encoding="utf-8",
                     )
-            print(f"base {revision}; {len(replay.applied)} migration(s) replayed")
+            print(f"base {revision}; {len(replayed)} migration(s) replayed")
             return print_comparison(first, second)
     finally:
         cleanup_errors = []

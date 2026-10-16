@@ -60,6 +60,9 @@ owner login applies schema changes and needs `CREATEROLE`. Locally,
 `make create-db init-db` runs the sequence; `make reset-db` drops and rebuilds.
 The explicit commands are in
 [Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
+Pending `001` and `002` are owner-applied cutover steps; automatic apply
+reports them as owed. Follow the [cutover runbook](../operations/schema-cutover.md)
+for the rehearsal, separate constraint validation and confirmed snapshot backup.
 
 ### Verify Setup
 
@@ -117,6 +120,8 @@ Two services from the same repo. `railway.toml` gives both the build command,
 the pre-deploy migration step, the `/health` check and the restart policy.
 
 **Service 1: `worker`**
+- [ ] Required dashboard setting: open **Settings > Deploy > Start Command**
+  for `worker` and set `python -m src.main` before deploying.
 - Start command: `python -m src.main` — the target worker (`src.worker`): the
   clock, the job lanes, the sender. It posts to Instagram for whatever
   database it is pointed at

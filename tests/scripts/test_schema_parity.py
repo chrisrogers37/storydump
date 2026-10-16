@@ -33,7 +33,23 @@ def snapshot_json(tmp_path):
 
 def test_diff_cli_accepts_equal_fixture_json(snapshot_json, capsys):
     assert parity.main(["diff", str(snapshot_json), str(snapshot_json)]) == 0
-    assert "0 difference(s)" in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines()[-1] == "0 difference(s)"
+
+
+@pytest.mark.parametrize("side", ["first", "second"])
+def test_diff_cli_labels_out_of_scope_role_reports(tmp_path, side, capsys):
+    snapshots = {label: healthy_snapshot() for label in ("first", "second")}
+    snapshots[side]["reported"]["outside_roles"] = {"roles": ["support_operator"]}
+    files = []
+    for label, snapshot in snapshots.items():
+        file = tmp_path / f"{label}.json"
+        file.write_text(json.dumps(snapshot), encoding="utf-8")
+        files.append(str(file))
+    assert parity.main(["diff", *files]) == 0
+    summary = capsys.readouterr().out.splitlines()[-1]
+    assert "0 difference(s)" in summary
+    assert "out-of-scope roles reported" in summary
+    assert side in summary
 
 
 @pytest.mark.parametrize("dimension", parity.DIMENSIONS)
@@ -276,6 +292,56 @@ class FakeCursor:
 
     def fetchone(self):
         return self.result[0]
+
+
+@pytest.mark.parametrize(
+    ("role", "member", "grantor", "compared"),
+    [
+        ("pg_execute_server_program", "svc_worker", "owner_a", True),
+        ("pg_read_all_data", "owner_a", "external_grantor", True),
+        ("external_privilege", "svc_worker", "external_grantor", True),
+        ("svc_clock", "svc_worker", "external_grantor", True),
+        ("svc_worker", "external_member", "owner_a", False),
+    ],
+)
+def test_extract_membership_scope_depends_on_member(role, member, grantor, compared):
+    class MembershipCursor(FakeCursor):
+        def execute(self, statement, parameters=None):
+            super().execute(statement, parameters)
+            if "FROM pg_auth_members" in statement:
+                self.result = [
+                    {
+                        "role": role,
+                        "member": member,
+                        "grantor": grantor,
+                        "admin_option": False,
+                        "inherit_option": True,
+                        "set_option": True,
+                    }
+                ]
+
+    cursor = MembershipCursor(170000)
+    conn = SimpleNamespace(
+        set_session=lambda **kwargs: None,
+        cursor=lambda **kwargs: cursor,
+        rollback=lambda: None,
+    )
+    snapshot = parity.extract(conn)
+    normalized_member = parity.normalize_role(member, "owner_a")
+    normalized_grantor = parity.normalize_role(grantor, "owner_a")
+    key = f"{role}->{normalized_member}@{normalized_grantor}"
+    expected = {
+        "role": role,
+        "member": normalized_member,
+        "grantor": normalized_grantor,
+        "admin_option": False,
+    }
+    if compared:
+        assert snapshot["catalog"]["memberships"][key] == expected
+        assert "memberships" not in snapshot["reported"]["outside_roles"]
+    else:
+        assert snapshot["catalog"]["memberships"] == {}
+        assert snapshot["reported"]["outside_roles"]["memberships"] == [expected]
 
 
 @pytest.mark.parametrize("version", [150000, 160000, 170000])
@@ -572,6 +638,20 @@ def test_role_properties_and_membership_edges_gate(catalog_db):
     differences = parity.schema_diff(before, parity.schema_signature(catalog_db))
     assert any(d.startswith("roles svc_worker.connection_limit:") for d in differences)
     assert any(d.startswith("memberships svc_clock->svc_worker") for d in differences)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("member", ["svc_worker", "CURRENT_USER"])
+def test_predefined_role_memberships_held_by_scoped_roles_gate(catalog_db, member):
+    before = parity.schema_signature(catalog_db)
+    execute(catalog_db, f"GRANT pg_execute_server_program TO {member}")
+    try:
+        after = parity.schema_signature(catalog_db)
+        normalized_member = "<owner>" if member == "CURRENT_USER" else member
+        expected = f"memberships pg_execute_server_program->{normalized_member}@"
+        assert any(d.startswith(expected) for d in parity.schema_diff(before, after))
+    finally:
+        execute(catalog_db, f"REVOKE pg_execute_server_program FROM {member}")
 
 
 @pytest.mark.integration

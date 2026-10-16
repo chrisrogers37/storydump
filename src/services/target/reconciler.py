@@ -444,8 +444,11 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
     the intent left `publishing_ambiguous`, or the session's tenant cannot see
     it — raises instead, so the verdict never closes the op of
     an intent that stayed put.
+
+    A posted verdict also applies the shared posting effects in this
+    transaction, after the guarded flip succeeds.
     """
-    from src.services.target import provider_ops
+    from src.services.target import intent_ledger, provider_ops
 
     await _record_evidence(conn, intent_id=intent_id, checks=len(trail), trail=trail)
     sets = "state = :state"
@@ -456,20 +459,35 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
         # would leave a posted row that cannot say what it posted.
         sets += ", published_via = 'api', publish_step = 'effect_confirmed'"
     flipped = (
-        await conn.execute(
-            text(
-                f"UPDATE post_intents SET {sets}"
-                " WHERE id = :intent AND state = 'publishing_ambiguous'"
-                " RETURNING id"
-            ),
-            {"intent": str(intent_id), "state": state},
+        (
+            await conn.execute(
+                text(
+                    f"UPDATE post_intents SET {sets}"
+                    " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                    " RETURNING workspace_id, media_item_id, ig_account_id,"
+                    " (SELECT w.repost_ttl_days FROM workspaces w"
+                    "  WHERE w.id = post_intents.workspace_id) AS repost_ttl_days"
+                ),
+                {"intent": str(intent_id), "state": state},
+            )
         )
-    ).first()
+        .mappings()
+        .first()
+    )
     if flipped is None:
         raise ValueError(
             f"intent {intent_id} matched no 'publishing_ambiguous' row before its"
             f" {state!r} verdict: it left that state, or this session's tenant"
             " cannot see it"
+        )
+    if state == "posted":
+        await intent_ledger.posted_effects(
+            conn,
+            workspace_id=str(flipped["workspace_id"]),
+            media_item_id=str(flipped["media_item_id"]),
+            ig_account_id=str(flipped["ig_account_id"]),
+            intent_id=str(intent_id),
+            ttl_days=flipped["repost_ttl_days"],
         )
     result = await conn.execute(
         text(

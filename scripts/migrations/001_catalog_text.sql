@@ -1,25 +1,45 @@
 -- Refresh stored function definitions and remove unused intent fields.
 -- The runner wraps this file and its ledger row in one transaction.
+-- runner:manual
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_description d JOIN pg_proc p ON d.classoid = 'pg_proc'::regclass AND d.objoid = p.oid JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public')
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_description d JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND d.objoid = c.oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public')
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) setting WHERE setting LIKE 'search_path=%'))
 
 SET LOCAL search_path = public, pg_temp;
 
-LOCK TABLE public.post_intents IN ACCESS EXCLUSIVE MODE;
-
-DO $guard$
+DO $comments$
+DECLARE item record; object_kind text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.post_intents'::regclass
-             AND attname = 'legacy_queue_item_id' AND NOT attisdropped) THEN
-    IF EXISTS (SELECT 1 FROM public.post_intents WHERE legacy_queue_item_id IS NOT NULL) THEN
-      RAISE EXCEPTION 'legacy_queue_item_id contains data; catalog refresh refuses';
+  FOR item IN
+    SELECT p.oid::regprocedure AS identity FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_description d ON d.classoid = 'pg_proc'::regclass AND d.objoid = p.oid
+      WHERE n.nspname = 'public'
+  LOOP
+    EXECUTE format('COMMENT ON FUNCTION %s IS NULL', item.identity);
+  END LOOP;
+  FOR item IN
+    SELECT c.relname, c.relkind, d.objsubid, a.attname FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_description d ON d.classoid = 'pg_class'::regclass AND d.objoid = c.oid
+      LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid
+      WHERE n.nspname = 'public'
+  LOOP
+    IF item.objsubid > 0 THEN
+      EXECUTE format('COMMENT ON COLUMN public.%I.%I IS NULL', item.relname, item.attname);
+    ELSE
+      object_kind := CASE item.relkind
+        WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'TABLE' WHEN 'v' THEN 'VIEW'
+        WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
+        WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'i' THEN 'INDEX'
+        WHEN 'I' THEN 'INDEX' WHEN 'c' THEN 'TYPE' END;
+      IF object_kind IS NULL THEN
+        RAISE EXCEPTION 'unsupported public relation kind %', item.relkind;
+      END IF;
+      EXECUTE format('COMMENT ON %s public.%I IS NULL', object_kind, item.relname);
     END IF;
-  END IF;
-  IF EXISTS (SELECT 1 FROM public.post_intents WHERE published_via = 'legacy_backfill') THEN
-    RAISE EXCEPTION 'published_via legacy_backfill contains data; catalog refresh refuses';
-  END IF;
-END $guard$;
+  END LOOP;
+END $comments$;
 
 CREATE OR REPLACE FUNCTION trg_intent_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -893,44 +913,25 @@ BEGIN
  RETURN minted;
 END $$;
 
+LOCK TABLE public.post_intents IN ACCESS EXCLUSIVE MODE;
+
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.post_intents'::regclass
+             AND attname = 'legacy_queue_item_id' AND NOT attisdropped) THEN
+    IF EXISTS (SELECT 1 FROM public.post_intents WHERE legacy_queue_item_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'legacy_queue_item_id contains data; catalog refresh refuses';
+    END IF;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.post_intents WHERE published_via = 'legacy_backfill') THEN
+    RAISE EXCEPTION 'published_via legacy_backfill contains data; catalog refresh refuses';
+  END IF;
+END $guard$;
+
 ALTER TABLE public.post_intents DROP COLUMN IF EXISTS legacy_queue_item_id;
 
 ALTER TABLE public.post_intents DROP CONSTRAINT IF EXISTS ck_intent_via;
-ALTER TABLE public.post_intents ADD CONSTRAINT ck_intent_via CHECK (published_via IN ('api','manual','dry_run'));
+ALTER TABLE public.post_intents ADD CONSTRAINT ck_intent_via CHECK (published_via IN ('api','manual','dry_run')) NOT VALID;
 
 ALTER TABLE public.post_intents DROP CONSTRAINT IF EXISTS ck_posted_complete;
-ALTER TABLE public.post_intents ADD CONSTRAINT ck_posted_complete CHECK (state <> 'posted' OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL) OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL) OR (published_via = 'api' AND ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL));
-
-DO $comments$
-DECLARE item record; object_kind text;
-BEGIN
-  FOR item IN
-    SELECT p.oid::regprocedure AS identity FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-      JOIN pg_description d ON d.classoid = 'pg_proc'::regclass AND d.objoid = p.oid
-      WHERE n.nspname = 'public'
-  LOOP
-    EXECUTE format('COMMENT ON FUNCTION %s IS NULL', item.identity);
-  END LOOP;
-  FOR item IN
-    SELECT c.relname, c.relkind, d.objsubid, a.attname FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      JOIN pg_description d ON d.classoid = 'pg_class'::regclass AND d.objoid = c.oid
-      LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid
-      WHERE n.nspname = 'public'
-  LOOP
-    IF item.objsubid > 0 THEN
-      EXECUTE format('COMMENT ON COLUMN public.%I.%I IS NULL', item.relname, item.attname);
-    ELSE
-      object_kind := CASE item.relkind
-        WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'TABLE' WHEN 'v' THEN 'VIEW'
-        WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
-        WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'i' THEN 'INDEX'
-        WHEN 'I' THEN 'INDEX' WHEN 'c' THEN 'TYPE' END;
-      IF object_kind IS NULL THEN
-        RAISE EXCEPTION 'unsupported public relation kind %', item.relkind;
-      END IF;
-      EXECUTE format('COMMENT ON %s public.%I IS NULL', object_kind, item.relname);
-    END IF;
-  END LOOP;
-END $comments$;
+ALTER TABLE public.post_intents ADD CONSTRAINT ck_posted_complete CHECK (state <> 'posted' OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL) OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL) OR (published_via = 'api' AND ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)) NOT VALID;

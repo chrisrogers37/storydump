@@ -124,6 +124,16 @@ characters in URL passwords; the owner login stays in the `DB_*` settings.
 it without executing it; later migrations apply on top of that base. The
 runner refuses to execute an unrecorded `000`.
 
+Automatic `runner apply`, including the deployment pre-step, reports `001`
+and `002` as owed. The owner applies them explicitly, validates the intent
+constraints in a separate transaction, and confirms the snapshot backup before
+the archive drop. The [cutover runbook](documentation/operations/schema-cutover.md)
+describes the rehearsal and the required zero-difference parity gate.
+An existing database whose runner ledger records the retired chain first uses
+the owner command `runner convert-ledger --confirm-legacy-ledger`. It preserves
+that ledger as `runner.schema_migrations_legacy` and adopts the current chain;
+the runbook covers rehearsal on a Neon production branch and rollback before 001.
+
 `make validate-env` loads the settings and builds the key ring, as both services do at startup, and
 `make check-health` asks the deployed API.
 
