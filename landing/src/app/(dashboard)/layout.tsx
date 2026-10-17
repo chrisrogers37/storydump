@@ -29,12 +29,19 @@ export default async function DashboardLayout({
   // No fetch here: a layout runs on every route beneath it, so a request here
   // would be one round trip per dashboard navigation.
 
+  // The frame is one screen tall and only <main> scrolls. <main> is
+  // `relative` so that it, not the page, is the containing block of what is
+  // absolutely positioned inside it: the native <select> Radix renders for a
+  // Select in a <form>, `sr-only` text. Without it such an element sits at its
+  // place in the content but outside <main>'s clip, and the window scrolls
+  // past the frame onto blank page (main-containing-block-contract.test.ts).
+
   return (
     <div className="surface-app flex h-screen">
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <DashboardHeader user={session} />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+        <main className="relative flex-1 overflow-y-auto p-6">{children}</main>
       </div>
     </div>
   );
