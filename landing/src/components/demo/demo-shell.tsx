@@ -23,7 +23,7 @@ export function DemoShell({ children }: { children: ReactNode }) {
       <Sidebar items={DEMO_NAV} home={DEMO_HOME} />
       <div className="flex flex-1 flex-col overflow-hidden">
         <DemoHeader />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="relative flex-1 overflow-y-auto p-6">
           <DemoProvider>
             {children}
             <DemoEndPanel />
