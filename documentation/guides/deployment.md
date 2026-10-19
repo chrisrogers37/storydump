@@ -60,11 +60,11 @@ owner login applies schema changes and needs `CREATEROLE`. Locally,
 `make create-db init-db` runs the sequence; `make reset-db` drops and rebuilds.
 The explicit commands are in
 [Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
-A fresh build adopts `001` and `002` with the marker, so nothing is owed. On a
-database converted from the retired chain they are owner-applied cutover steps,
-and automatic apply reports them as owed. Follow the
-[cutover runbook](../operations/schema-cutover.md) for the rehearsal, separate
-constraint validation and confirmed snapshot backup.
+A fresh build adopts `000`, `001` and `002`, so nothing is owed. On a database
+whose schema predates them, such as one converted from the retired chain, `001`
+and `002` are owner-applied cutover steps, and automatic apply reports them as
+owed. Follow the [cutover runbook](../operations/schema-cutover.md) for the
+rehearsal, separate constraint validation and confirmed snapshot backup.
 
 ### Verify Setup
 

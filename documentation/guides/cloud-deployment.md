@@ -90,11 +90,12 @@ Locally, `make init-db` runs these same steps using the `DB_*` connection
 components; `make create-db init-db` creates the database first.
 
 On a fresh build, `adopt` records `000`, `001` and `002`, so automatic apply
-has nothing owed. Only a database converted from the retired chain owes `001`
-and `002`. Those cutover steps require explicit owner application, separate
-constraint validation, and confirmation of the snapshot export or backup.
-Follow the [cutover runbook](../operations/schema-cutover.md), including its
-rehearsal and zero-difference parity requirement.
+has nothing owed. A database whose schema predates them, such as one converted
+from the retired chain, owes `001` and `002`. There, those cutover steps require
+explicit owner application, separate constraint validation, and confirmation of
+the snapshot export or backup: follow the
+[cutover runbook](../operations/schema-cutover.md), including its rehearsal and
+zero-difference parity requirement.
 
 `scripts/migrations/000_initial.sql` is an empty marker, never executable SQL.
 `adopt` records it after checking the schema-code probe. Later files apply on

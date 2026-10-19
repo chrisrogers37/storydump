@@ -126,7 +126,7 @@ characters in URL passwords; the owner login stays in the `DB_*` settings.
 it without executing it; later migrations apply on top of that base. The
 runner refuses to execute an unrecorded `000`.
 
-On a database built from schema code, as production has been since 2026-10-17,
+On a database built from schema code, such as production's since 2026-10-17,
 adoption records `000`, `001` and `002`, so automatic `runner apply`, including
 the deployment pre-step, has nothing owed.
 An existing database whose runner ledger records the retired chain first uses
