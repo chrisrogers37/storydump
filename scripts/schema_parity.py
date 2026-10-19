@@ -513,7 +513,10 @@ def validate(snapshot):
 
 
 def schema_diff(first, second):
-    """Return every structural difference plus each side's count-floor failures."""
+    """Return every structural difference plus each side's count-floor failures.
+
+    A membership option that one side's server predates (INHERIT and SET
+    arrived in PostgreSQL 16) has nothing to compare against there."""
     diffs = []
     for label, snapshot in (("first", first), ("second", second)):
         diffs.extend(f"{label} {failure}" for failure in validate(snapshot))
@@ -526,6 +529,12 @@ def schema_diff(first, second):
                 diffs.append(f"{dimension} {key}: only in first schema")
             elif left[key] != right[key]:
                 for field in sorted(left[key].keys() | right[key].keys()):
+                    if (
+                        dimension == "memberships"
+                        and field in ("inherit_option", "set_option")
+                        and not (field in left[key] and field in right[key])
+                    ):
+                        continue
                     a, b = left[key].get(field), right[key].get(field)
                     if a != b:
                         diffs.append(

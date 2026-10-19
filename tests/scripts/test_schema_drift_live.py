@@ -25,9 +25,10 @@ when `REQUIRE_SCHEMA_DRIFT_CHECK=1` is set without one.
 The signature compares the user catalog, including function bodies, policies,
 RLS, grants, sequences, types, indexes and view definitions. Each side must meet
 the catalog count floors. Archive and runner relations, extension members and
-system objects are excluded. Archive relation names, descriptions, unrelated
-roles and membership options are reported for review. Transition reference rows
-are compared; their creation timestamps are runtime metadata and are reported.
+system objects are excluded. Archive relation names, descriptions and unrelated
+roles are reported for review; membership options are compared where both
+servers have them. Transition reference rows are compared; their creation
+timestamps are runtime metadata and are reported.
 Both extractions run in one read-only transaction and roll it back.
 
 """

@@ -437,17 +437,19 @@ def test_membership_inherit_and_set_options_gate(option):
     ]
 
 
-@pytest.mark.parametrize("grant_order", [(False, True), (True, False)])
+@pytest.mark.parametrize("first_inherits", [True, False])
 def test_multiple_membership_grantors_preserve_effective_inherit_and_set(
-    grant_order,
+    first_inherits,
 ):
+    # One grant supplies inheritance and the other SET ROLE, so an option
+    # merged from the wrong field loses one of them.
     grants = [
         {
             **membership_grant(f"provider_owner_{n}"),
-            "inherit_option": granted,
-            "set_option": granted,
+            "inherit_option": inherits,
+            "set_option": not inherits,
         }
-        for n, granted in enumerate(grant_order)
+        for n, inherits in enumerate((first_inherits, not first_inherits))
     ]
     snapshot = membership_snapshot(grants)
     assert snapshot["catalog"]["memberships"] == {
@@ -470,6 +472,20 @@ def test_memberships_before_postgresql_16_carry_admin_option_only():
             "admin_option": False,
         }
     }
+
+
+def test_membership_options_one_server_lacks_do_not_gate():
+    """A PostgreSQL 15 edge has no INHERIT or SET option to compare, so against
+    a 16+ snapshot the edge compares its admin option alone."""
+    before_16 = membership_snapshot([membership_grant("provider_owner_a")], 150000)
+    since_16 = membership_snapshot([membership_grant("provider_owner_a")], 170000)
+    assert parity.schema_diff(before_16, since_16) == []
+    administered = membership_snapshot(
+        [membership_grant("provider_owner_a", True)], 170000
+    )
+    assert parity.schema_diff(before_16, administered) == [
+        "memberships svc_clock->svc_worker.admin_option: first=False second=True"
+    ]
 
 
 def test_redundant_membership_grantors_do_not_gate():
@@ -530,18 +546,11 @@ def test_invalid_snapshot_fails_cli(tmp_path, capsys):
     assert "format_version" in capsys.readouterr().err
 
 
-def test_snapshot_with_option_free_membership_keys_fails_cli(tmp_path, capsys):
-    """Format 1 compared memberships without INHERIT or SET. Against a current
-    snapshot every PostgreSQL 16+ edge would differ by options it never read."""
+def test_format_1_snapshot_fails_cli(tmp_path, capsys):
+    """Format 1 recorded memberships without INHERIT or SET, so its PostgreSQL
+    16+ edges cannot be compared with a current snapshot's."""
     snapshot = healthy_snapshot()
     snapshot["format_version"] = 1
-    snapshot["catalog"]["memberships"] = {
-        "svc_clock->svc_worker": {
-            "role": "svc_clock",
-            "member": "svc_worker",
-            "admin_option": False,
-        }
-    }
     file = tmp_path / "format-1.json"
     file.write_text(json.dumps(snapshot))
     assert parity.main(["diff", str(file), str(file)]) == 1
@@ -867,28 +876,60 @@ def test_membership_inherit_and_set_options_gate_on_real_postgres(catalog_db):
         version = int(cur.fetchone()[0])
     if version < 160000:
         execute(catalog_db, "GRANT svc_clock TO svc_worker")
-    else:
-        execute(catalog_db, "GRANT svc_clock TO svc_worker WITH INHERIT TRUE, SET TRUE")
-    try:
-        granted = parity.schema_signature(catalog_db)
-        if version < 160000:
+        try:
             # No per-grant options before 16: the edge carries admin only.
+            granted = parity.schema_signature(catalog_db)
             assert granted["catalog"]["memberships"]["svc_clock->svc_worker"] == {
                 "role": "svc_clock",
                 "member": "svc_worker",
                 "admin_option": False,
             }
-            return
+        finally:
+            execute(catalog_db, "REVOKE svc_clock FROM svc_worker")
+        return
+    execute(
+        catalog_db,
+        "CREATE ROLE parity_grantor_a; CREATE ROLE parity_grantor_b; GRANT svc_clock TO parity_grantor_a, parity_grantor_b WITH ADMIN OPTION",
+    )
+    try:
         execute(
-            catalog_db, "GRANT svc_clock TO svc_worker WITH INHERIT FALSE, SET FALSE"
+            catalog_db,
+            "SET ROLE parity_grantor_a; GRANT svc_clock TO svc_worker WITH INHERIT TRUE, SET TRUE; RESET ROLE",
+        )
+        granted = parity.schema_signature(catalog_db)
+        execute(
+            catalog_db,
+            "SET ROLE parity_grantor_a; GRANT svc_clock TO svc_worker WITH INHERIT FALSE, SET FALSE; RESET ROLE",
         )
         restricted = parity.schema_signature(catalog_db)
         assert parity.schema_diff(granted, restricted) == [
             "memberships svc_clock->svc_worker.inherit_option: first=True second=False",
             "memberships svc_clock->svc_worker.set_option: first=True second=False",
         ]
+        # Each grantor supplies one option; PostgreSQL holds the edge to both.
+        execute(
+            catalog_db,
+            "SET ROLE parity_grantor_a; GRANT svc_clock TO svc_worker WITH INHERIT TRUE, SET FALSE; RESET ROLE; SET ROLE parity_grantor_b; GRANT svc_clock TO svc_worker WITH INHERIT FALSE, SET TRUE; RESET ROLE",
+        )
+        with psycopg2.connect(catalog_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_has_role('svc_worker', 'svc_clock', 'USAGE'), pg_has_role('svc_worker', 'svc_clock', 'SET')"
+            )
+            assert cur.fetchone() == (True, True)
+        combined = parity.schema_signature(catalog_db)
+        assert combined["catalog"]["memberships"]["svc_clock->svc_worker"] == {
+            "role": "svc_clock",
+            "member": "svc_worker",
+            "admin_option": False,
+            "inherit_option": True,
+            "set_option": True,
+        }
+        assert parity.schema_diff(granted, combined) == []
     finally:
-        execute(catalog_db, "REVOKE svc_clock FROM svc_worker")
+        execute(
+            catalog_db,
+            "REVOKE svc_clock FROM parity_grantor_a, parity_grantor_b CASCADE; DROP ROLE parity_grantor_a; DROP ROLE parity_grantor_b",
+        )
 
 
 @pytest.mark.integration
