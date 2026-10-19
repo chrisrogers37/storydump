@@ -470,6 +470,12 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "DATABASE_URL",
     # the independent disposable replay cluster used by schema consistency
     "REPLAY_DATABASE_URL",
+    # the cutover rehearsal's two disposable clusters and its read-only drift
+    # check (`scripts/cutover_rehearsal.py`)
+    "REHEARSAL_RESTORE_ADMIN_DSN",
+    "REHEARSAL_CODE_ADMIN_DSN",
+    "SCHEMA_DRIFT_DSN",
+    "REQUIRE_SCHEMA_DRIFT_CHECK",
     # a local database's fields, for `make init-db`'s URL (`scripts/app_db_url.py`,
     # which init-db's recipe hands them with psql's own quoting) — the names
     # `Settings` declares
