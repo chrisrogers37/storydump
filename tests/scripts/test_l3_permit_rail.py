@@ -679,6 +679,98 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             == "failed"
         )
 
+    def _debited_day(self, ops_db, intent, *, count):
+        """The day *intent* recorded its debit on, with that day's bucket
+        holding *count* debits. The rail's intents carry the day but never
+        wrote a bucket."""
+        day = _exec(
+            ops_db,
+            "SELECT cap_consumed_on FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        self._clear_day(ops_db, day)
+        _exec(
+            ops_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, %s, %s)",
+            (ops_db["ws"], ops_db["iga"], day, count, count + 1),
+        )
+        return day
+
+    def _clear_day(self, ops_db, day):
+        _exec(
+            ops_db,
+            "DELETE FROM daily_post_counts WHERE workspace_id = %s"
+            " AND ig_account_id = %s AND local_date = %s",
+            (ops_db["ws"], ops_db["iga"], day),
+        )
+
+    def _bucket_and_refund(self, ops_db, intent, day):
+        bucket = _exec(
+            ops_db,
+            "SELECT count FROM daily_post_counts WHERE workspace_id = %s"
+            " AND ig_account_id = %s AND local_date = %s",
+            (ops_db["ws"], ops_db["iga"], day),
+            fetch=True,
+        )[0][0]
+        refunded = _exec(
+            ops_db,
+            "SELECT cap_refunded_at FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        return bucket, refunded
+
+    def test_failed_verdict_returns_the_cap_slot_to_its_recorded_day(self, ops_db):
+        """The verdict says the story never posted, so the slot it took goes
+        back to the day it was taken from, in the verdict's transaction, as
+        every other terminal failure returns it (`publish_cap.refund_cap`).
+        Run as the worker runs it: `svc_worker`, scoped to the tenant."""
+        from src.services.target import reconciler, unit_of_work
+
+        intent, op = self._ambiguous(ops_db)
+        day = self._debited_day(ops_db, intent, count=2)
+
+        async def resolve():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                async with engine.begin() as conn:
+                    await unit_of_work.apply_gucs(
+                        conn, tenant_id=str(ops_db["ws"]), actor_kind="system"
+                    )
+                    return await reconciler.reconcile_intent(
+                        conn,
+                        intent_id=intent,
+                        workspace_id=ops_db["ws"],
+                        status_code="EXPIRED",
+                        mode="container_verdict",
+                    )
+
+        try:
+            assert _run(resolve()) == "failed"
+            bucket, refunded = self._bucket_and_refund(ops_db, intent, day)
+            assert bucket == 1, "the failed story's slot goes back once, to its day"
+            assert refunded is not None, "the intent records the refund"
+            assert _state(ops_db, "post_intents", intent) == "failed"
+            assert _state(ops_db, "provider_operations", op["id"]) == "failed"
+        finally:
+            self._clear_day(ops_db, day)
+
+    def test_a_failed_verdict_whose_intent_already_left_returns_no_slot(self, ops_db):
+        """The flip is state-guarded, and a verdict that moved nothing returns
+        nothing: the day stays spent and the intent records no refund."""
+        intent, _ = self._ambiguous(ops_db)
+        day = self._debited_day(ops_db, intent, count=2)
+        _leave_ambiguity(ops_db, intent)  # moved after the provider was asked
+        try:
+            with pytest.raises(ValueError, match="before its 'failed' verdict"):
+                self._reconcile(
+                    ops_db, intent, status="EXPIRED", mode="container_verdict"
+                )
+            assert self._bucket_and_refund(ops_db, intent, day) == (2, None)
+        finally:
+            self._clear_day(ops_db, day)
+
     @pytest.mark.parametrize("ttl_days", [17, None])
     def test_posted_verdict_records_rotation_effects_once(self, ops_db, ttl_days):
         from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
