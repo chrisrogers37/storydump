@@ -1,11 +1,11 @@
 # Schema cutover
 
 Production was not converted in place. On 2026-10-17 it moved to a new database
-built from schema code; the original database stays, unchanged, as the rollback
-copy. [The cutover as performed](#the-cutover-as-performed-2026-10-17) records
-where production lives, what data moved, how to roll back and when the original
-database may be deleted. [The in-place procedure](#the-in-place-procedure)
-follows it, for a database whose ledger records the retired chain.
+built from schema code, and on 2026-10-19 the owner deleted the original
+database. [The cutover as performed](#the-cutover-as-performed-2026-10-17)
+records where production lives, what data moved and what was deleted.
+[The in-place procedure](#the-in-place-procedure) follows it, for a database
+whose ledger records the retired chain.
 
 ## The cutover as performed (2026-10-17)
 
@@ -40,76 +40,42 @@ exception is the 32 legal-edge rows of `post_intent_transitions` that every
 schema build writes. At the 2026-10-16 rehearsal snapshot the original database
 held 2 users, 2 workspaces, 2 Instagram accounts, 4,554 media items, 759 post
 intents and 531 post locks, plus its 16 `archive.*_pre_cutover_20260917`
-tables. All of it is still there.
+tables. None of it came across, and all of it was deleted with the original
+database.
 
-Both systems run the same `ENCRYPTION_KEY`, so a credential copied from the
-original database would decrypt in production while that key stays in the
-ring. The original system never had an `ARCHIVE_HMAC_KEYS` ring, and neither
-database holds a tombstone or deletion receipt keyed by one, so production's
-ring starts new. Once it is set, keep every version it has held; see
+The original system never had an `ARCHIVE_HMAC_KEYS` ring, and neither
+database held a tombstone or deletion receipt keyed by one, so production's
+ring started new. It was set on the API and the worker on 2026-10-19. Keep
+every version it has held; see
 [the key ring](instagram-archive-review.md#5-the-key-ring).
 
-**The original database.** Neon project `storyline-ai-db`
-(`ancient-grass-50759240`), database `neondb`, unchanged since the switch. Its
-ledger still records the retired chain, `001` and `002` were never applied, and
-its archive snapshots remain. It is the rollback copy:
+**The original database, deleted.** Neon project `storyline-ai-db`
+(`ancient-grass-50759240`), database `neondb`, was the rollback copy from the
+switch until the owner deleted the project, with its branches, on 2026-10-19.
+Nothing wrote to it after the switch. The full dump and the archive-snapshot
+dump taken from its temporary branch on 2026-10-16 were deleted the same day.
 
-- Do not write to it.
-- Do not run `convert-ledger`, `apply` or a rehearsal against it.
-- Do not point a deployment at it except to roll back.
+Kept with the cutover record, outside Git: the Railway and Vercel settings from
+before the switch, the password-free roles and source catalog taken on
+2026-10-16, which hold no user data, and a bundle of every branch of the
+original repository, `chrisrogers37/storydump`. That repository is archived on
+GitHub and stays readable.
 
-The backups are kept with the cutover record, outside Git, as production data:
-the Railway and Vercel settings from before the switch, and the full dump,
-archive-snapshot dump, password-free roles and source catalog taken from the
-temporary branch on 2026-10-16. The branch was set to expire on 2026-10-17.
+**No rollback to the original system.** It ended with the original database.
+The owner deleted it once a rollback was no longer wanted and nothing more was
+to come across.
 
-**Rolling back to the original system.** A rollback makes the original database
-production again. Everything created in the new database since the switch stays
-there and does not come back.
-
-1. Turn on Pause Posting in the current dashboard, and hold deployments on both
-   Railway services.
-2. In one Railway environment change, point both services back to
-   `chrisrogers37/storydump`. Restore the variables the cutover changed from the
-   settings backup: `DATABASE_URL` and `TARGET_DATABASE_URL` on both services,
-   and the API's `OPS_USER_IDS`. Deploy both at `7c861ec`, the last original
-   production commit.
-3. Link the Vercel project back to `chrisrogers37/storydump`. Alias
-   `storydump.app` and `www.storydump.app` to the last original production
-   deployment, built from `ac36383`.
-4. Confirm that `/health` reports `7c861ec`, and that the original database
-   holds the `svc_ingress` and `svc_worker` sessions while the new one holds
-   none. The Telegram webhook URL,
-   `https://api.storydump.app/webhooks/telegram`, does not change.
-
-The original system resumes with its settings as they were at the switch: a
-workspace that was not paused then resumes posting. Instagram login tokens last
-60 days from their last refresh, and nothing has refreshed the original
-database's tokens since the switch. By mid-December 2026 at the latest, a
-rollback also means reconnecting each Instagram account.
-
-**When the original database may be deleted.** Only when the owner decides, and
-only once all of these hold:
-
-- The owner no longer wants a rollback.
-- Nothing more is to come across. Production started empty by decision; if any
-  of the original data is to move, the copy is made and verified first.
-- The backups listed above are deleted with it, or kept for a period the
-  privacy policy states.
-
-The privacy policy says, in two places, that a one-time copy of the previous
-system's data, taken on September 17, 2026, is kept and that deletion requests
-are applied to it by hand. That copy is the original database's archive
-snapshots and the backups that contain them, so such a request is applied to
-both. It is the one write the original database may take. Deleting the database
-and those backups ends the copy. Publish the privacy copy change that removes
-both mentions then, not before.
+The privacy policy said, in two places, that a one-time copy of the previous
+system's data, taken on September 17, 2026, was kept and that deletion requests
+were applied to it by hand. That copy was the original database's archive
+snapshots and the dumps that contained them. Deleting them ended it, and the
+policy no longer mentions it.
 
 ## The in-place procedure
 
 In this procedure, "production" and `$PRODUCTION_OWNER_DSN` mean the database
-being converted. Today the only database on the retired chain is the original
-one, and it is the rollback copy: converting it is the owner's decision.
+being converted. No database on the retired chain remains: the original one
+was deleted on 2026-10-19.
 
 On such a database the deployment runner leaves `001_catalog_text.sql` and
 `002_drop_archive_snapshots.sql` owed. An owner applies them separately. A
