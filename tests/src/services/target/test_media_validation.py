@@ -400,12 +400,24 @@ async def test_evidence_is_immutable_and_raw_bytes_are_not_retained():
     assert "sha256" in result.evidence
 
 
+def _requires_linux():
+    """Off Linux, `run_bounded` refuses before it creates a process, so a test
+    that waits for its process to be created would wait forever."""
+    if sys.platform != "linux":
+        pytest.fail(
+            "the selected-media validator runs only on Linux"
+            " (`media_validation.run_bounded`): run this test on the Linux lane",
+            pytrace=False,
+        )
+
+
 async def test_cancellation_during_process_creation_still_reaps_group(
     monkeypatch, tmp_path
 ):
     import os
     import signal
 
+    _requires_linux()
     original = asyncio.create_subprocess_exec
     spawned = []
     ready = asyncio.Event()
@@ -538,6 +550,7 @@ async def test_repeated_creation_cancellation_reaps_before_temp_cleanup(
     import os
     import signal
 
+    _requires_linux()
     original = asyncio.create_subprocess_exec
     ready = asyncio.Event()
     spawned = []
@@ -595,6 +608,7 @@ async def test_repeated_creation_cancellation_reaps_before_temp_cleanup(
 async def test_repeated_cancellation_during_finally_finishes_reaping(
     monkeypatch, tmp_path
 ):
+    _requires_linux()
     original = asyncio.create_subprocess_exec
     ready = asyncio.Event()
     cleanup_started = asyncio.Event()
