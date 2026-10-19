@@ -217,8 +217,10 @@ Build the schema-code reference on a matching Neon branch or an independent
 cluster with the same PostgreSQL major version, role attributes, and owner and
 provider membership edges as the rehearsal target. The parity comparison reports
 membership grantors, but compares effective role-to-member edges and whether
-those edges carry admin option; grantor names may differ. When a vanilla
-PostgreSQL reference does not model Neon provider memberships, adapt the
+those edges carry admin option and, on PostgreSQL 16 and later, the inherit and
+set options; grantor names may differ. A snapshot saved before those options
+were compared carries format version 1 and is refused; extract it again. When a
+vanilla PostgreSQL reference does not model Neon provider memberships, adapt the
 disposable reference to match the target's effective memberships. Do not grant
 production roles new memberships or admin powers just to match that reference.
 

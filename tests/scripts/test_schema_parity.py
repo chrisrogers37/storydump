@@ -204,7 +204,8 @@ def test_creator_membership_and_options_normalization():
     second, second_report = parity.normalize_membership(
         {**explicit, "inherit_option": True, "set_option": True}, "owner_a", 170000
     )
-    assert first == second
+    assert (first["inherit_option"], first["set_option"]) == (False, False)
+    assert (second["inherit_option"], second["set_option"]) == (True, True)
     assert first_report != second_report
     assert (
         parity.normalize_membership(
@@ -215,7 +216,15 @@ def test_creator_membership_and_options_normalization():
     old = {
         k: v for k, v in explicit.items() if k not in ("inherit_option", "set_option")
     }
-    assert parity.normalize_membership(old, "owner_a", 150000) == (first, None)
+    assert parity.normalize_membership(old, "owner_a", 150000) == (
+        {
+            "role": "svc_worker",
+            "member": "<owner>",
+            "grantor": "<owner>",
+            "admin_option": False,
+        },
+        None,
+    )
 
 
 def test_deparsed_layout_preserves_literal_and_identifier_whitespace():
@@ -335,6 +344,8 @@ def test_extract_membership_scope_depends_on_member(role, member, grantor, compa
         "member": normalized_member,
         "grantor": normalized_grantor,
         "admin_option": False,
+        "inherit_option": True,
+        "set_option": True,
     }
     if compared:
         assert snapshot["reported"]["membership_grants"] == [expected]
@@ -405,12 +416,60 @@ def test_multiple_membership_grantors_preserve_effective_admin_option(grant_orde
             "role": "svc_clock",
             "member": "svc_worker",
             "admin_option": True,
+            "inherit_option": True,
+            "set_option": True,
         }
     }
     assert len(second["reported"]["membership_grants"]) == 2
     assert any(
         "admin_option" in difference for difference in parity.schema_diff(first, second)
     )
+
+
+@pytest.mark.parametrize("option", ["inherit_option", "set_option"])
+def test_membership_inherit_and_set_options_gate(option):
+    first = membership_snapshot([membership_grant("provider_owner_a")])
+    second = membership_snapshot(
+        [{**membership_grant("provider_owner_a"), option: False}]
+    )
+    assert parity.schema_diff(first, second) == [
+        f"memberships svc_clock->svc_worker.{option}: first=True second=False"
+    ]
+
+
+@pytest.mark.parametrize("grant_order", [(False, True), (True, False)])
+def test_multiple_membership_grantors_preserve_effective_inherit_and_set(
+    grant_order,
+):
+    grants = [
+        {
+            **membership_grant(f"provider_owner_{n}"),
+            "inherit_option": granted,
+            "set_option": granted,
+        }
+        for n, granted in enumerate(grant_order)
+    ]
+    snapshot = membership_snapshot(grants)
+    assert snapshot["catalog"]["memberships"] == {
+        "svc_clock->svc_worker": {
+            "role": "svc_clock",
+            "member": "svc_worker",
+            "admin_option": False,
+            "inherit_option": True,
+            "set_option": True,
+        }
+    }
+
+
+def test_memberships_before_postgresql_16_carry_admin_option_only():
+    snapshot = membership_snapshot([membership_grant("provider_owner_a")], 150000)
+    assert snapshot["catalog"]["memberships"] == {
+        "svc_clock->svc_worker": {
+            "role": "svc_clock",
+            "member": "svc_worker",
+            "admin_option": False,
+        }
+    }
 
 
 def test_redundant_membership_grantors_do_not_gate():
@@ -467,6 +526,24 @@ def test_extract_cli_reads_one_readonly_transaction_and_rolls_back(
 def test_invalid_snapshot_fails_cli(tmp_path, capsys):
     file = tmp_path / "invalid.json"
     file.write_text("{}")
+    assert parity.main(["diff", str(file), str(file)]) == 1
+    assert "format_version" in capsys.readouterr().err
+
+
+def test_snapshot_with_option_free_membership_keys_fails_cli(tmp_path, capsys):
+    """Format 1 compared memberships without INHERIT or SET. Against a current
+    snapshot every PostgreSQL 16+ edge would differ by options it never read."""
+    snapshot = healthy_snapshot()
+    snapshot["format_version"] = 1
+    snapshot["catalog"]["memberships"] = {
+        "svc_clock->svc_worker": {
+            "role": "svc_clock",
+            "member": "svc_worker",
+            "admin_option": False,
+        }
+    }
+    file = tmp_path / "format-1.json"
+    file.write_text(json.dumps(snapshot))
     assert parity.main(["diff", str(file), str(file)]) == 1
     assert "format_version" in capsys.readouterr().err
 
@@ -781,6 +858,37 @@ def test_membership_grantor_change_is_reported_on_real_postgres(catalog_db):
             catalog_db,
             "REVOKE svc_clock FROM parity_grantor_a, parity_grantor_b CASCADE; DROP ROLE parity_grantor_a; DROP ROLE parity_grantor_b",
         )
+
+
+@pytest.mark.integration
+def test_membership_inherit_and_set_options_gate_on_real_postgres(catalog_db):
+    with psycopg2.connect(catalog_db) as conn, conn.cursor() as cur:
+        cur.execute("SHOW server_version_num")
+        version = int(cur.fetchone()[0])
+    if version < 160000:
+        execute(catalog_db, "GRANT svc_clock TO svc_worker")
+    else:
+        execute(catalog_db, "GRANT svc_clock TO svc_worker WITH INHERIT TRUE, SET TRUE")
+    try:
+        granted = parity.schema_signature(catalog_db)
+        if version < 160000:
+            # No per-grant options before 16: the edge carries admin only.
+            assert granted["catalog"]["memberships"]["svc_clock->svc_worker"] == {
+                "role": "svc_clock",
+                "member": "svc_worker",
+                "admin_option": False,
+            }
+            return
+        execute(
+            catalog_db, "GRANT svc_clock TO svc_worker WITH INHERIT FALSE, SET FALSE"
+        )
+        restricted = parity.schema_signature(catalog_db)
+        assert parity.schema_diff(granted, restricted) == [
+            "memberships svc_clock->svc_worker.inherit_option: first=True second=False",
+            "memberships svc_clock->svc_worker.set_option: first=True second=False",
+        ]
+    finally:
+        execute(catalog_db, "REVOKE svc_clock FROM svc_worker")
 
 
 @pytest.mark.integration
