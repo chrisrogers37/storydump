@@ -1,10 +1,121 @@
 # Schema cutover
 
-The deployment runner leaves `001_catalog_text.sql` and
+Production was not converted in place. On 2026-10-17 it moved to a new database
+built from schema code; the original database stays, unchanged, as the rollback
+copy. [The cutover as performed](#the-cutover-as-performed-2026-10-17) records
+where production lives, what data moved, how to roll back and when the original
+database may be deleted. [The in-place procedure](#the-in-place-procedure)
+follows it, for a database whose ledger records the retired chain.
+
+## The cutover as performed (2026-10-17)
+
+**Where production lives.**
+
+- Database: Neon project `storydump-v2` (`divine-lab-41654730`), database
+  `storydump_v2`, PostgreSQL 17. It was built empty from schema code on
+  2026-10-16. Adoption recorded `000`, `001` and `002`, each confirmed by its
+  probe, so the deployment pre-step applies nothing and owes nothing.
+- Railway: the `storydump` service (the API, `api.storydump.app`) and the
+  `worker` service deploy `chrisrogers37/storydump-v2` `main`.
+  `TARGET_DATABASE_URL` connects the API as `svc_ingress` and the worker as
+  `svc_worker`. `DATABASE_URL` is the database owner, used only by the
+  pre-deploy runner.
+- Vercel: `storydump.app` builds `landing/` from the same repository's `main`.
+- The switch: one Railway environment change repointed both services, which
+  deployed `d25d10d` between 14:17 and 14:22 UTC. The original deployments were
+  removed, and by 14:30 UTC the original database had no application sessions.
+
+A fresh build needs none of the in-place procedure. Schema code builds the
+current schema directly and each adoption probe confirms it, so there is no
+ledger to convert and no owner migration to apply. On 2026-10-16 a read-only
+parity check ran on a temporary Neon branch of the original database, and a
+local rehearsal ran on a dump of that branch. The rehearsal stopped while
+restoring object ownership; neither was repeated.
+
+**What data moved.** None. By the owner's decision production started empty:
+no users, workspaces, Instagram accounts, credentials, media, schedules or
+posting history were imported. Every row in production was created there after
+the switch, starting with the owner's admission, account and workspace. The
+exception is the 32 legal-edge rows of `post_intent_transitions` that every
+schema build writes. At the 2026-10-16 rehearsal snapshot the original database
+held 2 users, 2 workspaces, 2 Instagram accounts, 4,554 media items, 759 post
+intents and 531 post locks, plus its 16 `archive.*_pre_cutover_20260917`
+tables. All of it is still there.
+
+Both systems run the same `ENCRYPTION_KEY`, so a credential copied from the
+original database would decrypt in production while that key stays in the
+ring. The original system never had an `ARCHIVE_HMAC_KEYS` ring, and neither
+database holds a tombstone or deletion receipt keyed by one, so production's
+ring starts new. Once it is set, keep every version it has held; see
+[the key ring](instagram-archive-review.md#5-the-key-ring).
+
+**The original database.** Neon project `storyline-ai-db`
+(`ancient-grass-50759240`), database `neondb`, unchanged since the switch. Its
+ledger still records the retired chain, `001` and `002` were never applied, and
+its archive snapshots remain. It is the rollback copy:
+
+- Do not write to it.
+- Do not run `convert-ledger`, `apply` or a rehearsal against it.
+- Do not point a deployment at it except to roll back.
+
+The backups are kept with the cutover record, outside Git, as production data:
+the Railway and Vercel settings from before the switch, and the full dump,
+archive-snapshot dump, password-free roles and source catalog taken from the
+temporary branch on 2026-10-16. The branch was set to expire on 2026-10-17.
+
+**Rolling back to the original system.** A rollback makes the original database
+production again. Everything created in the new database since the switch stays
+there and does not come back.
+
+1. Turn on Pause Posting in the current dashboard, and hold deployments on both
+   Railway services.
+2. In one Railway environment change, point both services back to
+   `chrisrogers37/storydump`. Restore the variables the cutover changed from the
+   settings backup: `DATABASE_URL` and `TARGET_DATABASE_URL` on both services,
+   and the API's `OPS_USER_IDS`. Deploy both at `7c861ec`, the last original
+   production commit.
+3. Link the Vercel project back to `chrisrogers37/storydump`. Alias
+   `storydump.app` and `www.storydump.app` to the last original production
+   deployment, built from `ac36383`.
+4. Confirm that `/health` reports `7c861ec`, and that the original database
+   holds the `svc_ingress` and `svc_worker` sessions while the new one holds
+   none. The Telegram webhook URL,
+   `https://api.storydump.app/webhooks/telegram`, does not change.
+
+The original system resumes with its settings as they were at the switch: a
+workspace that was not paused then resumes posting. Instagram login tokens last
+60 days from their last refresh, and nothing has refreshed the original
+database's tokens since the switch. By mid-December 2026 at the latest, a
+rollback also means reconnecting each Instagram account.
+
+**When the original database may be deleted.** Only when the owner decides, and
+only once all of these hold:
+
+- The owner no longer wants a rollback.
+- Nothing more is to come across. Production started empty by decision; if any
+  of the original data is to move, the copy is made and verified first.
+- The backups listed above are deleted with it, or kept for a period the
+  privacy policy states.
+
+The privacy policy says, in two places, that a one-time copy of the previous
+system's data, taken on September 17, 2026, is kept and that deletion requests
+are applied to it by hand. That copy is the original database's archive
+snapshots and the backups that contain them, so such a request is applied to
+both. It is the one write the original database may take. Deleting the database
+and those backups ends the copy. Publish the privacy copy change that removes
+both mentions then, not before.
+
+## The in-place procedure
+
+In this procedure, "production" and `$PRODUCTION_OWNER_DSN` mean the database
+being converted. Today the only database on the retired chain is the original
+one, and it is the rollback copy: converting it is the owner's decision.
+
+On such a database the deployment runner leaves `001_catalog_text.sql` and
 `002_drop_archive_snapshots.sql` owed. An owner applies them separately. A
 deployment must never decide when to remove archive snapshots.
 
-The prerequisites below apply to the future owner-operated cutover. Running a
+The prerequisites below apply to any owner-operated in-place cutover. Running a
 synthetic fixture proves the script's behavior; it does not prove that the
 production database matches the schema code. Production cutover requires a
 successful rehearsal of a current production dump with zero catalog differences.
@@ -320,6 +431,10 @@ backup recovery procedure and verify the restored database; do not simulate a
 rollback by editing migration history.
 
 ## Repeat on production
+
+The live production database does not need this section: since 2026-10-17 it
+is built from schema code and owes neither migration. The section applies only
+to a database still on the retired chain, and only on the owner's decision.
 
 Only after the owner-created Neon branch rehearsal passes, the owner schedules
 the production cutover, verifies a current usable backup/export, and prevents

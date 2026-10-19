@@ -77,8 +77,10 @@ Railway deploys both services from `main` (`ci.yml:4`). For each service,
    migrations are applied first, under the runner's advisory lock, so the two
    services' pre-deploys serialize and the second finds nothing pending. A
    failing migration aborts the deploy with the old version still serving. A
-   gated file (`-- runner:manual`), including `001` and `002`, is listed as
-   owed and is not applied. The owner follows the
+   pending gated file (`-- runner:manual`) is listed as owed and is not
+   applied. Production, built from schema code, owes none. A database whose
+   schema predates `001` and `002`, such as one converted from the retired
+   chain, owes them, and the owner follows the
    [cutover runbook](../operations/schema-cutover.md).
 3. **Start**, and the health check: `GET /health` must answer within 30 s
 4. **Restart policy** — `ON_FAILURE`, 10 retries; the old deployment gets 60 s to drain
