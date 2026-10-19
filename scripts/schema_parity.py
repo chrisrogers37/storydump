@@ -3,11 +3,12 @@
 Only reference rows in ``public.post_intent_transitions`` are data in the
 signature; their created_at timestamps are reported as runtime metadata.
 Archive and runner relations, extension members and system objects
-are excluded. Comments, outside-role grants and membership options are reported
-for review; raw function bodies remain part of the comparison.
+are excluded. Comments and outside-role grants are reported for review; raw
+function bodies remain part of the comparison.
 Memberships held by service roles or the database owner are compared regardless
-of the granted role. Grantor provenance is reported separately; admin power is
-compared across every grant of the same membership edge.
+of the granted role. Grantor provenance is reported separately; admin power and,
+on PostgreSQL 16 and later, inheritance and SET ROLE are compared across every
+grant of the same membership edge.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ if __package__ in (None, ""):
 
 from scripts.sql_lexer import CODE, COMMENTS, segments
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+MEMBERSHIP_OPTIONS = ("admin_option", "inherit_option", "set_option")
 FLOORS = {
     "tables": 44,
     "functions": 85,
@@ -127,7 +129,9 @@ def normalize_acl(entries, owner):
 
 
 def normalize_membership(row, owner, version):
-    """Compare explicit membership edges; report creator and option metadata."""
+    """Compare explicit membership edges with their options; report creator
+    grants and option metadata. Before PostgreSQL 16 a grant has no INHERIT or
+    SET option to compare."""
     normalized = dict(row)
     for name in ("role", "member", "grantor"):
         normalized[name] = normalize_role(normalized[name], owner)
@@ -140,8 +144,9 @@ def normalize_membership(row, owner, version):
         and not normalized["inherit_option"]
         and not normalized["set_option"]
     )
-    normalized.pop("inherit_option", None)
-    normalized.pop("set_option", None)
+    if version < 160000:
+        normalized.pop("inherit_option", None)
+        normalized.pop("set_option", None)
     return (None if automatic else normalized), options
 
 
@@ -356,8 +361,10 @@ def extract(conn, *, read_only=False):
                     existing = catalog["memberships"].get(key)
                     if existing is not None:
                         # PostgreSQL 16+ can retain grants from several grantors.
-                        # Any admin grant supplies administration of this edge.
-                        row["admin_option"] |= existing["admin_option"]
+                        # Any grant carrying an option supplies it to this edge.
+                        for option in MEMBERSHIP_OPTIONS:
+                            if option in row:
+                                row[option] |= existing[option]
                     catalog["memberships"][key] = row
                 elif any(
                     r == "<owner>" or r.startswith("svc_")
@@ -506,7 +513,10 @@ def validate(snapshot):
 
 
 def schema_diff(first, second):
-    """Return every structural difference plus each side's count-floor failures."""
+    """Return every structural difference plus each side's count-floor failures.
+
+    A membership option that one side's server predates (INHERIT and SET
+    arrived in PostgreSQL 16) has nothing to compare against there."""
     diffs = []
     for label, snapshot in (("first", first), ("second", second)):
         diffs.extend(f"{label} {failure}" for failure in validate(snapshot))
@@ -519,6 +529,12 @@ def schema_diff(first, second):
                 diffs.append(f"{dimension} {key}: only in first schema")
             elif left[key] != right[key]:
                 for field in sorted(left[key].keys() | right[key].keys()):
+                    if (
+                        dimension == "memberships"
+                        and field in ("inherit_option", "set_option")
+                        and not (field in left[key] and field in right[key])
+                    ):
+                        continue
                     a, b = left[key].get(field), right[key].get(field)
                     if a != b:
                         diffs.append(
