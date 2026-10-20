@@ -24,7 +24,7 @@ const audiences: { art: ArtKind; name: string; text: string; useCase?: UseCaseSl
     art: "bottle",
     name: "Online shops",
     useCase: "instagram-stories-for-online-stores",
-    text: "Product shots, restocks and behind-the-scenes every day, without making it anyone’s whole job.",
+    text: "Product shots, restocks and behind-the-scenes, every day.",
   },
 ]
 
