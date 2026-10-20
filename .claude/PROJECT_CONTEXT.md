@@ -157,9 +157,10 @@ suggesting any of them.
 The same holds outside the CLI: the migration runner's `apply`, `adopt`,
 `convert-ledger` and `repair`, the database `make` targets (`drop-db`,
 `reset-db`, `db-restore`, `create-db`, `init-db`, `setup-db`, `quickstart`,
-`db-shell`, `test`, `test-integration`), the schema builder and the database
-gates run only against a local or throwaway database (`AGENTS.md` › Reading
-this list correctly).
+`db-shell`, `check-db`, `db-backup` and the `test` targets), the schema builder
+and `pytest tests/scripts/` run only against a local or throwaway database;
+against any other they are the owner's (`AGENTS.md` › Reading this list
+correctly).
 
 **SAFE to suggest:**
 - `storydump whoami` / `storydump story <id>` / `storydump cards <id>` / `storydump floating` / `storydump account <handle>` (reads)

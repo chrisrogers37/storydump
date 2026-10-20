@@ -73,8 +73,8 @@ The same holds outside the CLI. The migration runner's `apply`, `adopt`,
 `--database-url` or `DATABASE_URL` names; `status` and `parity` only read. The
 `Makefile` exports `.env`, so `make drop-db`, `reset-db` and `db-restore` drop
 or overwrite the database it names, `create-db`, `init-db`, `setup-db` and
-`quickstart` create or build on it, `db-shell` opens it, and `make test` and
-`test-integration` run the database gates against it. Run any of these, the
+`quickstart` create or build on it, `db-shell`, `check-db` and `db-backup`
+open it, and the `test` targets create and drop test databases on its server. Run any of these, the
 schema builder (`python -m src.models.target.ddl`) and `pytest tests/scripts/`
 only against a local or throwaway database; against any other they are the
 owner's.
