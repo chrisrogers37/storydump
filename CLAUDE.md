@@ -59,7 +59,9 @@ storydump admit <email>              # Admits a person and emails them a sign-up
 
 Never run against production: the posting scheduler, or mutating SQL against
 the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
-`src/models/target/` declares — or the `archive` schema.
+`src/models/target/` declares — or the `archive` schema. Do not open a
+connection to the production database at all, even to read: a read is the
+owner's to run. Say what you would read and leave it to them.
 
 This list names what posts, destroys, emails a person, or re-points the bot; absence
 from it does not mean a command is read-only. The other write verbs (`skip`, `reject`, `posted`,
@@ -67,7 +69,7 @@ from it does not mean a command is read-only. The other write verbs (`skip`, `re
 through the command port too, and each is a posting-related action under the
 STOP rule above. The migration runner's writes, the database `make` targets,
 the schema builder and the database-gated tests run only against a local or
-throwaway database. See the same section in `AGENTS.md` for the details and
+throwaway database; against any other they are the owner's. See the same section in `AGENTS.md` for the details and
 for which verbs only read.
 
 ### The record

@@ -154,6 +154,13 @@ Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
 command port, and a skip or a reject is final for that story. Ask before
 suggesting any of them.
 
+The same holds outside the CLI: the migration runner's `apply`, `adopt`,
+`convert-ledger` and `repair`, the database `make` targets (`drop-db`,
+`reset-db`, `db-restore`, `create-db`, `init-db`, `setup-db`, `quickstart`,
+`db-shell`, `test`, `test-integration`), the schema builder and the database
+gates run only against a local or throwaway database (`AGENTS.md` › Reading
+this list correctly).
+
 **SAFE to suggest:**
 - `storydump whoami` / `storydump story <id>` / `storydump cards <id>` / `storydump floating` / `storydump account <handle>` (reads)
 - `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture` / `storydump planned` (reads)
