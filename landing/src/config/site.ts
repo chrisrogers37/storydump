@@ -8,7 +8,6 @@ export const siteConfig = {
   },
   contact: {
     portfolio: "https://crog.gg",
-    // placeholder: the public contact address is not set yet
-    email: "contact@storydump.invalid",
+    email: "chris@storydump.app",
   },
 }
