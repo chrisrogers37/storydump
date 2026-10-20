@@ -1,0 +1,132 @@
+---
+description: "Check the database's posture, the job queue and the API's health through storydump (read-only)"
+---
+
+Report the state of the ledger through the `storydump` CLI. Every command below
+is a bounded read through the API under the user's token — there is no database
+connection and no SQL here. Add `--json` to any of them for one envelope
+`{"v": 1, "kind", "data", "error"}`; a workspace read's `data` is
+`{"workspaces": [{"workspace_id", "rows"}]}`.
+
+Exit codes: 0 ok · 1 not found · 2 refused · 3 not authorized (no usable
+token, or `not_ops` from `posture`: the token's person is not in the API's
+`OPS_USER_IDS`) · 4 API unreachable or not well · 5 Railway unreachable · 6 a
+watched condition failed (`--watch` only) · 64 usage.
+
+## 0. Is there a token?
+
+```bash
+storydump whoami
+```
+
+It prints the principal and the workspaces the token can read. Exit 3 means no
+usable token: stop and say so. Minting one is the user's (the web's Settings ›
+API tokens, then `storydump login`, or `STORYDUMP_TOKEN` in the environment) —
+do not ask for the secret in the conversation.
+
+## 1. The API and its database
+
+```bash
+storydump health --json
+```
+
+`data.api` is the API's operating details only when `data.details.read` is
+true, which needs a token whose person is in the API's `OPS_USER_IDS`;
+otherwise it is public `/health` (`status`, `version`, `commit`) and
+`data.details` says why and what fixes it — report the fields below as not
+checked, never as fine. From `data.api`: `target_database` (false means every data
+route answers 503), `db_role` (the login the API holds, and whether it bypasses
+RLS), `pool` (`size`, `checked_out`, `checked_out_peak` — in the table's `api`
+facts and in the JSON). `data.verdicts` judges `api`,
+`scheduling`, `posting` and `webhook` by the rules in
+`storydump_cli/health_classify/` and `storydump_cli/commands/env.py`; exit 4
+when one is not well — the report is still printed, so read it.
+
+## 2. The database's posture
+
+```bash
+storydump posture --json
+```
+
+It needs a token whose person is in the API's `OPS_USER_IDS`; anyone else
+gets `not_ops`.
+
+`data.ledger` is `present`, `absent` or `unreadable`; `data.migrations` is the
+runner's ledger (`version`, `status`, `applied_at`); `data.role` the connected
+login and `bypassrls`; `data.rls` every tenant table with `enabled`/`forced`;
+`data.doors` the `SECURITY DEFINER` functions and their owners.
+
+Compare the highest applied version with the tree:
+
+```bash
+ls scripts/migrations/*.sql | tail -3
+grep -l "^-- runner:manual" scripts/migrations/*.sql
+```
+
+The tree is `000` (the schema, built from code) and two files the second
+command lists, `001` and `002`, which carry `-- runner:manual`: the deploy
+never applies them; the owner applies one by hand. A database built from schema
+code adopts all three, each confirmed by its probe (`adoption_manifest.json`;
+production's record is `documentation/operations/schema-cutover.md`), so the
+ledger's highest version should be the tree's highest file (the first command).
+A manual file absent from the ledger is expected, not drift: `storydump doctor` reads the same directive
+(`storydump_cli/commands/env.py`, `_gated_in`), keeps its ledger line `ok` and
+names it as "owed to a maintenance window". Any OTHER file in the tree
+that the ledger lacks is what doctor calls "not applied — deploy main": a deploy
+that has not happened or a predeploy that failed. Report it.
+
+## 3. The job queue
+
+```bash
+storydump jobs --since 24h
+```
+
+One row per kind × lane × state, with the oldest runnable and failed samples
+(a publish job's sample carries its story's `last_error`). What is still owed
+(`ready`, `leased`) is listed at any age. Worth reporting: a `failed` or
+`review_required` group, and a `ready` group whose `oldest_run_at` is long past
+— nothing is claiming that lane. System jobs (no workspace) are not shown.
+
+## 4. Stories in flight
+
+```bash
+storydump floating
+```
+
+Approved stories carrying a debit, waiting between attempts: the step, the
+retry job and its next run, the last wait's class and rung. A row whose job is
+`failed` is a story nobody is retrying.
+
+If the user names an Instagram account, add `storydump account <handle>`: the
+cap per day, the zone, the next slot, today's count and the last twenty
+outcomes.
+
+## What no verb answers
+
+The media pool's totals and a credential's expiry have no read verb. Say so;
+do not open a database connection to answer them. Whether to read production
+is the user's call, and any such read is theirs to run.
+
+## Report Format
+
+```
+## Ledger Status
+
+### API
+| Surface | Verdict | Facts |
+|---------|---------|-------|
+
+### Posture
+role … · bypassrls … · ledger … · applied through NNN · gated and owed: …
+
+### Jobs (24h)
+| Kind | Lane | State | Count | Oldest run_at |
+|------|------|-------|-------|---------------|
+
+### Floating
+| Story | Step | Job | Next run | Last wait |
+|-------|------|-----|----------|-----------|
+```
+
+**REMINDER**: every command here reads. Do not follow one with a write verb —
+`CLAUDE.md`'s safety block governs those, and the decision is the user's.

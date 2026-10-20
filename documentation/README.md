@@ -21,3 +21,5 @@ Guides for using, developing and operating Storydump.
 - [Instagram archive](operations/instagram-archive-review.md) — testing it locally, the prerequisites, activation, Meta permissions, the key ring and its limits
 - [Instagram source gate, run in isolation](operations/instagram-source-isolated-gate.md) — the contributor recipe for the full-composition gate
 - [Meta callback endpoints](operations/meta-callback-endpoints.md) — the deauthorize and data-deletion callbacks
+- [Retention policy](operations/retention-policy.md) — which data a scheduled sweep deletes (only rate counters) and which accumulates
+- [Schema cutover](operations/schema-cutover.md) — where production's database lives since 2026-10-17, and the in-place procedure
