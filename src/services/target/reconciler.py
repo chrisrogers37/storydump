@@ -446,11 +446,34 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
     an intent that stayed put.
 
     A posted verdict also applies the shared posting effects in this
-    transaction, after the guarded flip succeeds.
+    transaction, after the guarded flip succeeds. A failed verdict returns the
+    story's cap slot to its recorded day (`publish_cap.refund_cap`), before
+    the flip.
     """
-    from src.services.target import intent_ledger, provider_ops
+    from src.services.target import intent_ledger, provider_ops, publish_cap
 
     await _record_evidence(conn, intent_id=intent_id, checks=len(trail), trail=trail)
+    if state == "failed":
+        # The story never posted, so its slot goes back, as every terminal
+        # failure returns it. BEFORE the flip: the terminal-freeze trigger
+        # refuses the refund's stamp once `failed` lands. An intent that left
+        # `publishing_ambiguous` returns nothing, and the flip below raises.
+        held = (
+            await conn.execute(
+                text(
+                    "SELECT workspace_id, ig_account_id FROM post_intents"
+                    " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                ),
+                {"intent": str(intent_id)},
+            )
+        ).first()
+        if held is not None:
+            await publish_cap.refund_cap(
+                conn,
+                intent_id=str(intent_id),
+                workspace_id=str(held.workspace_id),
+                ig_account_id=str(held.ig_account_id),
+            )
     sets = "state = :state"
     if state == "posted":
         # `ck_posted_complete` refuses a bare state flip, and it is right to:
