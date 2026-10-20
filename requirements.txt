@@ -37,6 +37,9 @@ pytest==9.0.3
 pytest-asyncio==1.3.0
 pytest-cov==7.1.0
 pytest-mock==3.15.1
+# Divides the suite across CI's parallel test jobs by the recorded test times
+# in `.test_durations` (`--splits N --group K`; ci.yml's test-shard matrix).
+pytest-split==0.11.0
 # NOT a second HTTP client for the application, and NOT dead weight: no module
 # under src/, storydump_cli/ or scripts/ imports it, and the app reaches the
 # network through httpx and the egress floor. `starlette.testclient` imports

@@ -32,14 +32,23 @@ JOBS = [
     "Schema consistency",
 ]
 
+#: Declared but not required: the test-shard matrix, whose legs report as
+#: "Test shard 1".."Test shard 5" and which `Test` needs, every leg of it.
+COVERED = ["Test shard ${{ matrix.group }}"]
+
+SHARD_LEGS = [f"Test shard {g}" for g in range(1, 6)]
+
+
+def _workflow_file(path: Path, names) -> Path:
+    path.write_text(
+        "jobs:\n" + "".join(f"  j{i}:\n    name: {n}\n" for i, n in enumerate(names))
+    )
+    return path
+
 
 @pytest.fixture()
 def workflow(tmp_path: Path) -> Path:
-    wf = tmp_path / "ci.yml"
-    wf.write_text(
-        "jobs:\n" + "".join(f"  j{i}:\n    name: {n}\n" for i, n in enumerate(JOBS))
-    )
-    return wf
+    return _workflow_file(tmp_path / "ci.yml", [*JOBS, *COVERED])
 
 
 def _rollup(**over) -> dict:
@@ -188,14 +197,41 @@ class TestAFailureToObtainAValueNeverRendersAsAPassingValue:
     def test_a_drifted_required_list_refuses(self, tmp_path):
         """A hardcoded list that silently misses a newly added CI job
         re-creates the absence-blindness the gate exists to close."""
-        wf = tmp_path / "drift.yml"
-        wf.write_text(
-            "jobs:\n"
-            + "".join(
-                f"  j{i}:\n    name: {n}\n"
-                for i, n in enumerate([*JOBS, "Brand New Job"])
-            )
-        )
+        wf = _workflow_file(tmp_path / "drift.yml", [*JOBS, *COVERED, "Brand New Job"])
         r = run(tmp_path, wf, _rollup())
         assert r.returncode == 3
         assert "drifted" in r.stderr and "Brand New Job" in r.stderr
+
+    def test_a_workflow_that_lost_the_test_shards_is_drift_too(self, tmp_path):
+        """The covered list is pinned like the required one: a workflow that
+        no longer declares the shard matrix is refused, naming it."""
+        wf = _workflow_file(tmp_path / "no-shards.yml", JOBS)
+        r = run(tmp_path, wf, _rollup())
+        assert r.returncode == 3
+        assert "drifted" in r.stderr and "Test shard" in r.stderr
+
+
+class TestTheShardLegsAreCoveredByTest:
+    """The suite runs in a matrix whose legs report as "Test shard N". They are
+    declared, so the drift gate must know them, but never required: `Test`
+    needs every leg and passes only when all of them did."""
+
+    def test_a_rollup_with_only_the_required_checks_is_ready(self, tmp_path, workflow):
+        r = run(tmp_path, workflow, _rollup())
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "all 7 required checks" in r.stdout
+
+    def test_green_shard_legs_never_stand_in_for_test(self, tmp_path, workflow):
+        checks = [c for c in _rollup()["statusCheckRollup"] if c["name"] != "Test"]
+        checks += [
+            {
+                "__typename": "CheckRun",
+                "name": leg,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            }
+            for leg in SHARD_LEGS
+        ]
+        r = run(tmp_path, workflow, _rollup(statusCheckRollup=checks))
+        assert r.returncode == 1
+        assert "'Test' is ABSENT" in r.stdout

@@ -8,17 +8,18 @@ uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
 
 ## Overview
 
-The CI workflow defines jobs on GitHub-hosted runners (`ubuntu-latest`).
-GitHub Actions is disabled for this private repository, so validation runs
-locally and its results are recorded in the pull request.
+The CI workflow defines jobs on GitHub-hosted runners (`ubuntu-latest`). It
+runs on every pull request and every push to `main`, and Railway waits for it
+before deploying.
 
 ---
 
 ## CI Pipeline (Automated)
 
 `.github/workflows/ci.yml` runs on every push to `main`, `develop` and
-`feature/*`, and on every pull request into `main` or `develop`. It has seven
-jobs, and none is path-filtered — every job runs on every PR:
+`feature/*`, and on every pull request into `main` or `develop`. It declares
+eight jobs, one of them a matrix of five test shards, and none is
+path-filtered — every job runs on every PR:
 
 ```yaml
 # .github/workflows/ci.yml (abridged — the file is the authority)
@@ -33,9 +34,13 @@ on:
 jobs:
   lint:             # ruff check . && ruff format . --check   (the whole repository)
   telegram-ratchet: # python scripts/telegram_ratchet.py      (stdlib only, no install)
-  test:             # pip install -e '.[cli]'
+  test-shard:       # matrix group: 1..TEST_SPLITS (5), a postgres:17 service each
+                    # pip install -e '.[cli]'; fingerprint the collected suite
                     # pytest tests/ -v --cov=src --cov=storydump_cli
-                    # against a postgres:17 service, REQUIRE_TEST_DATABASE=1
+                    #   --splits 5 --group N   (pytest-split, .test_durations)
+                    # REQUIRE_TEST_DATABASE=1
+  test:             # needs every shard: passes only if all passed and all five
+                    # fingerprints match; combined coverage on the run summary
   security:         # pip-audit -r requirements.txt               (GATES)
                     # bandit -r src/ storydump_cli/               (advisory)
   front-end:        # in landing/: npm ci, npm test, npx tsc --noEmit, npm run lint
@@ -53,17 +58,39 @@ jobs:
 | Linting | `ruff check .` | Code style and errors, over the whole repository — `tests/` included |
 | Formatting | `ruff format . --check` | Consistent code formatting |
 | Telegram ratchet | `scripts/telegram_ratchet.py` | An allowlist of the modules permitted to reference Telegram: a reference outside it fails. Stdlib-only, so it runs without the app's dependencies |
-| Tests | `pytest` | The whole suite against a PostgreSQL 17 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced, and the upload is advisory: it continues on error and times out after five minutes, so it never fails the job |
+| Tests | `pytest`, `pytest-split` | The whole suite, split across five `Test shard` jobs by the recorded test times in `.test_durations`, each against its own PostgreSQL 17 service (the `tests/scripts` suites hold a cluster-wide lock, so two shards cannot share one). `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). The final `Test` job passes only if every shard passed and every shard fingerprinted the same collected suite, which is what makes each test run exactly once. It combines the shards' coverage of `src` and `storydump_cli` into the run summary; no threshold is enforced and coverage never fails the job |
 | Security | `pip-audit`, `bandit` | Vulnerability scanning. `pip-audit` GATES: a known-vulnerable pin in `requirements.txt` fails the job. `bandit` is advisory (`\|\| true` + `continue-on-error`): its findings on this tree have not been triaged, so read the uploaded report rather than the step's colour. The npm dependencies of `landing/` are audited in Front end, below |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint`, `npm audit --omit=dev` | The web app in `landing/` (Node 22). The audit GATES: a known advisory against a runtime dependency, direct or transitive, fails the job. It runs on every PR, so a newly published advisory turns every PR red until a bump lands; the step's note in `ci.yml` has its scope, why it has no severity floor, and how to clear an advisory. `next build` is left to Vercel, which builds every PR |
 | Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
 | Schema consistency | `python -m scripts.schema_consistency` | Compares the catalog built from current schema code with the pinned schema-code base plus its migration tail. Two independent disposable PostgreSQL 17 clusters keep roles and memberships separate. Catalog snapshots and differences are uploaded as an artifact |
 
-The local `scripts/pr_ready.sh` helper expects all seven declared jobs by name:
-Lint, Telegram ratchet, Test, Security Scan, Front End, Changelog Check and
-Schema consistency. It checks that this list matches the workflow. GitHub
-rulesets govern merge policy; review that configuration when changing job
-names. The helper's expectations do not establish the remote ruleset settings.
+The local `scripts/pr_ready.sh` helper requires seven checks by name: Lint,
+Telegram ratchet, Test, Security Scan, Front End, Changelog Check and Schema
+consistency. The `Test shard` matrix is declared to it as covered by `Test`:
+its legs report as `Test shard 1` … `Test shard 5`, and `Test` needs every one
+of them. It checks both lists against the workflow. GitHub rulesets govern
+merge policy; review that configuration when changing job names. The helper's
+expectations do not establish the remote ruleset settings.
+
+### Test shards and their timings
+
+pytest-split divides the collected suite into five contiguous chunks of about
+equal recorded time, so the heavy `tests/scripts` gates spread across the
+shards while each test file stays, with a few exceptions at chunk edges, in one
+shard. A test missing from `.test_durations` gets the average time: stale
+timings only make the shards uneven, they never skip a test.
+
+When the shards drift apart (the slowest more than about 25% over the
+fastest), refresh the file from a green `main` run: every such run's `Test`
+job publishes the merged times as the `test-durations` artifact.
+
+```bash
+gh run download <run-id> -n test-durations   # writes .test_durations
+```
+
+Commit it at the repository root with a `### Tests` changelog fragment. To
+change the number of shards, change `TEST_SPLITS` and the matrix's `group`
+list in `ci.yml` together: each leg refuses to run if they disagree.
 
 ---
 
@@ -85,8 +112,9 @@ Railway deploys both services from `main` (`ci.yml:4`). For each service,
 3. **Start**, and the health check: `GET /health` must answer within 30 s
 4. **Restart policy** — `ON_FAILURE`, 10 retries; the old deployment gets 60 s to drain
 
-A red CI check can hold a deploy back: Railway can skip the deploy of a commit
-whose `Test` job is red. Merge on green.
+Railway waits for the commit's CI run to finish before deploying, and skips the
+deploy when the run fails. The test shards are the long pole, so a deploy lands
+about 15 minutes after a merge. Merge on green.
 
 ### Railway Services
 
@@ -203,7 +231,7 @@ railway logs --service worker
 - **Python 3.10** in every job (`setup.py` `python_requires=">=3.10"`); Railway
   builds with NIXPACKS' default Python, so the pin is CI's, not the deploy's
 - **Node 22** for the front end (mirrored by `engines` in `landing/package.json`)
-- **PostgreSQL 17** for the Test job and both Schema consistency clusters
+- **PostgreSQL 17** for every test shard and both Schema consistency clusters
 
 ## Cost
 

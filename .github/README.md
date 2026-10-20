@@ -18,15 +18,22 @@ and push gate.
 **File**: `ci.yml`
 
 Runs on every push to `main`, `develop` and `feature/*`, and on every pull
-request into `main` or `develop`, seven jobs:
+request into `main` or `develop`, eight jobs (one of them a five-leg matrix):
 
 - **Lint** — `ruff check .` and `ruff format . --check`, the whole repository
   (`ruff.toml` declares the scope; nothing is left unlinted by a directory list)
 - **Telegram ratchet** — `python scripts/telegram_ratchet.py`: the
   allowlist of modules that may reference Telegram (stdlib-only, no install)
-- **Test** — `pytest tests/ -v --cov=src --cov=storydump_cli` against a
-  PostgreSQL 17 service container, with `REQUIRE_TEST_DATABASE=1` so a database
-  that fails to come up fails the run instead of skipping the tests it backs
+- **Test shard 1 … 5** — the suite split five ways by pytest-split and the
+  recorded times in `.test_durations`: each runs
+  `pytest tests/ -v --cov=src --cov=storydump_cli --splits 5 --group N` against
+  its own PostgreSQL 17 service container, with `REQUIRE_TEST_DATABASE=1` so a
+  database that fails to come up fails the run instead of skipping the tests it
+  backs, and first fingerprints the whole collected suite
+- **Test** — needs every shard, and passes only if all five passed and all five
+  fingerprints match, so each test ran exactly once; it writes the combined
+  coverage to the run summary and publishes the merged test times
+  (`test-durations` artifact)
 - **Security Scan** — pip-audit gates (a known-vulnerable pin in
   `requirements.txt` fails the job); bandit is advisory (`|| true` and
   `continue-on-error`)
@@ -43,9 +50,10 @@ request into `main` or `develop`, seven jobs:
   as an artifact
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`). The local
-`scripts/pr_ready.sh` helper expects all seven declared jobs by name and checks
-that its list matches the workflow. GitHub rulesets govern merge policy; review
-that configuration when changing job names.
+`scripts/pr_ready.sh` helper requires seven checks by name (every job above
+but the shards, which `Test` covers) and checks its lists against the
+workflow. GitHub rulesets govern merge policy; review that configuration when
+changing job names.
 
 ### Continuous Deployment (Railway Auto-Deploy)
 
