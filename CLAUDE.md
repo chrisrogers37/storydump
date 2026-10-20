@@ -30,6 +30,8 @@ change here, and review checks both files at the same head.
 ```bash
 python -m src.main                   # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
+make run                             # Runs `python -m src.main`: starts the posting worker
+make dev                             # Runs `python -m src.main` once .env exists: starts the posting worker
 python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots; only a database converted in place owes 001 and 002
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
@@ -50,7 +52,8 @@ storydump admit <email>              # Admits a person and emails them a sign-up
 ### Telegram Web (web.telegram.org)
 
 - **NEVER type or click** — view and screenshot only.
-- All bot interactions go through the database or the user's own device.
+- Anything the bot should do happens through a `storydump` verb under the rules
+  above, or on the user's own device.
 
 ### Production
 
@@ -58,12 +61,14 @@ Never run against production: the posting scheduler, or mutating SQL against
 the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 `src/models/target/` declares — or the `archive` schema.
 
-This list names what is unambiguously destructive or emails a person; absence
+This list names what posts, destroys, emails a person, or re-points the bot; absence
 from it does not mean a command is read-only. The other write verbs (`skip`, `reject`, `posted`,
-`pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the ledger
+`resolve <story> posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the ledger
 through the command port too, and each is a posting-related action under the
-STOP rule above. See the same section in `AGENTS.md` for the commands that
-write despite reading as inspection.
+STOP rule above. The migration runner's writes, the database `make` targets,
+the schema builder and the database-gated tests run only against a local or
+throwaway database. See the same section in `AGENTS.md` for the details and
+for which verbs only read.
 
 ### The record
 
@@ -112,8 +117,9 @@ worker, and Vercel builds `storydump.app` from it. So:
 - `.claude/commands/db-status.md` and `telegram-status.md` — the `/db-status`
   and `/telegram-status` slash commands, read-only `storydump` reads.
 - `.claude/PROJECT_CONTEXT.md` and `.claude/QUICK_REFERENCE.md` — satellite
-  context pages; each carries its own copy of the never-run list, which
-  `tests/test_agent_docs.py` holds equal to the block above.
+  context pages; each carries its own copy of the never-run list, and
+  `tests/test_agent_docs.py` fails when a copy misses a `storydump` entry of
+  the block above (it does not check their other entries).
 - There is no `.claude/settings.json`: no permission list stands in for the
   block above, which is the safety rule.
 

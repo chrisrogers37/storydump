@@ -116,7 +116,7 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   secret answers the same 403 whether the secret is wrong or unset.
 - Compare secrets in constant time (`hmac.compare_digest`,
   `webhook_ingress.verify_secret_token`). Store a hash of a bearer token, never
-  the token (`service_tokens.token_hash`, `sessions.token_hash`).
+  the token (`service_tokens.token_hash`, `session_tokens.token_hash`).
 - Bound every numeric API input at the route: `Query(default, ge=1, le=MAX)`
   (`v1.py:638`, `ops.py:93`), and clamp again in the service so a direct
   caller is bounded too (`ops_views.floating`).

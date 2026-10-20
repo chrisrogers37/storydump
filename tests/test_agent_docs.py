@@ -9,7 +9,7 @@ That is not hypothetical. Both documents named `storydump-cli process-queue`
 and `storydump-cli create-schedule` in their NEVER-run blocks for a month after
 neither command existed, and the credential-destroying `revoke-tokens` and
 `rotate-keys` were in neither. The list looked authoritative the whole time.
-The legacy CLI is gone (the v2 CLI plan, phase 03); the same guard now pins
+The legacy CLI is gone; the same guard now pins
 `storydump`, whose verbs nest (`storydump tokens revoke`), so a subcommand is
 pinned, not its group.
 
@@ -165,20 +165,32 @@ def test_the_never_run_list_is_not_empty_and_covers_the_worker_and_the_cli():
         "the legacy CLI is gone; a guard pointing at it protects nothing"
     )
     assert any("scripts.migration_runner apply --manual" in line for line in block), (
-        "the gated door — the one command that drops the legacy schema — is"
-        " not in the NEVER-run list (the tear-out, phase 04; fork F7)"
+        "the gated door — `apply --manual`, which applies an owner-only file —"
+        " is not in the NEVER-run list"
     )
 
 
 _MAIN_GUARD = re.compile(r"""^if __name__ == ["']__main__["']:""", re.M)
 
 
+#: An entry point judged NOT dangerous, with the reason. It was made for the
+#: schema builder on 2026-10-20; a new entry point still fails below
+#: until someone makes it again, here or on the never-run list.
+JUDGED_SAFE: dict[str, str] = {
+    "src.models.target.ddl.__main__": (
+        "builds the schema on an EMPTY database and refuses any other; `init`"
+        " leaves a database built from code untouched"
+    ),
+}
+
+
 def test_every_src_entry_point_is_on_the_never_run_list():
     """A module under `src/` with a `__main__` entry is a process `python -m`
-    starts, and the two that exist both start the posting worker (`src.main`
-    only dispatches to `src.worker`). The set is derived from the tree, so a
-    new entry point fails here until someone decides whether it is dangerous —
-    `src.worker` was missing from the list while `src.main` was on it."""
+    starts. Two start the posting worker (`src.main` only dispatches to
+    `src.worker`); the schema builder is judged safe in JUDGED_SAFE. The set
+    is derived from the tree, so a new entry point fails here until someone
+    decides whether it is dangerous — `src.worker` was missing from the list
+    while `src.main` was on it."""
     block = _never_run_block(_doc("AGENTS.md"))
     entry_points = sorted(
         ".".join(path.relative_to(ROOT).with_suffix("").parts)
@@ -188,10 +200,14 @@ def test_every_src_entry_point_is_on_the_never_run_list():
     # positive control: the scan finds the two entry points the Procfile and
     # `src/main.py` name, so an empty scan cannot pass
     assert {"src.main", "src.worker"} <= set(entry_points), entry_points
+    assert set(JUDGED_SAFE) <= set(entry_points), (
+        "a JUDGED_SAFE entry names an entry point that is gone — remove it"
+    )
     missing = [
         module
         for module in entry_points
-        if not any(line.split() == ["python", "-m", module] for line in block)
+        if module not in JUDGED_SAFE
+        and not any(line.split() == ["python", "-m", module] for line in block)
     ]
     assert not missing, (
         f"{missing} can be started with `python -m` but are not in the NEVER-run"
@@ -317,8 +333,8 @@ def test_no_other_file_carries_an_unpinned_never_run_list():
 # target's own metadata; the variables are phase 02's dead list; the paths are
 # phase 01's deleted packages and files, which its own test asserts are gone
 # (`tests/src/test_legacy_tier_gone.py`).
-# History keeps its names: `documentation/archive/`, `documentation/planning/`
-# and `CHANGELOG.md` are outside the live roots.
+# History keeps its names: `CHANGELOG.md` and `changelog.d/` are outside the
+# live roots.
 # ---------------------------------------------------------------------------
 
 #: Where a page is LIVE — read as a description of the system that exists.
@@ -331,13 +347,12 @@ LIVE_ROOTS = (
     "documentation/guides",
 )
 
-#: Live too, but only the directory's OWN pages: `documentation/README.md`,
-#: `ROADMAP.md` — below them are the archive and the plans, which are history.
+#: Live too, but only the directory's OWN pages (`documentation/README.md`):
+#: its subdirectories are live only where LIVE_ROOTS names them.
 LIVE_FLAT_ROOTS = ("documentation",)
 
-#: A live page ABOUT the legacy lineage that is still in the tree — the
-#: migration files 001-050, the lane that replays them, the snapshots 078 took
-#: — may name one of its tables. Each entry is a claim with its reason AND the
+#: A live page ABOUT the legacy lineage — the cutover runbook, which moves the
+#: old database's ledger aside — may name one of its tables. Each entry is a claim with its reason AND the
 #: number of times the page names it: an exemption is read for the mentions
 #: that were there, so one more (a stale line about the worker's token hiding
 #: beside the pager's) or one fewer fails, and the page is read again.

@@ -93,7 +93,7 @@ swallowed.
 `MAX_EXPECTED_SKIPS = 1` (`:92`) is the backstop, enforced at session finish
 only where a database is required (`:150`) and pinned by
 `tests/test_integration_coverage_policy.py:284`. The one legitimate skip is the
-live-drift audit, which runs only on its schedule
+live-drift audit, which runs only where `SCHEMA_DRIFT_DSN` is supplied
 (`tests/scripts/test_schema_drift_live.py:71`). So:
 
 - A new `pytest.skip` breaches the ceiling in CI. If the skip is legitimate,

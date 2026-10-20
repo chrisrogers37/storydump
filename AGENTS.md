@@ -20,6 +20,8 @@ Telegram on behalf of paying tenants.
 ```bash
 python -m src.main                   # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
+make run                             # Runs `python -m src.main`: starts the posting worker
+make dev                             # Runs `python -m src.main` once .env exists: starts the posting worker
 python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots; only a database converted in place owes 001 and 002
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
@@ -40,7 +42,8 @@ storydump admit <email>              # Admits a person and emails them a sign-up
 ### Telegram Web (web.telegram.org)
 
 - **NEVER type or click** — view and screenshot only.
-- All bot interactions go through the database or the user's own device.
+- Anything the bot should do happens through a `storydump` verb under the rules
+  above, or on the user's own device.
 
 ### Production
 
@@ -52,7 +55,8 @@ the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 
 It names what posts, destroys, emails a person, or re-points the bot. It is not a complete
 read-only/read-write taxonomy: the other write verbs (`skip`, `reject`,
-`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the
+`posted`, `resolve <story> posted`, `pause`, `resume`, `sync`, `schedule`,
+`reschedule`, `link`) change the
 ledger through the command port too — a skip or a reject is a terminal state
 for that story, and a scheduled story asks the workspace's chats to approve it
 at its time — and every one of them is a posting-related action under the STOP
@@ -61,6 +65,15 @@ rule above. The read verbs (`waitlist` among them: it lists, and admits no one),
 (its door check is an empty POST the API refuses by design). When a verb is
 not on this list, check what it does before running it rather than inferring
 that absence means safe.
+
+The same holds outside the CLI. The migration runner's `apply`, `adopt`,
+`convert-ledger` and `repair` write the schema or its ledger on whatever
+`DATABASE_URL` names; `status` and `parity` only read. The `Makefile` exports
+`.env`, so `make drop-db`, `reset-db` and `db-restore` drop or overwrite the
+database it names, and `init-db`, `setup-db` and `quickstart` build on it. Run
+any of these, the schema builder (`python -m src.models.target.ddl`) and
+`pytest tests/scripts/` only against a local or throwaway database; against
+any other they are the owner's.
 
 ### The record
 
@@ -152,8 +165,9 @@ Each layer is isolated. Do not violate the boundaries:
   `scripts/migration_runner.py`.
 
 **The database is the authority.** The legal edges of a story's state are rows
-of `post_intent_transitions` and a trigger refuses the rest
-(`src/models/target/intent_ledger.py`; the service `intent_ledger.py` issues
+of `post_intent_transitions` (`src/models/target/ddl/05_reference_rows.sql`)
+and the trigger `tg_intent_guard` refuses the rest
+(`src/models/target/ddl/06_triggers.sql`; the service `intent_ledger.py` issues
 the UPDATE and translates the refusal), one live lease per serialization key
 is a unique index on `jobs` (`src/models/target/machinery.py`), and every state
 change of a story writes its own `audit_events` row by trigger, which refuses
@@ -235,7 +249,7 @@ variable something reads, and a test fails if it names one nothing does.
 storydump whoami
 storydump floating --watch
 storydump story <intent_id>
-storydump skip <story> --workspace <ws>
+storydump planned
 storydump health
 storydump doctor
 ```
@@ -304,8 +318,8 @@ client, never a database connection. Install it with
    story cannot carry one). A
    refusal is an answer, not a failure: the reason's sentence, the fixing
    verb, exit 2. The Telegram adapter's words never appear in a terminal.
-   `storydump admit <email> [--resend]` is the one write outside the port,
-   for `OPS_USER_IDS` only, like `posture`: it admits any address, on the
+   `storydump admit <email> [--resend]` writes outside the port, as
+   `tokens revoke` and the webhook verbs do. It is for `OPS_USER_IDS` only, like `posture`: it admits any address, on the
    waitlist or not, to sign up, and queues its email with a one-time sign-up
    link (`POST /api/v1/admissions`). An admission belongs to no
    workspace, so it takes no `--workspace`. A re-run answers "already
@@ -380,8 +394,8 @@ The `Procfile` names the two deployed processes; both run the one tier.
   and the version and commit that answer, nothing else (the details — usage
   counts, the database login, the pool, the webhook, the queue — are
   `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone; plus
-  `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
-  poll), schema at `/openapi.json` (and `/docs`) only when started with
+  `/health/scheduling`, `/health/posting` and `/health/delivery`, the
+  surfaces the fleet monitors poll), schema at `/openapi.json` (and `/docs`) only when started with
   `API_DOCS=1`, which Railway's `production` environment ignores — the resource and command surface under
   `/api/v1`, sign-in under `/auth`. Telegram's deliveries — `/start` links,
   group joins, a group's move to a supergroup, taps on a card, the link

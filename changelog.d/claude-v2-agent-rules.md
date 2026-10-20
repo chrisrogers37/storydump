@@ -4,4 +4,4 @@
 
 ### Tests
 
-- **The never-run lists are pinned again.** `tests/test_agent_docs.py` fails when the two documents' never-run lists disagree, when a context page's copy misses an entry, when either names a CLI command that does not exist, or when a new `python -m` entry point is left unclassified.
+- **The never-run lists are pinned again.** `tests/test_agent_docs.py` fails when the two documents' never-run lists disagree, when a context page's copy misses a `storydump` entry, when either names a CLI command that does not exist, or when a new `python -m` entry point is left unclassified; the legacy table names it checks live pages for are back in `tests/scripts/legacy_inventory.py`.

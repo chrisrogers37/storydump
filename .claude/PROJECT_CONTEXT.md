@@ -143,13 +143,14 @@ names every one something reads.
 - `storydump admit <email>` (admits a person and emails them a sign-up link — the owner's decision)
 - `python -m src.main` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
 - `python -m src.worker` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
+- `make run` / `make dev` (both run `python -m src.main`: the posting worker)
 - `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 001 and 002 are owed only by a database converted in place; a manual file is always the owner's)
 
-The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
-it by `tests/test_agent_docs.py`.
+The canonical list is the safety block in `CLAUDE.md`; `tests/test_agent_docs.py` fails when this copy
+misses one of its `storydump` entries.
 
 Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
-`pause`, `resume`, `sync`, `schedule`, `reschedule` and `link` also write through the
+`resolve <story> posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule` and `link` also write through the
 command port, and a skip or a reject is final for that story. Ask before
 suggesting any of them.
 
@@ -158,7 +159,7 @@ suggesting any of them.
 - `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture` / `storydump planned` (reads)
 - `storydump waitlist` (a read; its rows are people's addresses, which never go into the repository)
 - `storydump health` / `storydump deploys` / `storydump doctor` / `storydump webhook status` (the deployment; nothing changes)
-- `pytest tests/`
+- `pytest tests/` (its database gates against a local or throwaway database only)
 
 ---
 
