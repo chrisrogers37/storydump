@@ -29,6 +29,12 @@ REQUIRED_DEFAULT=(
   "Lint" "Telegram ratchet" "Test" "Security Scan" "Front End"
   "Changelog Check" "Schema consistency"
 )
+# Declared in ci.yml but not required here: the test-shard matrix. Its legs
+# report as "Test shard 1".."Test shard N", never under this template, so
+# requiring the template would read ABSENT forever; `Test` needs every leg and
+# passes only when all of them did. Pinned with the required list by the drift
+# gate below, so it cannot go stale either.
+COVERED_BY_TEST=('Test shard ${{ matrix.group }}')
 
 die_lookup() { echo "CANNOT LOOK: $1" >&2; exit 3; }
 usage() { echo "usage: $0 <pr-number> [check-name ...]" >&2
@@ -64,9 +70,9 @@ if [ "$EXPLICIT" = 0 ]; then
   [ -r "$WF" ] || die_lookup "cannot read $WF — the drift gate cannot run, and skipping it is how the required list goes stale unnoticed"
   declared=$(sed -n 's/^    name: \(.*\)$/\1/p' "$WF" | sort)
   [ -n "$declared" ] || die_lookup "parsed zero job names out of $WF — the drift gate cannot run"
-  listed=$(printf '%s\n' "${REQUIRED_DEFAULT[@]}" | sort)
+  listed=$(printf '%s\n' "${REQUIRED_DEFAULT[@]}" "${COVERED_BY_TEST[@]}" | sort)
   if [ "$declared" != "$listed" ]; then
-    echo "REFUSING: REQUIRED_DEFAULT has drifted from $WF" >&2
+    echo "REFUSING: REQUIRED_DEFAULT + COVERED_BY_TEST have drifted from $WF" >&2
     echo "  only in ci.yml: $(comm -23 <(echo "$declared") <(echo "$listed") | paste -sd', ' -)" >&2
     echo "  only in script: $(comm -13 <(echo "$declared") <(echo "$listed") | paste -sd', ' -)" >&2
     exit 3

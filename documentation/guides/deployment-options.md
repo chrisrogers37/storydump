@@ -45,14 +45,14 @@ configuration; the runtime-login section in `cloud-deployment.md` walks through 
 
 ### Continuous Integration (Automated)
 
-GitHub Actions is disabled for this repository, so run validation locally and
-record its results in the pull request. When enabled, `.github/workflows/ci.yml`
-runs these checks on the configured push and pull-request branches:
+`.github/workflows/ci.yml` runs these checks on the configured push and
+pull-request branches:
 - **Linting** (ruff) -- code style checks over the whole repository
 - **Telegram ratchet** (`scripts/telegram_ratchet.py`) -- the allowlist of
   modules that may reference Telegram
-- **Tests** (pytest) -- unit and integration tests against a PostgreSQL 15
-  service container
+- **Tests** (pytest) -- unit and integration tests split across five parallel
+  jobs, each against its own PostgreSQL 17 service container, and a final
+  `Test` job that requires all five
 - **Security** -- vulnerability scanning: `pip-audit` gates (a known-vulnerable
   pin in `requirements.txt` fails the job); `bandit` is advisory, read its
   uploaded report rather than the step's colour
@@ -126,8 +126,8 @@ share it.
 
 ## Summary
 
-- **CI uses GitHub-hosted runners** (`ubuntu-latest`) when enabled; validation
-  runs locally while Actions is disabled
+- **CI uses GitHub-hosted runners** (`ubuntu-latest`) on every pull request
+  and every push to `main`
 - **CD runs automatically** via Railway GitHub integration on push to `main`
 - **No manual deployment required** -- merge to main and Railway handles the rest
 - **No self-hosted runners** -- all CI/CD uses managed cloud infrastructure

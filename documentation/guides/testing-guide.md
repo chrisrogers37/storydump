@@ -276,9 +276,14 @@ whether the database-backed tests ran.
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml`'s `test` job (abridged):
+CI runs the suite in five `Test shard` jobs, each with its own PostgreSQL, and a
+final `Test` job that passes only when all five passed and all five collected
+the same suite. `.github/workflows/ci.yml`'s `test-shard` job (abridged):
 
 ```yaml
+strategy:
+  matrix:
+    group: [1, 2, 3, 4, 5]          # 1..TEST_SPLITS
 services:
   postgres:
     image: postgres:17
@@ -290,7 +295,10 @@ services:
 - name: Install package
   run: pip install -e '.[cli]'
 
-- name: Run tests with coverage
+- name: Fingerprint the collected suite      # the whole suite, every shard
+  run: python -m pytest --collect-only -qq --no-cov tests/ > collection.txt
+
+- name: Run this shard of the tests with coverage
   env:
     DB_HOST: localhost
     DB_USER: test_user
@@ -298,8 +306,21 @@ services:
     TEST_DB_NAME: storyline_test
     ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}   # a fresh Fernet key per run
     REQUIRE_TEST_DATABASE: "1"
-  run: pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
+  run: pytest tests/ -v --cov=src --cov=storydump_cli --splits 5 --group N
 ```
+
+The split comes from pytest-split and the recorded times in `.test_durations`;
+[`ci-cd-pipeline.md`](ci-cd-pipeline.md#test-shards-and-their-timings) says how
+the file is refreshed. To run exactly what one shard ran, run its group locally
+against your test database:
+
+```bash
+pytest tests/ --splits 5 --group 3      # the share "Test shard 3" ran
+```
+
+Test ids must not change between runs: every shard has to collect the same
+suite, so a parametrize value that embeds something random (a fresh uuid, the
+time) needs explicit `ids=`.
 
 The other jobs — lint, the Telegram ratchet, security, the front end, the changelog
 check — are in [`ci-cd-pipeline.md`](ci-cd-pipeline.md).

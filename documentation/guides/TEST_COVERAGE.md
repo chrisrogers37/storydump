@@ -60,20 +60,21 @@ database lives in `tests/scripts/`.
   `addopts` carries `--cov=src --cov-report=term-missing --cov-report=html`
   (`pytest.ini:9-15`), so the terminal report and `htmlcov/` are produced
   without asking. `--no-cov` turns it off.
-- **CI measures `src` and `storydump_cli`**:
-  `pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing`
-  (the `Run tests with coverage` step of `.github/workflows/ci.yml`), and uploads
-  `coverage.xml` to Codecov in the `Upload coverage to Codecov` step, which is
-  advisory: it continues on error and times out after five minutes, so an upload
-  never fails `Test`.
+- **CI measures `src` and `storydump_cli`** in each of its five test shards
+  (`pytest tests/ -v --cov=src --cov=storydump_cli --splits 5 --group N`, the
+  `Run this shard of the tests with coverage` step of
+  `.github/workflows/ci.yml`). A shard's own terminal report covers only its
+  share of the suite. The final `Test` job combines the five shards' data
+  (`coverage combine`) and writes the total and the per-file table to the run's
+  summary page. Combining is advisory: it continues on error, so coverage never
+  fails `Test`.
 - **No threshold is enforced.** Nothing sets `--cov-fail-under`, and the
-  repository has no `.coveragerc` or `codecov.yml`. A percentage is reported,
-  never gated.
+  repository has no `.coveragerc`. A percentage is reported, never gated.
 
 This page states no percentage. A meaningful one needs the database-backed run
 (most of the tests under `tests/scripts/` need a PostgreSQL), and the
-current figure is whatever CI's `Test` job last printed — a number copied here
-would be stale at the next merge.
+current figure is whatever CI's `Test` job last put on its run summary — a
+number copied here would be stale at the next merge.
 
 ---
 
@@ -122,8 +123,8 @@ throwaway-server recipe that runs them.
 
 ## What is not covered
 
-- **The live providers.** The suite holds no provider credential — CI's `Test`
-  job sets only the `DB_*` components, `ENCRYPTION_KEY`,
+- **The live providers.** The suite holds no provider credential — CI's test
+  shards set only the `DB_*` components, `ENCRYPTION_KEY`,
   `REQUIRE_TEST_DATABASE` and `LOG_LEVEL` (in `ci.yml`). The provider
   seams are patched (`egress.request`, in
   `tests/src/services/target/conftest.py`) or pointed at a local double

@@ -11,6 +11,11 @@ on:
   pull_request:
     branches: [main, develop]
 
+env:
+  # How many parallel legs run the test suite. The test-shard matrix lists
+  # 1..TEST_SPLITS, and each leg refuses to run if the two disagree.
+  TEST_SPLITS: "5"
+
 jobs:
   lint:
     name: Lint
@@ -62,9 +67,26 @@ jobs:
       - name: Run the Telegram ratchet
         run: python scripts/telegram_ratchet.py
 
-  test:
-    name: Test
+  # The suite in TEST_SPLITS parallel legs. pytest-split divides it by the
+  # recorded test times in .test_durations, into contiguous chunks of the
+  # collection order, so every test lands in exactly one leg's share as long as
+  # every leg collects the same suite. Each leg proves that by fingerprinting
+  # what it collected, and `Test` below compares the fingerprints. One
+  # PostgreSQL per leg: tests/scripts holds a cluster-wide advisory lock for a
+  # whole session and refuses pytest-xdist.
+  test-shard:
+    name: Test shard ${{ matrix.group }}
     runs-on: ubuntu-latest
+    # Well inside Railway's two-hour wait on the run: a hung leg fails here
+    # rather than leaving the deploy to time out.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4, 5]
+    env:
+      # One collection order in every process that has to agree on it.
+      PYTHONHASHSEED: "0"
     services:
       postgres:
         image: postgres:17
@@ -81,6 +103,9 @@ jobs:
           --health-retries 5
 
     steps:
+      - name: Check the matrix covers TEST_SPLITS
+        run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
+
       - uses: actions/checkout@v4
         with:
           # Migration tests build the pinned schema-code base from history.
@@ -119,7 +144,20 @@ jobs:
         id: gen-key
         run: echo "key=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_OUTPUT"
 
-      - name: Run tests with coverage
+      # The fingerprint of the WHOLE collection, not of this leg's share: every
+      # leg must report the same one for the split to be exact. pytest's own
+      # count is checked against the ids read, so a line the pattern misses
+      # cannot shrink the fingerprinted list unnoticed.
+      - name: Fingerprint the collected suite
+        run: |
+          python -m pytest --collect-only -qq --no-cov tests/ > collection.txt
+          grep -E '^\S+\.py::' collection.txt > ids.txt
+          collected=$(sed -n -E 's/^([0-9]+)(\/[0-9]+)? tests? collected.*/\1/p' collection.txt | tail -n 1)
+          test "$(wc -l < ids.txt)" -eq "$collected"
+          echo "$(sha256sum < ids.txt | cut -d ' ' -f 1) $collected" > "collection-shard-${{ matrix.group }}.txt"
+          cat "collection-shard-${{ matrix.group }}.txt"
+
+      - name: Run this shard of the tests with coverage
         env:
           # Database configuration (individual components for Settings class)
           DB_HOST: localhost
@@ -137,22 +175,133 @@ jobs:
           # that never executed the tests it claims to cover.
           REQUIRE_TEST_DATABASE: "1"
           LOG_LEVEL: DEBUG
+        # --store-durations --clean-durations rewrite this leg's copy of the
+        # times with exactly the tests it ran; `Test` merges the five copies.
         run: |
-          pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
+          cp .test_durations "test-durations-shard-${{ matrix.group }}.json"
+          pytest tests/ -v --cov=src --cov=storydump_cli \
+            --splits "$TEST_SPLITS" --group "${{ matrix.group }}" \
+            --durations-path "test-durations-shard-${{ matrix.group }}.json" \
+            --store-durations --clean-durations
+          mv .coverage ".coverage.shard-${{ matrix.group }}"
 
-      # The coverage upload gates nothing (no coverage threshold).
-      # `fail_ci_if_error: false` does not cover the
-      # action itself crashing, for example on a TLS handshake failure to
-      # Codecov. An outage at Codecov must not block every merge.
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        continue-on-error: true
-        # A stalled upload would otherwise hold Test, and the merge or deploy
-        # waiting on it, until the job's six-hour default timeout.
-        timeout-minutes: 5
+      # Uploaded only after a green run: a failed leg publishes no times.
+      - name: Upload the collection fingerprint
+        uses: actions/upload-artifact@v4
         with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+          name: collection-shard-${{ matrix.group }}
+          path: collection-shard-${{ matrix.group }}.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-${{ matrix.group }}
+          path: .coverage.shard-${{ matrix.group }}
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Upload test durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-shard-${{ matrix.group }}
+          path: test-durations-shard-${{ matrix.group }}.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # The one test check the rest of the repository knows by name:
+  # scripts/pr_ready.sh requires it and the docs describe it. It runs whatever
+  # happened upstream — `always()`, NOT `!cancelled()`, because a skipped job
+  # reports success — and passes only when every leg passed and every leg
+  # collected the same suite.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [test-shard]
+    if: always()
+    timeout-minutes: 10
+    steps:
+      - name: Require every test shard to have passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "test-shard: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+
+      - name: Download the collection fingerprints
+        uses: actions/download-artifact@v4
+        with:
+          pattern: collection-shard-*
+          path: fingerprints
+          merge-multiple: true
+
+      # pytest-split puts each test in exactly one leg's share when every leg
+      # collected the same suite. Five files, one distinct line.
+      - name: Require one collected suite across every shard
+        run: |
+          cat fingerprints/*.txt
+          test "$(ls fingerprints | wc -l)" -eq "$TEST_SPLITS"
+          test "$(sort -u fingerprints/*.txt | wc -l)" -eq 1
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # Coverage gates nothing (there is no threshold), so a failure to combine
+      # or report it must not fail Test either.
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: coverage-shard-*
+          path: coverage-parts
+          merge-multiple: true
+
+      - name: Combine coverage into the run summary
+        continue-on-error: true
+        run: |
+          pip install "$(grep -E '^pytest-cov==' requirements.txt)"
+          coverage combine coverage-parts
+          {
+            echo "### Coverage: $(coverage report --format=total)%"
+            echo
+            coverage report --format=markdown --skip-covered --sort=cover
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download test durations
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: durations-shard-*
+          path: durations-parts
+          merge-multiple: true
+
+      # A refreshed .test_durations for when the shards drift apart: download
+      # this artifact from a green main run and commit it
+      # (documentation/guides/testing-guide.md).
+      - name: Merge the shards' test durations
+        continue-on-error: true
+        run: |
+          jq -S --indent 4 -s 'add | map_values((. * 1000 | round) / 1000)' durations-parts/*.json > .test_durations
+
+      - name: Upload the merged test durations
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-durations
+          path: .test_durations
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
 
   security:
     name: Security Scan
@@ -207,12 +356,13 @@ jobs:
     # workflow runs on every PR.
     #
     # Running it on a backend-only PR costs runner time in parallel with
-    # `Test`, so it adds nothing to the wall-clock a person waits for, and a
-    # gate that costs nothing is a gate nobody routes around.
+    # the test shards, so it adds nothing to the wall-clock a person waits
+    # for, and a gate that costs nothing is a gate nobody routes around.
     #
-    # scripts/pr_ready.sh expects all seven declared jobs by name: Lint,
-    # Telegram ratchet, Test, Security Scan, Front End, Changelog Check and
-    # Schema consistency. It checks that its list matches this workflow.
+    # scripts/pr_ready.sh requires seven checks by name: Lint, Telegram
+    # ratchet, Test, Security Scan, Front End, Changelog Check and Schema
+    # consistency. The test-shard matrix is declared there too, as covered by
+    # Test, and the script checks both lists against this workflow.
     # GitHub rulesets govern merge policy; review that configuration when
     # changing job names.
     #
