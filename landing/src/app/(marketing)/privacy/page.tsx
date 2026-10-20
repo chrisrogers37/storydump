@@ -4,7 +4,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "October 5, 2026"
+const LAST_UPDATED = "October 19, 2026"
 
 const linkClass = "underline underline-offset-4 hover:text-foreground"
 const email = siteConfig.contact.email
@@ -652,10 +652,7 @@ export default function PrivacyPolicy() {
             <li>
               <Label>Backups</Label> — our database provider keeps a rolling
               history of the database so we can recover from mistakes; deleted
-              data drops out of it as the history rolls forward. We also keep a
-              one-time copy of the data from our previous system, taken on
-              September 17, 2026, when we moved to the current one; we apply
-              deletion requests to it by hand.
+              data drops out of it as the history rolls forward.
             </li>
           </ul>
         </section>
@@ -783,8 +780,8 @@ export default function PrivacyPolicy() {
             To delete your Storydump account and the data tied to it, email{" "}
             <EmailLink /> from the email address on your account. We do this by
             hand and complete it within 30 days of your request, including
-            removing your details from the workspace action log and from the
-            copy of our previous system; deleted data then drops out of our
+            removing your details from the workspace action log; deleted data
+            then drops out of our
             database backups as they roll forward. In the
             dashboard, a workspace owner can delete a workspace under Settings ›
             General, and it is permanently deleted 30 days later. You can
