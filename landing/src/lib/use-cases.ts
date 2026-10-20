@@ -65,6 +65,19 @@ export const useCases = [
     closing: "One card. Anyone on the team can take it.",
     lastModified: "2026-10-07",
   },
+  {
+    slug: "instagram-stories-for-online-stores",
+    seoTitle: "Instagram Stories for Small Online Stores",
+    description:
+      "Daily Instagram Stories for your shop, picked from the product shots, restocks and behind-the-scenes in your Google Drive. Your team taps to post.",
+    ogTitle: "Instagram Stories for small online stores",
+    ogSubtitle: "Product shots, restocks and behind-the-scenes from your own Drive, every day.",
+    eyebrow: "Use case · Online stores",
+    title: "Daily Instagram Stories for your online store",
+    navLabel: "Online stores",
+    closing: "Your product shots are tomorrow’s Stories.",
+    lastModified: "2026-10-20",
+  },
 ] as const satisfies readonly UseCase[]
 
 export type UseCaseSlug = (typeof useCases)[number]["slug"]

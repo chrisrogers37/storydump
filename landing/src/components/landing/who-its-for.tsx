@@ -20,6 +20,12 @@ const audiences: { art: ArtKind; name: string; text: string; useCase?: UseCaseSl
     name: "Freelancers",
     text: "A few accounts, each with its own schedule and rotation.",
   },
+  {
+    art: "bottle",
+    name: "Online shops",
+    useCase: "instagram-stories-for-online-stores",
+    text: "Product shots, restocks and behind-the-scenes every day, without making it anyone’s whole job.",
+  },
 ]
 
 export function WhoItsFor() {
@@ -35,7 +41,7 @@ export function WhoItsFor() {
         >
           Made for small teams with a deep library.
         </h2>
-        <ul className="mt-12 grid grid-cols-2 gap-x-4 gap-y-8 lg:grid-cols-3 lg:gap-6">
+        <ul className="mt-12 grid grid-cols-2 gap-x-4 gap-y-8 lg:grid-cols-4 lg:gap-6">
           {audiences.map(({ art, name, text, useCase }) => (
             <li key={name}>
               <StoryArt kind={art} className="aspect-[4/5] w-full rounded-2xl text-[18px] sm:text-[26px]" />

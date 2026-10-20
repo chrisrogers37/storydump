@@ -84,7 +84,8 @@ export const evergreen: UseCaseContent = {
 
       <Section title="Who keeps a deep library">
         <p>
-          Niche and community pages, creators, and freelancers with a few
+          <UseCaseLink slug="instagram-stories-for-online-stores">Online shops</UseCaseLink>
+          , niche and community pages, creators, and freelancers with a few
           accounts, each with its own schedule and rotation.
         </p>
       </Section>
