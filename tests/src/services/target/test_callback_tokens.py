@@ -51,6 +51,18 @@ class TestRefusals:
             "v1:post:" + INTENT + ":extra",
             "posted:" + INTENT,  # the legacy shape
         ],
+        # Named, because four of these values embed INTENT, a fresh uuid per
+        # process: CI's test shards must all collect the same test ids.
+        ids=[
+            "none",
+            "empty",
+            "unknown-version",
+            "unknown-action",
+            "not-a-uuid",
+            "too-few-parts",
+            "extra-part",
+            "legacy-shape",
+        ],
     )
     def test_anything_but_a_known_v1_token_is_none_never_a_raise(self, data):
         assert callback_tokens.parse(data) is None
