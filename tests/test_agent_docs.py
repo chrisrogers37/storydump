@@ -5,9 +5,9 @@ A name in that list is acted on — an agent reads it and refuses — so a stale
 entry is not a cosmetic defect: it points the guard at nothing while the real
 surface goes unnamed.
 
-That is not hypothetical. Both documents named `storydump-cli process-queue`
-and `storydump-cli create-schedule` in their NEVER-run blocks for a month after
-neither command existed, and the credential-destroying `revoke-tokens` and
+That is not hypothetical. Both documents named the legacy CLI's `process-queue`
+and `create-schedule` in their NEVER-run blocks for a month after neither
+command existed, and the credential-destroying `revoke-tokens` and
 `rotate-keys` were in neither. The list looked authoritative the whole time.
 The legacy CLI is gone; the same guard now pins
 `storydump`, whose verbs nest (`storydump tokens revoke`), so a subcommand is
@@ -161,7 +161,7 @@ def test_the_never_run_list_is_not_empty_and_covers_the_worker_and_the_cli():
     assert any(line.startswith("storydump ") for line in block), (
         "the CLI's destructive verbs are no longer in the NEVER-run list"
     )
-    assert not any("storydump-cli" in line for line in block), (
+    assert not any(line.startswith("storydump-") for line in block), (
         "the legacy CLI is gone; a guard pointing at it protects nothing"
     )
     assert any("scripts.migration_runner apply --manual" in line for line in block), (
