@@ -11,10 +11,10 @@ import { pathForUseCase, useCases, useCasesPath } from "@/lib/use-cases"
 export const metadata: Metadata = pageMetadata({
   title: "Instagram Stories Use Cases",
   description:
-    "How small teams use Storydump for Instagram Stories: from Google Drive, evergreen content and team approvals in Telegram.",
+    "How small teams use Storydump for Instagram Stories: from Google Drive, evergreen content, team approvals in Telegram and online stores.",
   path: useCasesPath,
   ogTitle: "One library. A Story every day.",
-  ogSubtitle: "From Google Drive, evergreen content and team approvals in Telegram.",
+  ogSubtitle: "From Google Drive, evergreen content, team approvals in Telegram and online stores.",
 })
 
 export default function UseCasesIndex() {

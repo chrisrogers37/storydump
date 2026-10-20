@@ -11,6 +11,7 @@ import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { getUseCase, pathForUseCase, useCases, useCasesPath, type UseCaseSlug } from "@/lib/use-cases"
 import { evergreen } from "./_content/evergreen"
 import { googleDrive } from "./_content/google-drive"
+import { onlineStores } from "./_content/online-stores"
 import { Section, type UseCaseContent } from "./_content/shared"
 import { teamApprovals } from "./_content/team-approvals"
 
@@ -18,6 +19,7 @@ const content: Record<UseCaseSlug, UseCaseContent> = {
   "google-drive-to-instagram-stories": googleDrive,
   "evergreen-instagram-stories": evergreen,
   "approve-instagram-stories-in-telegram": teamApprovals,
+  "instagram-stories-for-online-stores": onlineStores,
 }
 
 // The same four steps on every page; each links to the guide that covers it.
