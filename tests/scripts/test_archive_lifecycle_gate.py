@@ -244,7 +244,7 @@ async def converted_with_archive(engine, chain, tmp_path, *, on):
     async with uow(engine, chain) as conn:
         drives = await mix_gate.add(conn, chain, [".7", ".3"])
         await category_mix.convert_workspace(
-            conn, workspace_id=ws, evidence=mix_gate.evidence(tmp_path)
+            conn, workspace_id=ws, evidence=mix_gate.evidence()
         )
     async with uow(engine, chain) as conn:
         connected = await connect_archive(

@@ -128,16 +128,12 @@ def _transit_from_env(env):
 
 
 def _conversion_evidence(env):
-    """The operator's source-mix conversion record, if it binds this worker's
-    release. `main` reads it once and hands it to the archive composition and to
+    """This worker's release's source-mix conversion run
+    (`mix_conversion.release_evidence`). `main` reads it once and hands it to
     `compose`, which reads it itself when it is handed none."""
     from src.services.target import mix_conversion
 
-    return mix_conversion.load_evidence(
-        env.get(mix_conversion.RECORD_PATH),
-        service="worker",
-        release_sha=env.get(archive_composition.RELEASE_VAR),
-    )
+    return mix_conversion.release_evidence(env.get(archive_composition.RELEASE_VAR))
 
 
 def _publish_media_fetch(adapters: media_adapters.MediaAdapters):
@@ -364,9 +360,9 @@ def compose(
 
     *archive* is `archive_composition.build_worker`'s answer, which `main`
     builds first because the card media fetch needs its coordinator. None, the
-    default, wires no archive seam at all, as every deploy does until an operator
-    arms it. *conversion_evidence* is the conversion record `main` already read
-    for the archive composition; None, the default, reads it from *env*. *meta*
+    default, wires no archive seam at all, as a deploy without the archive's key
+    ring does. *conversion_evidence* is the release's conversion run `main`
+    already read; None, the default, reads it from *env*. *meta*
     and *transit* are test overrides of the seams built from *env*; `main`
     passes neither."""
     # The publish leg: the Graph adapter is always built (it
@@ -396,9 +392,9 @@ def compose(
         mix_conversion_evidence=conversion_evidence,
         engine=engine,
         config=config,
-        # The archive. The key ring loads whatever the activation says (a
-        # deletion receipt is redacted with it either way); everything else is
-        # the armed archive's, and None otherwise.
+        # The archive. The key ring arms it, and redacts a deletion receipt
+        # either way; everything else is the armed archive's, and None without
+        # the ring.
         archive_keys=archive_activation.load_keys(env),
         archive=archive.coordinator if archive else None,
         archive_evidence=archive.evidence if archive else None,
@@ -1165,12 +1161,9 @@ def main() -> None:
     )
     adapters = {PROVIDER_GDRIVE: drive}
     # The archive first: the approval card's media fetch needs its coordinator.
-    # None (and one `inactive (<reason>)` line) unless the operator's record
-    # and the key ring both load: on a deploy with the archive not armed, None.
+    # None (and one `inactive (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
-    archive = archive_composition.build_worker(
-        engine=engine, env=env, conversion=conversion_evidence
-    )
+    archive = archive_composition.build_worker(engine=engine, env=env)
     if token:
         from src.channels.telegram_transport import transport_from_env
 

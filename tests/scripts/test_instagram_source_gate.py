@@ -50,7 +50,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
-import hashlib
 import json
 import sys
 import time
@@ -78,7 +77,6 @@ from src.services.target import (
     ig_login_oauth,
     jobs,
     media_validation,
-    mix_conversion,
     unit_of_work,
     versioned_mix,
     work_loop,
@@ -91,7 +89,6 @@ from tests.fixtures import fake_providers as fakes
 from tests.fixtures import instagram_onboarding as onboarding
 from tests.scripts import test_meta_deletion_receipts_gate as receipts
 from tests.scripts import test_oauth_archive_choice_gate as oauth
-from tests.scripts import test_versioned_mix_gate as mix_gate
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -141,19 +138,9 @@ def world(admin_conn, owner_actor):
 
 
 def armed_environments(tmp_path):
-    """The API's and the worker's environments, each binding its own release as
-    production's do: an activation record that names both releases and the
-    conversion run, the conversion record itself, and a whole key ring."""
-    conversion = json.dumps(mix_gate.record()).encode()
-    conversion_path = tmp_path / "conversion.json"
-    conversion_path.write_bytes(conversion)
-    activation = activation_gate.record()
-    activation["conversion_run_digest"] = hashlib.sha256(conversion).hexdigest()
-    shared = {
-        mix_conversion.RECORD_PATH: str(conversion_path),
-        archive_activation.RECORD_PATH: activation_gate.write(tmp_path, activation),
-        archive_activation.KEYS_VAR: activation_gate.RING,
-    }
+    """The API's and the worker's environments as production's are: each on its
+    own release, with the whole key ring and nothing else the archive needs."""
+    shared = {archive_activation.KEYS_VAR: activation_gate.RING}
     return (
         {**shared, archive_composition.RELEASE_VAR: activation_gate.API_SHA},
         {**shared, archive_composition.RELEASE_VAR: activation_gate.WORKER_SHA},
@@ -546,19 +533,13 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
             scene.owner, scene.user_id, scene.ws = await owned_workspace(
                 client, monkeypatch, tag=scene.tag
             )
-            conversion = mix_conversion.load_evidence(
-                worker_env[mix_conversion.RECORD_PATH],
-                service="worker",
-                release_sha=worker_env[archive_composition.RELEASE_VAR],
-            )
             armed = archive_composition.build_worker(
                 engine=engine,
                 env=worker_env,
-                conversion=conversion,
                 client=clients[1],
                 policy=fakes.OFFLINE,
             )
-            assert armed is not None, "the worker's activation record did not arm it"
+            assert armed is not None, "the worker's key ring did not arm it"
             adapters = {"gdrive": DriveForbidden()}
             transport = telegram.transport(
                 media_fetch=worker._card_media_fetch(
@@ -654,9 +635,11 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
         g.publishing()
         g.bind()
 
-        # Armed by the record and the key ring, not by anything the test hands over.
+        # Armed by the key ring alone, not by anything the test hands over.
         assert g.app.deps.archive_capability == ArchiveCapability(enabled=True)
-        assert g.armed.evidence.run_id == activation_gate.RUN_ID
+        assert g.armed.evidence == archive_activation.release_evidence(
+            activation_gate.WORKER_SHA
+        )
         assert g.app.deps.archive is g.armed.coordinator
         assert not isinstance(g.app.registry["sync_media_source"], work_loop.Parked)
 

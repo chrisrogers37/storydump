@@ -2,7 +2,6 @@
 
 from contextlib import asynccontextmanager
 from decimal import Decimal, localcontext
-import json
 import uuid
 import httpx
 import pytest
@@ -21,69 +20,15 @@ ingress = preview_gate.ingress
 pytestmark = pytest.mark.integration
 
 
-def record():
-    return {
-        "v": 1,
-        "run_id": "synthetic-conversion",
-        "enabled": True,
-        "api": {
-            "sha": "a" * 40,
-            "source_mix_protocol_max": 2,
-            "expanded_schema": True,
-            "both_protocols": True,
-        },
-        "worker": {
-            "sha": "b" * 40,
-            "source_mix_protocol_max": 2,
-            "expanded_schema": True,
-            "both_protocols": True,
-        },
-        "termination_evidence": "synthetic:terminated",
-        "leases_evidence": "synthetic:exhausted",
-        "lease_disposition": "exhausted",
-        "rollback_releases": [
-            {
-                "sha": "c" * 40,
-                "source_mix_protocol_max": 2,
-                "expanded_schema": True,
-                "both_protocols": True,
-            }
-        ],
-    }
+#: The release these gates' API runs, and so the conversion run it carries.
+API_RELEASE = "a" * 40
 
 
-def evidence(tmp_path, change=None):
-    from src.services.target.mix_conversion import load_evidence
+def evidence(release=API_RELEASE):
+    """The conversion run of *release* (`mix_conversion.release_evidence`)."""
+    from src.services.target.mix_conversion import release_evidence
 
-    data = record()
-    if change:
-        change(data)
-    path = tmp_path / "run.json"
-    path.write_text(json.dumps(data))
-    return load_evidence(str(path), service="api", release_sha="a" * 40)
-
-
-@pytest.mark.parametrize(
-    "bad", ["missing", "disabled", "lease", "rollback", "sha", "max", "bool"]
-)
-def test_incomplete_operator_record_never_opens_conversion(tmp_path, bad):
-    def change(data):
-        if bad == "missing":
-            data.pop("termination_evidence")
-        if bad == "disabled":
-            data["enabled"] = False
-        if bad == "lease":
-            data["lease_disposition"] = "unknown"
-        if bad == "rollback":
-            data["rollback_releases"] = []
-        if bad == "sha":
-            data["api"]["sha"] = "d" * 40
-        if bad == "max":
-            data["worker"]["source_mix_protocol_max"] = 1
-        if bad == "bool":
-            data["api"]["source_mix_protocol_max"] = True
-
-    assert evidence(tmp_path, change) is None
+    return release_evidence(release)
 
 
 async def add(conn, chain, ratios):
@@ -127,7 +72,7 @@ async def test_conversion_atomic_decimal_and_retry(
     async with uow(archive_engine, origin) as conn:
         ids = await add(conn, origin, ratios)
         first = await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         repeat = await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=None
@@ -152,7 +97,7 @@ async def test_conversion_atomic_decimal_and_retry(
         assert (
             await row(
                 conn,
-                "SELECT count(*) AS n FROM audit_events WHERE detail->>'run_id'='synthetic-conversion'",
+                f"SELECT count(*) AS n FROM audit_events WHERE detail->>'run_id'='{evidence().run_id}'",
             )
         )["n"] == 1
 
@@ -179,7 +124,7 @@ async def test_custom_stale_and_membership_actions_preserve_off(
     async with uow(archive_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", "0"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         with pytest.raises(category_mix.MixConflict) as stale:
             await category_mix.mutate(
@@ -271,7 +216,7 @@ async def test_real_allocator_off_add_preserves_custom_and_enabled_add_resets(
             {"sid": ids[2]},
         )
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         await conn.execute(
             text("UPDATE media_sources SET config=config - 'removed' WHERE id=:sid"),
@@ -308,7 +253,7 @@ async def test_converter_crash_rolls_back_inside_caught_caller_transaction(
         monkeypatch.setattr(audit, "record", fail)
         with pytest.raises(RuntimeError, match="synthetic crash"):
             await category_mix.convert_workspace(
-                conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+                conn, workspace_id=str(origin["ws"]), evidence=evidence()
             )
         assert (await row(conn, "SELECT source_mix_revision FROM workspaces"))[
             "source_mix_revision"
@@ -330,7 +275,7 @@ async def test_hybrid_50000_items_empty_automatic_stays_positive(
             {"ws": str(origin["ws"]), "sid": ids[0]},
         )
         value = await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         automatic = next(r for r in value["rows"] if r["source_id"] == ids[1])
         assert Decimal(automatic["ratio"]) > 0 and Decimal(
@@ -370,7 +315,7 @@ async def test_workspace_creation_compatibility_and_explicit_v2_barrier(
                 name="synthetic-new",
                 workspace_id=ws,
                 protocol_version=2 if explicit else None,
-                conversion_evidence=evidence(tmp_path) if admitted else None,
+                conversion_evidence=evidence() if admitted else None,
             )
             saved = await row(
                 conn,
@@ -390,7 +335,7 @@ async def test_preview_never_changes_scd_or_revision(archive_engine, origin, tmp
     async with uow(archive_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", "0"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         value = await category_mix.preview(
             conn,
@@ -418,7 +363,7 @@ async def test_versioned_drive_source_add_remove_and_off_only_preserve_custom(
     async with uow(archive_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         added = await category_mix.connect_drive(
             conn,
@@ -463,7 +408,7 @@ async def test_real_archive_allocator_epoch_changes_only_enablement(
     async with uow(archive_engine, origin) as conn:
         await add(conn, origin, ["1"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
     async with uow(archive_engine, origin) as conn:
         connected = await connect_archive(
@@ -545,9 +490,7 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
     ws = str(origin["ws"])
     async with uow(ingress, origin) as conn:
         await add(conn, origin, ["1"])
-        await category_mix.convert_workspace(
-            conn, workspace_id=ws, evidence=evidence(tmp_path)
-        )
+        await category_mix.convert_workspace(conn, workspace_id=ws, evidence=evidence())
     async with uow(ingress, origin) as conn:
         connected = await connect_archive(
             conn,
@@ -657,7 +600,7 @@ async def test_removed_drive_readd_honors_requested_membership(
     async with uow(archive_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         added = await category_mix.connect_drive(
             conn,
@@ -723,7 +666,7 @@ async def test_connected_drive_reconnect_preserves_saved_membership(
             {"sid": sid},
         )
         saved = await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         connected = await category_mix.connect_drive(
             conn,

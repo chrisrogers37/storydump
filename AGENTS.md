@@ -455,17 +455,16 @@ the worker and the API.
 Do not describe an email as sent where the deployment lacks the variables,
 and do not wire another provider without the owner's acknowledgement.
 
-**The Instagram archive source is built and inactive in production.** Its code (the
-adapter, the index, selection, the lifecycle and the deletion receipts) is in
-the tree, and nothing in the repository arms it. `archive_activation.resolve` alone
-builds an enabled `ArchiveCapability`, and only from an operator record
-(`INSTAGRAM_ARCHIVE_ACTIVATION_RECORD`) that binds the service's release and the
-mix-conversion run, together with a whole `ARCHIVE_HMAC_KEYS` ring; otherwise each
-composition root wires nothing and logs `instagram archive: inactive (<reason>)`.
-Activation is the owner's decision: do not set either variable, and do not build an
-enabled capability outside `archive_activation.py` and tests. The ring alone leaves the
-archive off but makes Meta data-deletion receipts durable. What is owed first is in
-`documentation/operations/instagram-archive-review.md`.
+**The Instagram archive source is on wherever its key ring is.** Its code (the
+adapter, the index, selection, the lifecycle and the deletion receipts) is in the
+tree, and `archive_activation.resolve` arms it in every process that loads a whole
+`ARCHIVE_HMAC_KEYS` ring: there is no record file and no switch. Without the ring
+each composition root wires nothing and logs `instagram archive: inactive (<reason>)`.
+The ring is required, not a switch: it keys tombstones and Meta data-deletion
+receipts, so never remove it to turn the archive off. A connected account's archive
+is switched Off on the posting-mix card instead. Do not build an enabled capability
+outside `archive_activation.py` and tests. What is still unproven on real providers
+is in `documentation/operations/instagram-archive-review.md`.
 
 Publishing, dry run and pause are **per-workspace settings** in the ledger
 (`workspaces.api_publishing_enabled`, `dry_run_mode`, `is_paused`; the web's

@@ -1,8 +1,8 @@
 """Origin-owned archive catalog writers, dormant until `archive_activation` arms a process.
 
 The activation capability is injected by a trusted composition root
-(`archive_composition`). Until an operator's activation record supplies it, every
-archive admission fails before writing.
+(`archive_composition`), which has one wherever the archive's key ring loads.
+Without it, every archive admission fails before writing.
 """
 
 from __future__ import annotations

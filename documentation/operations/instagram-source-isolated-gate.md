@@ -23,10 +23,9 @@ recipe below keeps them true:
 
 ## What the gate drives
 
-The archive is armed the way a deployment arms it: the test writes an activation
-record, a conversion record and an `ARCHIVE_HMAC_KEYS` ring into a temporary
-directory, and `archive_composition.build_worker` and
-`create_app(env=...)` read them. Nothing is read from the process environment and no
+The archive is armed the way a deployment arms it: the test hands each service an
+environment holding an `ARCHIVE_HMAC_KEYS` ring and that service's release, and
+`archive_composition.build_worker` and `create_app(env=...)` read it. Nothing is read from the process environment and no
 test hands a service a capability. The API runs as `svc_ingress` (sign-in, the
 OAuth callback, the source-mix and source-policy routes, the command port, the
 data-deletion callback). The worker runs as `svc_worker`: its clock ticks, its

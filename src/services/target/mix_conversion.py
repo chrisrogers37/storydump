@@ -1,82 +1,51 @@
-"""Operator-issued conversion evidence; parsing is not an estate census.
+"""The source-mix conversion run: every release has one, and converts.
 
-Only trusted composition loads this durable run record. Archive activation is
-separate. No record, or incomplete evidence, keeps conversion disabled.
+There is no operator record. Each process takes its release's run
+(`release_evidence`): the run id and digest its conversion jobs are keyed to,
+so a deploy mints fresh jobs for any workspace an earlier one left unconverted.
+Every release since the cutover speaks both mix protocols, so no older process
+can be fed a converted mix it cannot read.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
-import json
-from pathlib import Path
 import re
 
 from sqlalchemy import text
 from src.services.target import jobs, source_state
 
 PROTOCOL_MAX = 2
-RECORD_PATH = "SOURCE_MIX_CONVERSION_RECORD"
+
+#: A release is the 40-hex commit Railway sets on a Git deploy.
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
 class MixConversionEvidence:
+    """The run a release's conversion jobs carry: an id and a digest."""
+
     run_id: str
     digest: str
-    api_sha: str
-    worker_sha: str
-    rollback_shas: tuple[str, ...]
 
 
-def _release(value):
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("sha"), str)
-        and re.fullmatch(r"[0-9a-f]{40}", value["sha"]) is not None
-        and type(value.get("source_mix_protocol_max")) is int
-        and value["source_mix_protocol_max"] == PROTOCOL_MAX
-        and value.get("expanded_schema") is True
-        and value.get("both_protocols") is True
-    )
+def release_run(release_sha) -> tuple[str, str]:
+    """`(run_id, digest)` for *release_sha*: one run per deployed commit.
+
+    The shapes are the ones `fn_mix_conversion_jobs` and
+    `fn_archive_reconcile_jobs` accept. A process with no usable commit (a
+    local run, a test) is `release-local`."""
+    sha = release_sha.strip().lower() if isinstance(release_sha, str) else ""
+    if _SHA.fullmatch(sha) is None:
+        sha = ""
+    run_id = f"release-{sha[:12]}" if sha else "release-local"
+    digest = hashlib.sha256(f"storydump-release:{sha or 'local'}".encode()).hexdigest()
+    return run_id, digest
 
 
-def load_evidence(path: str | None, *, service: str, release_sha: str | None):
-    """Return trusted immutable evidence or disabled. Never log private references."""
-    if not path or service not in ("api", "worker"):
-        return None
-    try:
-        raw = Path(path).read_bytes()
-        if len(raw) > 65536:
-            return None
-        value = json.loads(raw)
-        if (
-            not isinstance(value, dict)
-            or type(value.get("v")) is not int
-            or value["v"] != 1
-            or value.get("enabled") is not True
-            or not isinstance(value.get("run_id"), str)
-            or re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", value["run_id"]) is None
-            or not _release(value.get("api"))
-            or not _release(value.get("worker"))
-            or value[service]["sha"] != release_sha
-            or value.get("lease_disposition") not in ("exhausted", "fenced")
-            or not all(
-                isinstance(value.get(k), str) and 0 < len(value[k]) <= 2048
-                for k in ("termination_evidence", "leases_evidence")
-            )
-            or not isinstance(value.get("rollback_releases"), list)
-            or not value["rollback_releases"]
-            or not all(_release(v) for v in value["rollback_releases"])
-        ):
-            return None
-        return MixConversionEvidence(
-            value["run_id"],
-            hashlib.sha256(raw).hexdigest(),
-            value["api"]["sha"],
-            value["worker"]["sha"],
-            tuple(v["sha"] for v in value["rollback_releases"]),
-        )
-    except (OSError, ValueError, TypeError):
-        return None
+def release_evidence(release_sha) -> MixConversionEvidence:
+    """This release's conversion run."""
+    return MixConversionEvidence(*release_run(release_sha))
 
 
 def capability(env, service, evidence=None):

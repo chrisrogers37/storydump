@@ -12,9 +12,7 @@ from src.services.target.work_loop import Parked, WorkerDeps, build_registry
 
 
 def trusted():
-    return mix_conversion.MixConversionEvidence(
-        "synthetic-run", "d" * 64, "a" * 40, "b" * 40, ("c" * 40,)
-    )
+    return mix_conversion.release_evidence("a" * 40)
 
 
 async def test_disabled_discovery_never_touches_executor():
@@ -40,11 +38,11 @@ async def test_trusted_discovery_uses_one_bounded_real_door():
     assert seen[0][1] == {"limit": 1, "run_id": e.run_id, "digest": e.digest}
 
 
-def test_converter_registry_parks_without_operator_record():
+def test_converter_registry_parks_without_a_conversion_run():
     assert isinstance(build_registry(WorkerDeps())["convert_source_mix"], Parked)
 
 
-def test_converter_registry_is_callable_with_typed_record():
+def test_converter_registry_is_callable_with_the_release_run():
     deps = WorkerDeps(mix_conversion_evidence=trusted())
     assert callable(build_registry(deps)["convert_source_mix"])
 

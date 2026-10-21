@@ -865,25 +865,22 @@ def create_app(
     # The deployed commit, for `/health` (Railway sets it on a Git deploy).
     from src.services.target import mix_conversion
 
-    app.state.mix_conversion_evidence = mix_conversion.load_evidence(
-        env.get(mix_conversion.RECORD_PATH),
-        service="api",
-        release_sha=env.get(COMMIT_VAR),
+    app.state.mix_conversion_evidence = mix_conversion.release_evidence(
+        env.get(COMMIT_VAR)
     )
     app.state.source_mix_capability = mix_conversion.capability(
         env, "api", app.state.mix_conversion_evidence
     )
     app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
-    # The archive. The key ring loads whatever the activation says (a deletion
-    # receipt is durable with it, and only with it); the capability and the
-    # preview port are the armed archive's and None otherwise, which is what
-    # every route reads as an inactive archive.
+    # The archive, armed wherever the key ring loads (a deletion receipt is
+    # durable with the ring, and only with it); the capability and the preview
+    # port are None without it, which is what every route reads as an inactive
+    # archive.
     app.state.archive_keys = archive_activation.load_keys(env)
     archive = archive_composition.build_api(
         engine=app.state.engine,
         env=env,
-        conversion=app.state.mix_conversion_evidence,
         client=archive_client,
     )
     app.state.archive_capability = archive.capability if archive else None

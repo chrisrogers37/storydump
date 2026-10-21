@@ -60,9 +60,7 @@ def full_deps(**over):
         raise AssertionError("seam invoked in a registry-shape test")
 
     base = dict(
-        mix_conversion_evidence=MixConversionEvidence(
-            "synthetic-run", "d" * 64, "a" * 40, "b" * 40, ("c" * 40,)
-        ),
+        mix_conversion_evidence=MixConversionEvidence("synthetic-run", "d" * 64),
         meta=object(),
         transit=object(),
         media_fetch=_fake_seam,
@@ -273,16 +271,14 @@ class TestDeletionCleanupNeedsOnlyTheKeyRing:
         assert "ARCHIVE_HMAC_KEYS" in entry.reason
 
 
-SWEEP_EVIDENCE = ArchiveActivationEvidence(
-    "synthetic-run", "e" * 64, "a" * 40, "b" * 40, ("c" * 40,)
-)
+SWEEP_EVIDENCE = ArchiveActivationEvidence("synthetic-run", "e" * 64)
 
 
 class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
     """The existing-account reconciliation backfills grants made
     before the archive was live, so it needs the capability AND the archive
     adapter's client; the sweep mints its jobs only on the same terms, plus the
-    activation evidence the door keys them to."""
+    release run the door keys them to."""
 
     def test_armed_with_its_client_it_is_live_and_owns_its_transactions(self):
         entry = build_registry(full_deps())["reconcile_archive_accounts"]
@@ -292,14 +288,14 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
     @pytest.mark.parametrize(
         "capability", [None, ArchiveCapability(enabled=False)], ids=["none", "off"]
     )
-    def test_without_an_active_capability_it_parks_naming_the_activation(
+    def test_without_an_active_capability_it_parks_naming_the_key_ring(
         self, capability
     ):
         entry = build_registry(full_deps(archive_capability=capability))[
             "reconcile_archive_accounts"
         ]
         assert isinstance(entry, Parked)
-        assert "INSTAGRAM_ARCHIVE_ACTIVATION_RECORD" in entry.reason
+        assert "ARCHIVE_HMAC_KEYS" in entry.reason
 
     def test_without_the_adapters_client_it_parks_naming_the_client(self):
         entry = build_registry(full_deps(archive_client=None))[

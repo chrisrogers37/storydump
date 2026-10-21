@@ -1,27 +1,29 @@
-# Instagram archive: testing and activation guide
+# Instagram archive: testing and operations guide
 
 The Instagram archive lets a workspace reuse a connected professional account's own
 past feed posts as a posting source, through the normal approval and publishing
-workflow. It is **off by default and runs only when activated**. This guide covers:
+workflow. It is **on in every process that holds its key ring**, with no record file
+and no switch. This guide covers:
 - how to test it locally with fakes;
-- what must be true before it is turned on;
-- how to turn it on;
+- what is still unproven on real providers;
+- how it is turned on, and what a connected account sees;
 - the Meta permissions it needs;
 - the key ring;
 - its limits.
 
 ## How it switches on
 
-The archive runs only in a process where `archive_activation.resolve` finds both of
-these:
-- a valid operator activation record, bound to that service's release and to the
-  mix-conversion run;
-- a whole `ARCHIVE_HMAC_KEYS` ring.
+The archive runs in every process where `archive_activation.resolve` loads a whole
+`ARCHIVE_HMAC_KEYS` ring. The ring is required, not optional: it keys the tombstones
+and deletion receipts the archive cannot run without.
 
-Without both, each composition root wires nothing and logs
-`instagram archive: inactive (<reason>)`. When armed, it logs
-`instagram archive: armed (run=<run id>)`. There is no registry entry or flag to turn
-on: activation is a deliberate operator step, described in step 3.
+Without the ring, each composition root wires nothing and logs
+`instagram archive: inactive (keys_missing)` or `inactive (keys_invalid)`. With it,
+each logs `instagram archive: armed (run=release-<first 12 hex of the commit>)`.
+
+The run is the release's own (`mix_conversion.release_run`). Each deploy's
+source-mix conversion jobs and existing-account reconciliation jobs carry it, so a
+deploy retries whatever an earlier one could not finish.
 
 ## 1. Test locally with fakes
 
@@ -70,8 +72,8 @@ Between them, they cover these properties:
   never replaces a predetermined ceiling.
 
 **What a green run does not show.** Every provider in these gates is a fake, so a pass
-says nothing about Meta, Instagram's CDN, Cloudinary or Telegram. It satisfies none of
-the prerequisites below.
+says nothing about Meta, Instagram's CDN, Cloudinary or Telegram; section 2 lists
+what is still unproven against the real ones.
 
 **`scripts/instagram_archive_probe.py` is not a test or a readiness check.**
 - Every invocation without `--help` or `-h` returns a deterministic version-1 JSON
@@ -83,15 +85,15 @@ the prerequisites below.
   authoritative admission and return fences, all taken under database row locks. A
   read-only probe cannot take those locks.
 
-## 2. Prerequisites
+## 2. What is still unproven
 
-Each item needs real evidence before activation. The fake-provider gates and an
-existing app review satisfy none of them. Any live retrieval or publication needs its
-own explicit approval, and the scheduler is never run to verify publishing.
+None of these holds the archive back. They are the open questions about real
+providers, and each wants live evidence before anyone relies on the behavior it
+names.
 
-1. **Meta access for this exact use.** The use is feed retrieval and reuse through a
-   managed Stories publishing workflow; see step 4. An existing App Review, or an
-   allowlisted account's retrieval, is not proof of general import permission.
+1. **Meta access beyond your own accounts.** Accounts you own or manage connect under
+   Standard Access, which needs no App Review. Anyone else's account needs Advanced
+   Access first; see step 4.
 2. **The callback identity.** The Meta app the callback URLs are registered under
    decides the app identity that verified mappings are keyed to. The code takes
    `/me`'s `id` to be the app-scoped id Meta's callbacks name as `user_id`. Confirm
@@ -101,7 +103,7 @@ own explicit approval, and the scheduler is never run to verify publishing.
    `META_GRAPH_VERSION`, default `v21.0` (`instagram_graph.DEFAULT_GRAPH_VERSION`).
    Publishing uses the same one. Verify it against Meta's current documentation.
    Upgrading it requires publishing evidence on an owned account first.
-4. **A live read-only field and pagination check** on the selected account:
+4. **Fields and pagination on a real account:**
    - **Fields:** which are available (`media_url`, `like_count`, `comments_count`,
      `permalink`, `owner`, and `caption` under Instagram Login).
    - **Pagination:** complete time-bound and same-second pagination. Where only an
@@ -109,13 +111,13 @@ own explicit approval, and the scheduler is never run to verify publishing.
      refuses instead of skipping unseen posts.
    - **`until` without `since`:** whether the edge accepts it, which the walk's
      empty-window probe depends on. The launch-date floor holds either way.
-5. **The carousel edge.** A read-only probe that `children` returns all slides in one
-   page at `limit=20`.
-6. **The mixed-video validator.** Run the real validator and runtime over a mixed
-   archive, including maximum bitrate.
+5. **The carousel edge.** Whether `children` returns all slides in one page at
+   `limit=20`.
+6. **The mixed-video validator** over a real archive, including maximum bitrate.
+   Until then a video that passes every probe stays `validation_pending`
+   (`needs_spec_evidence`), so only images reach the rotation.
    - The validator pins `ffprobe` and `ffmpeg` to 7.1. The deployed image supplies them
      through `nixpacks.toml`.
-   - Image-only coverage cannot satisfy this item.
 7. **The transit store's real answers**, which the transit drain relies on:
    Cloudinary's Admin API fields, 404 as the only absence signal, destroy's
    `not found`, and the removal of the derived frame.
@@ -123,82 +125,40 @@ own explicit approval, and the scheduler is never run to verify publishing.
    [`meta-callback-endpoints.md`](meta-callback-endpoints.md#what-a-completed-deletion-leaves).
    There is no surface that resolves a deletion receipt held in `needs_review`; such a
    receipt waits.
-9. **Deployment and drain evidence** for both operator records, the mix-conversion
-   record and the activation record: release SHAs, old-process termination and
-   exhausted leases.
-10. **An acceptance record**, made under explicit approval. It labels fake tests,
-    read-only live retrieval and live publishing separately.
 
-## 3. Turn it on
+Record what a live check shows without naming the account or any of its posts.
 
-Activation is two operator record files and the key ring. Set all three on both the
-API and the worker. Each record is a JSON file of at most 64 KiB, readable by the
-process, at the path its variable names.
+## 3. Turning it on
 
-**a. The mix-conversion record**, at `SOURCE_MIX_CONVERSION_RECORD`:
+Set `ARCHIVE_HMAC_KEYS` on both the API and the worker (step 5). There is nothing
+else to set.
 
-```json
-{
-  "v": 1,
-  "enabled": true,
-  "run_id": "<1-128 of A-Z a-z 0-9 _ . ->",
-  "api": {"sha": "<API release, 40 hex>", "source_mix_protocol_max": 2, "expanded_schema": true, "both_protocols": true},
-  "worker": {"sha": "<worker release, 40 hex>", "source_mix_protocol_max": 2, "expanded_schema": true, "both_protocols": true},
-  "lease_disposition": "exhausted",
-  "termination_evidence": "<text>",
-  "leases_evidence": "<text>",
-  "rollback_releases": [{"sha": "<40 hex>", "source_mix_protocol_max": 2, "expanded_schema": true, "both_protocols": true}]
-}
-```
-
-- `lease_disposition` is `exhausted` or `fenced`.
-- Each evidence text is 1–2,048 characters.
-- `rollback_releases` names at least one release a rollback may return to. Each one
-  carries the same protocol fields.
-
-**b. The archive activation record**, at `INSTAGRAM_ARCHIVE_ACTIVATION_RECORD`:
-
-```json
-{
-  "v": 1,
-  "enabled": true,
-  "run_id": "<1-128 of A-Z a-z 0-9 _ . ->",
-  "api": {"sha": "<API release, 40 hex>"},
-  "worker": {"sha": "<worker release, 40 hex>"},
-  "conversion_run_digest": "<SHA-256 of the mix-conversion record file, 64 hex>",
-  "evidence": {
-    "meta_access": "<text>",
-    "graph_version": "<text>",
-    "video_validation": "<text>",
-    "deployment_drain": "<text>",
-    "callback_identity": "<text>"
-  },
-  "rollback_releases": [{"sha": "<40 hex>"}]
-}
-```
-
-- Each evidence string attests one prerequisite in 1–2,048 characters. The code checks
-  only that it is present, and never stores, returns or logs it, because it may carry
-  private references. Keep it out of the repository.
-- `conversion_run_digest` is the SHA-256 of the mix-conversion record file's bytes, as
-  `sha256sum <file>` prints it.
-
-**c. The key ring**, `ARCHIVE_HMAC_KEYS` (step 5).
-
-**Check each service.** Each process checks its own release: `api.sha` or `worker.sha`
-must equal that service's `RAILWAY_GIT_COMMIT_SHA`. Then read the compose line in
-each service's log:
+**Check each service.** Read the compose line in each service's log:
 - `instagram archive: armed (run=<run id>)` means the service is armed;
-- `instagram archive: inactive (<reason>)` means it is not. The reason is the first
-  check that failed, in this order: `no_record`, `record_invalid`, `release_mismatch`,
-  `conversion_missing`, `conversion_mismatch`, `keys_missing`, `keys_invalid`.
+- `instagram archive: inactive (<reason>)` means it is not, and the reason is
+  `keys_missing` or `keys_invalid`.
+
+**What happens next, on its own:**
+- **Conversion.** A workspace still on the folder-keyed posting mix is converted to
+  the source-keyed one by a `convert_source_mix` job. A new workspace starts
+  converted. Every release since the cutover speaks both mix protocols, so no older
+  process is ever handed a mix it cannot read.
+- **Existing accounts.** An account connected before the archive was armed has no
+  archive source. A `reconcile_archive_accounts` job verifies its identity with one
+  `/me` read and adds its archive source **Off**. The owner switches it On on the
+  posting-mix card in Settings.
+- **New connections.** History is the History choice of the OAuth connect, and it
+  defaults On.
 
 **Once armed:**
-- History is the History choice of the OAuth connect. It defaults On for a new
-  connection, and an existing account stays Off until enabled.
 - An Off archive makes no history reads.
 - The source-mediated status and the explicit preview reach a provider only in an
   armed process. Elsewhere, every archive thumbnail answers the placeholder's 404.
+
+**Turning it off** means removing the ring, and the ring is not a switch: without it
+the API stops keeping Meta data-deletion receipts and the worker parks their
+cleanup (step 5). To stop reusing one account's posts, switch its archive Off on
+the posting-mix card instead.
 
 ## 4. Meta permissions and review
 
@@ -218,14 +178,15 @@ past feed posts for reuse through a managed Story publishing workflow.
 - It does not offer an archive mirror, permanent media copies, or a general Instagram
   download or backup product.
 
-**Obtain acceptance for that flow.** Meta's developer policy §6 requires prior
-permission for display, import and backup uses. Calling the product a scheduler does
-not establish an exemption. Whether Meta accepts the archive's reads under the
-permissions the product already holds is a question for that acceptance.
+**Access levels.** Accounts you own or manage, and have added to the app in the App
+Dashboard, connect under Standard Access, which needs no App Review. An account you
+do not own or manage can connect only after the app has Advanced Access, which
+requires App Review.
 
-**Keep the publishing review independent.** The App Review for publishing covers the
-publishing permissions only. A publishing submission must not borrow an archive
-approval, and the archive must not borrow the publishing one.
+**Describe the archive in that review.** Meta's developer policy §6.2 asks for Meta's
+permission before the platform is used simply to display, import or back up content.
+An App Review submission for the permissions the archive reads with must describe
+the archive's use as it is, so Meta's answer covers it.
 
 **Prepare truthful evidence of the implemented flow:**
 - Instagram Login consent and the connected account;
@@ -245,7 +206,7 @@ they are registered under.
 ## 5. The key ring
 
 `ARCHIVE_HMAC_KEYS` is one variable, read by `archive_activation.load_keys` in both the
-API and the worker. Set it, with the activation record, on both services.
+API and the worker. Set it on both services: it is what arms the archive.
 
 **Shape.** `<version>:<base64url key>`, comma-separated, for example
 `1:<key>,2:<key>`.
@@ -300,13 +261,12 @@ API and the worker. Set it, with the activation record, on both services.
   The receipt is the 16-hex code derived from the app secret, logged and not stored,
   and its status page says only that the request was received.
 - The worker parks `meta_deletion_cleanup`, which needs the ring.
-- The archive cannot arm, with or without a record.
-- A ring that does not parse is not an error at boot. It loads as none, and the only
-  trace is the compose line when a valid record is also present. A record problem is
-  reported before a key problem.
+- The archive does not arm.
+- A ring that does not parse is not an error at boot. It loads as none, and the
+  compose line names `keys_invalid`.
 
-The ring alone, with no activation record, leaves the archive off, but makes the
-data-deletion receipts durable, and the worker runs their cleanup. Without a transit
+With the ring, the archive is armed, the data-deletion receipts are durable, and the
+worker runs their cleanup. Without a transit
 store (`CLOUDINARY_*`), the cleanup asks the provider nothing and completes only scopes
 that hold no unresolved upload.
 

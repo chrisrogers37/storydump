@@ -1,65 +1,39 @@
-"""The archive activation loader (#1644).
+"""The archive activation (#1644): on wherever the key ring is.
 
-Two things arm the Instagram archive, and only together: one operator record
-that binds THIS release and the mix conversion run, and a whole HMAC key
-ring. Every refusal is a named reason, none echoes a value, and `capability` is
-the one place the tree builds an enabled `ArchiveCapability` — pinned below by
-an AST scan of everything outside `tests/`, so a second construction site fails
-CI instead of arming production by accident. No database, no network.
+The Instagram archive needs no operator record and no switch. A process arms it
+whenever the `ARCHIVE_HMAC_KEYS` ring loads whole, because that ring keys the
+tombstones and deletion receipts the archive cannot run without. A missing or
+malformed ring is a named reason, and then nothing arms. An armed process keys
+its reconciliation jobs to its own release's run
+(`mix_conversion.release_run`), so each deploy retries what an earlier one could
+not finish. `capability` is the one place the tree builds an enabled
+`ArchiveCapability`, pinned below by an AST scan of everything outside `tests/`,
+so a second construction site fails CI. No database, no network.
 
-Every record and key here is synthetic.
+Every key here is synthetic.
 """
 
 from __future__ import annotations
 
 import ast
 import base64
-import dataclasses
 import hashlib
-import json
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from src.services.target import archive_activation as aa
+from src.services.target import mix_conversion
 from src.services.target.instagram_catalog import TombstoneKeys
 from src.services.target.instagram_sources import ArchiveCapability, is_activated
-from src.services.target.mix_conversion import MixConversionEvidence
 from tests.src.conftest import leaks
 
 ROOT = Path(__file__).resolve().parents[4]
 
-API_SHA, WORKER_SHA, ROLLBACK_SHA = "a" * 40, "b" * 40, "c" * 40
-CONVERSION_DIGEST = "d" * 64
-RUN_ID = "synthetic-archive-run"
-_DEFAULT = object()
-
-
-def conversion(digest=CONVERSION_DIGEST):
-    return MixConversionEvidence(
-        "synthetic-conversion-run", digest, API_SHA, WORKER_SHA, (ROLLBACK_SHA,)
-    )
-
-
-def record():
-    return {
-        "v": 1,
-        "enabled": True,
-        "run_id": RUN_ID,
-        "api": {"sha": API_SHA},
-        "worker": {"sha": WORKER_SHA},
-        "conversion_run_digest": CONVERSION_DIGEST,
-        "evidence": {
-            "meta_access": "synthetic:meta-access",
-            "graph_version": "synthetic:graph-version",
-            "video_validation": "synthetic:video-validation",
-            "deployment_drain": "synthetic:deployment-drain",
-            "callback_identity": "synthetic:callback-identity",
-        },
-        "rollback_releases": [{"sha": ROLLBACK_SHA}],
-    }
+API_SHA, WORKER_SHA = "a" * 40, "b" * 40
 
 
 def key_material(label: str) -> bytes:
@@ -75,116 +49,13 @@ K1, K2 = key_material("synthetic-key-1"), key_material("synthetic-key-2")
 RING = f"1:{b64(K1)},2:{b64(K2)}"
 
 
-def write(tmp_path, data, name="activation.json") -> str:
-    """*data* is a record (dict) or the file's exact bytes."""
-    path = tmp_path / name
-    path.write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode())
-    return str(path)
+def ring_env(keys=RING) -> dict:
+    return {} if keys is None else {aa.KEYS_VAR: keys}
 
 
-def env_for(tmp_path, data=None, keys=RING) -> dict:
-    env = {aa.RECORD_PATH: write(tmp_path, record() if data is None else data)}
-    if keys is not None:
-        env[aa.KEYS_VAR] = keys
-    return env
+def decide(env, *, release_sha=WORKER_SHA):
+    return aa.resolve(env, release_sha=release_sha)
 
-
-def load(path, *, service="worker", release_sha=WORKER_SHA, conv=_DEFAULT):
-    return aa.load_evidence(
-        path,
-        service=service,
-        release_sha=release_sha,
-        conversion=conversion() if conv is _DEFAULT else conv,
-    )
-
-
-def decide(env, *, service="worker", release_sha=WORKER_SHA, conv=_DEFAULT):
-    return aa.resolve(
-        env,
-        service=service,
-        release_sha=release_sha,
-        conversion=conversion() if conv is _DEFAULT else conv,
-    )
-
-
-def drop(*path):
-    def mutate(data):
-        node = data
-        for key in path[:-1]:
-            node = node[key]
-        del node[path[-1]]
-
-    return mutate
-
-
-def put(value, *path):
-    def mutate(data):
-        node = data
-        for key in path[:-1]:
-            node = node[key]
-        node[path[-1]] = value
-
-    return mutate
-
-
-def _evidence_cases():
-    for key in aa.EVIDENCE_KEYS:
-        yield f"{key} missing", drop("evidence", key)
-        yield f"{key} empty", put("", "evidence", key)
-        yield f"{key} blank", put(" \t\n ", "evidence", key)
-        yield f"{key} one character too long", put("x" * 2049, "evidence", key)
-        yield f"{key} not text", put(["synthetic"], "evidence", key)
-
-
-#: Each way a record fails its own shape, by name. The record is read whole or
-#: not at all: no field is optional, and none is half-accepted.
-INVALID_RECORDS = {
-    "version missing": drop("v"),
-    "version two": put(2, "v"),
-    "version true": put(True, "v"),
-    "version text": put("1", "v"),
-    "version float": put(1.0, "v"),
-    "disabled": put(False, "enabled"),
-    "enabled missing": drop("enabled"),
-    "enabled text": put("true", "enabled"),
-    "enabled one": put(1, "enabled"),
-    "run id missing": drop("run_id"),
-    "run id empty": put("", "run_id"),
-    "run id with a space": put("run 1", "run_id"),
-    "run id with a slash": put("run/1", "run_id"),
-    "run id with a newline": put("run\n", "run_id"),
-    "run id too long": put("r" * 129, "run_id"),
-    "run id not text": put(7, "run_id"),
-    "api missing": drop("api"),
-    "api not an object": put(API_SHA, "api"),
-    "api sha missing": drop("api", "sha"),
-    "api sha short": put("a" * 39, "api", "sha"),
-    "api sha long": put("a" * 41, "api", "sha"),
-    "api sha uppercase": put("A" * 40, "api", "sha"),
-    "api sha not hex": put("g" * 40, "api", "sha"),
-    "api sha not text": put(["a" * 40], "api", "sha"),
-    "worker missing": drop("worker"),
-    "worker not an object": put(WORKER_SHA, "worker"),
-    "worker sha short": put("b" * 39, "worker", "sha"),
-    "worker sha uppercase": put("B" * 40, "worker", "sha"),
-    "conversion digest missing": drop("conversion_run_digest"),
-    "conversion digest short": put("d" * 63, "conversion_run_digest"),
-    "conversion digest long": put("d" * 65, "conversion_run_digest"),
-    "conversion digest uppercase": put("D" * 64, "conversion_run_digest"),
-    "conversion digest not hex": put("z" * 64, "conversion_run_digest"),
-    "conversion digest not text": put(7, "conversion_run_digest"),
-    "evidence missing": drop("evidence"),
-    "evidence not an object": put(["synthetic"], "evidence"),
-    **dict(_evidence_cases()),
-    "rollback releases missing": drop("rollback_releases"),
-    "rollback releases empty": put([], "rollback_releases"),
-    "rollback releases not a list": put({"sha": ROLLBACK_SHA}, "rollback_releases"),
-    "rollback release not an object": put([ROLLBACK_SHA], "rollback_releases"),
-    "rollback release sha short": put([{"sha": "c" * 39}], "rollback_releases"),
-    "one bad rollback release among good": put(
-        [{"sha": ROLLBACK_SHA}, {"sha": "nope"}], "rollback_releases"
-    ),
-}
 
 #: Each way a key ring is malformed, by name. One bad entry refuses the ring.
 BAD_RINGS = {
@@ -219,238 +90,11 @@ BAD_RINGS = {
 }
 
 
-class TestTheRecord:
-    def test_the_baseline_record_is_valid(self, tmp_path):
-        """The positive control every refusal below is measured against: a
-        table of refusals proves nothing if its baseline was never accepted."""
-        act = decide(env_for(tmp_path))
-        assert act.reason is None and act.evidence is not None
-        assert load(write(tmp_path, record())) is not None
-
-    @pytest.mark.parametrize(
-        "mutate", INVALID_RECORDS.values(), ids=list(INVALID_RECORDS)
-    )
-    def test_a_record_failing_any_check_is_invalid(self, tmp_path, mutate):
-        data = record()
-        mutate(data)
-        act = decide(env_for(tmp_path, data))
-        assert (act.reason, act.capability, act.evidence) == (
-            aa.RECORD_INVALID,
-            None,
-            None,
-        )
-        assert load(write(tmp_path, data)) is None
-
-    def test_image_only_activation_is_not_a_record(self, tmp_path):
-        """Locked gate: without video validation evidence there
-        is no activation, however complete everything else is."""
-        data = record()
-        del data["evidence"]["video_validation"]
-        assert decide(env_for(tmp_path, data)).reason == aa.RECORD_INVALID
-        assert aa.EVIDENCE_KEYS == (
-            "meta_access",
-            "graph_version",
-            "video_validation",
-            "deployment_drain",
-            "callback_identity",
-        )
-
-    def test_a_record_without_callback_identity_evidence_is_not_a_record(
-        self, tmp_path
-    ):
-        """Deauthorize and deletion match a callback's `user_id` against the `/me`
-        `id` the mapping stores, and code cannot check that they are the same
-        id: the operator must attest that Meta's test callback showed it. The
-        positive control is the same record, whole, arming."""
-        data = record()
-        armed = decide(env_for(tmp_path, data))
-        assert (armed.reason, armed.capability is not None) == (None, True)
-        del data["evidence"]["callback_identity"]
-        refused = decide(env_for(tmp_path, data))
-        assert (refused.reason, refused.capability, refused.evidence) == (
-            aa.RECORD_INVALID,
-            None,
-            None,
-        )
-        assert load(write(tmp_path, data)) is None
-        # A blank attestation is no attestation.
-        data["evidence"]["callback_identity"] = "  "
-        assert decide(env_for(tmp_path, data)).reason == aa.RECORD_INVALID
-
-    def test_the_length_boundaries_are_inclusive(self, tmp_path):
-        """The positive controls for the length refusals above."""
-        data = record()
-        data["run_id"] = "r" * 128
-        for key in aa.EVIDENCE_KEYS:
-            data["evidence"][key] = "x" * 2048
-        assert decide(env_for(tmp_path, data)).reason is None
-
-    @pytest.mark.parametrize(
-        "raw",
-        [
-            pytest.param(b"", id="empty"),
-            pytest.param(b"not json", id="not json"),
-            pytest.param(b"{", id="truncated object"),
-            pytest.param(b"[]", id="array"),
-            pytest.param(b"null", id="null"),
-            pytest.param(b'"text"', id="string"),
-            pytest.param(b"\xff\xff\xff", id="not utf-8"),
-            pytest.param(json.dumps(record()).encode()[:-1], id="truncated record"),
-        ],
-    )
-    def test_a_file_that_is_not_the_record_is_invalid(self, tmp_path, raw):
-        assert decide(env_for(tmp_path, raw)).reason == aa.RECORD_INVALID
-
-    def test_the_size_cap_is_exact(self, tmp_path):
-        """Mirrors the conversion record's 64 KiB cap. The file is read only
-        one byte past it, so a huge file is never pulled into memory."""
-        body = json.dumps(record()).encode()
-        at_cap = body + b" " * (aa.RECORD_MAX_BYTES - len(body))
-        assert aa.RECORD_MAX_BYTES == len(at_cap) == 65536
-        assert load(write(tmp_path, at_cap)) is not None
-        over = at_cap + b" "
-        assert load(write(tmp_path, over)) is None
-        assert decide(env_for(tmp_path, over)).reason == aa.RECORD_INVALID
-
-    def test_a_deeply_nested_record_is_invalid_not_a_crash(self, tmp_path):
-        nested = b"[" * 30000 + b"]" * 30000
-        assert len(nested) < aa.RECORD_MAX_BYTES
-        with pytest.raises(RecursionError):  # the input really is adversarial
-            json.loads(nested)
-        assert decide(env_for(tmp_path, nested)).reason == aa.RECORD_INVALID
-
-    @pytest.mark.parametrize("which", ["missing", "directory", "nul"])
-    def test_a_configured_but_unreadable_record_is_invalid_not_absent(
-        self, tmp_path, which
-    ):
-        """Set-but-unreadable is a deploy error an operator must see; only an
-        unset or blank variable is the quiet `no_record`."""
-        path = {
-            "missing": str(tmp_path / "absent.json"),
-            "directory": str(tmp_path),
-            "nul": "activation\x00.json",
-        }[which]
-        act = decide({aa.RECORD_PATH: path, aa.KEYS_VAR: RING})
-        assert (act.reason, act.capability) == (aa.RECORD_INVALID, None)
-
-    @pytest.mark.parametrize("value", [None, "", "   ", "\n"])
-    def test_an_unset_or_blank_path_is_no_record(self, value):
-        env = {aa.KEYS_VAR: RING}
-        if value is not None:
-            env[aa.RECORD_PATH] = value
-        act = decide(env)
-        assert (act.reason, act.capability) == (aa.NO_RECORD, None)
-        assert load(value) is None
-
-    def test_the_evidence_is_ids_and_hashes_only(self, tmp_path):
-        path = write(tmp_path, record())
-        evidence = load(path)
-        assert evidence == aa.ArchiveActivationEvidence(
-            RUN_ID,
-            hashlib.sha256(Path(path).read_bytes()).hexdigest(),
-            API_SHA,
-            WORKER_SHA,
-            (ROLLBACK_SHA,),
-        )
-        # The five evidence strings are checked and dropped, never carried.
-        assert [f.name for f in dataclasses.fields(evidence)] == [
-            "run_id",
-            "digest",
-            "api_sha",
-            "worker_sha",
-            "rollback_shas",
-        ]
-
-    def test_the_digest_is_the_file_bytes_not_the_parsed_record(self, tmp_path):
-        compact = write(
-            tmp_path, json.dumps(record(), separators=(",", ":")).encode(), "a.json"
-        )
-        spaced = write(tmp_path, json.dumps(record(), indent=2).encode(), "b.json")
-        assert load(compact).digest != load(spaced).digest
-        for path in (compact, spaced):
-            assert (
-                load(path).digest == hashlib.sha256(Path(path).read_bytes()).hexdigest()
-            )
-
-
-class TestTheBinding:
-    def test_each_service_binds_its_own_release(self, tmp_path):
-        path = write(tmp_path, record())
-        for service, own, other in (
-            ("api", API_SHA, WORKER_SHA),
-            ("worker", WORKER_SHA, API_SHA),
-        ):
-            assert load(path, service=service, release_sha=own) is not None
-            assert load(path, service=service, release_sha=other) is None
-            act = decide(env_for(tmp_path), service=service, release_sha=other)
-            assert (act.reason, act.capability) == (aa.RELEASE_MISMATCH, None)
-
-    @pytest.mark.parametrize(
-        "release_sha",
-        [
-            pytest.param(None, id="unset"),
-            pytest.param("", id="empty"),
-            pytest.param("b" * 39, id="one short"),
-            pytest.param("b" * 7, id="abbreviated"),
-            pytest.param("b" * 41, id="one long"),
-            pytest.param("B" * 40, id="uppercase"),
-            pytest.param("c" * 40, id="another release"),
-            pytest.param(5, id="not text"),
-        ],
-    )
-    def test_a_release_that_is_not_exactly_the_records_is_a_mismatch(
-        self, tmp_path, release_sha
-    ):
-        act = decide(env_for(tmp_path), release_sha=release_sha)
-        assert (act.reason, act.capability) == (aa.RELEASE_MISMATCH, None)
-
-    @pytest.mark.parametrize("service", ["web", "", "API", None])
-    def test_an_unknown_service_has_no_release_to_bind(self, tmp_path, service):
-        act = decide(env_for(tmp_path), service=service)
-        assert (act.reason, act.capability) == (aa.RELEASE_MISMATCH, None)
-
-    @pytest.mark.parametrize(
-        "conv",
-        [
-            pytest.param(None, id="none"),
-            pytest.param(SimpleNamespace(digest=CONVERSION_DIGEST), id="lookalike"),
-            pytest.param({"digest": CONVERSION_DIGEST}, id="dict"),
-            pytest.param(CONVERSION_DIGEST, id="bare digest"),
-            pytest.param(True, id="true"),
-        ],
-    )
-    def test_conversion_evidence_must_be_the_real_thing(self, tmp_path, conv):
-        act = decide(env_for(tmp_path), conv=conv)
-        assert (act.reason, act.capability) == (aa.CONVERSION_MISSING, None)
-        assert load(write(tmp_path, record()), conv=conv) is None
-
-    @pytest.mark.parametrize(
-        "digest",
-        [
-            pytest.param("e" * 64, id="another run"),
-            pytest.param("d" * 63 + "e", id="last character"),
-            pytest.param("e" + "d" * 63, id="first character"),
-            pytest.param("D" * 64, id="uppercase"),
-            pytest.param("", id="empty"),
-        ],
-    )
-    def test_a_different_conversion_run_is_a_mismatch(self, tmp_path, digest):
-        conv = conversion(digest)
-        act = decide(env_for(tmp_path), conv=conv)
-        assert (act.reason, act.capability) == (aa.CONVERSION_MISMATCH, None)
-        assert load(write(tmp_path, record()), conv=conv) is None
-
-    def test_the_matching_conversion_run_is_accepted(self, tmp_path):
-        """Positive control for the mismatch table above."""
-        assert load(write(tmp_path, record()), conv=conversion(CONVERSION_DIGEST))
-
-
 class TestTheKeyRing:
     @pytest.mark.parametrize("text", [None, "", "  \n"])
-    def test_an_unset_or_blank_ring_is_missing(self, tmp_path, text):
-        env = {} if text is None else {aa.KEYS_VAR: text}
-        assert aa.load_keys(env) is None
-        act = decide(env_for(tmp_path, keys=text))
+    def test_an_unset_or_blank_ring_is_missing(self, text):
+        assert aa.load_keys(ring_env(text)) is None
+        act = decide(ring_env(text))
         assert (act.reason, act.keys, act.capability) == (aa.KEYS_MISSING, None, None)
 
     def test_one_key_is_a_ring(self):
@@ -491,11 +135,11 @@ class TestTheKeyRing:
         assert keys.current_version == 999999999
 
     @pytest.mark.parametrize("text", BAD_RINGS.values(), ids=list(BAD_RINGS))
-    def test_a_malformed_ring_is_refused_whole(self, tmp_path, text):
+    def test_a_malformed_ring_is_refused_whole(self, text):
         """Never a partial ring: a malformed entry anywhere refuses all of it,
         so a deploy cannot half-rotate onto a key it did not mean to use."""
         assert aa.load_keys({aa.KEYS_VAR: text}) is None
-        act = decide(env_for(tmp_path, keys=text))
+        act = decide(ring_env(text))
         assert (act.reason, act.keys, act.capability) == (aa.KEYS_INVALID, None, None)
 
     @pytest.mark.parametrize(
@@ -506,9 +150,9 @@ class TestTheKeyRing:
             pytest.param(["1:abc"], id="list"),
         ],
     )
-    def test_a_ring_that_is_not_text_is_invalid(self, tmp_path, value):
+    def test_a_ring_that_is_not_text_is_invalid(self, value):
         assert aa.load_keys({aa.KEYS_VAR: value}) is None
-        act = decide(env_for(tmp_path, keys=value))
+        act = decide(ring_env(value))
         assert (act.reason, act.keys) == (aa.KEYS_INVALID, None)
 
     def test_a_ring_repr_carries_no_key_material(self):
@@ -517,42 +161,76 @@ class TestTheKeyRing:
             assert not leaks(text, secret, width=8)
 
 
+class TestTheReleaseRun:
+    def test_the_run_is_the_release_s_and_fits_the_job_functions(self):
+        """`fn_archive_reconcile_jobs` and `fn_mix_conversion_jobs` mint nothing
+        for a run id or digest outside these shapes."""
+        evidence = aa.release_evidence(WORKER_SHA)
+        assert evidence.run_id == "release-" + WORKER_SHA[:12]
+        assert re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", evidence.run_id)
+        assert re.fullmatch(r"[0-9a-f]{64}", evidence.digest)
+        assert (evidence.run_id, evidence.digest) == mix_conversion.release_run(
+            WORKER_SHA
+        )
+
+    def test_one_release_is_one_run_and_another_release_another(self):
+        assert aa.release_evidence(WORKER_SHA) == aa.release_evidence(WORKER_SHA)
+        mine, next_one = aa.release_evidence(WORKER_SHA), aa.release_evidence(API_SHA)
+        assert mine.run_id != next_one.run_id and mine.digest != next_one.digest
+
+    def test_the_api_and_the_worker_of_one_release_share_its_run(self):
+        assert decide(ring_env()).evidence == decide(ring_env()).evidence
+        assert mix_conversion.release_evidence(WORKER_SHA).digest == (
+            aa.release_evidence(WORKER_SHA).digest
+        )
+
+    @pytest.mark.parametrize(
+        "release_sha",
+        [None, "", "  ", "b" * 39, "g" * 40, "b" * 41, 7],
+        ids=["unset", "empty", "blank", "short", "not hex", "long", "not text"],
+    )
+    def test_a_process_with_no_usable_release_runs_as_local(self, release_sha):
+        evidence = aa.release_evidence(release_sha)
+        assert evidence.run_id == "release-local"
+        assert evidence.digest == aa.release_evidence(None).digest
+
+    def test_a_release_is_read_as_railway_writes_it(self):
+        spelled = aa.release_evidence(f" {WORKER_SHA.upper()}\n")
+        assert spelled == aa.release_evidence(WORKER_SHA)
+
+
 class TestCapability:
     @staticmethod
-    def parts(tmp_path):
-        evidence = load(write(tmp_path, record()))
+    def parts():
+        evidence = aa.release_evidence(WORKER_SHA)
         keys = aa.load_keys({aa.KEYS_VAR: RING})
-        assert evidence is not None and keys is not None
+        assert keys is not None
         return evidence, keys
 
-    def test_evidence_and_a_ring_together_arm(self, tmp_path):
-        armed = aa.capability(*self.parts(tmp_path))
+    def test_a_run_and_a_ring_together_arm(self):
+        armed = aa.capability(*self.parts())
         assert armed == ArchiveCapability(enabled=True)
         assert armed.enabled is True and is_activated(armed)
 
-    def test_either_alone_never_arms(self, tmp_path):
-        evidence, keys = self.parts(tmp_path)
+    def test_either_alone_never_arms(self):
+        evidence, keys = self.parts()
         assert aa.capability(evidence, None) is None
         assert aa.capability(None, keys) is None
         assert aa.capability(None, None) is None
 
-    def test_lookalikes_never_arm(self, tmp_path):
-        evidence, keys = self.parts(tmp_path)
+    def test_lookalikes_never_arm(self):
+        evidence, keys = self.parts()
         lookalike_evidence = SimpleNamespace(
-            run_id=RUN_ID,
-            digest="d" * 64,
-            api_sha=API_SHA,
-            worker_sha=WORKER_SHA,
-            rollback_shas=(ROLLBACK_SHA,),
+            run_id=evidence.run_id, digest=evidence.digest
         )
-        # The conversion run's evidence is a different attestation: it must
-        # never stand in for the archive's.
+        # The conversion's run is another type: it never stands in for the
+        # archive's, even for the same release.
         for fake in (
-            conversion(),
+            mix_conversion.release_evidence(WORKER_SHA),
             lookalike_evidence,
-            {"run_id": RUN_ID},
+            {"run_id": evidence.run_id},
             True,
-            RUN_ID,
+            evidence.run_id,
         ):
             assert aa.capability(fake, keys) is None
         lookalike_keys = SimpleNamespace(current_version=1, keys={1: K1})
@@ -560,167 +238,75 @@ class TestCapability:
             assert aa.capability(evidence, fake) is None
 
 
-def scenario(tmp_path, reason, base=None):
-    """The environment and arguments that make `decide` refuse for *reason*,
-    every other input being valid. A reason added to the vocabulary without a
-    scenario here fails loudly rather than going untested."""
-    data = record() if base is None else base
-    env, kwargs = env_for(tmp_path, data), {}
-    if reason == aa.NO_RECORD:
-        del env[aa.RECORD_PATH]
-    elif reason == aa.RECORD_INVALID:
-        env = env_for(tmp_path, {**data, "enabled": False})
-    elif reason == aa.RELEASE_MISMATCH:
-        kwargs["release_sha"] = "f" * 40
-    elif reason == aa.CONVERSION_MISSING:
-        kwargs["conv"] = None
-    elif reason == aa.CONVERSION_MISMATCH:
-        kwargs["conv"] = conversion("e" * 64)
-    elif reason == aa.KEYS_MISSING:
-        del env[aa.KEYS_VAR]
-    elif reason == aa.KEYS_INVALID:
-        env[aa.KEYS_VAR] = f"1:{b64(K1)},2:short"
-    else:
-        raise AssertionError(f"no scenario for the new reason {reason!r}")
-    return env, kwargs
-
-
 class TestResolve:
-    def test_the_vocabulary_is_the_designs_in_check_order(self):
-        assert aa.REASONS == (
-            "no_record",
-            "record_invalid",
-            "release_mismatch",
-            "conversion_missing",
-            "conversion_mismatch",
-            "keys_missing",
-            "keys_invalid",
-        )
+    def test_the_vocabulary_is_the_ring_s_alone(self):
+        assert aa.REASONS == ("keys_missing", "keys_invalid")
 
-    def test_a_valid_record_and_ring_arm(self, tmp_path):
-        env = env_for(tmp_path)
-        act = decide(env)
-        digest = hashlib.sha256(Path(env[aa.RECORD_PATH]).read_bytes()).hexdigest()
+    def test_a_ring_arms_with_nothing_else_set(self):
+        act = decide(ring_env())
         assert act.capability == ArchiveCapability(enabled=True)
         assert act.reason is None
-        assert act.evidence == aa.ArchiveActivationEvidence(
-            RUN_ID, digest, API_SHA, WORKER_SHA, (ROLLBACK_SHA,)
-        )
+        assert act.evidence == aa.release_evidence(WORKER_SHA)
         assert act.keys.current_version == 2
-        assert act.log_line == "instagram archive: armed (run=synthetic-archive-run)"
+        assert act.log_line == "instagram archive: armed (run=release-bbbbbbbbbbbb)"
 
-    def test_the_api_arms_from_its_own_release(self, tmp_path):
-        act = decide(env_for(tmp_path), service="api", release_sha=API_SHA)
-        assert act.capability == ArchiveCapability(enabled=True)
-        assert act.evidence.run_id == RUN_ID
+    def test_the_retired_record_variables_change_nothing(self, tmp_path):
+        """The operator records are gone: a leftover variable, even one naming
+        a file that is not a record, neither arms nor disarms anything."""
+        junk = tmp_path / "leftover.json"
+        junk.write_text("{")
+        env = {
+            **ring_env(),
+            "INSTAGRAM_ARCHIVE_ACTIVATION_RECORD": str(junk),
+            "SOURCE_MIX_CONVERSION_RECORD": str(junk),
+        }
+        assert decide(env) == decide(ring_env())
+        no_ring = {k: v for k, v in env.items() if k != aa.KEYS_VAR}
+        assert decide(no_ring).reason == aa.KEYS_MISSING
 
-    def test_nothing_set_is_inactive_by_default(self):
+    def test_nothing_set_is_inactive(self):
         act = decide({})
         assert (act.capability, act.evidence, act.keys) == (None, None, None)
-        assert act.log_line == "instagram archive: inactive (no_record)"
+        assert act.log_line == "instagram archive: inactive (keys_missing)"
 
-    @pytest.mark.parametrize("reason", aa.REASONS)
-    def test_each_refusal_is_named_in_the_log_line(self, tmp_path, reason):
-        env, kwargs = scenario(tmp_path, reason)
-        act = decide(env, **kwargs)
+    @pytest.mark.parametrize(
+        "reason, keys",
+        [(aa.KEYS_MISSING, None), (aa.KEYS_INVALID, f"1:{b64(K1)},2:short")],
+    )
+    def test_each_refusal_is_named_in_the_log_line(self, reason, keys):
+        act = decide(ring_env(keys))
         assert (act.capability, act.evidence, act.reason) == (None, None, reason)
         assert act.log_line == f"instagram archive: inactive ({reason})"
 
-    def test_an_evidence_reason_is_named_before_a_key_reason(self, tmp_path):
-        assert decide({aa.KEYS_VAR: "junk"}).reason == aa.NO_RECORD
-        garbage = {aa.RECORD_PATH: write(tmp_path, b"{"), aa.KEYS_VAR: "junk"}
-        assert decide(garbage).reason == aa.RECORD_INVALID
-        no_ring = env_for(tmp_path, keys=None)
-        assert decide(no_ring, release_sha="f" * 40).reason == aa.RELEASE_MISMATCH
-        junk_ring = env_for(tmp_path, keys="junk")
-        assert decide(junk_ring, conv=None).reason == aa.CONVERSION_MISSING
-        wrong_run = conversion("e" * 64)
-        assert decide(junk_ring, conv=wrong_run).reason == aa.CONVERSION_MISMATCH
+    def test_every_reason_has_a_refusal_above(self):
+        assert set(aa.REASONS) == {aa.KEYS_MISSING, aa.KEYS_INVALID}
 
-    def test_the_evidence_checks_run_in_vocabulary_order(self, tmp_path):
-        env = env_for(tmp_path)
-        wrong = {"release_sha": "f" * 40, "conv": None}
-        assert decide(env, **wrong).reason == aa.RELEASE_MISMATCH
-        disabled = env_for(tmp_path, {**record(), "enabled": False})
-        assert decide(disabled, **wrong).reason == aa.RECORD_INVALID
-
-    def test_the_ring_loads_on_its_own_for_receipts(self, tmp_path):
-        env = env_for(tmp_path)
-        del env[aa.RECORD_PATH]
-        act = decide(env)
-        assert (act.reason, act.capability, act.evidence) == (aa.NO_RECORD, None, None)
-        assert act.keys.current_version == 2
-        assert dict(act.keys.keys) == {1: K1, 2: K2}
-
-    def test_evidence_is_withheld_unless_the_archive_is_armed(self, tmp_path):
-        env = env_for(tmp_path, keys=None)
-        act = decide(env)
-        assert (act.reason, act.evidence, act.keys, act.capability) == (
-            aa.KEYS_MISSING,
-            None,
-            None,
-            None,
-        )
-        # The record on its own is still readable by the loader.
-        assert load(env[aa.RECORD_PATH]) is not None
-
-    @pytest.mark.parametrize(
-        "path", [5, b"/x", ["a"], object(), None], ids=lambda v: type(v).__name__
-    )
     @pytest.mark.parametrize(
         "keys", [5, b"1:x", ["1:x"], object(), None], ids=lambda v: type(v).__name__
     )
-    def test_garbage_in_the_environment_never_raises(self, path, keys):
-        act = decide({aa.RECORD_PATH: path, aa.KEYS_VAR: keys})
+    @pytest.mark.parametrize(
+        "release_sha", [5, b"x", None, "f" * 40], ids=lambda v: type(v).__name__
+    )
+    def test_garbage_in_the_environment_never_raises(self, keys, release_sha):
+        act = decide({aa.KEYS_VAR: keys}, release_sha=release_sha)
         assert act.capability is None and act.reason in aa.REASONS
 
 
 class TestNothingIsEchoed:
-    """The record's evidence strings may carry private references, and the key
-    ring is a secret: neither reaches a result's repr, the log line, a log
-    record or a stream, armed or refused."""
+    """The key ring is a secret: it reaches no result's repr, the log line, a
+    log record or a stream, armed or refused."""
 
-    PRIVATE = {
-        "meta_access": "zq-private-ref-meta-8f3a91c2",
-        "graph_version": "zq-private-ref-graph-5d70be14",
-        "video_validation": "zq-private-ref-video-c41f08a7",
-        "deployment_drain": "zq-private-ref-drain-92be6d35",
-        "callback_identity": "zq-private-ref-callback-3be17a60",
-    }
-
-    @pytest.mark.parametrize("reason", [None, *aa.REASONS], ids=["armed", *aa.REASONS])
-    def test_no_value_reaches_a_result_a_log_or_a_stream(
-        self, tmp_path, caplog, capsys, reason
-    ):
-        base = {**record(), "evidence": dict(self.PRIVATE)}
-        if reason is None:
-            env, kwargs = env_for(tmp_path, base), {}
-        else:
-            env, kwargs = scenario(tmp_path, reason, base)
+    @pytest.mark.parametrize("keys", [RING, None, f"1:{b64(K1)},2:short"])
+    def test_no_key_reaches_a_result_a_log_or_a_stream(self, caplog, capsys, keys):
         with caplog.at_level(logging.DEBUG):
-            act = decide(env, **kwargs)
-            evidence = load(env.get(aa.RECORD_PATH), **kwargs)
-            keys = aa.load_keys(env)
-        assert (reason is None) == (act.capability is not None)
+            act = decide(ring_env(keys))
+            loaded = aa.load_keys(ring_env(keys))
         out, err = capsys.readouterr()
         surfaces = "\n".join(
-            [
-                repr(act),
-                str(act),
-                act.log_line,
-                repr(evidence),
-                repr(keys),
-                caplog.text,
-                out,
-                err,
-            ]
+            [repr(act), str(act), act.log_line, repr(loaded), caplog.text, out, err]
         )
-        for value in self.PRIVATE.values():
-            assert value not in surfaces
         for secret in (b64(K1), b64(K2), K1.hex(), K2.hex()):
             assert not leaks(surfaces, secret, width=8)
-        if env.get(aa.RECORD_PATH):
-            assert env[aa.RECORD_PATH] not in surfaces
 
 
 # --- the one construction site ----------------------------------------------------

@@ -1,16 +1,16 @@
 """The archive composition roots (#1644).
 
-Two things are pinned, and neither needs a database. First, the archive is OFF
-by default: with an empty env, or any env that does not both bind this release
-and carry a whole key ring, nothing is built and every seam the worker and the
-API read stays None, so every archive path keeps failing closed. Second, ARMED,
-the composition builds the real graph and hands the capability to every place
+Two things are pinned, and neither needs a database. First, the archive is off
+without its key ring: with an empty env, or a ring that is missing or malformed,
+nothing is built and every seam the worker and the API read stays None, so every
+archive path keeps failing closed. Second, with the ring, on any release and with
+no record or switch, the composition builds the real graph and hands the capability to every place
 that must judge an archive source by it (the claim, the clock, the reaper, a
 spent sync's re-arm), the coordinator's `selected_prepare` WRAPPER to the
 worker's seam, and the coordinator to the publish pipeline. Providers are
 fakes; no request is ever made.
 
-Every record, key and identifier here is synthetic.
+Every key and identifier here is synthetic.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from src.services.target import archive_activation as aa
 from src.services.target import archive_composition as composition
 from src.services.target import (
     jobs,
-    mix_conversion,
     scheduler,
     unit_of_work,
     work_loop,
@@ -44,8 +43,6 @@ from tests.src.services.target.test_archive_activation import (
     API_SHA,
     RING,
     WORKER_SHA,
-    conversion,
-    env_for,
 )
 
 CAPTURE = admission.SourceReadCapture(
@@ -68,15 +65,14 @@ def client():
     return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
 
 
-def armed(tmp_path, *, sha=WORKER_SHA, **extra) -> dict:
-    return {**env_for(tmp_path), composition.RELEASE_VAR: sha, **extra}
+def armed(*, sha=WORKER_SHA, **extra) -> dict:
+    return {aa.KEYS_VAR: RING, composition.RELEASE_VAR: sha, **extra}
 
 
-def built(tmp_path, client, **extra):
+def built(client, **extra):
     return composition.build_worker(
         engine=object(),
-        env=armed(tmp_path, **extra),
-        conversion=conversion(),
+        env=armed(**extra),
         client=client,
     )
 
@@ -99,41 +95,40 @@ def composed(archive, env=None, **seams):
 
 
 @pytest.mark.parametrize(
-    "env_of, reasons",
+    "env, reason",
     [
-        (lambda tmp: {}, ("no_record", "no_record")),
-        # The key ring alone arms nothing; the record alone arms nothing. (The
-        # record binds the worker's release, so the API's refuses that first.)
-        (lambda tmp: {aa.KEYS_VAR: RING}, ("no_record", "no_record")),
-        (
-            lambda tmp: {k: v for k, v in armed(tmp).items() if k != aa.KEYS_VAR},
-            ("keys_missing", "release_mismatch"),
-        ),
-        (
-            lambda tmp: armed(tmp, sha="e" * 40),
-            ("release_mismatch", "release_mismatch"),
-        ),
+        ({}, "keys_missing"),
+        ({composition.RELEASE_VAR: WORKER_SHA}, "keys_missing"),
+        ({aa.KEYS_VAR: "  "}, "keys_missing"),
+        ({aa.KEYS_VAR: "1:short", composition.RELEASE_VAR: WORKER_SHA}, "keys_invalid"),
     ],
-    ids=["empty env", "keys only", "record only", "another release"],
+    ids=["empty env", "a release alone", "a blank ring", "a malformed ring"],
 )
-def test_nothing_is_built_unless_both_halves_load_and_the_line_names_why(
-    tmp_path, caplog, env_of, reasons
+def test_nothing_is_built_without_the_key_ring_and_the_line_names_why(
+    caplog, env, reason
 ):
-    env = env_of(tmp_path)
     with caplog.at_level(logging.INFO, logger=composition.logger.name):
-        worker = composition.build_worker(
-            engine=object(), env=env, conversion=conversion()
-        )
-        api = composition.build_api(engine=object(), env=env, conversion=conversion())
+        worker = composition.build_worker(engine=object(), env=env)
+        api = composition.build_api(engine=object(), env=env)
     assert (worker, api) == (None, None)
     assert [m for m in caplog.messages if m.startswith("instagram archive")] == [
-        f"instagram archive: inactive ({reason})" for reason in reasons
-    ]
+        f"instagram archive: inactive ({reason})"
+    ] * 2
 
 
-def test_an_inactive_worker_wires_no_archive_seam_but_still_loads_the_receipt_keys(
-    tmp_path,
-):
+@pytest.mark.parametrize("release", [WORKER_SHA, API_SHA, None])
+def test_the_ring_arms_on_any_release_with_nothing_else_set(caplog, client, release):
+    env = {aa.KEYS_VAR: RING}
+    if release is not None:
+        env[composition.RELEASE_VAR] = release
+    with caplog.at_level(logging.INFO, logger=composition.logger.name):
+        worker = composition.build_worker(engine=object(), env=env, client=client)
+    run = aa.release_evidence(release).run_id
+    assert worker is not None and worker.evidence == aa.release_evidence(release)
+    assert f"instagram archive: armed (run={run})" in caplog.messages
+
+
+def test_an_inactive_worker_wires_no_archive_seam_but_still_loads_the_receipt_keys():
     bare = composed(None)
     deps = bare.deps
     assert (
@@ -147,8 +142,8 @@ def test_an_inactive_worker_wires_no_archive_seam_but_still_loads_the_receipt_ke
     ) == (None,) * 7
     assert all(loop._archive_capability is None for loop in bare.loops)
     assert isinstance(bare.registry["reconcile_archive_accounts"], Parked)
-    # The key ring loads on its own: a deletion receipt is redacted with it
-    # whatever the activation says.
+    # `compose` reads the key ring itself: a deletion receipt is redacted with
+    # it whatever archive `main` built.
     ring = composed(None, env={aa.KEYS_VAR: RING}).deps
     assert ring.archive_keys == aa.load_keys({aa.KEYS_VAR: RING})
     assert ring.archive_keys is not None and ring.archive_capability is None
@@ -186,12 +181,12 @@ def test_an_inactive_app_has_no_archive_seam():
 # --- armed: the graph -------------------------------------------------------------
 
 
-def test_an_armed_worker_builds_the_real_graph(tmp_path, client):
-    archive = built(tmp_path, client)
+def test_an_armed_worker_builds_the_real_graph(client):
+    archive = built(client)
 
     assert archive.capability == ArchiveCapability(enabled=True)
     assert archive.client is client
-    assert archive.evidence.run_id == "synthetic-archive-run"
+    assert archive.evidence == aa.release_evidence(WORKER_SHA)
     assert archive.keys.current_version == 2
     coordinator = archive.coordinator
     assert type(coordinator) is ArchivePipeline
@@ -205,10 +200,8 @@ def test_an_armed_worker_builds_the_real_graph(tmp_path, client):
     assert archive.sync_ports.tombstone_keys is archive.keys
 
 
-async def test_each_port_builds_its_own_adapter_with_the_plans_page_size(
-    tmp_path, client
-):
-    archive = built(tmp_path, client)
+async def test_each_port_builds_its_own_adapter_with_the_plans_page_size(client):
+    archive = built(client)
     provider = object()
 
     sync = await archive.sync_ports.prepare_adapter(CAPTURE, provider)
@@ -222,21 +215,20 @@ async def test_each_port_builds_its_own_adapter_with_the_plans_page_size(
     assert sync._base == selected._base == "https://graph.instagram.com/v21.0"
 
 
-async def test_the_graph_version_is_the_applications_shared_one(tmp_path, client):
-    archive = built(tmp_path, client, META_GRAPH_VERSION="v23.0")
+async def test_the_graph_version_is_the_applications_shared_one(client):
+    archive = built(client, META_GRAPH_VERSION="v23.0")
     adapter = await archive.sync_ports.prepare_adapter(CAPTURE, object())
     assert adapter._base == "https://graph.instagram.com/v23.0"
 
 
-def test_an_armed_process_with_a_bad_graph_version_refuses_to_compose(tmp_path, client):
+def test_an_armed_process_with_a_bad_graph_version_refuses_to_compose(client):
     with pytest.raises(ValueError, match="invalid shared Graph version"):
-        built(tmp_path, client, META_GRAPH_VERSION="latest")
+        built(client, META_GRAPH_VERSION="latest")
     # An inactive process never looks at the value.
     assert (
         composition.build_worker(
             engine=object(),
             env={"META_GRAPH_VERSION": "latest"},
-            conversion=None,
         )
         is None
     )
@@ -258,9 +250,9 @@ async def test_the_access_provider_refuses_a_call_for_another_source_before_any_
 # --- armed: the worker's wiring ---------------------------------------------------
 
 
-def test_an_armed_worker_wires_every_seam_to_the_one_graph(tmp_path, client):
-    archive = built(tmp_path, client)
-    app = composed(archive, env=armed(tmp_path))
+def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):
+    archive = built(client)
+    app = composed(archive, env=armed())
     deps = app.deps
 
     assert deps.archive is archive.coordinator
@@ -289,9 +281,9 @@ def test_an_armed_worker_wires_every_seam_to_the_one_graph(tmp_path, client):
 
 
 async def test_the_publish_executor_hands_the_pipeline_the_coordinator(
-    tmp_path, client, monkeypatch
+    client, monkeypatch
 ):
-    archive = built(tmp_path, client)
+    archive = built(client)
     seen = {}
 
     async def run(job, **kwargs):
@@ -305,9 +297,9 @@ async def test_the_publish_executor_hands_the_pipeline_the_coordinator(
 
 
 async def test_the_claim_the_reaper_and_the_clock_receive_the_capability(
-    tmp_path, client, monkeypatch
+    client, monkeypatch
 ):
-    archive = built(tmp_path, client)
+    archive = built(client)
     app = composed(archive)
     claimed, reaped, ticked = {}, {}, {}
 
@@ -487,9 +479,8 @@ async def test_the_reaper_runs_the_four_argument_door_only_when_activated(
 
 
 @pytest.fixture
-def api_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(mix_conversion, "load_evidence", lambda *a, **k: conversion())
-    return armed(tmp_path, sha=API_SHA)
+def api_env():
+    return armed(sha=API_SHA)
 
 
 def test_an_armed_api_builds_the_preview_and_hands_the_routes_the_capability(
@@ -505,13 +496,14 @@ def test_an_armed_api_builds_the_preview_and_hands_the_routes_the_capability(
     assert state.archive_client is client
 
 
-def test_the_api_arms_only_for_its_own_release(api_env, client):
-    # The same record binds the worker's release too, and the API refuses it.
+def test_the_api_arms_on_any_release_and_never_without_the_ring(api_env, client):
     other = {**api_env, composition.RELEASE_VAR: WORKER_SHA}
     app = app_module.create_app(engine=None, env=other, archive_client=client)
+    assert app.state.archive_capability == ArchiveCapability(enabled=True)
+    bare = {k: v for k, v in api_env.items() if k != aa.KEYS_VAR}
+    app = app_module.create_app(engine=None, env=bare, archive_client=client)
     assert app.state.archive_capability is None and app.state.archive_preview is None
-    assert app.state.archive_client is None
-    assert app.state.archive_keys == aa.load_keys(other), "receipts keep their keys"
+    assert (app.state.archive_client, app.state.archive_keys) == (None, None)
 
 
 async def test_the_app_closes_the_archive_client_at_shutdown(

@@ -2,11 +2,11 @@
 
 `build_worker` and `build_api` are what `src.worker` and `src.api.app` call once
 at composition. Each asks `archive_activation.resolve` whether this process may
-use the Instagram archive (one operator record that binds this release and the
-conversion run, and a whole HMAC key ring) and logs its one line. Without both
-they return None and the caller wires nothing, so production stays on the
-fail-closed paths every archive service already has. This module never builds a
-capability: it passes on the one `archive_activation` returned.
+use the Instagram archive (it may wherever the HMAC key ring loads whole; there
+is no record or switch) and logs its one line. Without the ring they return None
+and the caller wires nothing, so the process stays on the fail-closed paths
+every archive service already has. This module never builds a capability: it
+passes on the one `archive_activation` returned.
 
 Armed, they build the same graph the gates build by hand: the adapter, handed
 the capture it serves and the request admission that re-checks that capture
@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 #: default is its ceiling of 100.
 PAGE_SIZE = 25
 
-#: The variable Railway sets on each service and `mix_conversion.capability`
-#: reads; the record must bind the release this process runs.
+#: The variable Railway sets on each service: the release whose run keys this
+#: process's conversion and reconciliation jobs.
 RELEASE_VAR = "RAILWAY_GIT_COMMIT_SHA"
 
 
@@ -199,9 +199,9 @@ async def _unused(*args, **kwargs):  # pragma: no cover - the probe never calls 
 def _refuse_bad_configuration(client, graph_version, policy) -> None:
     """Build one adapter to throw away, so the constructor's own checks (the
     shared Graph version, a plain client) refuse at composition, by name, rather
-    than at the first claimed job. An armed process with such a value is one an
-    operator armed on purpose, and booting it half-working is the worse failure
-    (the key ring's is refused at boot the same way)."""
+    than at the first claimed job. An armed process with such a value is
+    misconfigured, and booting it half-working is the worse failure (the key
+    ring's is refused at boot the same way)."""
     InstagramArchiveAdapter(
         access_provider=_unused,
         client=client,
@@ -216,7 +216,6 @@ def build_worker(
     *,
     engine,
     env: Mapping[str, str],
-    conversion,
     client: Optional[httpx.AsyncClient] = None,
     policy: Optional[egress.EgressPolicy] = None,
 ) -> Optional[WorkerArchive]:
@@ -224,12 +223,7 @@ def build_worker(
 
     *client* and *policy* are the test seams (a mock transport and a policy that
     allows its host); production passes neither."""
-    activation = archive_activation.resolve(
-        env,
-        service="worker",
-        release_sha=env.get(RELEASE_VAR),
-        conversion=conversion,
-    )
+    activation = archive_activation.resolve(env, release_sha=env.get(RELEASE_VAR))
     logger.info(activation.log_line)
     capability = activation.capability
     if capability is None:
@@ -289,7 +283,6 @@ def build_api(
     *,
     engine,
     env: Mapping[str, str],
-    conversion,
     client: Optional[httpx.AsyncClient] = None,
     policy: Optional[egress.EgressPolicy] = None,
 ) -> Optional[ApiArchive]:
@@ -297,12 +290,7 @@ def build_api(
 
     The preview port's admission is the one the port hands each call, which
     carries its lock timeout, and the access provider waits no longer than it."""
-    activation = archive_activation.resolve(
-        env,
-        service="api",
-        release_sha=env.get(RELEASE_VAR),
-        conversion=conversion,
-    )
+    activation = archive_activation.resolve(env, release_sha=env.get(RELEASE_VAR))
     logger.info(activation.log_line)
     capability = activation.capability
     if capability is None:

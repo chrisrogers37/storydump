@@ -265,10 +265,11 @@ class WorkerDeps:
     #: the publish pipeline; None unless `archive_activation` armed this worker,
     #: and then an archive intent is refused `archive_pipeline_not_configured`.
     archive: Any = None
-    #: The tombstone key ring (`archive_activation.load_keys`), loaded whatever
-    #: the activation says: a deletion receipt is redacted with it either way.
+    #: The tombstone key ring (`archive_activation.load_keys`): it arms the
+    #: archive, and a deletion receipt is redacted with it either way.
     archive_keys: Any = None
-    #: What the activation record proved (ids and hashes), or None.
+    #: The armed archive's release run (`archive_activation.release_evidence`),
+    #: which keys its reconciliation jobs, or None.
     archive_evidence: Any = None
     #: The archive adapter's HTTP client, closed at shutdown, or None.
     archive_client: Any = None
@@ -717,8 +718,8 @@ def build_registry(deps: WorkerDeps) -> dict:
     # The existing-account reconciliation backfills grants made before the
     # archive was live, so it exists only where the archive is armed and its
     # client built. The sweep mints for it on the same condition, and only with
-    # the activation evidence its jobs are keyed to, so nothing here mints a job
-    # that would only park.
+    # the release run its jobs are keyed to, so nothing here mints a job that
+    # would only park; each deploy's run retries what an earlier one left.
     reconciling = (
         is_activated(deps.archive_capability) and deps.archive_client is not None
     )
@@ -793,8 +794,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         registry["reconcile_archive_accounts"] = reconcile_archive_accounts
     elif not is_activated(deps.archive_capability):
         registry["reconcile_archive_accounts"] = Parked(
-            "instagram archive not activated (no valid"
-            " INSTAGRAM_ARCHIVE_ACTIVATION_RECORD)"
+            "instagram archive not armed (ARCHIVE_HMAC_KEYS missing or invalid)"
         )
     else:
         registry["reconcile_archive_accounts"] = Parked(
