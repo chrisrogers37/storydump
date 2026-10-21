@@ -11,7 +11,8 @@ whose ledger records the retired chain.
 
 **Where production lives.**
 
-- Database: Neon project `storydump-v2` (`divine-lab-41654730`), database
+- Database: Neon project `storydump` (`divine-lab-41654730`, named
+  `storydump-v2` until 2026-10-21), database
   `storydump_v2`, PostgreSQL 17. It was built empty from schema code on
   2026-10-16. Adoption recorded `000`, `001` and `002`, each confirmed by its
   probe, so the deployment pre-step applies nothing and owes nothing.
