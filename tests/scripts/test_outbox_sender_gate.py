@@ -2602,7 +2602,7 @@ async def test_media_admission_touch_uses_wallclock_in_old_transaction(outbox_db
 
 
 @pytest.mark.parametrize("unexpected", [False, True])
-async def test_selected_archive_no_send_restores_attempt_but_keeps_admitted_rate_charge(
+async def test_selected_past_posts_no_send_restores_attempt_but_keeps_admitted_rate_charge(
     outbox_db, unexpected
 ):
     from sqlalchemy import text
@@ -2617,7 +2617,7 @@ async def test_selected_archive_no_send_restores_attempt_but_keeps_admitted_rate
     )
 
     async def no_send(row):
-        error = outbox.MediaAdmissionNotSent("archive_revalidation_required")
+        error = outbox.MediaAdmissionNotSent("past_posts_revalidation_required")
         error.preparation_failed = unexpected
         raise error
 

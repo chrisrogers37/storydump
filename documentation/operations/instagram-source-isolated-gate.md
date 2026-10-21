@@ -3,7 +3,7 @@
 The contributor recipe for `tests/scripts/test_instagram_source_gate.py`, the
 full-composition gate of the Instagram source. It runs the real services over fake providers and a throwaway
 PostgreSQL, from connecting an account to a posted story and to the deletion of
-what the archive imported. It is a test, not an operations procedure: nothing
+what the past-posts source imported. It is a test, not an operations procedure: nothing
 here touches a deployment, and a green run is not evidence about Meta,
 Instagram's CDN, Cloudinary or Telegram, because every one of them is a fake.
 
@@ -23,9 +23,9 @@ recipe below keeps them true:
 
 ## What the gate drives
 
-The archive is armed the way a deployment arms it: the test hands each service an
-environment holding an `ARCHIVE_HMAC_KEYS` ring and that service's release, and
-`archive_composition.build_worker` and `create_app(env=...)` read it. Nothing is read from the process environment and no
+The past-posts source is armed the way a deployment arms it: the test hands each service an
+environment holding a `PAST_POSTS_HMAC_KEYS` ring and that service's release, and
+`past_posts_composition.build_worker` and `create_app(env=...)` read it. Nothing is read from the process environment and no
 test hands a service a capability. The API runs as `svc_ingress` (sign-in, the
 OAuth callback, the source-mix and source-policy routes, the command port, the
 data-deletion callback). The worker runs as `svc_worker`: its clock ticks, its
@@ -39,7 +39,7 @@ above them runs unchanged:
 
 | Fake | Stands in for |
 |---|---|
-| `FakeInstagram` | Graph and the media CDN, one `httpx.MockTransport` serving the generated onboarding archives the way Meta pages them (by time window, newest first, a caption only to the read that asks for it, UTC offsets written `+0000`, the form Python 3.10's `datetime.fromisoformat` does not accept) |
+| `FakeInstagram` | Graph and the media CDN, one `httpx.MockTransport` serving the generated onboarding past-posts sources the way Meta pages them (by time window, newest first, a caption only to the read that asks for it, UTC offsets written `+0000`, the form Python 3.10's `datetime.fromisoformat` does not accept) |
 | `FakeTransit` | the transit store: one asset registry behind the publish pipeline's upload and the deletion cleanup's typed lookup and destroy |
 | `FakeTelegram` | the Bot API, recording every call, under the real `TelegramTransport` |
 | `GateMeta` over `StubMetaAdapter` | the Meta publish calls, counted |
@@ -47,7 +47,7 @@ above them runs unchanged:
 
 Each scene indexes `onboarding.useful(10, ...)` trimmed to five posts: a recent
 one, a credited one, one of unknown attribution (each an exclusion with its own
-reason) and the archive's single 2022 image, the one post that qualifies. What is
+reason) and the past-posts source's single 2022 image, the one post that qualifies. What is
 selected is therefore known in advance. Every token, id and URL is synthetic.
 
 ## What a run needs
@@ -63,7 +63,7 @@ selected is therefore known in advance. Every token, id and URL is synthetic.
 - **PostgreSQL 15 in UTC, with password authentication over TCP, and a superuser
   test role** (the `POSTGRES_USER` of CI's `postgres:15` service is one). The
   fixtures create databases and the `svc_*` roles, which are cluster objects. A
-  cluster in another time zone can fail the archive gates that store naive dates.
+  cluster in another time zone can fail the past-posts gates that store naive dates.
 - **`psql` 15 on the `PATH`**, if you will run more than this gate. The gate's own
   fixtures bootstrap the roles and replay the migration stream through `psycopg2`,
   but the wider database-gated suites apply files through `psql`.
@@ -160,9 +160,9 @@ a source is one per account, an item is `media_items.id` (it survives a deletion
 reconnect through its tombstone), and the card is the story's `post_intents.id`, which
 the buttons carry as `v1:<verb>:<intent id>`.
 
-### 1. A connected archive runs from connect to a posted audit
+### 1. A connected past-posts source runs from connect to a posted audit
 
-`test_a_connected_archive_runs_from_connect_to_a_posted_audit`, the whole path:
+`test_a_connected_past_posts_runs_from_connect_to_a_posted_audit`, the whole path:
 
 1. **Armed by records.** The worker's capability is enabled, its evidence carries the
    record's run id, and `sync_media_source` is not parked.
@@ -203,7 +203,7 @@ the buttons carry as `v1:<verb>:<intent id>`.
 
 ### 2. Posted myself closes a card without a provider call
 
-`test_posted_myself_closes_an_archive_card_without_a_provider_call`. API publishing is
+`test_posted_myself_closes_a_past_posts_card_without_a_provider_call`. API publishing is
 off. A Post now tap is refused with reason `manual_mode` and nothing moves.
 `mark_posted` answers 200 `executed`, state `posted`, `published_via = manual`,
 `publish_step = none`; three transitions end `awaiting_approval → posted`; one
@@ -217,7 +217,7 @@ source Off (mix revision 2) moves its epoch by one. While Off, `sync_now` is ref
 with `source_read_reason = source_off`, the waiting card's approval is refused
 (`media_unsuitable`, `source_reason = source_off`), and the sweeps and the sender touch
 no provider. Switching On (revision 3) makes the same story approvable: the publish
-renews the authorization (audit reason `archive_authorization_renewed`, at the new
+renews the authorization (audit reason `past_posts_authorization_renewed`, at the new
 epoch), stages the story once, and posts it once.
 
 ### 4. A source policy revision withdraws approval until it qualifies again
@@ -242,7 +242,7 @@ epoch and the publish's carries the epoch the Off and On made.
 ### 6. A repeated deletion episode cleans each generation once
 
 `test_a_repeated_deletion_episode_cleans_each_generation_once_and_spares_the_rest`,
-with an Off Drive folder beside the archive. After the story posts, the residue is five
+with an Off Drive folder beside the past-posts source. After the story posts, the residue is five
 index rows, one intent provenance, two operation provenance, one artifact, five live
 items and no tombstone.
 
@@ -266,12 +266,12 @@ items and no tombstone.
   the new generation alone and cleans it. Both generations end `deleted`, and the
   first receipt stays complete.
 
-### 7. Two accounts and two workspaces never see each other's archives
+### 7. Two accounts and two workspaces never see each other's past-posts sources
 
-`test_two_accounts_and_two_workspaces_never_see_each_others_archives`. Two accounts
+`test_two_accounts_and_two_workspaces_never_see_each_others_past_posts`. Two accounts
 share one workspace, each with its own source at 0.5. Each index holds only its own
 posts, and every Graph request carries the token of the account it names. Each slot's
-story comes from its own archive, the Off Drive folder is drawn by neither, and the
+story comes from its own past-posts source, the Off Drive folder is drawn by neither, and the
 cards are captioned for their own accounts. Approving one story posts through that
 account alone. Switching B Off moves only B's epoch and refuses B's approval and read.
 A second workspace's person is refused the first workspace's sources and, as the API's
@@ -316,12 +316,12 @@ sweeps a crashed run's strays, which is why the cluster is dropped rather than r
 Every provider is a fake. The gate does not satisfy any activation gate: Meta's access
 path for this use, the shared Graph version, the live field and pagination check,
 mixed-video validator compatibility, or the deployment and drain evidence. Those are
-listed in [`instagram-archive-review.md`](instagram-archive-review.md#2-prerequisites).
+listed in [`instagram-past-posts-review.md`](instagram-past-posts-review.md#2-what-is-still-unproven).
 
 ## See also
 
-- [`instagram-archive-review.md`](instagram-archive-review.md) — testing, prerequisites, activation, permissions, the key ring and limits
+- [`instagram-past-posts-review.md`](instagram-past-posts-review.md) — testing, prerequisites, activation, permissions, the key ring and limits
 - [`meta-callback-endpoints.md`](meta-callback-endpoints.md) — the deauthorize and data-deletion endpoints scene 6 drives
 - `tests/isolation_guard.py`, `tests/test_isolation_guard.py` — the guard and its refusals
-- `tests/fixtures/fake_providers.py`, `tests/fixtures/instagram_onboarding/` — the fakes and the generated archives
+- `tests/fixtures/fake_providers.py`, `tests/fixtures/instagram_onboarding/` — the fakes and the generated past-posts sources
 - [`testing-guide.md`](../guides/testing-guide.md) — the general recipe for the database-gated suites

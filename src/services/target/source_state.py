@@ -1,7 +1,7 @@
-"""One archive fence writer, under the common source lock order.
+"""One past-posts fence writer, under the common source lock order.
 
 Enter before holding an intent/job lease or any later row lock. A consumer
-that locks those first breaks the order archive activation relies on. Locks
+that locks those first breaks the order past-posts activation relies on. Locks
 are transaction scoped; provider I/O belongs after this transaction commits.
 """
 
@@ -16,7 +16,7 @@ from src.services.target import audit, readers
 
 
 @dataclass(frozen=True)
-class ArchiveState:
+class PastPostsState:
     enabled: bool
     removed: bool
     generation_id: str | None
@@ -46,10 +46,10 @@ def _locks(executor):
     transaction = sync.get_transaction()
     if transaction is None:
         raise RuntimeError("source_lock_requires_transaction")
-    current = executor.info.get("archive_source_locks")
+    current = executor.info.get("past_posts_source_locks")
     if current is None or current[0] is not transaction:
         current = (transaction, {})
-        executor.info["archive_source_locks"] = current
+        executor.info["past_posts_source_locks"] = current
     return current[1]
 
 
@@ -147,9 +147,9 @@ def require_source_lock(executor, workspace_id: str, source_id: str) -> None:
         raise RuntimeError("source_lock_required")
 
 
-async def archive_state(
+async def past_posts_state(
     executor, *, workspace_id: str, source_id: str
-) -> ArchiveState | None:
+) -> PastPostsState | None:
     require_source_lock(executor, workspace_id, source_id)
     row = await readers.row(
         executor,
@@ -160,17 +160,17 @@ async def archive_state(
         " AND d.source_id = s.id AND d.ig_account_id = s.origin_ig_account_id AND d.state = 'active') AS assigned"
         " FROM media_sources s LEFT JOIN category_post_case_mix x"
         " ON x.workspace_id = s.workspace_id AND x.source_id = s.id AND x.effective_to IS NULL"
-        " LEFT JOIN instagram_archive_generations g ON g.workspace_id = s.workspace_id"
+        " LEFT JOIN instagram_past_posts_generations g ON g.workspace_id = s.workspace_id"
         " AND g.source_id = s.id AND g.id = s.current_authorization_generation_id AND g.lifecycle = 'active'"
         " LEFT JOIN oauth_credentials c ON c.workspace_id = s.workspace_id"
         " AND c.ig_account_id = s.origin_ig_account_id AND c.provider = 'ig_login'"
-        " WHERE s.workspace_id = :ws AND s.id = :sid AND s.provider = 'instagram_archive'",
+        " WHERE s.workspace_id = :ws AND s.id = :sid AND s.provider = 'instagram_past_posts'",
         ws=str(workspace_id),
         sid=str(source_id),
     )
     if row is None:
         return None
-    return ArchiveState(
+    return PastPostsState(
         bool(row["enabled"]),
         bool(row["removed"]),
         str(row["generation_id"]) if row["generation_id"] else None,
@@ -179,12 +179,12 @@ async def archive_state(
     )
 
 
-async def apply_archive_transition(
+async def apply_past_posts_transition(
     executor,
     *,
     workspace_id: str,
     source_id: str,
-    before: ArchiveState | None,
+    before: PastPostsState | None,
     reason: str,
 ) -> int:
     """Compare logical state, bump once per source/transaction, audit atomically.
@@ -199,18 +199,18 @@ async def apply_archive_transition(
     needs `active` and an armed source that is never admitted is never read;
     any other state, `paused` included, is left as it is.
     """
-    after = await archive_state(
+    after = await past_posts_state(
         executor, workspace_id=workspace_id, source_id=source_id
     )
     if after is None:
-        raise ValueError("archive_source_not_found")
+        raise ValueError("past_posts_source_not_found")
     params = {"ws": str(workspace_id), "sid": str(source_id)}
     if after != before:
         changed = await readers.row(
             executor,
             "UPDATE media_sources SET source_use_epoch = source_use_epoch + 1,"
             " source_epoch_transaction_id = txid_current()"
-            " WHERE workspace_id = :ws AND id = :sid AND provider = 'instagram_archive'"
+            " WHERE workspace_id = :ws AND id = :sid AND provider = 'instagram_past_posts'"
             " AND source_epoch_transaction_id IS DISTINCT FROM txid_current() RETURNING source_use_epoch",
             **params,
         )
@@ -219,7 +219,7 @@ async def apply_archive_transition(
                 text(
                     "UPDATE media_sources SET next_sync_at = clock_timestamp(), alerted_at = NULL,"
                     " state = CASE WHEN state = 'error' THEN 'active' ELSE state END"
-                    " WHERE workspace_id = :ws AND id = :sid AND provider = 'instagram_archive'"
+                    " WHERE workspace_id = :ws AND id = :sid AND provider = 'instagram_past_posts'"
                 ),
                 params,
             )

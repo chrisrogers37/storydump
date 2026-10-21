@@ -26,7 +26,7 @@
  */
 
 import { asApprovalPosition, type ApprovalPosition } from "./approvals";
-import type { MediaProvenance } from "./archive-media";
+import type { MediaProvenance } from "./past-posts-media";
 import { NON_TERMINAL_STATES, TERMINAL_STATES as TERMINAL_STATE_LIST } from "./intents";
 import { cardRows, type CategoryMixResponse, type WeightMode } from "./category-mix";
 import {
@@ -71,10 +71,10 @@ export type StatsResponse = {
 export type MediaRow = {
   id: string;
   source_id: string | null;
-  /** The provider's id for the file; null for an archive item, whose is Instagram's id. */
+  /** The provider's id for the file; null for a past-posts item, whose is Instagram's id. */
   provider_file_ref: string | null;
   /**
-   * An archive item reads `ARCHIVE_ITEM_NAME`: it is stored under that name, and
+   * A past-posts item reads `PAST_POSTS_ITEM_NAME`: it is stored under that name, and
    * every read projects it, a row stored as `Instagram <Graph id>` included.
    */
   file_name: string;
@@ -89,12 +89,12 @@ export type MediaRow = {
   has_thumbnail: boolean;
   /**
    * The thumbnail URL's version. A Drive item's is the same version for the
-   * same picture; an archive item's is the generation and epoch the API will
+   * same picture; a past-posts item's is the generation and epoch the API will
    * answer for, and null while the item awaits observation again.
    */
   thumbnail_version: string | null;
   /**
-   * Where an archive item came from; null for a Drive item. This read carries
+   * Where a past-posts item came from; null for a Drive item. This read carries
    * it, and it is never a Graph id, a permalink or a caption.
    */
   provenance?: MediaProvenance | null;
@@ -391,7 +391,7 @@ export function deriveFolderMix(
 /** One source on the overview's mix card of a converted workspace. */
 export type SourceShareView = {
   sourceId: string;
-  /** "Your Instagram", or the folder's name. */
+  /** "Instagram past posts", or the folder's name. */
   title: string;
   /** "@handle · Instagram", or "Google Drive": the handle is in the row's text. */
   subtitle: string;

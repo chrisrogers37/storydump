@@ -8,7 +8,7 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.test_source_suitability_gate import activate
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
@@ -38,10 +38,12 @@ async def capture(engine, origin, src, capability=True):
         )
 
 
-async def test_empty_on_archive_admits_without_item_or_pool(archive_engine, origin):
+async def test_empty_on_past_posts_admits_without_item_or_pool(
+    past_posts_engine, origin
+):
     service()
-    src = await ready(archive_engine, origin)
-    c = await capture(archive_engine, origin, src)
+    src = await ready(past_posts_engine, origin)
+    c = await capture(past_posts_engine, origin, src)
     assert c.generation_id == src["generation_id"] and c.credential_id == str(
         origin["credential"]
     )
@@ -68,12 +70,12 @@ async def test_empty_on_archive_admits_without_item_or_pool(archive_engine, orig
             "credential_unavailable",
         ),
         (
-            "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:gid",
+            "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending' WHERE id=:gid",
             "generation_unavailable",
         ),
-        # archive lifecycle cleanup: a generation held for review is unavailable, not destroyed.
+        # past-posts lifecycle cleanup: a generation held for review is unavailable, not destroyed.
         (
-            "UPDATE instagram_archive_generations SET lifecycle='review_hold' WHERE id=:gid",
+            "UPDATE instagram_past_posts_generations SET lifecycle='review_hold' WHERE id=:gid",
             "generation_unavailable",
         ),
         (
@@ -82,22 +84,22 @@ async def test_empty_on_archive_admits_without_item_or_pool(archive_engine, orig
         ),
         (
             "UPDATE workspaces SET source_mix_conversion_version=2 WHERE id=:ws",
-            "archive_not_activated",
+            "past_posts_not_activated",
         ),
         (
             "UPDATE workspaces SET source_mix_revision=NULL WHERE id=:ws",
-            "archive_not_activated",
+            "past_posts_not_activated",
         ),
         (
             "UPDATE workspaces SET source_mix_mode=NULL WHERE id=:ws",
-            "archive_not_activated",
+            "past_posts_not_activated",
         ),
     ],
 )
-async def test_current_authority_refuses_closed(archive_engine, origin, sql, reason):
+async def test_current_authority_refuses_closed(past_posts_engine, origin, sql, reason):
     s = service()
-    src = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(sql),
             dict(
@@ -108,18 +110,18 @@ async def test_current_authority_refuses_closed(archive_engine, origin, sql, rea
             ),
         )
     with pytest.raises(s.SourceReadRefused) as refused:
-        await capture(archive_engine, origin, src)
+        await capture(past_posts_engine, origin, src)
     assert (
         refused.value.reason == reason and refused.value.source_id == src["source_id"]
     )
 
 
-async def test_feature_gate_and_drive_off_control(archive_engine, origin):
+async def test_feature_gate_and_drive_off_control(past_posts_engine, origin):
     s = service()
-    src = await ready(archive_engine, origin)
-    with pytest.raises(s.SourceReadRefused, match="archive_not_activated"):
-        await capture(archive_engine, origin, src, False)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await ready(past_posts_engine, origin)
+    with pytest.raises(s.SourceReadRefused, match="past_posts_not_activated"):
+        await capture(past_posts_engine, origin, src, False)
+    async with obs.uow(past_posts_engine, origin) as conn:
         drive = await s.capture_source_read(
             conn, workspace_id=str(origin["ws"]), source_id=str(origin["src"])
         )
@@ -127,19 +129,19 @@ async def test_feature_gate_and_drive_off_control(archive_engine, origin):
 
 
 async def test_off_on_and_reused_credential_g2_reject_old_capture(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     s = service()
-    src = await ready(archive_engine, origin)
-    old = await capture(archive_engine, origin, src)
+    src = await ready(past_posts_engine, origin)
+    old = await capture(past_posts_engine, origin, src)
     from src.services.target import source_state
 
     for ratio in (0, 1):
-        async with obs.uow(archive_engine, origin) as conn:
+        async with obs.uow(past_posts_engine, origin) as conn:
             await source_state.lock_all_workspace_sources(
                 conn, workspace_id=str(origin["ws"])
             )
-            before = await source_state.archive_state(
+            before = await source_state.past_posts_state(
                 conn, workspace_id=str(origin["ws"]), source_id=src["source_id"]
             )
             await conn.execute(
@@ -148,49 +150,51 @@ async def test_off_on_and_reused_credential_g2_reject_old_capture(
                 ),
                 dict(ratio=ratio, sid=src["source_id"]),
             )
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn,
                 workspace_id=str(origin["ws"]),
                 source_id=src["source_id"],
                 before=before,
                 reason="test",
             )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         with pytest.raises(s.SourceReadRefused, match="source_epoch_changed"):
             await s.check_source_read(conn, old, capability=foundation.capability())
-    current = await capture(archive_engine, origin, src)
-    g2 = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    current = await capture(past_posts_engine, origin, src)
+    g2 = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     assert g2["generation_id"] != current.generation_id
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         with pytest.raises(s.SourceReadRefused):
             await s.check_source_read(conn, current, capability=foundation.capability())
 
 
 async def test_request_hook_requires_original_capture_and_commits_each_check(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     s = service()
-    from src.services.target.instagram_archive_adapter import ArchiveAccess
+    from src.services.target.instagram_past_posts_adapter import PastPostsAccess
     from src.services.target.media_adapters import MediaSourceFenceDrop
 
-    src = await ready(archive_engine, origin)
-    c = await capture(archive_engine, origin, src)
-    provider = s.admission_provider(archive_engine, capability=foundation.capability())
+    src = await ready(past_posts_engine, origin)
+    c = await capture(past_posts_engine, origin, src)
+    provider = s.admission_provider(
+        past_posts_engine, capability=foundation.capability()
+    )
     with pytest.raises(MediaSourceFenceDrop) as refused:
         await provider(
             src["source_id"],
             workspace_id=str(origin["ws"]),
-            access=ArchiveAccess(c.account_ref, "unused"),
+            access=PastPostsAccess(c.account_ref, "unused"),
         )
     assert refused.value.reason == "source_capture_missing"
     hook = await provider(
         src["source_id"],
         workspace_id=str(origin["ws"]),
-        access=ArchiveAccess(c.account_ref, "unused", c),
+        access=PastPostsAccess(c.account_ref, "unused", c),
     )
     ticket = await hook.before_dispatch()
     await hook.after_return(ticket)
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE category_post_case_mix SET ratio=0 WHERE source_id=:sid"),
             dict(sid=src["source_id"]),

@@ -6,14 +6,14 @@ import uuid
 import httpx
 import pytest
 from sqlalchemy import text
-from tests.scripts import test_archive_preview_gate as preview_gate
+from tests.scripts import test_past_posts_preview_gate as preview_gate
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts.test_instagram_observations_gate import uow, row
 from src.api.app import create_app
 from src.api.principal import Principal, current_principal
 from src.services.target import category_mix
 
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 #: The API's own login (`svc_ingress`), for the tests that drive the real app.
 ingress = preview_gate.ingress
@@ -67,9 +67,9 @@ async def add(conn, chain, ratios):
     ],
 )
 async def test_conversion_atomic_decimal_and_retry(
-    archive_engine, origin, tmp_path, ratios, mode
+    past_posts_engine, origin, tmp_path, ratios, mode
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, ratios)
         first = await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
@@ -103,9 +103,9 @@ async def test_conversion_atomic_decimal_and_retry(
 
 
 async def test_missing_drain_refuses_without_mutation_even_if_caught(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         with pytest.raises(category_mix.MixConversionUnavailable):
             await category_mix.convert_workspace(
                 conn, workspace_id=str(origin["ws"]), evidence=None
@@ -119,9 +119,9 @@ async def test_missing_drain_refuses_without_mutation_even_if_caught(
 
 
 async def test_custom_stale_and_membership_actions_preserve_off(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", "0"])
         await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
@@ -202,11 +202,11 @@ async def test_custom_stale_and_membership_actions_preserve_off(
 
 
 async def test_real_allocator_off_add_preserves_custom_and_enabled_add_resets(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
     from src.services.target.source_membership import AllocationRequest
 
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", None])
         # Convert the first two with all-explicit custom intent.
         await conn.execute(
@@ -240,11 +240,11 @@ async def test_real_allocator_off_add_preserves_custom_and_enabled_add_resets(
 
 
 async def test_converter_crash_rolls_back_inside_caught_caller_transaction(
-    archive_engine, origin, tmp_path, monkeypatch
+    past_posts_engine, origin, tmp_path, monkeypatch
 ):
     from src.services.target import audit
 
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await add(conn, origin, [None, None])
 
         async def fail(*args, **kwargs):
@@ -264,9 +264,9 @@ async def test_converter_crash_rolls_back_inside_caught_caller_transaction(
 
 
 async def test_hybrid_50000_items_empty_automatic_stays_positive(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, ["1", None])
         await conn.execute(
             text(
@@ -285,7 +285,7 @@ async def test_hybrid_50000_items_empty_automatic_stays_positive(
 
 
 async def test_workspace_creation_compatibility_and_explicit_v2_barrier(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
     import uuid
     from src.services.target import workspaces
@@ -294,7 +294,7 @@ async def test_workspace_creation_compatibility_and_explicit_v2_barrier(
     for explicit, admitted in [(False, False), (True, False), (True, True)]:
         ws = str(uuid.uuid4())
         async with unit_of_work(
-            archive_engine, ws, actor_kind="system"
+            past_posts_engine, ws, actor_kind="system"
         ).begin() as conn:
             if explicit and not admitted:
                 with pytest.raises(category_mix.MixConversionUnavailable):
@@ -331,8 +331,10 @@ async def test_workspace_creation_compatibility_and_explicit_v2_barrier(
                 assert all(v is None for v in saved.values())
 
 
-async def test_preview_never_changes_scd_or_revision(archive_engine, origin, tmp_path):
-    async with uow(archive_engine, origin) as conn:
+async def test_preview_never_changes_scd_or_revision(
+    past_posts_engine, origin, tmp_path
+):
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", "0"])
         await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
@@ -358,9 +360,9 @@ async def test_preview_never_changes_scd_or_revision(archive_engine, origin, tmp
 
 
 async def test_versioned_drive_source_add_remove_and_off_only_preserve_custom(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3"])
         await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
@@ -400,24 +402,27 @@ async def test_versioned_drive_source_add_remove_and_off_only_preserve_custom(
         assert all(Decimal(r["ratio"]) > 0 for r in added["mix"]["rows"])
 
 
-async def test_real_archive_allocator_epoch_changes_only_enablement(
-    archive_engine, origin, tmp_path
+async def test_real_past_posts_allocator_epoch_changes_only_enablement(
+    past_posts_engine, origin, tmp_path
 ):
-    from src.services.target.source_membership import connect_archive, ArchiveChoice
+    from src.services.target.source_membership import (
+        connect_past_posts,
+        PastPostsChoice,
+    )
 
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await add(conn, origin, ["1"])
         await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
-    async with uow(archive_engine, origin) as conn:
-        connected = await connect_archive(
+    async with uow(past_posts_engine, origin) as conn:
+        connected = await connect_past_posts(
             conn,
             workspace_id=str(origin["ws"]),
             origin_ig_account_id=str(origin["iga"]),
             authorization=foundation.authorization(),
             had_prior_grant=False,
-            choice=ArchiveChoice(True, 1),
+            choice=PastPostsChoice(True, 1),
             allocation_writer=category_mix.allocate_membership,
             capability=foundation.capability(),
         )
@@ -462,7 +467,7 @@ async def mix_api(engine, user, *, capability):
     """The real app over *engine*, with *user* signed in. *capability* is what a
     composition root would inject: None is production's, and the rollback's."""
     app = create_app(engine=engine, env={})
-    app.state.archive_capability = capability
+    app.state.past_posts_capability = capability
     app.dependency_overrides[current_principal] = lambda: Principal(
         session_id=str(uuid.uuid4()), user_id=str(user)
     )
@@ -475,38 +480,41 @@ async def mix_api(engine, user, *, capability):
         app.dependency_overrides.clear()
 
 
-async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_http(
+async def test_a_withdrawn_capability_turns_a_past_posts_off_but_never_on_over_http(
     ingress, origin, tmp_path
 ):
-    """The rollback: archive rows exist and the deployment no longer injects the
-    capability. Off closes, so an archive row's Off through the real routes, as
+    """The rollback: past-posts rows exist and the deployment no longer injects the
+    capability. Off closes, so a past-posts row's Off through the real routes, as
     the API's own role, still works, and so does its preview. On opens: it is a
     named 503 on the PUT and on its preview and writes nothing, a malformed value
     included (a closing exemption is never inferred from a value the client got
     wrong). With the capability back, a wrong value is a 400 and the same On body
     is the allowed path. Never the bare 500 an unhandled refusal was."""
-    from src.services.target.source_membership import ArchiveChoice, connect_archive
+    from src.services.target.source_membership import (
+        PastPostsChoice,
+        connect_past_posts,
+    )
 
     ws = str(origin["ws"])
     async with uow(ingress, origin) as conn:
         await add(conn, origin, ["1"])
         await category_mix.convert_workspace(conn, workspace_id=ws, evidence=evidence())
     async with uow(ingress, origin) as conn:
-        connected = await connect_archive(
+        connected = await connect_past_posts(
             conn,
             workspace_id=ws,
             origin_ig_account_id=str(origin["iga"]),
             authorization=foundation.authorization(),
             had_prior_grant=False,
-            choice=ArchiveChoice(True, 1),
+            choice=PastPostsChoice(True, 1),
             allocation_writer=category_mix.allocate_membership,
             capability=foundation.capability(),
         )
-    archive = connected.source_id
+    past_posts = connected.source_id
     assert (connected.history_enabled, connected.mix_revision) == (True, 2)
 
     async def saved():
-        """The mix revision and the archive's current ratio, as the tenant reads them."""
+        """The mix revision and the past-posts source's current ratio, as the tenant reads them."""
         async with uow(ingress, origin) as conn:
             revision = await row(
                 conn,
@@ -518,7 +526,7 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
                 "SELECT ratio FROM category_post_case_mix WHERE workspace_id=:ws"
                 " AND source_id=:sid AND effective_to IS NULL",
                 ws=ws,
-                sid=archive,
+                sid=past_posts,
             )
         return revision["n"], ratio["ratio"]
 
@@ -528,19 +536,22 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
     off = {
         "protocol_version": 2,
         "action": "set_enabled",
-        "source_id": archive,
+        "source_id": past_posts,
         "enabled": False,
         "expected_revision": 2,
     }
 
     on = {**off, "enabled": True, "expected_revision": 3}
-    refusal = {"detail": "archive_not_activated", "reason": "archive_not_activated"}
+    refusal = {
+        "detail": "past_posts_not_activated",
+        "reason": "past_posts_not_activated",
+    }
 
     async with mix_api(ingress, origin["user"], capability=None) as client:
-        # The editor still loads: archive rows are listed, the archive is not available.
+        # The editor still loads: past-posts rows are listed, the past-posts source is not available.
         listed = await client.get(mix)
         assert listed.status_code == 200, listed.text
-        assert listed.json()["archive_available"] is False
+        assert listed.json()["past_posts_available"] is False
 
         # Off closes: its preview answers and saves nothing, then the PUT turns it off.
         previewed = await client.post(f"{mix}/preview", json=off)
@@ -550,7 +561,7 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
         done = await client.put(mix, json=off)
         assert done.status_code == 200, done.text
         assert done.json()["revision"] == 3
-        switched = next(r for r in done.json()["rows"] if r["source_id"] == archive)
+        switched = next(r for r in done.json()["rows"] if r["source_id"] == past_posts)
         assert (switched["enabled"], switched["ratio"]) == (False, "0")
         assert await saved() == (3, Decimal(0))
 
@@ -571,8 +582,8 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
         wrong = await client.put(mix, json={**on, "enabled": "no"})
         assert wrong.status_code == 400, wrong.text
         assert wrong.json() == {
-            "detail": "invalid_archive_choice",
-            "reason": "invalid_archive_choice",
+            "detail": "invalid_past_posts_choice",
+            "reason": "invalid_past_posts_choice",
         }
         assert await saved() == (3, Decimal(0))
 
@@ -584,7 +595,7 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
         done = await client.put(mix, json=on)
         assert done.status_code == 200, done.text
         assert done.json()["revision"] == 4
-        switched = next(r for r in done.json()["rows"] if r["source_id"] == archive)
+        switched = next(r for r in done.json()["rows"] if r["source_id"] == past_posts)
         assert (switched["enabled"], Decimal(switched["ratio"])) == (
             True,
             Decimal("0.5"),
@@ -594,10 +605,10 @@ async def test_a_withdrawn_capability_turns_an_archive_off_but_never_on_over_htt
 
 @pytest.mark.parametrize("requested", [True, False, None])
 async def test_removed_drive_readd_honors_requested_membership(
-    archive_engine, origin, tmp_path, requested
+    past_posts_engine, origin, tmp_path, requested
 ):
     """Same-folder restoration is an add; it preserves stable source identity."""
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3"])
         await category_mix.convert_workspace(
             conn, workspace_id=str(origin["ws"]), evidence=evidence()
@@ -653,10 +664,10 @@ async def test_removed_drive_readd_honors_requested_membership(
 
 @pytest.mark.parametrize("was_enabled", [True, False])
 async def test_connected_drive_reconnect_preserves_saved_membership(
-    archive_engine, origin, tmp_path, was_enabled
+    past_posts_engine, origin, tmp_path, was_enabled
 ):
     """A grant/idempotent connect is not a removed-folder membership addition."""
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3", "0"])
         sid = ids[0] if was_enabled else ids[2]
         await conn.execute(

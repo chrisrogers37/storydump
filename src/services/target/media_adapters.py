@@ -121,7 +121,7 @@ class MediaPage(Generic[Observation]):
     """Complete observations are separate from representable candidates.
 
     Tuple unpacking/indexing serves the Drive/sync port: Drive returns its
-    tuple, and only archive consumers use observations. Landing/checkpoint CAS
+    tuple, and only past-posts consumers use observations. Landing/checkpoint CAS
     owns the separate committed-progress counters.
     """
 
@@ -155,7 +155,7 @@ SOURCE_FENCE_REASONS = frozenset(
         "origin_unavailable",
         "generation_unavailable",
         "credential_unavailable",
-        "archive_not_activated",
+        "past_posts_not_activated",
         "source_not_found",
         "source_epoch_changed",
         "source_generation_changed",

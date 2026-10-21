@@ -165,7 +165,7 @@ describe("the posting mix card of a converted workspace", () => {
     provider,
     name,
     state: "active",
-    origin_handle: provider === "instagram_archive" ? name : null,
+    origin_handle: provider === "instagram_past_posts" ? name : null,
     enabled: share !== "0",
     ratio: share,
     target_share: share,
@@ -193,14 +193,14 @@ describe("the posting mix card of a converted workspace", () => {
   it("gives each source a row: its title and provider, its target, its posted share", () => {
     const text = draw(
       converted([
-        sourceRow(IG, "instagram_archive", "example_handle", THIRD),
+        sourceRow(IG, "instagram_past_posts", "example_handle", THIRD),
         sourceRow(DRIVE, "gdrive", "Event photos", THIRD),
         sourceRow(EVENTS, "gdrive", "Events", THIRD),
       ]),
       { [IG]: 2, [DRIVE]: 1, [EVENTS]: 1 },
     );
     expect(text).toContain("Source Target Posted");
-    expect(text).toContain("Your Instagram @example_handle · Instagram 33.4% 50%");
+    expect(text).toContain("Instagram past posts @example_handle · Instagram 33.4% 50%");
     expect(text).toContain("Event photos Google Drive 33.3% 25%");
     expect(text).toContain("Events Google Drive 33.3% 25%");
     expect(text).toContain("Posted: each source's share of the 4 posts the mix picked in this window.");
@@ -210,11 +210,11 @@ describe("the posting mix card of a converted workspace", () => {
   it("reads an Off source as Off, and every source Off as a choice", () => {
     const text = draw(
       converted([
-        sourceRow(IG, "instagram_archive", "example_handle", "0"),
+        sourceRow(IG, "instagram_past_posts", "example_handle", "0"),
         sourceRow(DRIVE, "gdrive", "Event photos", "0"),
       ]),
     );
-    expect(text).toContain("Your Instagram @example_handle · Instagram Off —");
+    expect(text).toContain("Instagram past posts @example_handle · Instagram Off —");
     expect(text).toContain("Every source is Off, so nothing is drawn until one is turned on in Posting mix.");
     expect(text).toContain("Posted shares are not available yet.");
   });
@@ -233,13 +233,13 @@ describe("the posting mix card of a converted workspace", () => {
 
   it("with accounts that draw on different sources, says a workspace target is no one account's share", () => {
     const rows = [
-      sourceRow(IG, "instagram_archive", "example_handle", "0.5"),
+      sourceRow(IG, "instagram_past_posts", "example_handle", "0.5"),
       sourceRow(DRIVE, "gdrive", "Event photos", "0.5"),
     ];
     const served = (...ids: string[]) => ids.map((source_id) => ({ source_id, assignable: true }));
     const one = [{ account_id: "a1", sources: served(IG, DRIVE) }];
     expect(draw(converted(rows, one))).not.toContain("Each account's own share can differ");
-    // The archive serves its own account and not the other: they draw differently.
+    // The past-posts source serves its own account and not the other: they draw differently.
     const apart = [
       { account_id: "a1", sources: served(IG, DRIVE) },
       { account_id: "a2", sources: [{ source_id: IG, assignable: false }, ...served(DRIVE)] },

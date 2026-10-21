@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.services.target import (
-    archive_transit_cleanup,
+    past_posts_transit_cleanup,
     intent_ledger,
     offboarding,
     workspaces,
@@ -141,8 +141,8 @@ class TestTheDrainBound:
         assert (out["cancelled"], out["more"]) == (5, True)
 
 
-class TestTheArchiveTransitDrain:
-    """Leg 3's archive half reports what the scope still owes whether or not a
+class TestThePastPostsTransitDrain:
+    """Leg 3's past-posts half reports what the scope still owes whether or not a
     transit store is wired: the run decides on `unresolved`, so a report without
     it is a run that finalizes into the guard's refusal and strands the
     workspace."""
@@ -153,12 +153,12 @@ class TestTheArchiveTransitDrain:
 
         async def settle_and_destroy(engine, **kwargs):
             calls.append((engine, kwargs))
-            return archive_transit_cleanup.TransitDrain(
+            return past_posts_transit_cleanup.TransitDrain(
                 settled=1, destroyed=0, unresolved=2, overdue=1
             )
 
         monkeypatch.setattr(
-            archive_transit_cleanup, "settle_and_destroy", settle_and_destroy
+            past_posts_transit_cleanup, "settle_and_destroy", settle_and_destroy
         )
         return calls
 
@@ -170,7 +170,7 @@ class TestTheArchiveTransitDrain:
     ):
         """Mutation that reddens: return `{"seam": "absent"}` before asking, which
         is what let a run with no store finalize over an owed upload."""
-        out = await offboarding.drain_archive_transit(
+        out = await offboarding.drain_past_posts_transit(
             SimpleNamespace(engine="engine", transit=transit), "ws-1"
         )
         assert out == {
@@ -186,7 +186,7 @@ class TestTheArchiveTransitDrain:
                 {
                     "workspace_id": "ws-1",
                     "transit": transit,
-                    "limit": archive_transit_cleanup.DRAIN_LIMIT,
+                    "limit": past_posts_transit_cleanup.DRAIN_LIMIT,
                 },
             )
         ]

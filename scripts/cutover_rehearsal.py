@@ -342,7 +342,9 @@ def run(
         print("converted legacy runner ledger to runner.schema_migrations_legacy")
         preserved = preserve_public_legacy_ledgers(restored)
         print("preserved public history: " + (", ".join(preserved) or "none present"))
-        pending = migration_runner.apply_pending(restored, migrations)
+        # 003 and later run after 001 and 002 (003 refuses to run before them),
+        # so the deploy before the owner steps carries the files through 002.
+        pending = migration_runner.apply_pending(restored, migrations, max_version=2)
         if pending.applied or [m.version for m in pending.owed] != [1, 2]:
             raise RuntimeError(
                 "pre-deploy must leave exactly 001 and 002 owed and apply neither"
@@ -367,6 +369,12 @@ def run(
             restored, migrations, 2, confirm_archive_backup=True
         )
         print("applied owner step 002 after confirmed snapshot backup")
+        later = migration_runner.apply_pending(restored, migrations)
+        print(
+            "deploy after the owner steps: "
+            + (", ".join(m.label for m in later.applied) or "nothing")
+            + " applied"
+        )
         require_parity(restored, expected)
         if drift_dsn:
             print("checking SCHEMA_DRIFT_DSN in read-only transactions")

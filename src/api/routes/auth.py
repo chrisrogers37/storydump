@@ -54,7 +54,7 @@ or the claim page posted no token of a claim's shape) — those two land on
 with a grant the leg will not keep; `google_drive_oauth.REDIRECT_REASON` maps
 each refusal) · ``already_connected`` (Instagram: the real account is already
 another destination in this workspace) · ``history_setup_failed`` (Instagram,
-where the archive is live: the history choice could not be applied, and
+where the past-posts source is live: the history choice could not be applied, and
 nothing the callback wrote landed). A Drive failure also carries
 ``flow=drive`` and an Instagram one ``flow=instagram``: the page is
 sign-in-shaped by default and needs to know which leg it renders for.
@@ -63,7 +63,7 @@ sign-in-shaped by default and needs to know which leg it renders for.
 `POST /api/v1/workspaces/{ws}/accounts/{id}/connect`: the same
 shape as the Drive leg on the path the Meta app has registered, so the app
 needs no console change. The admin check runs again at the callback,
-inside the write transaction. Where the archive is live it also applies the
+inside the write transaction. Where the past-posts source is live it also applies the
 history choice the state recorded and lands on Settings with the applied
 result's id (`connect_choice`), and records the verified Meta
 identity the exchange proved (`identity_mappings`): an exchange that
@@ -110,7 +110,10 @@ from src.services.target import (
     signup_admissions,
     tenant_resolution,
 )
-from src.services.target.instagram_sources import ArchiveAuthorization, ArchiveRefused
+from src.services.target.instagram_sources import (
+    PastPostsAuthorization,
+    PastPostsRefused,
+)
 from src.services.target.oauth_states import (
     STATE_TTL_SECONDS,
     OAuthStateRefused,
@@ -638,7 +641,7 @@ async def instagram_login_callback(
     # Unpinned: the workspace-level ADD. One landing function decides; the
     # credential write below is the same either way.
     target = row["reconnect_target"]
-    capability = getattr(request.app.state, "archive_capability", None)
+    capability = getattr(request.app.state, "past_posts_capability", None)
     result_id = None
     uow = unit_of_work(
         require_engine(request),
@@ -659,11 +662,11 @@ async def instagram_login_callback(
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
             )
-            # where the archive is live the recorded history
+            # where the past-posts source is live the recorded history
             # choice lands with the destination, under the source prefix taken
             # first. Without a capability no statement is issued here and the
-            # landing below makes no archive write.
-            archive = (
+            # landing below makes no past-posts write.
+            past_posts = (
                 await connect_choice.live_revision(
                     session, workspace_id=workspace_id, capability=capability
                 )
@@ -678,8 +681,8 @@ async def instagram_login_callback(
             )
             # Read BEFORE the credential lands, from the account, never from
             # the state's purpose: had it been granted before? A pre-rollout
-            # grant is an existing connection, and its archive lands Off.
-            had_prior_grant = archive and (
+            # grant is an existing connection, and its past-posts source lands Off.
+            had_prior_grant = past_posts and (
                 await ig_login_oauth.connect_purpose(
                     session, workspace_id=workspace_id, ig_account_id=account_id
                 )
@@ -694,12 +697,12 @@ async def instagram_login_callback(
                 token=grant.access_token,
                 expires_at=grant.expires_at,
             )
-            if archive:
+            if past_posts:
                 # The exchange that just succeeded is ONE authorization: the
-                # archive generation and the verified identity mapping
+                # past-posts generation and the verified identity mapping
                 # are bound to this id and this callback time.
-                # No mapping is recorded where the archive is not live.
-                authorization = ArchiveAuthorization(
+                # No mapping is recorded where the past-posts source is not live.
+                authorization = PastPostsAuthorization(
                     str(uuid.uuid4()),
                     app_id,
                     grant.ig_user_id,
@@ -732,7 +735,7 @@ async def instagram_login_callback(
             raise
         logger.warning("instagram connect: landing refused: %s", exc)
         return _fail(_ATTACH_REASON[exc.reason], flow=INSTAGRAM_FLOW)
-    except ArchiveRefused as exc:
+    except PastPostsRefused as exc:
         # The unit of work rolled back whole: no destination, credential,
         # source or result from this callback landed.
         logger.warning("instagram connect: history setup refused: %s", exc.reason)

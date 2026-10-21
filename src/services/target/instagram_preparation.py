@@ -1,4 +1,4 @@
-"""Selected archive bytes and identity-CAS evidence; never catalog traversal.
+"""Selected past-posts bytes and identity-CAS evidence; never catalog traversal.
 
 The injected adapter owns per-request admission. Every SQL checkpoint closes
 before provider/local decoder work. Returned bytes carry proof but never grant
@@ -22,13 +22,13 @@ from src.services.target import (
     vocabulary,
 )
 from src.services.target import source_read_admission as admission
-from src.services.target.instagram_sources import ArchiveCapability
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.instagram_catalog import TombstoneKeys
 from src.services.target.unit_of_work import unit_of_work
 
 
 @dataclass(frozen=True)
-class SelectedArchiveBytes:
+class SelectedPastPostsBytes:
     intent_id: str
     capture: admission.SourceReadCapture
     parent_media_id: str = field(repr=False)
@@ -39,8 +39,8 @@ class SelectedArchiveBytes:
 
 
 @dataclass(frozen=True)
-class ArchivePreparationPorts:
-    capability: ArchiveCapability
+class PastPostsPreparationPorts:
+    capability: PastPostsCapability
     prepare_adapter: Callable[[admission.SourceReadCapture, dict], Awaitable[Any]]
     tombstone_keys: TombstoneKeys = field(repr=False)
 
@@ -67,13 +67,13 @@ LEFT JOIN instagram_media_index x ON x.workspace_id=a.workspace_id AND x.source_
  AND x.parent_media_id=a.parent_media_id AND x.data_generation_id=a.data_generation_id
  AND x.observation_revision=a.observation_revision
 LEFT JOIN instagram_source_policies pol ON pol.workspace_id=s.workspace_id AND pol.source_id=s.id
-WHERE i.workspace_id=:ws AND i.id=:id AND s.provider='instagram_archive'
+WHERE i.workspace_id=:ws AND i.id=:id AND s.provider='instagram_past_posts'
 FOR UPDATE OF m,i
 """
 
 
 class SelectedPreparation:
-    def __init__(self, ports: ArchivePreparationPorts):
+    def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
 
     async def _start(self, engine, workspace_id, intent_id):
@@ -99,14 +99,14 @@ class SelectedPreparation:
                 raise source_policy.MediaAdmissionPending(
                     "asset_unavailable"
                     if subject["media_item_state"] == "removed"
-                    else "archive_revalidation_required"
+                    else "past_posts_revalidation_required"
                 )
             if (
                 not subject["parent_media_id"]
                 or str(subject["data_generation_id"]) != capture.generation_id
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             provenance = await readers.row(
                 conn,
@@ -121,7 +121,7 @@ class SelectedPreparation:
                     != subject["selected_asset_id"]
                 ):
                     raise source_policy.MediaAdmissionPending(
-                        "archive_revalidation_required"
+                        "past_posts_revalidation_required"
                     )
                 if provenance["transit_artifact_ref"] is not None and (
                     str(provenance["capture_generation_id"]) != capture.generation_id
@@ -131,7 +131,7 @@ class SelectedPreparation:
                     != subject["current_fingerprint"]
                 ):
                     raise source_policy.MediaAdmissionPending(
-                        "archive_revalidation_required"
+                        "past_posts_revalidation_required"
                     )
             candidate = await source_policy.intent_suitability(
                 conn,
@@ -190,7 +190,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
 
     async def fetch_selected(
         self, *, engine, workspace_id, intent_id
-    ) -> SelectedArchiveBytes:
+    ) -> SelectedPastPostsBytes:
         selected = await self._start(engine, workspace_id, intent_id)
         return await self._fetch(engine, workspace_id, intent_id, selected)
 
@@ -219,7 +219,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         except media_adapters.MediaSelectedAssetChanged:
             # A truncated children read cannot prove the selected slide left.
             raise source_policy.MediaAdmissionPending(
-                "archive_revalidation_required"
+                "past_posts_revalidation_required"
             ) from None
         except media_adapters.MediaSelectedAssetGone:
             await self._retire_gone(engine, workspace_id, intent_id, selected)
@@ -256,7 +256,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 if validation.state == "unsupported"
                 else "validation_pending"
             )
-        return SelectedArchiveBytes(
+        return SelectedPastPostsBytes(
             str(intent_id),
             selected.capture,
             selected.subject["parent_media_id"],
@@ -299,7 +299,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 or subject["policy_revision"] != selected.policy_revision
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             provenance = await readers.row(
                 conn,
@@ -316,7 +316,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 or provenance["selected_asset_identity"] != before["selected_asset_id"]
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             retired = await instagram_catalog.retire_selected_asset(
                 conn,
@@ -330,7 +330,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if not retired:
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
 
     async def _land(self, engine, ws, iid, selected, validation, *, reason=None):
@@ -348,7 +348,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 raise source_policy.MediaAdmissionPending(
                     "asset_unavailable"
                     if subject["media_item_state"] == "removed"
-                    else "archive_revalidation_required"
+                    else "past_posts_revalidation_required"
                 )
             if (
                 subject is None
@@ -358,7 +358,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 or subject["selected_asset_id"] != selected.subject["selected_asset_id"]
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             if (
                 subject["cancel_requested"]
@@ -376,7 +376,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 or provenance["selected_asset_identity"] != subject["selected_asset_id"]
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             if provenance["transit_artifact_ref"] is not None and (
                 validation is None
@@ -387,7 +387,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 != subject["observation_revision"]
             ):
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             verdict = await source_policy.intent_suitability(
                 conn,
@@ -445,7 +445,7 @@ WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item
             )
             if changed.rowcount != 1:
                 raise source_policy.MediaAdmissionPending(
-                    "archive_revalidation_required"
+                    "past_posts_revalidation_required"
                 )
             if provenance["transit_artifact_ref"] is None:
                 await conn.execute(

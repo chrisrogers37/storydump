@@ -163,17 +163,29 @@ def run(
                     directory / "scripts/migrations/adoption_manifest.json",
                     max_version=0 if directory == root else None,
                 )
-            replay = apply_pending(dsns[1], root / "scripts/migrations")
-            replayed = list(replay.applied)
-            for migration in replay.owed:
-                manual = apply_manual(
-                    dsns[1],
-                    root / "scripts/migrations",
-                    migration.version,
-                    confirm_archive_backup=migration.version == 2,
-                )
-                replayed.extend(manual.applied)
-                if migration.version == 1:
+            # The tail replays in version order: a manual file when its turn
+            # comes, the ordinary files up to it before, so a file written
+            # after 001 and 002 runs after them.
+            replayed = []
+            manual_tail = {
+                m.version
+                for m in discover_migrations(root / "scripts/migrations")
+                if m.manual and m.version in later
+            }
+            for version in later:
+                if version in manual_tail:
+                    report = apply_manual(
+                        dsns[1],
+                        root / "scripts/migrations",
+                        version,
+                        confirm_archive_backup=version == 2,
+                    )
+                else:
+                    report = apply_pending(
+                        dsns[1], root / "scripts/migrations", max_version=version
+                    )
+                replayed.extend(report.applied)
+                if version == 1:
                     with closing(psycopg2.connect(dsns[1])) as connection:
                         with connection, connection.cursor() as cursor:
                             cursor.execute(

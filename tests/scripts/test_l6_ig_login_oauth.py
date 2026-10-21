@@ -125,7 +125,7 @@ def _call(oauth_db, fn):
 
 def _load(oauth_db, cid):
     """The bare read: no capture, so an unreadable payload takes the bare flip
-    these tests are about (`archive_lifecycle` owns the captured one)."""
+    these tests are about (`past_posts_lifecycle` owns the captured one)."""
     return _call(
         oauth_db,
         lambda c: oauth.load_credential(c, credential_id=cid, captured=None),

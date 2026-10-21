@@ -146,30 +146,30 @@ class MediaSource(TargetBase):
 
     __table_args__ = (
         Index(
-            "uq_archive_origin",
+            "uq_past_posts_origin",
             "workspace_id",
             "origin_ig_account_id",
             unique=True,
-            postgresql_where=text("provider = 'instagram_archive'"),
+            postgresql_where=text("provider = 'instagram_past_posts'"),
         ),
         CheckConstraint(
-            "provider IN ('gdrive','instagram_archive')", name="ck_sources_provider"
+            "provider IN ('gdrive','instagram_past_posts')", name="ck_sources_provider"
         ),
         CheckConstraint(
-            "(provider = 'instagram_archive') = (origin_ig_account_id IS NOT NULL)",
+            "(provider = 'instagram_past_posts') = (origin_ig_account_id IS NOT NULL)",
             name="ck_sources_origin",
         ),
         CheckConstraint("source_use_epoch >= 0", name="ck_sources_epoch"),
         CheckConstraint(
-            "current_authorization_generation_id IS NULL OR provider = 'instagram_archive'",
+            "current_authorization_generation_id IS NULL OR provider = 'instagram_past_posts'",
             name="ck_sources_current_authorization",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "id", "current_authorization_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
             name="fk_sources_current_authorization",
             ondelete="RESTRICT",
@@ -342,9 +342,9 @@ class MediaItem(TargetBase):
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "source_data_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
             name="fk_media_generation",
             ondelete="RESTRICT",

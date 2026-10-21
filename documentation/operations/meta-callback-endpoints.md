@@ -4,8 +4,8 @@
 do not, and the bounds they run under. Submitting the app for review is a separate
 process.
 
-Both endpoints know about the [Instagram archive](instagram-archive-review.md). The
-archive is off by default and runs only when activated, so until then what changes
+Both endpoints know about the [Instagram past posts](instagram-past-posts-review.md). The
+past-posts source runs wherever `PAST_POSTS_HMAC_KEYS` is configured, so what changes
 is limited to what the key ring and the verified identity mappings switch on; each
 section below says which.
 
@@ -20,9 +20,9 @@ conflating them would destroy tenant data on a mere disconnect.
 |---|---|---|
 | URL | `POST /webhooks/meta/deauthorize` | `POST /webhooks/meta/data-deletion` |
 | Fires when | a person removes the app | a person asks Meta to delete their data |
-| Effect | the matching accounts' current in-scope credentials are marked `revoked`, and an archive's current generation is fenced | a **receipt** is recorded |
+| Effect | the matching accounts' current in-scope credentials are marked `revoked`, and a past-posts source's current generation is fenced | a **receipt** is recorded |
 | Revokes the publishing credential | **yes** | **no** |
-| Deletes data | **no** | **not synchronously.** With a durable receipt the worker deletes, afterwards, what the archive imported for the receipt's frozen scope, and nothing else |
+| Deletes data | **no** | **not synchronously.** With a durable receipt the worker deletes, afterwards, what the past-posts source imported for the receipt's frozen scope, and nothing else |
 | Response | `{"status": "ok"}` | `{"url": ..., "confirmation_code": ...}` |
 
 A third, read-only door backs the returned URL:
@@ -49,7 +49,7 @@ Three reasons it must not delete inline, in increasing order of weight:
    Meta id will ever equal). The only proof of which account an app-scoped id belongs
    to is the OAuth exchange itself, which reads `/me` with the new token and says both.
    `meta_identity_mappings` (`meta_identity_mappings`) records that proof, bound to the credential and the
-   authorization it was verified for, where the archive is live and, for older
+   authorization it was verified for, where the past-posts source is live and, for older
    credentials, once reconciliation backfills it. Anywhere else the subject cannot be
    tied to anything.
 2. **The blast radius is not the requester's to spend.** An Instagram account
@@ -62,7 +62,7 @@ Three reasons it must not delete inline, in increasing order of weight:
    than the owner's own confirmed one.
 
 So the receipt is the deliverable. What the worker completes behind it is scoped to
-what the archive imported from the authorized account (below); removing a workspace
+what the past-posts source imported from the authorized account (below); removing a workspace
 stays the owner's confirmed act through the existing door.
 
 ## What a data-deletion request does
@@ -70,7 +70,7 @@ stays the owner's confirmed act through the existing door.
 1. **Verify.** The `signed_request` must verify against one of the two app secrets
    ([below](#the-app-secret-is-not-one-setting)). The setting that verified it names
    the app identity.
-2. **No key ring** (`ARCHIVE_HMAC_KEYS` unset or malformed): the plain receipt, kept
+2. **No key ring** (`PAST_POSTS_HMAC_KEYS` unset or malformed): the plain receipt, kept
    on purpose. The code is 16 hex characters derived from the app
    secret and the subject, logged and not stored, and the status page says only that
    the request was received. Nothing else happens.
@@ -92,15 +92,15 @@ stays the owner's confirmed act through the existing door.
      expands to a newer grant for want of evidence. Order evidence from beyond the skew,
      judged by the database's clock, is no evidence.
    - **Freeze.** In-scope and held scopes freeze the non-deleted generations of that
-     authorization on that origin's archive source. A grant made later never joins the
+     authorization on that origin's past-posts source. A grant made later never joins the
      scope, and a newer authorization is not deleted by an old callback.
    - **State.** The receipt is `pending`, or `completed` at once when nothing is in
      scope, or `needs_review` (below).
 4. **The answer** carries a fresh random 128-bit capability. The database keeps only
    its SHA-256 digest, and the status URL is `…/status?code=<capability>`. A request
    made after a reconnect is a new receipt, never a replay of the old.
-5. **The cleanup is the worker's.** The clock's `archive_lifecycle_sweep` (every 60
-   seconds, not gated on the archive's activation, because a deletion closes things)
+5. **The cleanup is the worker's.** The clock's `past_posts_lifecycle_sweep` (every 60
+   seconds, not gated on the past-posts source's activation, because a deletion closes things)
    marks scopes of removed workspaces `workspace_purged` and mints at most 25
    `meta_deletion_cleanup` jobs, one per receipt and workspace with due work. Each job
    runs four steps, each its own tenant transaction, never one across a provider call:
@@ -117,8 +117,8 @@ stays the owner's confirmed act through the existing door.
      (`transit_unresolved`). Nothing is ever uploaded again. With no transit store
      the worker asks the provider nothing: a scope that holds no unresolved upload
      completes, and one that does waits, then goes to review after the hour.
-   - **C. Redact**, all or nothing, through `fn_archive_redact_generation_records`
-     (archive lifecycle cleanup): provenance and artifact records, then the bound stories' queued card
+   - **C. Redact**, all or nothing, through `fn_past_posts_redact_generation_records`
+     (past-posts lifecycle cleanup): provenance and artifact records, then the bound stories' queued card
      payloads (once those stories are terminal and nothing is owed delivery), then
      the observations and shared item fields.
    - **D. Recount and report.** Every category of the completion predicate is counted
@@ -165,14 +165,14 @@ under its tenant and the `system` actor, and each account's current authorizatio
 classified the way a deletion classifies it. Only an in-scope current authorization is
 revoked:
 
-- an archive whose current generation it is is fenced (the generation superseded, the
+- a past-posts source whose current generation it is is fenced (the generation superseded, the
   credential revoked, the epoch bumped once);
 - any other account's credential is revoked directly.
 
 A newer or ambiguous authorization is left alone. Nothing is deleted.
 
 **For an account no mapping names, the account-reference lookup applies.** No mapping
-is recorded while the archive is not live, so an account connected then has none, and
+is recorded while the past-posts source is not live, so an account connected then has none, and
 the legacy Facebook app identity is never mapped. The account-reference lookup
 (`resolve_ig_accounts`, then `revoke_for_accounts`) runs for every request, and skips
 only the (workspace, account) pairs a mapping names for the subject, whatever the
@@ -186,7 +186,7 @@ matched: Meta retries non-2xx and there is nothing to retry.
 **Deauthorize** updates `oauth_credentials.state` to `revoked`, scoped on the
 `(ig_account_id, workspace_id)` **pair** (the fallback path) or on a mapped
 authorization's own credential. It never touches the account row, its media, its
-posting history, its workspace, or any other member's content. It fences an archive's
+posting history, its workspace, or any other member's content. It fences a past-posts source's
 current generation and deletes nothing.
 
 **Data deletion without the key ring** writes nothing. It logs the request and returns
@@ -194,7 +194,7 @@ the receipt.
 
 **Data deletion with the key ring** writes only the receipt: a fingerprint, the scopes
 and the frozen generation ids, and the capability digest. The deletion is the worker's,
-over the frozen generations alone: the archive's observations and provider-derived item
+over the frozen generations alone: the past-posts source's observations and provider-derived item
 fields, its provenance and artifact records, its staged transit bytes, and the queued
 card payloads of its stories. **It never deletes a workspace, another origin's content,
 Drive content, or the account's grant**, and a newer authorization's generation is not
@@ -209,7 +209,7 @@ Instagram accounts the person authorized. A remote erasure is never counted as d
 **The routes issue no SQL at all, and `meta_callbacks` issues no SQL `DELETE`.** AST
 tests (`tests/src/api/test_meta_callbacks.py`) pin both, and that the module's one
 credential statement is an `UPDATE`. The rows that are deleted are deleted in the
-worker, by the redaction door (archive lifecycle cleanup) and the catalog's redaction.
+worker, by the redaction door (past-posts lifecycle cleanup) and the catalog's redaction.
 
 ## What a completed deletion leaves
 
@@ -305,9 +305,9 @@ is removed:
 
 ## The key ring
 
-Durable receipts and the worker's cleanup need `ARCHIVE_HMAC_KEYS`. Its shape, how to
+Durable receipts and the worker's cleanup need `PAST_POSTS_HMAC_KEYS`. Its shape, how to
 rotate it without splitting a request into two receipts, and what happens without it are
-in [`instagram-archive-review.md`](instagram-archive-review.md#5-the-key-ring).
+in [`instagram-past-posts-review.md`](instagram-past-posts-review.md#5-the-key-ring).
 Without a transit store the worker still runs `meta_deletion_cleanup`: it asks the
 provider nothing, so it completes only scopes that hold no unresolved upload.
 
@@ -318,7 +318,7 @@ provider nothing, so it completes only scopes that hold no unresolved upload.
    mapping, deauthorize and cleanup SQL does run, under the runtime roles on a
    throwaway database, in `tests/scripts/test_meta_deletion_receipts_gate.py`,
    `test_meta_identity_mapping_gate.py`, `test_meta_receipt_doors_gate.py`,
-   `test_archive_lifecycle_gate.py`, `test_archive_deletion_cleanup_gate.py` and
+   `test_past_posts_lifecycle_gate.py`, `test_past_posts_deletion_cleanup_gate.py` and
    `test_instagram_source_gate.py` (scene 6).
 2. **Nothing resolves `needs_review` or a held scope**, and activation
    requires a privacy review of the retention allowlist above.
@@ -333,9 +333,9 @@ provider nothing, so it completes only scopes that hold no unresolved upload.
 
 ## See also
 
-- [`instagram-archive-review.md`](instagram-archive-review.md) — testing, prerequisites, activation, permissions, the key ring and limits
+- [`instagram-past-posts-review.md`](instagram-past-posts-review.md) — testing, prerequisites, activation, permissions, the key ring and limits
 - [`instagram-source-isolated-gate.md`](instagram-source-isolated-gate.md) — the full-composition gate, scene 6 of which drives these endpoints
 - `src/services/target/meta_callbacks.py` — verification, fingerprints and the receipt doors' callers
 - `src/api/routes/meta.py` — the routes
-- `src/services/target/archive_lifecycle.py` — deauthorize's revocation; `archive_deletion.py` — the cleanup job
+- `src/services/target/past_posts_lifecycle.py` — deauthorize's revocation; `past_posts_deletion.py` — the cleanup job
 - `tests/src/api/test_meta_callbacks.py` — the signature proofs

@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 import pytest
 
 from src.services.target import identity_mappings
-from src.services.target.instagram_sources import ArchiveAuthorization, ArchiveRefused
+from src.services.target.instagram_sources import (
+    PastPostsAuthorization,
+    PastPostsRefused,
+)
 
 WS = "33333333-3333-4333-8333-333333333333"
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
@@ -47,7 +50,7 @@ class _Scripted:
 
 
 def authorization():
-    return ArchiveAuthorization(AUTHORIZATION, "4242", "17841400000000001", AT)
+    return PastPostsAuthorization(AUTHORIZATION, "4242", "17841400000000001", AT)
 
 
 async def land(executor, **over):
@@ -126,7 +129,7 @@ class TestRecordOauthExchange:
             "ws": WS,
             "account": ACCOUNT,
             "credential": CREDENTIAL,
-            # The one id and time the archive generation is bound to.
+            # The one id and time the past-posts generation is bound to.
             "authorization": AUTHORIZATION,
             "app": "instagram:4242",
             # The person's id from the identity read; the account's own id
@@ -141,14 +144,14 @@ class TestRecordOauthExchange:
     @pytest.mark.parametrize("proven", [None, ""], ids=["none", "empty"])
     async def test_no_app_scoped_id_is_refused_before_any_statement(self, proven):
         executor = _Scripted()
-        with pytest.raises(ArchiveRefused) as refused:
+        with pytest.raises(PastPostsRefused) as refused:
             await land(executor, app_scoped_id=proven)
-        assert refused.value.reason == "archive_identity_unverified"
+        assert refused.value.reason == "past_posts_identity_unverified"
         assert executor.statements == []
 
     async def test_an_unconfigured_app_is_refused_before_any_statement(self):
         executor = _Scripted()
-        with pytest.raises(ArchiveRefused) as refused:
+        with pytest.raises(PastPostsRefused) as refused:
             await land(executor, app_identity="instagram:unconfigured")
-        assert refused.value.reason == "archive_identity_unverified"
+        assert refused.value.reason == "past_posts_identity_unverified"
         assert executor.statements == []

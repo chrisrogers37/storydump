@@ -25,7 +25,7 @@ vi.mock("react", async (importOriginal) => {
 
 import { Play } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArchiveThumbnail } from "./archive-thumbnail";
+import { PastPostsThumbnail } from "./past-posts-thumbnail";
 import { MediaThumbnail, settleOnMount, type ThumbnailState } from "./media-thumbnail";
 
 const SRC = "/api/workspaces/ws-1/media/media-1/thumbnail?v=0123456789abcdef";
@@ -102,21 +102,21 @@ describe("MediaThumbnail", () => {
   });
 });
 
-describe("MediaThumbnail for an archive item (#1644)", () => {
-  const ARCHIVE_SRC =
+describe("MediaThumbnail for a past-posts item (#1644)", () => {
+  const PAST_POSTS_SRC =
     "/api/workspaces/ws-1/media/media-1/thumbnail?v=5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b.7";
 
-  it("hands its picture to the archive's loader, in the workspace's lane and the box's layout, with none of Drive's own", () => {
+  it("hands its picture to the past-posts source's loader, in the workspace's lane and the box's layout, with none of Drive's own", () => {
     const tree = MediaThumbnail({
-      src: ARCHIVE_SRC,
+      src: PAST_POSTS_SRC,
       alt: "Instagram post",
       video: true,
       fallback: FALLBACK,
-      archive: { workspaceId: "ws-1", layout: "card" },
+      pastPosts: { workspaceId: "ws-1", layout: "card" },
     }) as ReactElement;
-    expect(tree.type).toBe(ArchiveThumbnail);
+    expect(tree.type).toBe(PastPostsThumbnail);
     expect(tree.props).toEqual({
-      src: ARCHIVE_SRC,
+      src: PAST_POSTS_SRC,
       alt: "Instagram post",
       video: true,
       fallback: FALLBACK,
@@ -130,18 +130,18 @@ describe("MediaThumbnail for an archive item (#1644)", () => {
 
   it("passes on that a box inside a link takes no Retry", () => {
     const tree = MediaThumbnail({
-      src: ARCHIVE_SRC,
+      src: PAST_POSTS_SRC,
       alt: "Instagram post",
       video: false,
       fallback: FALLBACK,
-      archive: { workspaceId: "ws-1", layout: "tile", retry: false },
+      pastPosts: { workspaceId: "ws-1", layout: "tile", retry: false },
     }) as ReactElement;
     expect(tree.props).toMatchObject({ layout: "tile", retry: false });
   });
 
   it("leaves a Drive item's picture to the browser, as it has always been", () => {
     const tree = render();
-    expect([...walk(tree)].some((el) => el.type === ArchiveThumbnail)).toBe(false);
+    expect([...walk(tree)].some((el) => el.type === PastPostsThumbnail)).toBe(false);
     expect(picture(tree)!.props.loading).toBe("lazy");
   });
 });

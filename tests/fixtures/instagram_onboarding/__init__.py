@@ -1,15 +1,15 @@
-"""Representative Instagram onboarding archives, shaped as the Graph pages them.
+"""Representative Instagram onboarding past-posts sources, shaped as the Graph pages them.
 
-The Instagram source gate (#1644) proves onboarding against archives of a
+The Instagram source gate (#1644) proves onboarding against past-posts sources of a
 known composition: N posts, a stated share of them usable, a stated share
 excluded for each reason, and the first usable one reachable early. Two pure
-generators build those archives, and ``expected_counts.json`` states what a run
+generators build those past-posts sources, and ``expected_counts.json`` states what a run
 over them must report.
 
 * ``useful(n, t0)``: 10% recent posts, then the newest old post (a plain image
-  the first card can use), then old posts that make 60% of the archive
+  the first card can use), then old posts that make 60% of the past-posts source
   ``not_detected`` overall, 20% credited and 10% unknown, interleaved, ending
-  in the archive's single 2022 image.
+  in the past-posts source's single 2022 image.
 * ``excluded(n, t0)``: 50% recent posts, 30% old credited, 20% old unknown.
   Nothing is a candidate and the leading reason is ``too_recent``.
 
@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = [
-    "Archive",
+    "PastPosts",
     "IMAGE_2022_AT",
     "OWNER_ID",
     "Post",
@@ -160,8 +160,8 @@ class Post:
 
 
 @dataclass(frozen=True)
-class Archive:
-    """The posts of one generated archive, with what built them."""
+class PastPosts:
+    """The posts of one generated past-posts source, with what built them."""
 
     kind: str
     n: int
@@ -185,7 +185,9 @@ def expected(kind: str, n: int) -> dict:
     return expected_counts()[kind][str(n)]
 
 
-def useful(n: int, t0: int | float | datetime, *, owner_id: str = OWNER_ID) -> Archive:
+def useful(
+    n: int, t0: int | float | datetime, *, owner_id: str = OWNER_ID
+) -> PastPosts:
     """*n* posts, 0.6n of them candidates; see the module docstring.
 
     Newest first: 0.1n recent posts, the accepted image, then 0.9n - 1 old
@@ -208,12 +210,12 @@ def useful(n: int, t0: int | float | datetime, *, owner_id: str = OWNER_ID) -> A
         )
         + [IMAGE_2022_AT]
     )
-    return _archive("useful", n, now, owner_id, groups, times, {recent, n - 1})
+    return _past_posts("useful", n, now, owner_id, groups, times, {recent, n - 1})
 
 
 def carousel(
     n: int, t0: int | float | datetime, *, owner_id: str = OWNER_ID
-) -> Archive:
+) -> PastPosts:
     """Useful's ages and attribution, with eight carousel positions per ten.
 
     The independent manifest records the position arithmetic. The first
@@ -249,12 +251,12 @@ def carousel(
             serial, kind, post.at, owner_id, _counts(index, serial, not is_carousel)
         )
         posts.append(Post(post.group, post.at, parent, post.caption, tuple(children)))
-    return Archive("carousel", n, base.t0, owner_id, tuple(posts))
+    return PastPosts("carousel", n, base.t0, owner_id, tuple(posts))
 
 
 def excluded(
     n: int, t0: int | float | datetime, *, owner_id: str = OWNER_ID
-) -> Archive:
+) -> PastPosts:
     """*n* posts, none a candidate: half recent, 0.3n old credited, 0.2n old
     unknown. Newest first, the old posts on the five-post cycle."""
     now = _checked(n, t0, owner_id)
@@ -267,11 +269,11 @@ def excluded(
     ) + _spread(
         old, now - OLD_AGE_DAYS * DAY, now - (OLD_AGE_DAYS + OLD_SPAN_DAYS) * DAY
     )
-    return _archive("excluded", n, now, owner_id, groups, times, set())
+    return _past_posts("excluded", n, now, owner_id, groups, times, set())
 
 
 def _checked(n, t0, owner_id) -> int:
-    """The epoch seconds of *t0*, once every argument can build an archive."""
+    """The epoch seconds of *t0*, once every argument can build a past-posts source."""
     if type(n) is not int or n < 10 or n % 10:
         raise ValueError(
             "n must be a positive multiple of 10: every share is a whole number"
@@ -307,7 +309,7 @@ def _spread(count: int, newest: int, oldest: int) -> list:
     return times
 
 
-def _archive(kind, n, now, owner_id, groups, times, plain) -> Archive:
+def _past_posts(kind, n, now, owner_id, groups, times, plain) -> PastPosts:
     """The posts for *groups* and *times*, newest first. Positions in *plain*
     are images with both counts present."""
     posts, carousels = [], 0
@@ -322,7 +324,7 @@ def _archive(kind, n, now, owner_id, groups, times, plain) -> Archive:
             serial, media_type, at, owner_id, _counts(index, serial, index in plain)
         )
         posts.append(Post(group, at, parent, _caption(group, serial), children))
-    return Archive(kind, n, now, owner_id, tuple(posts))
+    return PastPosts(kind, n, now, owner_id, tuple(posts))
 
 
 def _parent(serial, media_type, at, owner_id, counts) -> dict:

@@ -99,7 +99,7 @@ function target(f: FolderMixView, planned: number): string {
 
 /**
  * The same card for a converted workspace (protocol 2): one row per SOURCE —
- * Your Instagram and Drive folders alike, each with its provider — and its
+ * Instagram past posts and Drive folders alike, each with its provider — and its
  * workspace target as the settings card states it, Off as Off. The posted
  * column is counted as above. `PostingMixCard` is the card for protocol 1;
  * the overview picks between them by the read's protocol.

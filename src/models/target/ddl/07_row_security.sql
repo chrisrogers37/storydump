@@ -60,7 +60,7 @@ ALTER TABLE waitlist_entries ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE media_source_destinations ENABLE ROW LEVEL SECURITY;
 
-ALTER TABLE instagram_archive_generations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE instagram_past_posts_generations ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE instagram_source_policies ENABLE ROW LEVEL SECURITY;
 
@@ -292,7 +292,7 @@ CREATE POLICY p_tenant ON media_source_destinations FOR ALL TO svc_ingress, svc_
   USING (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
-CREATE POLICY p_tenant ON instagram_archive_generations FOR ALL TO svc_ingress, svc_worker
+CREATE POLICY p_tenant ON instagram_past_posts_generations FOR ALL TO svc_ingress, svc_worker
   USING (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
@@ -336,9 +336,9 @@ CREATE POLICY p_source_read ON oauth_credentials FOR SELECT TO svc_claim,svc_clo
 
 CREATE POLICY p_source_read_lock ON oauth_credentials FOR UPDATE TO svc_claim,svc_clock,svc_maintenance USING (true) WITH CHECK (true);
 
-CREATE POLICY p_source_read ON instagram_archive_generations FOR SELECT TO svc_claim,svc_clock,svc_maintenance USING (true);
+CREATE POLICY p_source_read ON instagram_past_posts_generations FOR SELECT TO svc_claim,svc_clock,svc_maintenance USING (true);
 
-CREATE POLICY p_source_read_lock ON instagram_archive_generations FOR UPDATE TO svc_claim,svc_clock,svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_source_read_lock ON instagram_past_posts_generations FOR UPDATE TO svc_claim,svc_clock,svc_maintenance USING (true) WITH CHECK (true);
 
 CREATE POLICY p_source_read ON category_post_case_mix FOR SELECT TO svc_claim,svc_clock,svc_maintenance USING (true);
 

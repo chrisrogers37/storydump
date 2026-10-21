@@ -4,7 +4,7 @@ No database, no network, and nothing here asks the suitability evaluator
 anything. Counts are read off the generated data itself (a post's age and the
 adapter's own caption classifier, in a fixed order of reasons) and compared
 with `expected_counts.json`, whose numbers are separately held to their
-formulas. A last group feeds the generated pages through the real archive
+formulas. A last group feeds the generated pages through the real past-posts
 adapter over a recording transport, so the adapter meets the shapes it consumes.
 """
 
@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from src.services.target import instagram_archive_adapter as archive
+from src.services.target import instagram_past_posts_adapter as past_posts
 from src.services.target.egress import EgressPolicy
 from tests.fixtures import instagram_onboarding as fx
 
@@ -45,7 +45,7 @@ _built = {}
 
 
 def build(kind, n):
-    """Each archive once: they are never mutated."""
+    """Each past-posts source once: they are never mutated."""
     if (kind, n) not in _built:
         _built[kind, n] = {"useful": fx.useful, "excluded": fx.excluded}[kind](n, T0)
     return _built[kind, n]
@@ -58,7 +58,7 @@ def age(post):
 def conditions(post):
     """Which exclusions the post's own data invites: too young, credited and
     unknown attribution. They are disjoint, one primary reason each."""
-    state = archive.attribution(post.caption)[0]
+    state = past_posts.attribution(post.caption)[0]
     return age(post) < MINIMUM_AGE_DAYS * DAY, state == "credited", state == "unknown"
 
 
@@ -81,7 +81,7 @@ def straddling_ties(a, size=25):
     first, a page of *size* posts ends on the second the next page begins."""
     windows = collections.defaultdict(list)
     for post in a.posts:
-        windows[(a.t0 - post.at) // archive.WINDOW_SECONDS].append(post.at)
+        windows[(a.t0 - post.at) // past_posts.WINDOW_SECONDS].append(post.at)
     return sum(
         times[i - 1] == times[i]
         for times in windows.values()
@@ -139,8 +139,8 @@ def test_other_multiples_of_ten_keep_the_shares_and_the_two_pinned_images(n):
     accepted, oldest = a.posts[n // 10], a.posts[-1]
     assert accepted.group == "accepted_image" and oldest.at == fx.IMAGE_2022_AT
     assert accepted.parent["media_type"] == oldest.parent["media_type"] == "IMAGE"
-    for archive_ in (a, b):
-        times = [p.at for p in archive_.posts]
+    for past_posts_ in (a, b):
+        times = [p.at for p in past_posts_.posts]
         assert times == sorted(times, reverse=True)
 
 
@@ -192,7 +192,7 @@ def test_useful_is_newest_first_with_the_accepted_image_right_after_the_recent_s
     accepted = a.posts[recent]
     assert accepted.group == "accepted_image"
     assert accepted.parent["media_type"] == "IMAGE" and accepted.children == ()
-    assert archive.attribution(accepted.caption) == ("not_detected", [])
+    assert past_posts.attribution(accepted.caption) == ("not_detected", [])
     assert age(accepted) == 100 * DAY
     # Strictly between the recent slice and everything older, and alone at its
     # second, so it is the unambiguous newest old post.
@@ -216,7 +216,7 @@ def test_the_accepted_image_leads_the_window_below_the_recent_one(n):
     a = build("useful", n)
     windows = collections.defaultdict(list)
     for post in a.posts:
-        windows[(a.t0 - post.at) // archive.WINDOW_SECONDS].append(post)
+        windows[(a.t0 - post.at) // past_posts.WINDOW_SECONDS].append(post)
     accepted = a.posts[n // 10]
 
     assert accepted in windows[1] and accepted.at == max(p.at for p in windows[1])
@@ -318,7 +318,7 @@ def test_captions_classify_as_built_by_the_adapters_own_classifier(kind, n):
     posts = build(kind, n).posts
 
     for post in posts:
-        state, handles = archive.attribution(post.caption)
+        state, handles = past_posts.attribution(post.caption)
         assert state == CAPTION_STATE[post.group], post.parent["id"]
         assert bool(handles) == (post.group == "credited"), post.parent["id"]
         # The base listing never asks for a caption.
@@ -342,9 +342,9 @@ def test_rows_are_the_graph_shape_the_adapter_reads(kind, n):
     assert not set(parent_ids) & set(child_ids)
     for post in a.posts:
         row = post.parent
-        assert archive._media_id(row["id"]) == row["id"]
-        assert archive._media_type(row["media_type"]) == row["media_type"]
-        assert archive._timestamp(row["timestamp"]) == post.at
+        assert past_posts._media_id(row["id"]) == row["id"]
+        assert past_posts._media_type(row["media_type"]) == row["media_type"]
+        assert past_posts._timestamp(row["timestamp"]) == post.at
         # The offset keeps its colon: Python 3.10's fromisoformat (CI) reads no
         # other form, though 3.11 and later also accept "+0000".
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", row["timestamp"])
@@ -360,7 +360,7 @@ def test_rows_are_the_graph_shape_the_adapter_reads(kind, n):
             assert parts.hostname.endswith(".cdninstagram.com")
             assert fx.URL_MARKER in parts.query
         for child in post.children:
-            assert archive._media_id(child["id"]) == child["id"]
+            assert past_posts._media_id(child["id"]) == child["id"]
             assert child["media_type"] in ("IMAGE", "VIDEO")
 
 
@@ -503,12 +503,12 @@ def test_partial_coverage_is_true_exactly_where_the_scan_reaches_the_listing_cei
 ):
     row = fx.expected(kind, n)
 
-    assert row["partial_coverage"] is (n >= archive.LISTING_CEILING)
+    assert row["partial_coverage"] is (n >= past_posts.LISTING_CEILING)
     basis = row["partial_coverage_basis"]
-    if n == archive.LISTING_CEILING and kind == "useful":
+    if n == past_posts.LISTING_CEILING and kind == "useful":
         text = " ".join(basis)
         for cited in (
-            "instagram_archive_adapter.py:42",
+            "instagram_past_posts_adapter.py:42",
             "instagram_sync.py:693-696",
             "instagram_sync.py:419-425",
             "destination_readiness.py:109-116",
@@ -533,7 +533,7 @@ class _Admission:
 
 
 def _graph(a, profile=None):
-    """A recording Graph over the archive: the listing by time window and
+    """A recording Graph over the past-posts source: the listing by time window and
     offset cursor (with no ``since``, the walk's one-row probe for the newest
     post below ``until``), a parent read that adds the caption when asked, the
     child page and, given *profile*, the token's own ``/me``. Nothing else is
@@ -572,12 +572,12 @@ def _graph(a, profile=None):
 
 def _adapter(a, client, *, account_ref=None):
     async def access(source_id, *, workspace_id):
-        return archive.ArchiveAccess(account_ref or a.owner_id, "fixture-token")
+        return past_posts.PastPostsAccess(account_ref or a.owner_id, "fixture-token")
 
     async def admission(source_id, *, workspace_id, access):
         return _Admission()
 
-    return archive.InstagramArchiveAdapter(
+    return past_posts.InstagramPastPostsAdapter(
         access_provider=access,
         admission_provider=admission,
         client=client,
@@ -626,14 +626,14 @@ async def test_the_adapter_lists_every_parent_once_newest_first(kind, n):
 
 
 @pytest.mark.parametrize("n", (2000, 10000))
-async def test_only_the_ten_thousand_archive_reaches_the_listing_ceiling(n):
-    """The premise of the manifest's partial_coverage: the 10,000 archive is
+async def test_only_the_ten_thousand_past_posts_reaches_the_listing_ceiling(n):
+    """The premise of the manifest's partial_coverage: the 10,000 past-posts source is
     observed in full and still ends at the ceiling, the 2,000 one ends clear."""
     seen, checkpoint = await _walk(build("useful", n), to_the_end=True)
 
     assert len(seen) == n
     assert checkpoint["more"] is False
-    assert checkpoint["ceiling_reached"] is (n >= archive.LISTING_CEILING)
+    assert checkpoint["ceiling_reached"] is (n >= past_posts.LISTING_CEILING)
 
 
 @pytest.mark.parametrize("kind", KINDS)

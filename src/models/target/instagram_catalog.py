@@ -1,4 +1,4 @@
-"""Archive ownership, current observations and immutable captures.
+"""Past-posts ownership, current observations and immutable captures.
 
 `ddl.build()` creates these tables through `TargetBase.metadata`. Services use
 SQL under the tenant unit of work. Functions, triggers and row policies live
@@ -64,8 +64,8 @@ class MediaSourceDestination(TargetBase):
     )
 
 
-class InstagramArchiveGeneration(TargetBase):
-    __tablename__ = "instagram_archive_generations"
+class InstagramPastPostsGeneration(TargetBase):
+    __tablename__ = "instagram_past_posts_generations"
 
     id = Column(
         UUID(as_uuid=True),
@@ -94,17 +94,17 @@ class InstagramArchiveGeneration(TargetBase):
             "workspace_id",
             "source_id",
             "id",
-            name="uq_archive_generations_ws_source_id",
+            name="uq_past_posts_generations_ws_source_id",
         ),
         UniqueConstraint(
             "workspace_id",
             "source_id",
             "authorization_id",
-            name="uq_archive_authorization",
+            name="uq_past_posts_authorization",
         ),
         CheckConstraint(
             "lifecycle IN ('active','superseded','review_hold','deletion_pending','deleted')",
-            name="ck_archive_generation_lifecycle",
+            name="ck_past_posts_generation_lifecycle",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "origin_ig_account_id"],
@@ -113,7 +113,7 @@ class InstagramArchiveGeneration(TargetBase):
                 "media_sources.id",
                 "media_sources.origin_ig_account_id",
             ],
-            name="fk_archive_generation_origin",
+            name="fk_past_posts_generation_origin",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -123,11 +123,11 @@ class InstagramArchiveGeneration(TargetBase):
                 "oauth_credentials.ig_account_id",
                 "oauth_credentials.id",
             ],
-            name="fk_archive_generation_credential",
+            name="fk_past_posts_generation_credential",
             ondelete="RESTRICT",
         ),
         Index(
-            "uq_archive_active_generation",
+            "uq_past_posts_active_generation",
             "workspace_id",
             "source_id",
             unique=True,
@@ -162,23 +162,23 @@ class InstagramSourcePolicy(TargetBase):
 
     __table_args__ = (
         CheckConstraint(
-            "schema_version > 0 AND revision > 0", name="ck_archive_policy_version"
+            "schema_version > 0 AND revision > 0", name="ck_past_posts_policy_version"
         ),
         CheckConstraint(
-            "minimum_age_days BETWEEN 0 AND 36500", name="ck_archive_policy_age"
+            "minimum_age_days BETWEEN 0 AND 36500", name="ck_past_posts_policy_age"
         ),
         CheckConstraint(
             "eligibility = 'supported' AND ranking = 'none' AND destination_scope = 'origin_only'",
-            name="ck_archive_policy_modes",
+            name="ck_past_posts_policy_modes",
         ),
         CheckConstraint(
             "carousel_slides IN ('all','first')",
-            name="ck_archive_policy_carousel_slides",
+            name="ck_past_posts_policy_carousel_slides",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id"],
             ["media_sources.workspace_id", "media_sources.id"],
-            name="fk_archive_policy_source",
+            name="fk_past_posts_policy_source",
             ondelete="RESTRICT",
         ),
     )
@@ -230,17 +230,17 @@ class InstagramMediaIndex(TargetBase):
 
     __table_args__ = (
         Index(
-            "ix_archive_generation_lookup",
+            "ix_past_posts_generation_lookup",
             "workspace_id",
             "source_id",
             "data_generation_id",
         ),
         CheckConstraint(
-            "observation_revision > 0", name="ck_archive_observation_revision"
+            "observation_revision > 0", name="ck_past_posts_observation_revision"
         ),
         CheckConstraint(
             "slide_count IS NULL OR slide_count BETWEEN 0 AND 20",
-            name="ck_archive_slide_count",
+            name="ck_past_posts_slide_count",
         ),
         UniqueConstraint(
             "workspace_id",
@@ -248,40 +248,40 @@ class InstagramMediaIndex(TargetBase):
             "parent_media_id",
             "data_generation_id",
             "observation_revision",
-            name="uq_archive_index_bundle",
+            name="uq_past_posts_index_bundle",
         ),
         CheckConstraint(
             "like_count >= 0 AND comments_count >= 0",
-            name="ck_archive_observation_counts",
+            name="ck_past_posts_observation_counts",
         ),
         CheckConstraint(
             "attribution IN ('not_detected','credited','unknown') AND attribution_detector_version > 0",
-            name="ck_archive_attribution",
+            name="ck_past_posts_attribution",
         ),
         CheckConstraint(
             "availability IN ('available','unavailable','excluded')",
-            name="ck_archive_availability",
+            name="ck_past_posts_availability",
         ),
         CheckConstraint(
             "validation_capture IS NULL OR ((jsonb_typeof(validation_capture)='object' AND validation_capture->>'generation_id'=data_generation_id::text AND (validation_capture->>'observation_revision')::bigint=observation_revision AND validation_capture->>'selected_asset_id'=COALESCE(first_child_id,parent_media_id) AND validation_capture->>'state' IN ('supported','unsupported','validation_pending')) IS TRUE)",
-            name="ck_archive_validation_capture",
+            name="ck_past_posts_validation_capture",
         ),
         CheckConstraint(
             "validation_state IN ('pending','supported','unsupported')",
-            name="ck_archive_validation",
+            name="ck_past_posts_validation",
         ),
         CheckConstraint(
             "(validation_state = 'pending' AND validation_generation_id IS NULL AND validation_observation_revision IS NULL AND validation_fingerprint IS NULL AND validated_at IS NULL) OR (validation_state <> 'pending' AND validation_generation_id IS NOT NULL AND validation_observation_revision IS NOT NULL AND validation_generation_id = data_generation_id AND validation_observation_revision = observation_revision AND validation_fingerprint IS NOT NULL AND validated_at IS NOT NULL)",
-            name="ck_archive_validation_evidence",
+            name="ck_past_posts_validation_evidence",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "data_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
-            name="fk_archive_index_generation",
+            name="fk_past_posts_index_generation",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -292,13 +292,13 @@ class InstagramMediaIndex(TargetBase):
                 "media_items.source_data_generation_id",
                 "media_items.id",
             ],
-            name="fk_archive_index_item",
+            name="fk_past_posts_index_item",
             ondelete="RESTRICT",
             deferrable=True,
             initially="DEFERRED",
         ),
         Index(
-            "uq_archive_index_item",
+            "uq_past_posts_index_item",
             "workspace_id",
             "source_id",
             "media_item_id",
@@ -306,14 +306,14 @@ class InstagramMediaIndex(TargetBase):
             postgresql_where=text("media_item_id IS NOT NULL"),
         ),
         Index(
-            "ix_archive_original_time",
+            "ix_past_posts_original_time",
             "workspace_id",
             "source_id",
             "original_at",
             "parent_media_id",
         ),
         Index(
-            "ix_archive_suitability",
+            "ix_past_posts_suitability",
             "workspace_id",
             "source_id",
             "data_generation_id",
@@ -360,7 +360,7 @@ class InstagramMediaAsset(TargetBase):
             "source_id",
             "parent_media_id",
             "position",
-            name="uq_archive_asset_position",
+            name="uq_past_posts_asset_position",
             deferrable=True,
             initially="DEFERRED",
         ),
@@ -368,31 +368,31 @@ class InstagramMediaAsset(TargetBase):
             "workspace_id",
             "source_id",
             "media_item_id",
-            name="uq_archive_asset_item",
+            name="uq_past_posts_asset_item",
         ),
         CheckConstraint(
             "observation_revision > 0 AND position > 0",
-            name="ck_archive_asset_revision",
+            name="ck_past_posts_asset_revision",
         ),
         CheckConstraint(
             "media_kind IN ('image','video') OR (media_kind='unknown' AND availability='excluded' AND exclusion_reason='unsupported_media' AND media_item_id IS NULL)",
-            name="ck_archive_asset_kind",
+            name="ck_past_posts_asset_kind",
         ),
         CheckConstraint(
             "availability IN ('available','unavailable','excluded')",
-            name="ck_archive_asset_availability",
+            name="ck_past_posts_asset_availability",
         ),
         CheckConstraint(
             "validation_state IN ('pending','supported','unsupported')",
-            name="ck_archive_asset_validation",
+            name="ck_past_posts_asset_validation",
         ),
         CheckConstraint(
             "(validation_state = 'pending' AND validation_generation_id IS NULL AND validation_observation_revision IS NULL AND validation_fingerprint IS NULL AND validated_at IS NULL) OR (validation_state <> 'pending' AND validation_generation_id IS NOT NULL AND validation_observation_revision IS NOT NULL AND validation_generation_id = data_generation_id AND validation_observation_revision = observation_revision AND validation_fingerprint IS NOT NULL AND validated_at IS NOT NULL)",
-            name="ck_archive_asset_validation_evidence",
+            name="ck_past_posts_asset_validation_evidence",
         ),
         CheckConstraint(
             "validation_capture IS NULL OR ((jsonb_typeof(validation_capture)='object' AND validation_capture->>'generation_id'=data_generation_id::text AND (validation_capture->>'observation_revision')::bigint=observation_revision AND validation_capture->>'selected_asset_id'=asset_media_id AND validation_capture->>'state' IN ('supported','unsupported','validation_pending')) IS TRUE)",
-            name="ck_archive_asset_validation_capture",
+            name="ck_past_posts_asset_validation_capture",
         ),
         ForeignKeyConstraint(
             [
@@ -409,7 +409,7 @@ class InstagramMediaAsset(TargetBase):
                 "instagram_media_index.data_generation_id",
                 "instagram_media_index.observation_revision",
             ],
-            name="fk_archive_asset_bundle",
+            name="fk_past_posts_asset_bundle",
             ondelete="CASCADE",
             deferrable=True,
             initially="DEFERRED",
@@ -417,11 +417,11 @@ class InstagramMediaAsset(TargetBase):
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "data_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
-            name="fk_archive_asset_generation",
+            name="fk_past_posts_asset_generation",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -432,20 +432,20 @@ class InstagramMediaAsset(TargetBase):
                 "media_items.source_data_generation_id",
                 "media_items.id",
             ],
-            name="fk_archive_asset_item",
+            name="fk_past_posts_asset_item",
             ondelete="RESTRICT",
             deferrable=True,
             initially="DEFERRED",
         ),
         Index(
-            "ix_archive_asset_bundle",
+            "ix_past_posts_asset_bundle",
             "workspace_id",
             "source_id",
             "parent_media_id",
             "position",
         ),
         Index(
-            "ix_archive_asset_suitability",
+            "ix_past_posts_asset_suitability",
             "workspace_id",
             "source_id",
             "data_generation_id",
@@ -475,26 +475,29 @@ class InstagramItemTombstone(TargetBase):
 
     __table_args__ = (
         Index(
-            "ix_archive_tombstone_lookup", "workspace_id", "key_version", "parent_hmac"
+            "ix_past_posts_tombstone_lookup",
+            "workspace_id",
+            "key_version",
+            "parent_hmac",
         ),
         Index(
-            "ix_archive_tombstone_item_revision",
+            "ix_past_posts_tombstone_item_revision",
             "workspace_id",
             "source_id",
             "media_item_id",
             "observation_revision",
         ),
         CheckConstraint(
-            "observation_revision > 0", name="ck_archive_tombstone_revision"
+            "observation_revision > 0", name="ck_past_posts_tombstone_revision"
         ),
         CheckConstraint(
             "key_version > 0 AND parent_hmac ~ '^[a-f0-9]{64}$'",
-            name="ck_archive_tombstone_key",
+            name="ck_past_posts_tombstone_key",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "media_item_id"],
             ["media_items.workspace_id", "media_items.source_id", "media_items.id"],
-            name="fk_archive_tombstone_item",
+            name="fk_past_posts_tombstone_item",
             ondelete="RESTRICT",
         ),
     )
@@ -539,7 +542,7 @@ class InstagramArtifact(TargetBase):
 
     __table_args__ = (
         UniqueConstraint(
-            "workspace_id", "artifact_ref", name="uq_archive_artifact_ws_ref"
+            "workspace_id", "artifact_ref", name="uq_past_posts_artifact_ws_ref"
         ),
         UniqueConstraint(
             "workspace_id",
@@ -552,29 +555,29 @@ class InstagramArtifact(TargetBase):
             "selected_asset_identity",
             "validation_fingerprint",
             "kind",
-            name="uq_archive_artifact_capture",
+            name="uq_past_posts_artifact_capture",
         ),
         UniqueConstraint(
-            "workspace_id", "upload_attempt_id", name="uq_archive_upload_attempt"
+            "workspace_id", "upload_attempt_id", name="uq_past_posts_upload_attempt"
         ),
         CheckConstraint(
             "(admitted_asset_ref IS NULL AND admitted_resource_type IS NULL AND creation_evidence IS NULL) OR (kind = 'transit' AND admitted_asset_ref ~ ('^ws/' || workspace_id::text || '/[0-9a-f]{20,64}$') AND admitted_resource_type IN ('image','video')) IS TRUE",
-            name="ck_archive_admitted_reference",
+            name="ck_past_posts_admitted_reference",
         ),
         CheckConstraint(
             "creation_evidence IS NULL OR (jsonb_typeof(creation_evidence) = 'object' AND octet_length(creation_evidence::text) <= 2048 AND creation_evidence ?& ARRAY['public_id','asset_id','version','resource_type','delivery_type','signature'] AND creation_evidence - ARRAY['public_id','asset_id','version','resource_type','delivery_type','signature'] = '{}'::jsonb AND creation_evidence->>'public_id' = admitted_asset_ref AND creation_evidence->>'resource_type' = admitted_resource_type AND creation_evidence->>'delivery_type' = 'authenticated' AND jsonb_typeof(creation_evidence->'version') = 'number' AND creation_evidence->>'version' ~ '^[1-9][0-9]{0,18}$' AND (creation_evidence->>'version')::numeric <= 9223372036854775807 AND jsonb_typeof(creation_evidence->'asset_id') = 'string' AND jsonb_typeof(creation_evidence->'signature') = 'string' AND creation_evidence->>'asset_id' ~ '^[a-zA-Z0-9_-]{1,128}$' AND creation_evidence->>'signature' ~ '^[0-9a-f]{40}$') IS TRUE",
-            name="ck_archive_creation_evidence",
+            name="ck_past_posts_creation_evidence",
         ),
         CheckConstraint(
             "admitted_asset_ref IS NULL OR ((outcome IN ('unsettled','uncertain') AND created_asset_ref IS NULL AND creation_evidence IS NULL AND cleanup_state = 'pending') OR (outcome = 'settled' AND created_asset_ref = admitted_asset_ref AND creation_evidence IS NOT NULL AND cleanup_state IN ('pending','destroyed'))) IS TRUE",
-            name="ck_archive_managed_completion",
+            name="ck_past_posts_managed_completion",
         ),
         CheckConstraint(
             "admitted_asset_ref IS NULL OR ((cleanup_state = 'destroyed') = (destroyed_at IS NOT NULL))",
-            name="ck_archive_artifact_destroyed",
+            name="ck_past_posts_artifact_destroyed",
         ),
         Index(
-            "uq_archive_admitted_owner",
+            "uq_past_posts_admitted_owner",
             "workspace_id",
             "admitted_asset_ref",
             "admitted_resource_type",
@@ -582,7 +585,7 @@ class InstagramArtifact(TargetBase):
             postgresql_where=text("admitted_asset_ref IS NOT NULL"),
         ),
         Index(
-            "uq_archive_unsettled_intent",
+            "uq_past_posts_unsettled_intent",
             "workspace_id",
             "intent_id",
             unique=True,
@@ -592,38 +595,38 @@ class InstagramArtifact(TargetBase):
         ),
         CheckConstraint(
             "kind IN ('download','validation','temporary','transit','stage')",
-            name="ck_archive_artifact_kind",
+            name="ck_past_posts_artifact_kind",
         ),
         CheckConstraint(
             "observation_revision > 0 AND capture_epoch >= 0 AND policy_revision > 0",
-            name="ck_archive_artifact_versions",
+            name="ck_past_posts_artifact_versions",
         ),
         CheckConstraint(
             "cleanup_state IN ('pending','destroyed','no_asset')",
-            name="ck_archive_artifact_cleanup",
+            name="ck_past_posts_artifact_cleanup",
         ),
         CheckConstraint(
             "(kind = 'transit' AND intent_id IS NOT NULL AND upload_attempt_id IS NOT NULL AND admitted_at IS NOT NULL AND outcome IS NOT NULL AND outcome IN ('unsettled','settled','uncertain')) OR (kind <> 'transit' AND upload_attempt_id IS NULL AND admitted_at IS NULL AND outcome IS NULL)",
-            name="ck_archive_artifact_attempt",
+            name="ck_past_posts_artifact_attempt",
         ),
         CheckConstraint(
             "(outcome IS NOT DISTINCT FROM 'settled') = (settled_at IS NOT NULL)",
-            name="ck_archive_artifact_settlement",
+            name="ck_past_posts_artifact_settlement",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "data_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
-            name="fk_archive_artifact_generation",
+            name="fk_past_posts_artifact_generation",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "media_item_id"],
             ["media_items.workspace_id", "media_items.source_id", "media_items.id"],
-            name="fk_archive_artifact_item",
+            name="fk_past_posts_artifact_item",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -633,11 +636,11 @@ class InstagramArtifact(TargetBase):
                 "post_intents.id",
                 "post_intents.media_item_id",
             ],
-            name="fk_archive_artifact_intent",
+            name="fk_past_posts_artifact_intent",
             ondelete="RESTRICT",
         ),
         Index(
-            "ix_archive_cleanup_generation",
+            "ix_past_posts_cleanup_generation",
             "workspace_id",
             "source_id",
             "data_generation_id",
@@ -679,15 +682,16 @@ class InstagramIntentProvenance(TargetBase):
 
     __table_args__ = (
         CheckConstraint(
-            "transit_artifact_kind = 'transit'", name="ck_archive_intent_transit_kind"
+            "transit_artifact_kind = 'transit'",
+            name="ck_past_posts_intent_transit_kind",
         ),
         CheckConstraint(
             "selection_observation_revision > 0 AND capture_observation_revision > 0 AND capture_epoch >= 0 AND last_authorized_policy_revision > 0",
-            name="ck_archive_intent_versions",
+            name="ck_past_posts_intent_versions",
         ),
         CheckConstraint(
             "(staged_generation_id IS NULL AND staged_observation_revision IS NULL AND transit_artifact_ref IS NULL) OR (staged_generation_id IS NOT NULL AND staged_observation_revision IS NOT NULL AND staged_observation_revision > 0 AND transit_artifact_ref IS NOT NULL AND validation_fingerprint IS NOT NULL)",
-            name="ck_archive_staged_bundle",
+            name="ck_past_posts_staged_bundle",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "origin_ig_account_id"],
@@ -696,13 +700,13 @@ class InstagramIntentProvenance(TargetBase):
                 "media_sources.id",
                 "media_sources.origin_ig_account_id",
             ],
-            name="fk_archive_intent_origin",
+            name="fk_past_posts_intent_origin",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "media_item_id"],
             ["media_items.workspace_id", "media_items.source_id", "media_items.id"],
-            name="fk_archive_intent_item",
+            name="fk_past_posts_intent_item",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -712,27 +716,27 @@ class InstagramIntentProvenance(TargetBase):
                 "post_intents.id",
                 "post_intents.media_item_id",
             ],
-            name="fk_archive_intent_intent",
+            name="fk_past_posts_intent_intent",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "selection_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
-            name="fk_archive_intent_selection",
+            name="fk_past_posts_intent_selection",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "capture_generation_id"],
             [
-                "instagram_archive_generations.workspace_id",
-                "instagram_archive_generations.source_id",
-                "instagram_archive_generations.id",
+                "instagram_past_posts_generations.workspace_id",
+                "instagram_past_posts_generations.source_id",
+                "instagram_past_posts_generations.id",
             ],
-            name="fk_archive_intent_capture",
+            name="fk_past_posts_intent_capture",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -760,7 +764,7 @@ class InstagramIntentProvenance(TargetBase):
                 "instagram_artifacts.validation_fingerprint",
                 "instagram_artifacts.kind",
             ],
-            name="fk_archive_intent_stage",
+            name="fk_past_posts_intent_stage",
             ondelete="RESTRICT",
         ),
     )
@@ -795,11 +799,11 @@ class InstagramOperationProvenance(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "transit_artifact_kind = 'transit'",
-            name="ck_archive_operation_transit_kind",
+            name="ck_past_posts_operation_transit_kind",
         ),
         CheckConstraint(
             "observation_revision > 0 AND policy_revision > 0 AND capture_epoch >= 0",
-            name="ck_archive_operation_versions",
+            name="ck_past_posts_operation_versions",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "operation_id", "intent_id"],
@@ -808,7 +812,7 @@ class InstagramOperationProvenance(TargetBase):
                 "provider_operations.id",
                 "provider_operations.intent_id",
             ],
-            name="fk_archive_operation_operation",
+            name="fk_past_posts_operation_operation",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -818,13 +822,13 @@ class InstagramOperationProvenance(TargetBase):
                 "media_sources.id",
                 "media_sources.origin_ig_account_id",
             ],
-            name="fk_archive_operation_origin",
+            name="fk_past_posts_operation_origin",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "source_id", "media_item_id"],
             ["media_items.workspace_id", "media_items.source_id", "media_items.id"],
-            name="fk_archive_operation_item",
+            name="fk_past_posts_operation_item",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -834,7 +838,7 @@ class InstagramOperationProvenance(TargetBase):
                 "post_intents.id",
                 "post_intents.media_item_id",
             ],
-            name="fk_archive_operation_intent",
+            name="fk_past_posts_operation_intent",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -862,7 +866,7 @@ class InstagramOperationProvenance(TargetBase):
                 "instagram_artifacts.validation_fingerprint",
                 "instagram_artifacts.kind",
             ],
-            name="fk_archive_operation_artifact",
+            name="fk_past_posts_operation_artifact",
             ondelete="RESTRICT",
         ),
     )

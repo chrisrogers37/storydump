@@ -163,7 +163,7 @@ async def rearm_after_connect(
             ws=str(workspace_id),
             sid=str(source_id),
         )
-        if source is not None and source["provider"] == "instagram_archive":
+        if source is not None and source["provider"] == "instagram_past_posts":
             try:
                 await source_read_admission.capture_source_read(
                     session,
@@ -406,13 +406,13 @@ async def _run_sync(deps, job, *, reason) -> str:
     )
     if isinstance(start, str):
         return start
-    if isinstance(start, _ArchiveDispatch):
+    if isinstance(start, _PastPostsDispatch):
         from src.services.target import instagram_sync
         from src.services.target.media_adapters import ProviderNotWired
 
-        ports = getattr(deps, "archive_sync", None)
+        ports = getattr(deps, "past_posts_sync", None)
         if ports is None:
-            raise ProviderNotWired("instagram_archive")
+            raise ProviderNotWired("instagram_past_posts")
         return (await instagram_sync.run_sync(deps.engine, job, ports=ports)).outcome
 
     page = await _call_provider(
@@ -451,8 +451,8 @@ async def _run_sync(deps, job, *, reason) -> str:
 
 
 @dataclass(frozen=True)
-class _ArchiveDispatch:
-    """Route a discovered archive to its captured transaction owner."""
+class _PastPostsDispatch:
+    """Route a discovered past-posts source to its captured transaction owner."""
 
 
 @dataclass(frozen=True)
@@ -472,7 +472,7 @@ class _SyncStart:
 
 async def _read_source(
     factory, job, *, adapters, payload, source_id, workspace_id, reason
-) -> str | _SyncStart | _ArchiveDispatch:
+) -> str | _SyncStart | _PastPostsDispatch:
     """The source read — read the source, own transaction, committed before the door.
 
     Each phase is its own function, and every phase boundary is a transaction
@@ -500,8 +500,8 @@ async def _read_source(
     if row is None:
         logger.warning("sync %s: source %s has no row", job["id"], source_id)
         return "missing"
-    if row["provider"] == "instagram_archive":
-        return _ArchiveDispatch()
+    if row["provider"] == "instagram_past_posts":
+        return _PastPostsDispatch()
     if row["state"] == "paused":
         # Removed, or its grant disconnected, while this job (a chunk of a
         # long walk, most likely) was queued: the person chose that. No
@@ -829,7 +829,7 @@ async def _land_page(
                     # cursor CAS above fails once the source is paused), so no
                     # check that the listing folder is still connected is
                     # needed here.
-                    # Archive identity is never adopted, including redacted
+                    # Past-posts identity is never adopted, including redacted
                     # items whose inert sentinels deliberately retain the UUID.
                     " WHERE EXISTS (SELECT 1 FROM media_sources owner_source"
                     "               WHERE owner_source.id = media_items.source_id"

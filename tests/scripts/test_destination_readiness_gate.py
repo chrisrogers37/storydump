@@ -2,19 +2,19 @@
 
 Destination readiness and its contract, read through
 `versioned_mix.resource` as `svc_ingress` and `svc_worker` against the replayed
-schema: a converted mix, and the archive capability injected the way only tests
+schema: a converted mix, and the past-posts capability injected the way only tests
 inject it. Every scenario is a world here: A's history
 On beside B's history Off with no Drive, a handle-only B, a shared Drive, a
 moved B, all sources Off, no source at all, a reauth-required B and a
-partial-coverage archive that is also ready. Tenancy is proven rather than
+partial-coverage past-posts source that is also ready. Tenancy is proven rather than
 assumed: another workspace is seeded beside this one.
 
-Beyond those, states no service reaches are built as owner fixtures: an archive
+Beyond those, states no service reaches are built as owner fixtures: a past-posts source
 also assigned to a second destination, or with its own assignment retired; a
 handle reference with a grant on file; a stalled history and a failed folder.
 The resource's own additions are pinned too: the exact key sets of the wire
 shape, `media_count` and `indexed`, the protocol-1 shape that gained nothing,
-`archive_available`, and the statement budget of one GET.
+`past_posts_available`, and the statement budget of one GET.
 """
 
 import asyncio
@@ -36,7 +36,7 @@ from src.services.target import (
     tenant_resolution,
     versioned_mix,
 )
-from src.services.target.instagram_sources import ensure_archive_source
+from src.services.target.instagram_sources import ensure_past_posts_source
 from src.services.target.unit_of_work import unit_of_work
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -46,7 +46,7 @@ from tests.scripts.test_candidate_selection_gate import metadata
 from tests.scripts.test_instagram_progress_gate import RecordedExecutor
 from tests.scripts.test_source_suitability_gate import activate
 
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 #: The API's own login (`svc_ingress`), for the test that reads over HTTP.
 ingress = mix_gate.ingress
@@ -79,7 +79,7 @@ def add_account(sync_conn, chain, ref, handle, *, credential=True, display_name=
 
 def owner_write(sync_conn, sql, *params):
     """A fixture change as the migration actor, for a state no service reaches
-    (an assignment of one archive to a second destination, a source whose
+    (an assignment of one past-posts source to a second destination, a source whose
     folder is gone). Committed on its own."""
     with sync_conn.cursor() as cur:
         cur.execute(sql, params)
@@ -108,9 +108,9 @@ def age(sync_conn, source_id, *, days=3):
 
 
 async def history(engine, chain, account, *, enabled):
-    """*account*'s own archive source, created Off as a new connection lands it."""
+    """*account*'s own past-posts source, created Off as a new connection lands it."""
     async with obs.uow(engine, chain) as conn:
-        source = await ensure_archive_source(
+        source = await ensure_past_posts_source(
             conn,
             workspace_id=str(chain["ws"]),
             origin_ig_account_id=account,
@@ -156,11 +156,11 @@ async def write(engine, chain, sql, **params):
 
 
 async def read(engine, chain, *, capability=True):
-    """The mix resource as the API reads it, the archive capability injected
+    """The mix resource as the API reads it, the past-posts capability injected
     the way only tests inject it, unless told otherwise."""
     async with obs.uow(engine, chain) as conn:
         if capability:
-            conn.info["archive_capability"] = foundation.capability()
+            conn.info["past_posts_capability"] = foundation.capability()
         return await versioned_mix.resource(conn, workspace_id=str(chain["ws"]))
 
 
@@ -190,7 +190,7 @@ def checkpoint(generation, **fields):
     same envelope with its lanes complete."""
     saved = {
         "v": 1,
-        "type": "instagram_archive_sync",
+        "type": "instagram_past_posts_sync",
         "generation_id": generation,
         "revision": 1,
         "next_lane": "recent",
@@ -208,17 +208,19 @@ def checkpoint(generation, **fields):
 
 
 async def test_a_history_on_and_b_history_off_without_drive(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
-    mine, item = await metadata(archive_engine, origin)
+    mine, item = await metadata(past_posts_engine, origin)
     b = add_account(
         sync_conn, origin, "acct-readiness-b", "example_b", display_name="Example B"
     )
-    theirs = await history(archive_engine, origin, b, enabled=False)
-    await write(archive_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"])
-    view = await read(archive_engine, origin)
-    assert view["archive_available"] is True
+    theirs = await history(past_posts_engine, origin, b, enabled=False)
+    await write(
+        past_posts_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"]
+    )
+    view = await read(past_posts_engine, origin)
+    assert view["past_posts_available"] is True
     rows = {r["source_id"]: r for r in view["rows"]}
     assert list(rows) == [mine["source_id"], theirs["source_id"]]
     assert (
@@ -235,7 +237,7 @@ async def test_a_history_on_and_b_history_off_without_drive(
     assert verdict(da) == ("ready", "active", None)
     assert (da["candidates"], da["eligible"], da["handle"]) == (1, 0, None)
     assert da["display_name"] is None
-    # A's archive cannot complete B's setup; B's own history is Off.
+    # A's past-posts source cannot complete B's setup; B's own history is Off.
     assert verdict(db) == ("no_assignable_source", "attention", "enable_history")
     assert (db["candidates"], db["handle"]) == (0, "example_b")
     assert db["display_name"] == "Example B"
@@ -254,9 +256,9 @@ async def test_a_history_on_and_b_history_off_without_drive(
     }
 
     # B's history On: indexing, with nothing observed yet. Never A's supply.
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await ratio(conn, origin, theirs["source_id"], 1)
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[b]) == ("indexing", "progress", None)
     assert verdict(by_account(view)[a]) == ("ready", "active", None)
     own = entry(view, b, theirs["source_id"])
@@ -265,9 +267,9 @@ async def test_a_history_on_and_b_history_off_without_drive(
 
     # B's history removed: nothing of B's to enable, so a source is the remedy.
     await write(
-        archive_engine, origin, REMOVED + " WHERE id=:sid", sid=theirs["source_id"]
+        past_posts_engine, origin, REMOVED + " WHERE id=:sid", sid=theirs["source_id"]
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[b]) == (
         "no_assignable_source",
         "attention",
@@ -276,19 +278,19 @@ async def test_a_history_on_and_b_history_off_without_drive(
 
 
 async def test_a_handle_only_destination_needs_connection_and_a_dead_grant_reconnect(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
     b = add_account(
         sync_conn, origin, "manual:example_b", "example_b", credential=False
     )
     c = add_account(sync_conn, origin, "acct-readiness-c", "example_c")
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
         await inventory(conn, origin, "handle-", 2)
-    view = await read(archive_engine, origin)
-    assert view["archive_available"] is True and view["rows"][0]["indexed"] is None
+    view = await read(past_posts_engine, origin)
+    assert view["past_posts_available"] is True and view["rows"][0]["indexed"] is None
     assert view["rows"][0]["media_count"] == 3
     d = by_account(view)
     assert verdict(d[a]) == verdict(d[c]) == ("ready", "active", None)
@@ -298,12 +300,12 @@ async def test_a_handle_only_destination_needs_connection_and_a_dead_grant_recon
     assert d[b]["candidates"] == 3
 
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE ig_accounts SET state='reauth_required' WHERE id=:id",
         id=c,
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     d = by_account(view)
     assert verdict(d[c]) == ("needs_reconnect", "attention", "reconnect")
     # Nothing can be posted to it: no supply shows.
@@ -323,33 +325,33 @@ async def test_a_handle_only_destination_needs_connection_and_a_dead_grant_recon
 
     # The account active again, its own credential revoked: still its grant.
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE ig_accounts SET state='active' WHERE id=:id",
         id=c,
     )
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE oauth_credentials SET state='revoked' WHERE ig_account_id=:id",
         id=c,
     )
-    d = by_account(await read(archive_engine, origin))
+    d = by_account(await read(past_posts_engine, origin))
     assert verdict(d[c]) == ("needs_reconnect", "attention", "reconnect")
     assert d[c]["candidates"] == 0
     assert verdict(d[a]) == ("ready", "active", None) and d[a]["candidates"] == 2
 
 
 async def test_a_shared_drive_readies_both_and_a_moved_one_leaves_the_denominator(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
         await inventory(conn, origin, "shared-", 1)
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     d = by_account(view)
     assert verdict(d[a]) == verdict(d[b]) == ("ready", "active", None)
     assert all(s["assignable"] for s in d[a]["sources"] + d[b]["sources"])
@@ -365,12 +367,12 @@ async def test_a_shared_drive_readies_both_and_a_moved_one_leaves_the_denominato
     }
 
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE ig_accounts SET state='moved' WHERE id=:id",
         id=b,
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[b]) == ("inactive", "inert", None)
     assert view["guidance"] == {
         "active": 1,
@@ -380,12 +382,12 @@ async def test_a_shared_drive_readies_both_and_a_moved_one_leaves_the_denominato
     }
 
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE ig_accounts SET state='moved' WHERE id=:id",
         id=a,
     )
-    assert (await read(archive_engine, origin))["guidance"] == {
+    assert (await read(past_posts_engine, origin))["guidance"] == {
         "active": 0,
         "ready": 0,
         "intentional": "all_inactive",
@@ -394,15 +396,15 @@ async def test_a_shared_drive_readies_both_and_a_moved_one_leaves_the_denominato
 
 
 async def test_all_sources_off_is_intentional_and_no_source_at_all_needs_one(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
-    await history(archive_engine, origin, a, enabled=False)
-    async with obs.uow(archive_engine, origin) as conn:
+    await history(past_posts_engine, origin, a, enabled=False)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 0)
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     d = by_account(view)
     # A's own history is Off too, yet the choice is the workspace's: all Off.
     assert verdict(d[a]) == verdict(d[b]) == ("sources_off", "inert", None)
@@ -413,8 +415,8 @@ async def test_all_sources_off_is_intentional_and_no_source_at_all_needs_one(
         "incomplete": [],
     }
 
-    await write(archive_engine, origin, REMOVED + " WHERE workspace_id=:ws")
-    view = await read(archive_engine, origin)
+    await write(past_posts_engine, origin, REMOVED + " WHERE workspace_id=:ws")
+    view = await read(past_posts_engine, origin)
     assert view["rows"] == []
     d = by_account(view)
     assert (
@@ -437,12 +439,12 @@ async def test_all_sources_off_is_intentional_and_no_source_at_all_needs_one(
     }
 
 
-async def test_a_partial_archive_is_ready_and_the_leading_exclusion_names_a_remedy(
-    archive_engine, origin
+async def test_a_partial_past_posts_is_ready_and_the_leading_exclusion_names_a_remedy(
+    past_posts_engine, origin
 ):
     a = str(origin["iga"])
-    mine, item = await metadata(archive_engine, origin)
-    view = await read(archive_engine, origin)
+    mine, item = await metadata(past_posts_engine, origin)
+    view = await read(past_posts_engine, origin)
     da = by_account(view)[a]
     # Never scanned to the end: partial coverage, and ready all the same.
     assert verdict(da) == ("ready", "active", None) and da["partial_coverage"]
@@ -460,26 +462,26 @@ async def test_a_partial_archive_is_ready_and_the_leading_exclusion_names_a_reme
         progress={},
     )
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE media_sources SET sync_checkpoint=CAST(:cp AS jsonb) WHERE id=:sid",
         cp=complete,
         sid=mine["source_id"],
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     da = by_account(view)[a]
     assert verdict(da) == ("ready", "active", None) and not da["partial_coverage"]
     assert not entry(view, a, mine["source_id"])["indexing"]
 
     # Its one post too recent: nothing matches, and the policy is the remedy.
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE instagram_media_index SET original_at=now()-interval '1 day'"
         " WHERE source_id=:sid",
         sid=mine["source_id"],
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     da = by_account(view)[a]
     assert verdict(da) == ("zero_eligible", "attention", "review_policy")
     assert da["leading_exclusion"] == {"reason": "too_recent", "count": 1}
@@ -487,20 +489,20 @@ async def test_a_partial_archive_is_ready_and_the_leading_exclusion_names_a_reme
 
     # Held by a lock instead: no policy leads, so no remedy is named.
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "UPDATE instagram_media_index SET original_at='2020-01-01T00:00:00Z'"
         " WHERE source_id=:sid",
         sid=mine["source_id"],
     )
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
         "INSERT INTO post_locks(workspace_id,media_item_id,kind)"
         " VALUES(:ws,:item,'hold')",
         item=item.media_item_id,
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     da = by_account(view)[a]
     assert verdict(da) == ("zero_eligible", "attention", None)
     assert da["leading_exclusion"] == {"reason": "locked", "count": 1}
@@ -509,48 +511,50 @@ async def test_a_partial_archive_is_ready_and_the_leading_exclusion_names_a_reme
     # Its generation pending deletion: the origin grant is unusable and no
     # Drive folder is usable, while the destination's own grant is fine.
     await write(
-        archive_engine,
+        past_posts_engine,
         origin,
-        "UPDATE instagram_archive_generations SET lifecycle='deletion_pending'"
+        "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending'"
         " WHERE id=:gid",
         gid=mine["generation_id"],
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[a]) == ("needs_reconnect", "attention", "reconnect")
     assert entry(view, a, mine["source_id"])["needs_reconnect"]
     # A usable Drive folder, empty for A: waiting on content, not a reconnect.
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await ratio(conn, origin, origin["src"], 1)
-    da = by_account(await read(archive_engine, origin))[a]
+    da = by_account(await read(past_posts_engine, origin))[a]
     assert verdict(da) == ("zero_eligible", "attention", None)
 
 
 async def test_a_manual_reference_needs_connection_even_with_a_grant_on_file(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
     # Added by handle alone, though a credential row exists for it.
     b = add_account(sync_conn, origin, "manual:example_b", "example_b")
     # Control: the same grant under a real reference connects.
     c = add_account(sync_conn, origin, "acct-readiness-c", "example_c")
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
         await inventory(conn, origin, "manual-", 1)
-    d = by_account(await read(archive_engine, origin))
+    d = by_account(await read(past_posts_engine, origin))
     assert verdict(d[b]) == ("needs_connection", "attention", "connect")
     assert verdict(d[a]) == verdict(d[c]) == ("ready", "active", None)
 
 
-async def test_an_archive_serves_its_origin_alone_through_an_active_assignment(
-    archive_engine, origin, sync_conn
+async def test_a_past_posts_serves_its_origin_alone_through_an_active_assignment(
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
-    mine, _ = await metadata(archive_engine, origin)
+    mine, _ = await metadata(past_posts_engine, origin)
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
-    theirs = await history(archive_engine, origin, b, enabled=True)
-    await write(archive_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"])
-    # B's history is assigned to A as well. An archive serves its own origin,
+    theirs = await history(past_posts_engine, origin, b, enabled=True)
+    await write(
+        past_posts_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"]
+    )
+    # B's history is assigned to A as well. A past-posts source serves its own origin,
     # whatever else it is assigned to (the v1 `origin_only` rule).
     owner_write(
         sync_conn,
@@ -560,7 +564,7 @@ async def test_an_archive_serves_its_origin_alone_through_an_active_assignment(
         theirs["source_id"],
         a,
     )
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     d = by_account(view)
     assert [s["assignable"] for s in d[a]["sources"]] == [True, False]
     assert [s["assignable"] for s in d[b]["sources"]] == [False, True]
@@ -576,7 +580,7 @@ async def test_an_archive_serves_its_origin_alone_through_an_active_assignment(
         theirs["source_id"],
         b,
     )
-    d = by_account(await read(archive_engine, origin))
+    d = by_account(await read(past_posts_engine, origin))
     assert [s["assignable"] for s in d[b]["sources"]] == [False, False]
     assert verdict(d[b]) == ("no_assignable_source", "attention", "add_source")
     # Control: A, still holding its own, is unmoved.
@@ -585,22 +589,24 @@ async def test_an_archive_serves_its_origin_alone_through_an_active_assignment(
 
 
 async def test_a_stalled_history_and_a_failed_folder_are_problems_to_retry(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
-    await write(archive_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"])
-    theirs = await history(archive_engine, origin, b, enabled=True)
-    async with obs.uow(archive_engine, origin) as conn:
+    await write(
+        past_posts_engine, origin, REMOVED + " WHERE id=:sid", sid=origin["src"]
+    )
+    theirs = await history(past_posts_engine, origin, b, enabled=True)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[b]) == ("indexing", "progress", None)
     assert not entry(view, b, theirs["source_id"])["stalled"]
 
     # Three days without a committed batch: past its budget. A retry is the
     # remedy, and A, with nothing to draw on, is listed before B's problem.
     age(sync_conn, theirs["source_id"])
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[b]) == ("stalled", "problem", "retry")
     assert entry(view, b, theirs["source_id"])["stalled"]
     assert view["guidance"]["incomplete"] == [
@@ -617,9 +623,9 @@ async def test_a_stalled_history_and_a_failed_folder_are_problems_to_retry(
         " WHERE id = %s",
         origin["src"],
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await ratio(conn, origin, origin["src"], 1)
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert verdict(by_account(view)[a]) == ("error", "problem", "retry")
     assert verdict(by_account(view)[b]) == ("stalled", "problem", "retry")
     assert view["guidance"]["incomplete"] == [
@@ -663,17 +669,17 @@ MALFORMED_CHECKPOINTS = {
     MALFORMED_CHECKPOINTS.values(),
     ids=MALFORMED_CHECKPOINTS.keys(),
 )
-async def test_a_malformed_checkpoint_reads_that_archive_as_stalled_and_the_get_still_answers(
+async def test_a_malformed_checkpoint_reads_that_past_posts_as_stalled_and_the_get_still_answers(
     ingress, origin, sync_conn, caplog, corrupted
 ):
-    """One unreadable checkpoint degrades that archive alone, not the whole mix
+    """One unreadable checkpoint degrades that past-posts source alone, not the whole mix
     GET and with it the editor an admin acts from: stalled and partial, no
     coverage, a retry the remedy, and one warning naming the source and the
     reason, never the checkpoint.
 
     The histories are created in the mix's row order: B's, then A's (the one
     under test), then C's. A read that gave up at the first bad checkpoint
-    would lose C's facts, and one that degraded every archive once any was bad
+    would lose C's facts, and one that degraded every past-posts source once any was bad
     would show on B."""
     a = str(origin["iga"])
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
@@ -722,7 +728,7 @@ async def test_a_malformed_checkpoint_reads_that_archive_as_stalled_and_the_get_
         assert said == []
 
         # The checkpoint corrupted: the same read answers 200, and only A's
-        # archive is degraded.
+        # past-posts source is degraded.
         await save(**corrupted)
         view, said = await get_and_listen(client)
         da = by_account(view)[a]
@@ -746,11 +752,11 @@ async def test_a_malformed_checkpoint_reads_that_archive_as_stalled_and_the_get_
         ]
         # The whole message: the source and the reason, nothing of the value.
         assert said == [
-            f"archive source {mine['source_id']}: checkpoint unreadable"
-            " (unsupported_archive_sync_checkpoint); read as stalled"
+            f"past-posts source {mine['source_id']}: checkpoint unreadable"
+            " (unsupported_past_posts_sync_checkpoint); read as stalled"
         ]
 
-        # Positive control: the same archive, its checkpoint well-formed and
+        # Positive control: the same past-posts source, its checkpoint well-formed and
         # fresh, is not stalled, keeps its coverage and says nothing.
         await save()
         view, said = await get_and_listen(client)
@@ -762,8 +768,8 @@ async def test_a_malformed_checkpoint_reads_that_archive_as_stalled_and_the_get_
 
 
 async def source_status(engine, chain, source_id):
-    """`instagram_sync.status` of one archive, read as the projection reads it:
-    under one suitability context, the archive capability injected."""
+    """`instagram_sync.status` of one past-posts source, read as the projection reads it:
+    under one suitability context, the past-posts capability injected."""
     async with obs.uow(engine, chain) as conn:
         context = await source_policy.suitability_context(
             conn, workspace_id=str(chain["ws"])
@@ -777,7 +783,7 @@ async def source_status(engine, chain, source_id):
 
 
 async def test_a_source_config_that_is_not_an_object_does_not_fail_the_get(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     """`media_sources.config` is an object wherever a writer builds it, but its
     CHECK lets any other JSON through (`config->'v'` is NULL for one, and a CHECK
@@ -785,8 +791,8 @@ async def test_a_source_config_that_is_not_an_object_does_not_fail_the_get(
     the database's own expression there, as in every other statement of the
     read, so a config it cannot read is not removed."""
     a = str(origin["iga"])
-    mine, _ = await metadata(archive_engine, origin)
-    before = await read(archive_engine, origin)
+    mine, _ = await metadata(past_posts_engine, origin)
+    before = await read(past_posts_engine, origin)
     held = entry(before, a, mine["source_id"])
     assert (held["indexing"], held["stalled"], held["needs_reconnect"]) == (
         True,
@@ -799,11 +805,11 @@ async def test_a_source_config_that_is_not_an_object_does_not_fail_the_get(
         "UPDATE media_sources SET config = '[1]'::jsonb WHERE id = %s",
         mine["source_id"],
     )
-    after = await read(archive_engine, origin)
+    after = await read(past_posts_engine, origin)
 
     # The same read, unchanged by it: nothing degrades, nothing is retired.
     assert after == before
-    live = await source_status(archive_engine, origin, mine["source_id"])
+    live = await source_status(past_posts_engine, origin, mine["source_id"])
     assert (live["connected"], live["enabled"]) == (True, True)
 
     # Control: a `removed` it can read still retires the source in `status`.
@@ -813,29 +819,31 @@ async def test_a_source_config_that_is_not_an_object_does_not_fail_the_get(
         " WHERE id = %s",
         mine["source_id"],
     )
-    gone = await source_status(archive_engine, origin, mine["source_id"])
+    gone = await source_status(past_posts_engine, origin, mine["source_id"])
     assert (gone["connected"], gone["enabled"], gone["needs_reconnect"]) == (
         False,
         False,
         False,
     )
     assert mine["source_id"] not in [
-        r["source_id"] for r in (await read(archive_engine, origin))["rows"]
+        r["source_id"] for r in (await read(past_posts_engine, origin))["rows"]
     ]
 
 
 async def test_media_count_is_the_retained_catalog_and_indexed_the_current_generation(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    first, _ = await metadata(archive_engine, origin)
-    await obs.observe(archive_engine, origin, first, obs.bundle(parent="456"))
+    first, _ = await metadata(past_posts_engine, origin)
+    await obs.observe(past_posts_engine, origin, first, obs.bundle(parent="456"))
 
-    async def archive_counts():
-        rows = {r["source_id"]: r for r in (await read(archive_engine, origin))["rows"]}
+    async def past_posts_counts():
+        rows = {
+            r["source_id"]: r for r in (await read(past_posts_engine, origin))["rows"]
+        }
         mine = rows[first["source_id"]]
         return (mine["media_count"], mine["indexed"]), rows
 
-    counts, rows = await archive_counts()
+    counts, rows = await past_posts_counts()
     assert counts == (2, 2)
     # The chain's own Drive item counts, whatever its intent or its folder's
     # Off, and a Drive has no observations to count.
@@ -844,32 +852,34 @@ async def test_media_count_is_the_retained_catalog_and_indexed_the_current_gener
 
     # A reauthorization opens a new generation: the posts stay retained, but
     # none is observed in it yet, which is an unknown count, not the old two.
-    second = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    second = await foundation.ensure(
+        past_posts_engine, origin, foundation.authorization()
+    )
     assert second["source_id"] == first["source_id"]
-    assert (await archive_counts())[0] == (2, None)
-    await obs.observe(archive_engine, origin, second, obs.bundle(parent="789"))
-    assert (await archive_counts())[0] == (3, 1)
+    assert (await past_posts_counts())[0] == (2, None)
+    await obs.observe(past_posts_engine, origin, second, obs.bundle(parent="789"))
+    assert (await past_posts_counts())[0] == (3, 1)
 
     # Erasing the first generation tombstones its posts: they leave the
     # catalog count, and the current generation's observation is untouched.
-    await obs.redact(archive_engine, origin, first)
-    assert (await archive_counts())[0] == (1, 1)
+    await obs.redact(past_posts_engine, origin, first)
+    assert (await past_posts_counts())[0] == (1, 1)
 
     # A generation marked deleted before its posts are redacted: they are not
     # retained either, though nothing has tombstoned them yet.
     owner_write(
         sync_conn,
-        "UPDATE instagram_archive_generations SET lifecycle = 'deleted' WHERE id = %s",
+        "UPDATE instagram_past_posts_generations SET lifecycle = 'deleted' WHERE id = %s",
         second["generation_id"],
     )
-    assert (await archive_counts())[0][0] == 0
+    assert (await past_posts_counts())[0][0] == 0
 
 
 async def test_a_member_reads_the_same_projection_and_no_other_workspace_appears(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     a = str(origin["iga"])
-    mine, _ = await metadata(archive_engine, origin)
+    mine, _ = await metadata(past_posts_engine, origin)
     other = seed_workspace_chain(sync_conn, "readiness-other")
     with sync_conn.cursor() as cur:
         cur.execute(
@@ -890,18 +900,18 @@ async def test_a_member_reads_the_same_projection_and_no_other_workspace_appears
             (origin["ws"], member),
         )
     sync_conn.commit()
-    async with obs.uow(archive_engine, other) as conn:
+    async with obs.uow(past_posts_engine, other) as conn:
         await activate(conn, other["ws"])
 
-    owner = await read(archive_engine, origin)
+    owner = await read(past_posts_engine, origin)
     async with unit_of_work(
-        archive_engine,
+        past_posts_engine,
         str(origin["ws"]),
         actor_kind="user",
         actor_user_id=member,
         channel="web",
     ).begin() as conn:
-        conn.info["archive_capability"] = foundation.capability()
+        conn.info["past_posts_capability"] = foundation.capability()
         # The GET's own floor: a member passes it, and is no admin.
         assert (
             await tenant_resolution.authorize_member(conn, str(origin["ws"]), member)
@@ -919,11 +929,11 @@ async def test_a_member_reads_the_same_projection_and_no_other_workspace_appears
     assert [d["account_id"] for d in owner["destinations"]] == [a]
     assert {r["source_id"] for r in owner["rows"]} == sources
     assert {s["source_id"] for s in owner["destinations"][0]["sources"]} == sources
-    theirs = await read(archive_engine, other)
+    theirs = await read(past_posts_engine, other)
     assert [d["account_id"] for d in theirs["destinations"]] == [str(other["iga"])]
     assert [r["source_id"] for r in theirs["rows"]] == [str(other["src"])]
     # Bound to the other tenant, this workspace is absent, refused by name.
-    async with obs.uow(archive_engine, other) as conn:
+    async with obs.uow(past_posts_engine, other) as conn:
         with pytest.raises(MixInvalid) as refused:
             await versioned_mix.resource(conn, workspace_id=str(origin["ws"]))
     assert refused.value.reason == "unknown_workspace"
@@ -937,7 +947,7 @@ RESOURCE_KEYS = {
     "mode",
     "supported_actions",
     "conversion",
-    "archive_available",
+    "past_posts_available",
     "rows",
     "destinations",
     "guidance",
@@ -985,11 +995,11 @@ DESTINATION_SOURCE_KEYS = {
 
 
 async def test_the_wire_shape_is_exactly_the_contracts(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    await metadata(archive_engine, origin)
+    await metadata(past_posts_engine, origin)
     add_account(sync_conn, origin, "acct-readiness-b", "example_b")
-    view = await read(archive_engine, origin)
+    view = await read(past_posts_engine, origin)
     assert set(view) == RESOURCE_KEYS
     assert len(view["rows"]) == len(view["destinations"]) == 2
     assert all(set(row) == ROW_KEYS for row in view["rows"])
@@ -1017,13 +1027,13 @@ LEGACY_ROW_KEYS = {
 }
 
 
-async def test_protocol_1_is_unchanged_and_archive_available_follows_the_capability(
-    archive_engine, origin
+async def test_protocol_1_is_unchanged_and_past_posts_available_follows_the_capability(
+    past_posts_engine, origin
 ):
     # A workspace not yet converted answers protocol 1: its rows and nothing
     # else, whether or not the capability is injected.
     for capability in (True, False):
-        legacy = await read(archive_engine, origin, capability=capability)
+        legacy = await read(past_posts_engine, origin, capability=capability)
         assert set(legacy) == {
             "protocol_version",
             "rows",
@@ -1035,26 +1045,26 @@ async def test_protocol_1_is_unchanged_and_archive_available_follows_the_capabil
         assert legacy["conversion"] == {"state": "pending"}
         assert [set(r) for r in legacy["rows"]] == [LEGACY_ROW_KEYS]
 
-    # Converted, the capability alone decides `archive_available`.
-    async with obs.uow(archive_engine, origin) as conn:
+    # Converted, the capability alone decides `past_posts_available`.
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
         await inventory(conn, origin, "protocol-", 1)
-    on = await read(archive_engine, origin)
-    off = await read(archive_engine, origin, capability=False)
+    on = await read(past_posts_engine, origin)
+    off = await read(past_posts_engine, origin, capability=False)
     assert on["protocol_version"] == off["protocol_version"] == 2
-    assert (on["archive_available"], off["archive_available"]) == (True, False)
+    assert (on["past_posts_available"], off["past_posts_available"]) == (True, False)
     # A Drive-only workspace reads the same either way: ready, with its
     # supply, and nothing else tells the two apart.
     a = str(origin["iga"])
     assert verdict(by_account(off)[a]) == ("ready", "active", None)
     assert by_account(off)[a]["candidates"] == 1
-    assert {**on, "archive_available": None} == {**off, "archive_available": None}
+    assert {**on, "past_posts_available": None} == {**off, "past_posts_available": None}
 
 
 async def counted_read(engine, chain):
     async with obs.uow(engine, chain) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+        conn.info["past_posts_capability"] = foundation.capability()
         recorded = RecordedExecutor(conn)
         view = await versioned_mix.resource(recorded, workspace_id=str(chain["ws"]))
         return view, recorded.calls
@@ -1069,7 +1079,7 @@ def locking(statements):
 
 
 async def test_a_protocol_1_get_takes_no_lock_and_a_converted_one_takes_the_prefix_after_its_probe(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     """A workspace not yet converted, the state every workspace starts in:
     the GET is its state and the card's rows, two plain SELECTs, and none of the
@@ -1077,7 +1087,7 @@ async def test_a_protocol_1_get_takes_no_lock_and_a_converted_one_takes_the_pref
     converted workspace reads that state first with no lock too, then takes the
     prefix, then reads the state again under it: the probe, ten statements of
     prefix, the state."""
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         recorded = RecordedExecutor(conn)
         legacy = await versioned_mix.resource(recorded, workspace_id=str(origin["ws"]))
     assert legacy["protocol_version"] == 1
@@ -1086,10 +1096,10 @@ async def test_a_protocol_1_get_takes_no_lock_and_a_converted_one_takes_the_pref
     assert "source_mix_mode,source_mix_policy_version" in statements[0]
     assert locking(statements) == []
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
-    view, calls = await counted_read(archive_engine, origin)
+    view, calls = await counted_read(past_posts_engine, origin)
     assert view["protocol_version"] == 2
     statements = [" ".join(str(s).split()) for s, _ in calls]
     reads = [
@@ -1104,7 +1114,7 @@ async def test_a_protocol_1_get_takes_no_lock_and_a_converted_one_takes_the_pref
 
 
 async def test_the_overviews_runway_takes_no_lock_until_the_workspace_has_converted(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     """The Overview loads the runway for every workspace. A suitability
     context takes the whole prefix, and the legacy pool reads none of its
@@ -1117,7 +1127,7 @@ async def test_the_overviews_runway_takes_no_lock_until_the_workspace_has_conver
     async def runway(executor):
         return await content_runway.runway(executor, workspace_id=ws, below_days=7)
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         recorded = RecordedExecutor(conn)
         quiet = await runway(recorded)
     assert [a["id"] for a in quiet["accounts"]] == [account]
@@ -1128,7 +1138,7 @@ async def test_the_overviews_runway_takes_no_lock_until_the_workspace_has_conver
     try:
 
         async def held():
-            async with obs.uow(archive_engine, origin) as conn:
+            async with obs.uow(past_posts_engine, origin) as conn:
                 return await runway(conn)
 
         # A read that waited here would sit until the writer left.
@@ -1137,14 +1147,14 @@ async def test_the_overviews_runway_takes_no_lock_until_the_workspace_has_conver
         sync_conn.rollback()
     assert under_a_writer == quiet
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
     hold_the_workspace(sync_conn, ws)
 
     async def converted():
-        async with obs.uow(archive_engine, origin) as conn:
-            conn.info["archive_capability"] = foundation.capability()
+        async with obs.uow(past_posts_engine, origin) as conn:
+            conn.info["past_posts_capability"] = foundation.capability()
             return await runway(conn)
 
     waiting = asyncio.create_task(converted())
@@ -1157,41 +1167,41 @@ async def test_the_overviews_runway_takes_no_lock_until_the_workspace_has_conver
     assert [a["id"] for a in after["accounts"]] == [account]
 
 
-async def test_an_unlocked_context_takes_no_lock_and_refuses_a_live_archive(
-    archive_engine, origin
+async def test_an_unlocked_context_takes_no_lock_and_refuses_a_live_past_posts(
+    past_posts_engine, origin
 ):
     ws = str(origin["ws"])
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         recorded = RecordedExecutor(conn)
         context = await source_policy.unlocked_context(
             recorded, workspace_id=ws, capability=foundation.capability()
         )
     # Not converted: nothing is activated, whatever the capability says.
-    assert context.archive_enabled is False
+    assert context.past_posts_enabled is False
     statements = [" ".join(str(s).split()) for s, _ in recorded.calls]
     assert len(statements) == 1 and locking(statements) == []
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         with pytest.raises(RuntimeError, match="unlocked_context_for_an_activated"):
             await source_policy.unlocked_context(
                 conn, workspace_id=ws, capability=foundation.capability()
             )
         # Control: the same converted workspace with no capability injected, the
-        # rollback's state, activates nothing, so there is no archive fact to see.
+        # rollback's state, activates nothing, so there is no past-posts fact to see.
         context = await source_policy.unlocked_context(conn, workspace_id=ws)
-        assert context.archive_enabled is False
+        assert context.past_posts_enabled is False
 
 
 async def test_a_workspace_converted_by_an_unknown_release_is_refused_by_name_with_no_lock(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     """Neither the protocol this code serves nor pending: a conversion a newer
     release made (its policy version is one this reader does not know). It is
     refused by name from the first read, before the prefix, as it was after it."""
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
     owner_write(
@@ -1199,7 +1209,7 @@ async def test_a_workspace_converted_by_an_unknown_release_is_refused_by_name_wi
         "UPDATE workspaces SET source_mix_policy_version = 2 WHERE id = %s",
         origin["ws"],
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         recorded = RecordedExecutor(conn)
         with pytest.raises(versioned_mix.MixProtocolRequired):
             await versioned_mix.resource(recorded, workspace_id=str(origin["ws"]))
@@ -1212,7 +1222,7 @@ async def test_a_workspace_converted_by_an_unknown_release_is_refused_by_name_wi
         "UPDATE workspaces SET source_mix_policy_version = 1 WHERE id = %s",
         origin["ws"],
     )
-    assert (await read(archive_engine, origin))["protocol_version"] == 2
+    assert (await read(past_posts_engine, origin))["protocol_version"] == 2
 
 
 def hold_the_workspace(sync_conn, ws):
@@ -1250,7 +1260,7 @@ async def a_request_waits_on_a_lock(sync_conn, *, timeout=10.0):
 
 
 async def test_a_writer_holding_the_workspace_delays_no_protocol_1_read_and_a_protocol_2_read_sees_its_commit(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     """Behaviour, not statements. The workspace's locks held as the worker holds
     them: a protocol-1 read answers at once. Once converted, a protocol-2 read
@@ -1261,19 +1271,19 @@ async def test_a_writer_holding_the_workspace_delays_no_protocol_1_read_and_a_pr
     hold_the_workspace(sync_conn, ws)
     try:
         # A read that waited here would sit until the writer left.
-        legacy = await asyncio.wait_for(read(archive_engine, origin), timeout=10)
+        legacy = await asyncio.wait_for(read(past_posts_engine, origin), timeout=10)
     finally:
         sync_conn.rollback()
     assert legacy["protocol_version"] == 1
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await ratio(conn, origin, origin["src"], 1)
-    before = await read(archive_engine, origin)
+    before = await read(past_posts_engine, origin)
     assert before["protocol_version"] == 2 and before["mode"] == "equal"
 
     hold_the_workspace(sync_conn, ws)
-    waiting = asyncio.create_task(read(archive_engine, origin))
+    waiting = asyncio.create_task(read(past_posts_engine, origin))
     try:
         await a_request_waits_on_a_lock(sync_conn)
         assert not waiting.done(), "a converted read takes the prefix, so it waits"
@@ -1295,38 +1305,38 @@ async def test_a_writer_holding_the_workspace_delays_no_protocol_1_read_and_a_pr
 
 
 #: The statements one protocol-2 GET issues for three destinations and three
-#: sources, two of them archives: the conversion state read with no lock (1), the
+#: sources, two of them past-posts sources: the conversion state read with no lock (1), the
 #: resource's lock prefix (10), its saved state read again under it, rows and row
 #: counts (3), the suitability context's own lock prefix and reads (13), the
-#: destinations (1), each archive's `instagram_sync.status` (4 each), `pool` per
+#: destinations (1), each past-posts source's `instagram_sync.status` (4 each), `pool` per
 #: destination (2 each) and the conversion record (1).
 THREE_BY_THREE_STATEMENTS = 1 + 10 + 3 + 13 + 1 + 2 * 4 + 3 * 2 + 1
 
 
 async def test_a_get_for_three_destinations_and_three_sources_has_a_fixed_budget(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    mine, _ = await metadata(archive_engine, origin)
+    mine, _ = await metadata(past_posts_engine, origin)
     b = add_account(sync_conn, origin, "acct-readiness-b", "example_b")
     add_account(sync_conn, origin, "acct-readiness-c", "example_c")
-    theirs = await history(archive_engine, origin, b, enabled=True)
-    await obs.observe(archive_engine, origin, theirs, obs.bundle(parent="456"))
-    async with obs.uow(archive_engine, origin) as conn:
+    theirs = await history(past_posts_engine, origin, b, enabled=True)
+    await obs.observe(past_posts_engine, origin, theirs, obs.bundle(parent="456"))
+    async with obs.uow(past_posts_engine, origin) as conn:
         await ratio(conn, origin, origin["src"], 1)
         await inventory(conn, origin, "budget-", 1)
-    view, calls = await counted_read(archive_engine, origin)
+    view, calls = await counted_read(past_posts_engine, origin)
     assert (len(view["destinations"]), len(view["rows"])) == (3, 3)
     assert view["guidance"]["ready"] == 3
 
     # More media changes no statement: every read is setwise, never per item.
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await inventory(conn, origin, "more-", 25)
         await conn.execute(
             text(
                 "WITH items AS (INSERT INTO media_items(workspace_id,source_id,"
                 "source_data_generation_id,content_hash,provider_file_ref,file_name,"
-                "media_kind) SELECT :ws,:sid,:gid,'budget-archive-'||n,"
-                "'budget-archive-'||n,'x.jpg','image' FROM generate_series(1,25) n"
+                "media_kind) SELECT :ws,:sid,:gid,'budget-past-posts-'||n,"
+                "'budget-past-posts-'||n,'x.jpg','image' FROM generate_series(1,25) n"
                 " RETURNING id,provider_file_ref)"
                 " INSERT INTO instagram_media_index(workspace_id,source_id,"
                 "parent_media_id,data_generation_id,media_item_id,original_at,"
@@ -1339,7 +1349,7 @@ async def test_a_get_for_three_destinations_and_three_sources_has_a_fixed_budget
                 "gid": mine["generation_id"],
             },
         )
-    grown, more = await counted_read(archive_engine, origin)
+    grown, more = await counted_read(past_posts_engine, origin)
     assert (
         next(r for r in grown["rows"] if r["source_id"] == mine["source_id"])["indexed"]
         == 26

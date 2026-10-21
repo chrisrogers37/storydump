@@ -27,7 +27,7 @@ from sqlalchemy import event
 from src.api.app import create_app
 from src.api.principal import Principal, current_principal
 from src.config.settings import settings
-from tests.scripts import test_archive_preview_gate as preview_gate
+from tests.scripts import test_past_posts_preview_gate as preview_gate
 from tests.scripts import test_instagram_sources_gate as foundation
 
 pytestmark = [pytest.mark.integration]
@@ -51,7 +51,7 @@ def instagram_configured(monkeypatch):
 async def api(engine, user):
     app = create_app(engine=engine, env={})
     app.state.email = None
-    app.state.archive_capability = foundation.capability()
+    app.state.past_posts_capability = foundation.capability()
     app.dependency_overrides[current_principal] = lambda: Principal(
         session_id=str(uuid.uuid4()), user_id=str(user)
     )
@@ -119,16 +119,16 @@ ROUTES = {
     "header_add": dict(
         method="POST",
         path="accounts/connect",
-        first=b'{"archive_choice": ',
+        first=b'{"past_posts_choice": ',
         rest=b"null}",
-        refused="invalid_archive_choice",
+        refused="invalid_past_posts_choice",
     ),
     "row_start": dict(
         method="POST",
         path="accounts/{account}/connect",
-        first=b'{"archive_choice": ',
+        first=b'{"past_posts_choice": ',
         rest=b"null}",
-        refused="invalid_archive_choice",
+        refused="invalid_past_posts_choice",
     ),
     "policy_put": dict(
         method="PUT",
@@ -211,9 +211,9 @@ async def test_a_refused_body_takes_no_connection(
 @pytest.mark.parametrize(
     "content",
     [
-        b'{"archive_choice": {"use_history": "yes", "expected_mix_revision": 8,'
+        b'{"past_posts_choice": {"use_history": "yes", "expected_mix_revision": 8,'
         b' "preview_version": 1}}',
-        b'{"archive_choice": {"use_history": true, "expected_mix_revision": 8,'
+        b'{"past_posts_choice": {"use_history": true, "expected_mix_revision": 8,'
         b' "preview_version": 2}}',
         b'{"purpose": "connect"}',
         b"[1]",
@@ -230,5 +230,5 @@ async def test_a_choice_that_is_not_the_contracts_shape_takes_no_connection(
         with counting(ingress) as connections:
             refused = await client.post(url, content=content, headers=JSON)
             assert refused.status_code == 400, refused.text
-            assert reason(refused) == "invalid_archive_choice"
+            assert reason(refused) == "invalid_past_posts_choice"
             assert connections.ever == 0

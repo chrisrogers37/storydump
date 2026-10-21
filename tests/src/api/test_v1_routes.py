@@ -2137,10 +2137,10 @@ class TestMediaThumbnail:
         assert resp.status_code == 422
         assert drive["read"] == [] and drive["asked"] == []
 
-    def test_a_drive_item_ignores_the_version_and_never_asks_the_archive_port(
+    def test_a_drive_item_ignores_the_version_and_never_asks_the_past_posts_port(
         self, app, client, signed_in, tenant, drive
     ):
-        app.state.archive_preview = _FailOnCall()
+        app.state.past_posts_preview = _FailOnCall()
         resp = client.get(self.URL + "?v=0123456789abcdef")
         assert resp.status_code == 200, resp.text
         assert resp.headers["cache-control"] == "private, max-age=2592000"
@@ -2148,19 +2148,19 @@ class TestMediaThumbnail:
 
 
 class _FailOnCall:
-    """An archive preview port that must not be reached."""
+    """A past-posts preview port that must not be reached."""
 
     async def preview(self, **kwargs):
-        raise AssertionError(f"the archive preview port was asked: {kwargs}")
+        raise AssertionError(f"the past-posts preview port was asked: {kwargs}")
 
 
-class TestArchiveThumbnail:
-    """`GET …/media/{media_id}/thumbnail` for an archive item:
+class TestPastPostsThumbnail:
+    """`GET …/media/{media_id}/thumbnail` for a past-posts item:
     an explicit preview through the port a trusted composition root injects,
     asked only with the row's current `thumbnail_version`. Every answer is
     no-store and carries no validator, so a browser keeps nothing and is
     never told 304; the admission and fence behind the port are the gate's,
-    `tests/scripts/test_archive_preview_gate.py`."""
+    `tests/scripts/test_past_posts_preview_gate.py`."""
 
     URL = f"/api/v1/workspaces/{WS}/media/{INTENT}/thumbnail"
     VERSION = "66666666-6666-4666-8666-666666666666.3"
@@ -2183,13 +2183,13 @@ class TestArchiveThumbnail:
     }
 
     @pytest.fixture
-    def archive(self, app, monkeypatch):
+    def past_posts(self, app, monkeypatch):
         from src.api.routes import v1
 
         holder = {
             "row": {
                 "source_id": "55555555-5555-5555-5555-555555555555",
-                "provider": "instagram_archive",
+                "provider": "instagram_past_posts",
                 "provider_file_ref": "17890000000000001",
                 "thumbnail_url": None,
             },
@@ -2210,15 +2210,15 @@ class TestArchiveThumbnail:
                 return holder["content"]
 
         def no_drive(request):
-            raise AssertionError("an archive item never asks Drive")
+            raise AssertionError("a past-posts item never asks Drive")
 
         monkeypatch.setattr(workspaces, "thumbnail_link", thumbnail_link)
         monkeypatch.setattr(v1, "_drive_adapter", no_drive)
-        app.state.archive_preview = _Preview()
+        app.state.past_posts_preview = _Preview()
         return holder
 
     def test_serves_the_preview_no_store_with_exactly_its_headers(
-        self, client, signed_in, tenant, archive
+        self, client, signed_in, tenant, past_posts
     ):
         resp = client.get(self.URL, params={"v": self.VERSION})
         assert resp.status_code == 200, resp.text
@@ -2227,14 +2227,14 @@ class TestArchiveThumbnail:
         assert resp.headers["cache-control"] == self.NO_STORE
         assert set(resp.headers.keys()) - {"vary"} == self.HEADERS
         assert resp.headers.get("vary", "Origin") == "Origin"
-        assert archive["asked"] == [(WS, INTENT, self.VERSION)]
+        assert past_posts["asked"] == [(WS, INTENT, self.VERSION)]
         assert tenant == [
             ("uow", WS, PRINCIPAL.user_id),
             ("gate", WS, PRINCIPAL.user_id, "member"),
         ]
 
     def test_a_conditional_request_is_answered_in_full_never_304(
-        self, client, signed_in, tenant, archive
+        self, client, signed_in, tenant, past_posts
     ):
         resp = client.get(
             self.URL,
@@ -2249,53 +2249,53 @@ class TestArchiveThumbnail:
         assert "etag" not in resp.headers and "last-modified" not in resp.headers
 
     def test_a_refused_preview_is_the_no_store_404(
-        self, client, signed_in, tenant, archive
+        self, client, signed_in, tenant, past_posts
     ):
-        archive["content"] = None
+        past_posts["content"] = None
         resp = client.get(self.URL, params={"v": self.VERSION})
         assert resp.status_code == 404
         assert resp.json() == {"detail": "not found"}
         assert resp.headers["cache-control"] == self.NO_STORE
         assert "etag" not in resp.headers and "last-modified" not in resp.headers
-        assert archive["asked"] == [(WS, INTENT, self.VERSION)]
+        assert past_posts["asked"] == [(WS, INTENT, self.VERSION)]
 
     @pytest.mark.parametrize("query", ["", "?v=", "?other=1"])
     def test_without_a_version_the_port_is_never_asked(
-        self, app, client, signed_in, tenant, archive, query
+        self, app, client, signed_in, tenant, past_posts, query
     ):
-        app.state.archive_preview = _FailOnCall()
+        app.state.past_posts_preview = _FailOnCall()
         resp = client.get(self.URL + query)
         assert resp.status_code == 404
         assert resp.headers["cache-control"] == self.NO_STORE
 
     def test_without_the_injected_port_it_is_404_and_nothing_is_asked(
-        self, app, client, signed_in, tenant, archive
+        self, app, client, signed_in, tenant, past_posts
     ):
-        del app.state.archive_preview
+        del app.state.past_posts_preview
         resp = client.get(self.URL, params={"v": self.VERSION})
         assert resp.status_code == 404
         assert resp.json() == {"detail": "not found"}
         assert resp.headers["cache-control"] == self.NO_STORE
-        assert archive["read"] == [(WS, INTENT)] and archive["asked"] == []
+        assert past_posts["read"] == [(WS, INTENT)] and past_posts["asked"] == []
 
     def test_a_member_of_another_workspace_gets_404_and_nothing_is_asked(
-        self, client, signed_in, tenant, archive
+        self, client, signed_in, tenant, past_posts
     ):
         tenant.refuse = TenantResolutionError("not_a_member")
         resp = client.get(self.URL, params={"v": self.VERSION})
         assert resp.status_code == 404
         assert resp.json() == {"detail": "not found"}
-        assert archive["read"] == [] and archive["asked"] == []
+        assert past_posts["read"] == [] and past_posts["asked"] == []
 
     def test_an_item_the_workspace_does_not_hold_never_asks_the_port(
-        self, app, client, signed_in, tenant, archive
+        self, app, client, signed_in, tenant, past_posts
     ):
-        archive["row"] = None
-        app.state.archive_preview = _FailOnCall()
+        past_posts["row"] = None
+        app.state.past_posts_preview = _FailOnCall()
         assert client.get(self.URL, params={"v": self.VERSION}).status_code == 404
 
     def test_the_database_session_closes_before_the_preview_is_asked(
-        self, client, signed_in, tenant, archive, engine, monkeypatch
+        self, client, signed_in, tenant, past_posts, engine, monkeypatch
     ):
         from contextlib import asynccontextmanager
 
@@ -2303,13 +2303,13 @@ class TestArchiveThumbnail:
 
         @asynccontextmanager
         async def open_tenant(request, workspace_id, who):
-            archive["events"].append("session open")
+            past_posts["events"].append("session open")
             yield engine.session
-            archive["events"].append("session closed")
+            past_posts["events"].append("session closed")
 
         monkeypatch.setattr(principal, "open_tenant", open_tenant)
         assert client.get(self.URL, params={"v": self.VERSION}).status_code == 200
-        assert archive["events"] == ["session open", "session closed", "preview"]
+        assert past_posts["events"] == ["session open", "session closed", "preview"]
 
 
 class TestSourcePolicy:
@@ -2355,7 +2355,7 @@ class TestSourcePolicy:
             ("invalid_source_policy", 400),
             ("source_not_found", 404),
             ("unsupported_source_provider", 400),
-            ("archive_not_activated", 503),
+            ("past_posts_not_activated", 503),
         ],
     )
     def test_closed_refusals_keep_current_revision(

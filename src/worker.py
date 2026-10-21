@@ -48,8 +48,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.channels import telegram_webhook_registration as reg
 from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
-    archive_activation,
-    archive_composition,
+    past_posts_activation,
+    past_posts_composition,
     credential_lifecycle,
     drive_credentials,
     email_sender,
@@ -133,7 +133,7 @@ def _conversion_evidence(env):
     `compose`, which reads it itself when it is handed none."""
     from src.services.target import mix_conversion
 
-    return mix_conversion.release_evidence(env.get(archive_composition.RELEASE_VAR))
+    return mix_conversion.release_evidence(env.get(past_posts_composition.RELEASE_VAR))
 
 
 def _publish_media_fetch(adapters: media_adapters.MediaAdapters):
@@ -347,7 +347,7 @@ def compose(
     transport=None,
     refresh=None,
     adapters: Optional[media_adapters.MediaAdapters] = None,
-    archive: Optional[archive_composition.WorkerArchive] = None,
+    past_posts: Optional[past_posts_composition.WorkerPastPosts] = None,
     meta=None,
     transit=None,
     conversion_evidence=None,
@@ -358,9 +358,9 @@ def compose(
     IG refresh door — always constructible (no config), egress-floored; tests
     inject a scripted one.
 
-    *archive* is `archive_composition.build_worker`'s answer, which `main`
+    *past-posts source* is `past_posts_composition.build_worker`'s answer, which `main`
     builds first because the card media fetch needs its coordinator. None, the
-    default, wires no archive seam at all, as a deploy without the archive's key
+    default, wires no past-posts seam at all, as a deploy without the past-posts source's key
     ring does. *conversion_evidence* is the release's conversion run `main`
     already read; None, the default, reads it from *env*. *meta*
     and *transit* are test overrides of the seams built from *env*; `main`
@@ -392,18 +392,20 @@ def compose(
         mix_conversion_evidence=conversion_evidence,
         engine=engine,
         config=config,
-        # The archive. The key ring arms it, and redacts a deletion receipt
-        # either way; everything else is the armed archive's, and None without
+        # The past-posts source. The key ring arms it, and redacts a deletion receipt
+        # either way; everything else is the armed past-posts source's, and None without
         # the ring.
-        archive_keys=archive_activation.load_keys(env),
-        archive=archive.coordinator if archive else None,
-        archive_evidence=archive.evidence if archive else None,
-        archive_client=archive.client if archive else None,
-        archive_sync=archive.sync_ports if archive else None,
+        past_posts_keys=past_posts_activation.load_keys(env),
+        past_posts=past_posts.coordinator if past_posts else None,
+        past_posts_evidence=past_posts.evidence if past_posts else None,
+        past_posts_client=past_posts.client if past_posts else None,
+        past_posts_sync=past_posts.sync_ports if past_posts else None,
         # The coordinator's wrapper, which owns the bound-content review route,
         # never the bare `SelectedPreparation` under it.
-        selected_prepare=archive.coordinator.selected_prepare if archive else None,
-        archive_capability=archive.capability if archive else None,
+        selected_prepare=past_posts.coordinator.selected_prepare
+        if past_posts
+        else None,
+        past_posts_capability=past_posts.capability if past_posts else None,
     )
     registry = build_registry(deps)
     live = {k for k, e in registry.items() if not isinstance(e, Parked)}
@@ -427,8 +429,8 @@ def compose(
         # until it does.
         "reconcile_ambiguous": 60.0,
         # Mints the deletion-cleanup jobs a Meta deletion receipt is owed. Not
-        # gated on the activation: a deletion closes things (`archive_lifecycle`).
-        "archive_lifecycle_sweep": 60.0,
+        # gated on the activation: a deletion closes things (`past_posts_lifecycle`).
+        "past_posts_lifecycle_sweep": 60.0,
     }
     if "reap_transit_assets" in live:
         recurring["reap_transit_assets"] = 6 * 3600.0
@@ -468,7 +470,7 @@ def compose(
             heartbeat=heartbeat,
             config=config,
             worker_name=f"{name}-{lane}-{k}",
-            archive_capability=deps.archive_capability,
+            past_posts_capability=deps.past_posts_capability,
         )
         for lane in ("interactive", "bulk")
         for k in range(config.concurrency_for(lane))
@@ -677,7 +679,7 @@ class PromptSweeper:
         prepare = getattr(deps, "selected_prepare", None)
         if prepare is None:
             return
-        # The bounded door discovers already selected subjects, never an archive catalog.
+        # The bounded door discovers already selected subjects, never a past-posts catalog.
         async with sessions({}) as session:
             subjects = (
                 (
@@ -710,8 +712,8 @@ class PromptSweeper:
             try:
                 await self.prepare_selected(sessions)
                 async with sessions({}) as session:
-                    session.info["archive_capability"] = getattr(
-                        getattr(self._app, "deps", None), "archive_capability", None
+                    session.info["past_posts_capability"] = getattr(
+                        getattr(self._app, "deps", None), "past_posts_capability", None
                     )
                     counts = await prompts_mod.sweep_due_prompts(
                         session,
@@ -836,7 +838,7 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
 
 def _clock_for(app: WorkerApp, election_conn) -> scheduler.Clock:
     """The clock this worker runs: its cadence, its recurring set, and the
-    archive's activation, so a tick judges an archive source as the claim does."""
+    past-posts source's activation, so a tick judges a past-posts source as the claim does."""
     cfg = app.config
     return scheduler.Clock(
         election_conn,
@@ -846,7 +848,7 @@ def _clock_for(app: WorkerApp, election_conn) -> scheduler.Clock:
         refresh_cadence_seconds=cfg.refresh_cadence_seconds,
         recurring=app.recurring,
         conversion_evidence=app.mix_conversion_evidence,
-        capability=app.deps.archive_capability,
+        capability=app.deps.past_posts_capability,
     )
 
 
@@ -958,8 +960,8 @@ async def _run(app: WorkerApp, *, stop: asyncio.Event | None) -> None:
         await election_conn.close()
         if app.deps.transport is not None:
             await app.deps.transport.aclose()
-        if app.deps.archive_client is not None:
-            await app.deps.archive_client.aclose()
+        if app.deps.past_posts_client is not None:
+            await app.deps.past_posts_client.aclose()
         await engine.dispose()
         logger.info(
             "worker stopped %s; final %s",
@@ -984,7 +986,7 @@ def _card_media_fetch(
 ):
     """Resolve a queued card's source under its tenant, then fetch outside SQL.
 
-    Drive cards use the source/reference contract. Archive cards additionally
+    Drive cards use the source/reference contract. Past-posts cards additionally
     name the server-selected intent and use its bound preparation port; an
     absent port is a no-send refusal. Current provider configuration is read
     here, for every queued card.
@@ -1015,7 +1017,7 @@ def _card_media_fetch(
 
                 raise MediaAdmissionNotSent("asset_unavailable")
             raise MediaUnavailable("media source is missing or inactive")
-        if source["provider"] == "instagram_archive":
+        if source["provider"] == "instagram_past_posts":
             from src.services.target import source_policy, source_read_admission
             from src.services.target.outbox import MediaAdmissionNotSent
 
@@ -1025,7 +1027,7 @@ def _card_media_fetch(
                 or not intent_id
                 or fetch_selected is None
             ):
-                raise MediaAdmissionNotSent("archive_revalidation_required")
+                raise MediaAdmissionNotSent("past_posts_revalidation_required")
             try:
                 selected = await fetch_selected(
                     engine=engine, workspace_id=workspace_id, intent_id=intent_id
@@ -1036,7 +1038,9 @@ def _card_media_fetch(
                 source_read_admission.SourceReadRefused,
                 *media_adapters.MEDIA_FAILURES,
             ):
-                raise MediaAdmissionNotSent("archive_revalidation_required") from None
+                raise MediaAdmissionNotSent(
+                    "past_posts_revalidation_required"
+                ) from None
             mime = "image/jpeg" if selected.media_kind == "image" else "video/mp4"
             return selected.content, media.get("file_name") or "story.jpg", mime
         cap = media_adapters.MEDIA_CARD_MAX_BYTES.get(
@@ -1082,7 +1086,7 @@ def _card_media_fetch(
             return await read(media)
         except MediaAdmissionNotSent:
             raise
-        except Exception:  # noqa: BLE001 — archive cards never degrade to actionable text
+        except Exception:  # noqa: BLE001 — past-posts cards never degrade to actionable text
             if media.get("intent_id") is not None:
                 raise MediaAdmissionNotSent(
                     "validation_pending", preparation_failed=True
@@ -1160,10 +1164,10 @@ def main() -> None:
         token_provider=drive_credentials.provider_from_engine(engine),
     )
     adapters = {PROVIDER_GDRIVE: drive}
-    # The archive first: the approval card's media fetch needs its coordinator.
-    # None (and one `inactive (<reason>)` line) unless the key ring loads.
+    # The past-posts source first: the approval card's media fetch needs its coordinator.
+    # None (and one `off (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
-    archive = archive_composition.build_worker(engine=engine, env=env)
+    past_posts = past_posts_composition.build_worker(engine=engine, env=env)
     if token:
         from src.channels.telegram_transport import transport_from_env
 
@@ -1177,7 +1181,9 @@ def main() -> None:
             media_fetch=_card_media_fetch(
                 engine,
                 adapters,
-                fetch_selected=archive.coordinator.fetch_selected if archive else None,
+                fetch_selected=past_posts.coordinator.fetch_selected
+                if past_posts
+                else None,
             ),
         )
     app = compose(
@@ -1186,7 +1192,7 @@ def main() -> None:
         env=env,
         transport=transport,
         adapters=adapters,
-        archive=archive,
+        past_posts=past_posts,
         conversion_evidence=conversion_evidence,
     )
     try:

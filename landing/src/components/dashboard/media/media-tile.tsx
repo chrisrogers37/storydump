@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { ImageIcon, Video } from "lucide-react";
 import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
-import { isArchiveMedia } from "@/lib/archive-media";
+import { isPastPostsMedia } from "@/lib/past-posts-media";
 import { thumbnailFor, type ThumbnailMedia } from "@/lib/thumbnails";
 import { cn } from "@/lib/utils";
 
@@ -11,8 +11,8 @@ import { cn } from "@/lib/utils";
  * ask, else the image or video glyph, which also stands in when the picture
  * fails. The Queue's rows, the calendar's chips and its day view all draw it.
  *
- * An archive item's picture (its `provenance` says so) is asked for under the
- * archive's limits, and fails to Instagram's placeholder with a Retry.
+ * A past-posts item's picture (its `provenance` says so) is asked for under the
+ * past-posts source's limits, and fails to Instagram's placeholder with a Retry.
  *
  * Called as a function, not drawn as a component, so the box's own elements sit
  * in the caller's tree. This module is not a client module, so a server
@@ -24,7 +24,7 @@ export function mediaTile({
   box,
   glyph: glyphSize,
   badge = true,
-  archivePreview = true,
+  pastPostsPreview = true,
 }: {
   media: ThumbnailMedia;
   workspaceId: string | null | undefined;
@@ -35,17 +35,17 @@ export function mediaTile({
   /** A video's play badge, which is too big for a chip's box. */
   badge?: boolean;
   /**
-   * Whether an archive item's picture is asked for. A chip is too small to hold
+   * Whether a past-posts item's picture is asked for. A chip is too small to hold
    * the placeholder and its Retry and sits inside a link, so it passes false and
    * draws the glyph, and asks for nothing.
    */
-  archivePreview?: boolean;
+  pastPostsPreview?: boolean;
 }): ReactElement {
   const video = media.media_kind === "video";
   const Glyph = video ? Video : ImageIcon;
   const glyph = <Glyph className={cn(glyphSize, "text-muted-foreground")} aria-hidden />;
-  const archive = isArchiveMedia(media);
-  const src = archive && !archivePreview ? null : thumbnailFor(media, workspaceId);
+  const pastPosts = isPastPostsMedia(media);
+  const src = pastPosts && !pastPostsPreview ? null : thumbnailFor(media, workspaceId);
   return (
     <div
       className={cn(
@@ -60,7 +60,7 @@ export function mediaTile({
           alt={media.file_name}
           video={badge && video}
           fallback={glyph}
-          archive={archive && workspaceId ? { workspaceId, layout: "tile" } : undefined}
+          pastPosts={pastPosts && workspaceId ? { workspaceId, layout: "tile" } : undefined}
         />
       ) : (
         glyph

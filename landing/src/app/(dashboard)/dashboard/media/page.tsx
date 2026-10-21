@@ -7,7 +7,7 @@ import {
   type StatsResponse,
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
-import { pastPostsOf } from "@/lib/archive-media";
+import { pastPostsOf } from "@/lib/past-posts-media";
 import { parseSourceMix } from "@/lib/source-mix";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";

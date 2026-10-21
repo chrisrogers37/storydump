@@ -1,9 +1,9 @@
 """The OAuth history choice on the web adapter (#1644), every service
 seam patched: the start body's refusals and what the state records, the
 connect preview and the applied-result resource at their floors, and the
-callback's archive landing — its order, its refusal and its absence
+callback's past-posts source landing — its order, its refusal and its absence
 without a capability. The database path, every matrix row under the real
-roles, is `tests/scripts/test_oauth_archive_choice_gate.py`.
+roles, is `tests/scripts/test_oauth_past_posts_choice_gate.py`.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from src.services.target import (
     sessions,
     tenant_resolution,
 )
-from src.services.target.instagram_sources import ArchiveCapability, ArchiveRefused
+from src.services.target.instagram_sources import PastPostsCapability, PastPostsRefused
 from tests.src.api.conftest import FRONT, PRINCIPAL, WS
 
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
 USER = "22222222-2222-2222-2222-222222222222"
 RESULT = "88888888-8888-4888-8888-888888888888"
-LIVE = ArchiveCapability(enabled=True)
+LIVE = PastPostsCapability(enabled=True)
 #: `live_revision` as shipped, captured before any fixture replaces it: the
 #: no-capability callback test runs the real one.
 REAL_LIVE_REVISION = connect_choice.live_revision
@@ -45,7 +45,7 @@ ABSENT = object()
 #: The app-scoped id the exchange proved: not the account's own id.
 APP_SCOPED = "990000000000007"
 CHOICE = {
-    "archive_choice": {
+    "past_posts_choice": {
         "use_history": True,
         "expected_mix_revision": 8,
         "preview_version": 1,
@@ -57,7 +57,7 @@ PREVIEW = f"/api/v1/workspaces/{WS}/accounts/connect-preview"
 
 
 def test_every_refusal_reason_has_a_status():
-    assert set(app_module._ARCHIVE_CHOICE_STATUS) == set(connect_choice.REASONS)
+    assert set(app_module._PAST_POSTS_CHOICE_STATUS) == set(connect_choice.REASONS)
 
 
 @pytest.fixture
@@ -83,15 +83,15 @@ def issued(monkeypatch):
 
 
 @pytest.fixture
-def archive(app, monkeypatch):
+def past_posts(app, monkeypatch):
     """The capability injected, the mix's live revision and a named account's
     facts behind their seams; `purpose` is the row start's own."""
     world = {
         "revision": 8,
-        "facts": {"handle": "example_handle", "has_archive": False},
+        "facts": {"handle": "example_handle", "has_past_posts": False},
         "purpose": "connect",
     }
-    app.state.archive_capability = LIVE
+    app.state.past_posts_capability = LIVE
 
     async def live_revision(executor, *, workspace_id, capability):
         assert capability is LIVE
@@ -109,17 +109,17 @@ def archive(app, monkeypatch):
     return world
 
 
-ARCHIVE_KEYS = {
-    "archive_entry",
-    "archive_use_history",
-    "archive_expected_mix_revision",
-    "archive_preview_version",
+PAST_POSTS_KEYS = {
+    "past_posts_entry",
+    "past_posts_use_history",
+    "past_posts_expected_mix_revision",
+    "past_posts_preview_version",
 }
 
 
 class TestStart:
-    @pytest.mark.parametrize("payload", [None, {}, {"archive_choice": None}])
-    def test_no_choice_without_the_archive_records_no_archive_keys(
+    @pytest.mark.parametrize("payload", [None, {}, {"past_posts_choice": None}])
+    def test_no_choice_without_the_past_posts_records_no_past_posts_keys(
         self, client, signed_in, tenant, instagram_configured, issued, payload
     ):
         resp = (
@@ -127,16 +127,16 @@ class TestStart:
         )
         assert resp.status_code == 200, resp.text
         assert "state=st4te" in resp.json()["authorization_url"]
-        assert not ARCHIVE_KEYS & set(issued)
+        assert not PAST_POSTS_KEYS & set(issued)
         assert issued["reconnect_target"] is None
 
     @pytest.mark.parametrize(
         "content",
         [
-            b'{"archive": null}',
-            b'{"archive_choice": {"use_history": true, "expected_mix_revision": 8,'
+            b'{"past_posts": null}',
+            b'{"past_posts_choice": {"use_history": true, "expected_mix_revision": 8,'
             b' "preview_version": 2}}',
-            b'{"archive_choice": {"use_history": "yes", "expected_mix_revision": 8,'
+            b'{"past_posts_choice": {"use_history": "yes", "expected_mix_revision": 8,'
             b' "preview_version": 1}}',
             b"[1]",
             b"null",
@@ -158,7 +158,7 @@ class TestStart:
             ADD, content=content, headers={"Content-Type": "application/json"}
         )
         assert resp.status_code == 400, resp.text
-        assert resp.json()["reason"] == "invalid_archive_choice"
+        assert resp.json()["reason"] == "invalid_past_posts_choice"
         assert issued == {}
         # Refused before a unit of work opened, so before a connection was taken.
         assert tenant == []
@@ -171,7 +171,7 @@ class TestStart:
         tenant,
         instagram_configured,
         issued,
-        archive,
+        past_posts,
         monkeypatch,
         url,
     ):
@@ -190,60 +190,60 @@ class TestStart:
         assert steps.count("body") == 1
         assert steps[:2] == ["body", "uow"]
 
-    def test_a_choice_where_the_archive_is_not_live_is_503(
+    def test_a_choice_where_the_past_posts_is_not_live_is_503(
         self, client, signed_in, tenant, instagram_configured, issued
     ):
         resp = client.post(ADD, json=CHOICE)
         assert resp.status_code == 503
-        assert resp.json()["reason"] == "archive_not_activated"
+        assert resp.json()["reason"] == "past_posts_not_activated"
         assert issued == {}
 
     def test_a_stale_on_preview_is_a_mix_conflict_before_any_state(
-        self, client, signed_in, tenant, instagram_configured, issued, archive
+        self, client, signed_in, tenant, instagram_configured, issued, past_posts
     ):
-        archive["revision"] = 9
+        past_posts["revision"] = 9
         resp = client.post(ADD, json=CHOICE)
         assert resp.status_code == 409
         assert resp.json() == {"reason": "mix_conflict", "current_revision": 9}
         assert issued == {}
 
     def test_a_live_add_records_its_choice_in_the_state(
-        self, client, signed_in, tenant, instagram_configured, issued, archive
+        self, client, signed_in, tenant, instagram_configured, issued, past_posts
     ):
         resp = client.post(ADD, json=CHOICE)
         assert resp.status_code == 200, resp.text
-        assert {key: issued[key] for key in ARCHIVE_KEYS} == {
-            "archive_entry": "add",
-            "archive_use_history": True,
-            "archive_expected_mix_revision": 8,
-            "archive_preview_version": 1,
+        assert {key: issued[key] for key in PAST_POSTS_KEYS} == {
+            "past_posts_entry": "add",
+            "past_posts_use_history": True,
+            "past_posts_expected_mix_revision": 8,
+            "past_posts_preview_version": 1,
         }
         assert issued["reconnect_target"] is None and issued["purpose"] == "connect"
 
     def test_a_first_connect_records_its_entry_and_target(
-        self, client, signed_in, tenant, instagram_configured, issued, archive
+        self, client, signed_in, tenant, instagram_configured, issued, past_posts
     ):
         resp = client.post(ROW, json=CHOICE)
         assert resp.status_code == 200, resp.text
-        assert issued["archive_entry"] == "first_connect"
+        assert issued["past_posts_entry"] == "first_connect"
         assert issued["reconnect_target"] == ACCOUNT
 
     def test_a_reconnect_refuses_a_choice_and_records_its_entry_without_one(
-        self, client, signed_in, tenant, instagram_configured, issued, archive
+        self, client, signed_in, tenant, instagram_configured, issued, past_posts
     ):
-        archive["purpose"] = "reconnect"
+        past_posts["purpose"] = "reconnect"
         refused = client.post(ROW, json=CHOICE)
         assert refused.status_code == 400
-        assert refused.json()["reason"] == "invalid_archive_choice"
+        assert refused.json()["reason"] == "invalid_past_posts_choice"
         assert issued == {}
-        resp = client.post(ROW, json={"archive_choice": None})
+        resp = client.post(ROW, json={"past_posts_choice": None})
         assert resp.status_code == 200, resp.text
         assert issued["purpose"] == "reconnect"
-        assert {key: issued.get(key) for key in ARCHIVE_KEYS} == {
-            "archive_entry": "reconnect",
-            "archive_use_history": None,
-            "archive_expected_mix_revision": None,
-            "archive_preview_version": None,
+        assert {key: issued.get(key) for key in PAST_POSTS_KEYS} == {
+            "past_posts_entry": "reconnect",
+            "past_posts_use_history": None,
+            "past_posts_expected_mix_revision": None,
+            "past_posts_preview_version": None,
         }
 
 
@@ -265,7 +265,7 @@ class TestPreviewRoute:
     def test_the_header_add_previews_at_its_floor(
         self, app, client, signed_in, tenant, previewed
     ):
-        app.state.archive_capability = LIVE
+        app.state.past_posts_capability = LIVE
         resp = client.get(PREVIEW)
         assert resp.status_code == 200 and resp.json() == {"entry": "seen"}
         assert previewed == {
@@ -372,7 +372,7 @@ class TestResultRoute:
 
 
 class TestCallbackLanding:
-    """`GET /auth/instagram-login/callback` where the archive is live: the
+    """`GET /auth/instagram-login/callback` where the past-posts source is live: the
     choice lands after the destination and its credential, with the prior
     grant read before the credential, and the browser returns to Settings
     with the applied result's id. Everything behind a seam, in order."""
@@ -392,10 +392,10 @@ class TestCallbackLanding:
                 "user_id": USER,
                 "workspace_id": WS,
                 "reconnect_target": None,
-                "archive_entry": "add",
-                "archive_use_history": True,
-                "archive_expected_mix_revision": 8,
-                "archive_preview_version": 1,
+                "past_posts_entry": "add",
+                "past_posts_use_history": True,
+                "past_posts_expected_mix_revision": 8,
+                "past_posts_preview_version": 1,
             },
             "revision": 8,
             "purpose": "connect",
@@ -481,7 +481,7 @@ class TestCallbackLanding:
         # there is anything to map, runs for real.
         monkeypatch.setattr(identity_mappings, "record", record)
         client.cookies.set(COOKIE, "opaque-session-value")
-        app.state.archive_capability = LIVE
+        app.state.past_posts_capability = LIVE
         world["log"] = log
         return world
 
@@ -509,13 +509,13 @@ class TestCallbackLanding:
         assert landed["had_prior_grant"] is False
         assert landed["session_id"] == "sess-1"
         assert landed["capability"] is LIVE
-        assert landed["state"]["archive_use_history"] is True
+        assert landed["state"]["past_posts_use_history"] is True
         assert landed["state"]["user_id"] == USER
 
-    def test_one_authorization_is_shared_by_the_mapping_and_the_archive(
+    def test_one_authorization_is_shared_by_the_mapping_and_the_past_posts(
         self, client, flow
     ):
-        """One id and one time for the mapping row and for the archive's
+        """One id and one time for the mapping row and for the past-posts source's
         authorization: the generation and the identity it was verified under are
         joined on `authorization_id`. The generation keeps the account's own id
         as its subject; the mapping carries the app-scoped id beside it."""
@@ -550,9 +550,9 @@ class TestCallbackLanding:
     def test_an_exchange_that_proved_no_app_scoped_id_refuses_the_landing(
         self, client, flow, proven
     ):
-        """Nothing can be mapped, so the archive landing is refused whole: the
+        """Nothing can be mapped, so the past-posts source landing is refused whole: the
         error page names `history_setup_failed`, and neither the mapping nor
-        the archive was written (the unit of work rolls the rest back)."""
+        the past-posts source was written (the unit of work rolls the rest back)."""
         flow["app_scoped_id"] = proven
         resp = client.get(self.URL, follow_redirects=False)
         assert resp.headers["location"] == (
@@ -592,7 +592,7 @@ class TestCallbackLanding:
         client.get(self.URL, follow_redirects=False)
         assert flow["landed"]["had_prior_grant"] is True
 
-    def test_an_unconverted_mix_makes_no_archive_write(self, client, flow):
+    def test_an_unconverted_mix_makes_no_past_posts_write(self, client, flow):
         flow["revision"] = None
         resp = client.get(self.URL, follow_redirects=False)
         assert resp.headers["location"] == (
@@ -608,7 +608,7 @@ class TestCallbackLanding:
         ]
 
     def test_a_refused_history_setup_lands_on_the_error_page(self, client, flow):
-        flow["land"] = ArchiveRefused("archive_credential_unavailable")
+        flow["land"] = PastPostsRefused("past_posts_credential_unavailable")
         resp = client.get(self.URL, follow_redirects=False)
         assert resp.headers["location"] == (
             f"{FRONT}/auth/error?reason=history_setup_failed&flow=instagram"
@@ -616,10 +616,10 @@ class TestCallbackLanding:
 
     @pytest.mark.parametrize(
         "injected",
-        [ABSENT, None, ArchiveCapability(enabled=False)],
+        [ABSENT, None, PastPostsCapability(enabled=False)],
         ids=["never-injected", "none", "disabled"],
     )
-    def test_without_an_enabled_capability_the_callback_makes_no_archive_write(
+    def test_without_an_enabled_capability_the_callback_makes_no_past_posts_write(
         self, app, client, flow, monkeypatch, injected
     ):
         """No enabled capability, though the state recorded an On choice: the
@@ -627,14 +627,14 @@ class TestCallbackLanding:
         session here has no `execute`, so a statement would raise), and the
         landing makes only the connect writes: the exchange, the unit of work,
         the admin gate, the destination, the credential. No prior-grant read,
-        no archive landing, no result, and the redirect is
+        no past-posts source landing, no result, and the redirect is
         `?connected=instagram`."""
         if injected is ABSENT:
-            del app.state.archive_capability
+            del app.state.past_posts_capability
         else:
-            app.state.archive_capability = injected
+            app.state.past_posts_capability = injected
         monkeypatch.setattr(connect_choice, "live_revision", REAL_LIVE_REVISION)
-        assert flow["row"]["archive_use_history"] is True
+        assert flow["row"]["past_posts_use_history"] is True
 
         resp = client.get(self.URL, follow_redirects=False)
 

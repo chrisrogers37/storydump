@@ -80,7 +80,7 @@ DEFAULT_GRAPH_VERSION = "v21.0"
 
 def graph_version(env: Mapping[str, str]) -> str:
     """The application's one Graph version: `META_GRAPH_VERSION`, else the
-    default. The publish adapter and the archive adapter both take it from here."""
+    default. The publish adapter and the past-posts adapter both take it from here."""
     return env.get("META_GRAPH_VERSION") or DEFAULT_GRAPH_VERSION
 
 

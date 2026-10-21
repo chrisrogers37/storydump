@@ -43,11 +43,13 @@ intents and 531 post locks, plus its 16 `archive.*_pre_cutover_20260917`
 tables. None of it came across, and all of it was deleted with the original
 database.
 
-The original system never had an `ARCHIVE_HMAC_KEYS` ring, and neither
+The original system never had a `PAST_POSTS_HMAC_KEYS` ring, and neither
 database held a tombstone or deletion receipt keyed by one, so production's
-ring started new. It was set on the API and the worker on 2026-10-19. Keep
+ring started new. It was set on the API and the worker on 2026-10-19 under its
+earlier name, `ARCHIVE_HMAC_KEYS`, and its value carried over to
+`PAST_POSTS_HMAC_KEYS` when the feature was renamed Instagram past posts. Keep
 every version it has held; see
-[the key ring](instagram-archive-review.md#5-the-key-ring).
+[the key ring](instagram-past-posts-review.md#5-the-key-ring).
 
 **The original database, deleted.** Neon project `storyline-ai-db`
 (`ancient-grass-50759240`), database `neondb`, was the rollback copy from the

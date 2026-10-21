@@ -2,18 +2,18 @@
 
 import { useCallback, useState, type ReactNode } from "react";
 import { Play } from "lucide-react";
-import { ArchiveThumbnail } from "@/components/dashboard/media/archive-thumbnail";
+import { PastPostsThumbnail } from "@/components/dashboard/media/past-posts-thumbnail";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PreviewLayout } from "@/lib/preview-loader";
 
 export type ThumbnailState = "loading" | "loaded" | "failed";
 
 /**
- * How an archive item's picture is asked for (`ArchiveThumbnail`): in this
+ * How a past-posts item's picture is asked for (`PastPostsThumbnail`): in this
  * workspace's lane of two, by the box's `layout`, and with a Retry button
  * unless the box sits inside a link.
  */
-export type ArchivePreview = {
+export type PastPostsPreview = {
   workspaceId: string;
   layout: PreviewLayout;
   retry?: boolean;
@@ -24,8 +24,8 @@ export type ArchivePreview = {
  * size, rounding and background, and must be `relative` and clip its overflow.
  * `fallback` takes the picture's place when the picture fails.
  *
- * A Drive item's picture is the browser's to load, lazily. An archive item's
- * (`archive`) is asked for only under the archive's own limits, and when it
+ * A Drive item's picture is the browser's to load, lazily. A past-posts item's
+ * (`pastPosts`) is asked for only under the past-posts source's own limits, and when it
  * fails shows the Instagram placeholder, with a Retry where the box has room
  * for one, rather than going without.
  */
@@ -34,7 +34,7 @@ export function MediaThumbnail({
   alt,
   video,
   fallback,
-  archive,
+  pastPosts,
 }: {
   src: string;
   /** The file's name. */
@@ -42,21 +42,21 @@ export function MediaThumbnail({
   video: boolean;
   /** What the box shows when the picture fails: the glyph, or nothing. */
   fallback: ReactNode;
-  archive?: ArchivePreview;
+  pastPosts?: PastPostsPreview;
 }) {
   const [state, setState] = useState<ThumbnailState>("loading");
   const settle = useCallback((img: HTMLImageElement | null) => {
     settleOnMount(img, setState);
   }, []);
 
-  if (archive) {
+  if (pastPosts) {
     return (
-      <ArchiveThumbnail
+      <PastPostsThumbnail
         src={src}
         alt={alt}
         video={video}
         fallback={fallback}
-        {...archive}
+        {...pastPosts}
       />
     );
   }

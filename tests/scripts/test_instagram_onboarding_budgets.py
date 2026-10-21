@@ -1,11 +1,11 @@
-"""Onboarding budgets: the representative archives through the real sync composition.
+"""Onboarding budgets: the representative past-posts sources through the real sync composition.
 
 The Instagram source (#1644): the generators of
-``tests/fixtures/instagram_onboarding`` build archives of a known composition and
+``tests/fixtures/instagram_onboarding`` build past-posts sources of a known composition and
 ``expected_counts.json`` states, by hand, what a complete clean traversal of each
-must report. This drives those archives through the sync as production composes
-it: ``instagram_sync.run_sync`` over the archive adapter that
-``archive_composition.adapter_factory`` builds, its access provider reading the
+must report. This drives those past-posts sources through the sync as production composes
+it: ``instagram_sync.run_sync`` over the past-posts adapter that
+``past_posts_composition.adapter_factory`` builds, its access provider reading the
 credential (and the verified identity) from a real database as the worker's
 login, and only Instagram's Graph faked, over ``httpx.MockTransport`` in the
 Graph's own wire shapes (``+0000`` timestamps, an offset cursor, no caption on a
@@ -38,7 +38,7 @@ that is open for it alone. What is NOT measured: the first verified-ready item
 and the card itself. They need the bytes validated (Linux's validator) and the
 card rendered, which is the full-composition gate's; the report says so.
 
-The 10,000-post archive lives in ``tests/scripts/onboarding_10k/`` and is
+The 10,000-post past-posts source lives in ``tests/scripts/onboarding_10k/`` and is
 deselected unless ``RUN_ONBOARDING_10K=1``.
 """
 
@@ -56,7 +56,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.services.target import archive_composition as composition
+from src.services.target import past_posts_composition as composition
 from src.services.target import source_read_admission as read_admission
 from src.services.target import (
     content_runway,
@@ -113,7 +113,7 @@ def graph_time(at):
 
 
 class FakeGraph:
-    """Instagram's Graph over one archive, recording every request it receives.
+    """Instagram's Graph over one past-posts source, recording every request it receives.
 
     The listing by time window and offset cursor (with no ``since``, the walk's
     one-row probe for the newest post below ``until``), a parent read that adds
@@ -125,9 +125,9 @@ class FakeGraph:
     own tallies stay what the traversal made.
     """
 
-    def __init__(self, archive, profile=None):
-        self.posts = archive.posts
-        self.by_id = {p.parent["id"]: p for p in archive.posts}
+    def __init__(self, past_posts, profile=None):
+        self.posts = past_posts.posts
+        self.by_id = {p.parent["id"]: p for p in past_posts.posts}
         self.profile = profile
         self.graph = []
         self.cdn = []
@@ -358,7 +358,7 @@ async def prepare_selected(worker, graph, content, capture, post):
 
 
 async def onboard(kind, n, variant, *, worker, origin, sync_conn, monkeypatch):
-    """Drive one archive to the end of its sync and measure it.
+    """Drive one past-posts source to the end of its sync and measure it.
 
     Returns the report: the measurements, the final facts and what they ran
     against. Stops (so the ceilings can fail with numbers, not hang) once the
@@ -368,10 +368,12 @@ async def onboard(kind, n, variant, *, worker, origin, sync_conn, monkeypatch):
     ceiling = manifest["traversal"]
     t0 = int(time.time())
     owner = fx.OWNER_ID if variant == "account" else APP_SCOPED_ID
-    archive = {"useful": fx.useful, "excluded": fx.excluded, "carousel": fx.carousel}[
-        kind
-    ](n, t0, owner_id=owner)
-    graph = FakeGraph(archive, profile={"id": owner, "user_id": fx.OWNER_ID})
+    past_posts = {
+        "useful": fx.useful,
+        "excluded": fx.excluded,
+        "carousel": fx.carousel,
+    }[kind](n, t0, owner_id=owner)
+    graph = FakeGraph(past_posts, profile={"id": owner, "user_id": fx.OWNER_ID})
     tally, validator = Tally(), []
 
     async def forbidden(*args, **kwargs):
@@ -418,12 +420,12 @@ async def onboard(kind, n, variant, *, worker, origin, sync_conn, monkeypatch):
         page_size=composition.PAGE_SIZE,
         policy=EgressPolicy().without(enforce_private_address_block=False),
     )
-    accepted = next((p for p in archive.posts if p.group == "accepted_image"), None)
+    accepted = next((p for p in past_posts.posts if p.group == "accepted_image"), None)
 
     async def prepare(captured, provider):
         return build(captured, counting(provider, tally))
 
-    ports = instagram_sync.ArchiveSyncPorts(
+    ports = instagram_sync.PastPostsSyncPorts(
         capability=foundation.capability(),
         tombstone_keys=obs.keys(),
         prepare_adapter=prepare,
@@ -467,7 +469,7 @@ async def onboard(kind, n, variant, *, worker, origin, sync_conn, monkeypatch):
         candidates=final["candidates"],
         sources=(
             destination_readiness.SourceFacts(
-                provider="instagram_archive",
+                provider="instagram_past_posts",
                 enabled=final["enabled"],
                 assignable=True,
                 origin_here=True,
@@ -634,7 +636,7 @@ def check(report):
         first, prepared = report["first_candidate"], report["first_preparation"]
         card = manifest["first_card"]
         assert first is not None and prepared is not None, where
-        # The first candidate arrives while a quarter of the archive, at most, is seen.
+        # The first candidate arrives while a quarter of the past-posts source, at most, is seen.
         assert first["observed"] <= card["max_observed"], where
         # What the first card's preparation spends is asserted, not assumed: the
         # parent read, the `/me` proof once for the turn when no verified id is

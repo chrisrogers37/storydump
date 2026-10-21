@@ -17,7 +17,7 @@ from src.services.target.source_policy import (
 )
 from src.services.target.mix_conversion import MixConversionEvidence
 from src.exceptions.mix import MixInvalid
-from src.services.target.source_membership import AllocationResult, retire_archive
+from src.services.target.source_membership import AllocationResult, retire_past_posts
 
 
 class MixConflict(StorydumpError):
@@ -131,7 +131,7 @@ def ratio_string(value):
 #: report it as `media_count`.
 RETAINED_COUNTS_SQL = (
     "SELECT m.source_id::text AS sid,count(*) AS n FROM media_items m"
-    " LEFT JOIN instagram_archive_generations g ON g.workspace_id=m.workspace_id AND g.id=m.source_data_generation_id"
+    " LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=m.workspace_id AND g.id=m.source_data_generation_id"
     " WHERE m.workspace_id=:ws AND g.lifecycle IS DISTINCT FROM 'deleted'"
     " AND NOT EXISTS(SELECT 1 FROM instagram_item_tombstones t WHERE t.workspace_id=m.workspace_id AND t.media_item_id=m.id)"
     " GROUP BY m.source_id"
@@ -140,15 +140,15 @@ RETAINED_COUNTS_SQL = (
 
 async def row_counts(executor, ws):
     """Each source's `media_count` (:data:`RETAINED_COUNTS_SQL`) and current
-    archive coverage (`workspaces.ARCHIVE_COVERAGE_SQL`), in one read."""
-    from src.services.target.workspaces import ARCHIVE_COVERAGE_SQL
+    past-posts coverage (`workspaces.PAST_POSTS_COVERAGE_SQL`), in one read."""
+    from src.services.target.workspaces import PAST_POSTS_COVERAGE_SQL
 
     return {
         r["source_id"]: r
         for r in await readers.rows(
             executor,
             "WITH retained AS (" + RETAINED_COUNTS_SQL + "),"
-            " coverage AS (" + ARCHIVE_COVERAGE_SQL + ")"
+            " coverage AS (" + PAST_POSTS_COVERAGE_SQL + ")"
             " SELECT s.id::text AS source_id,COALESCE(r.n,0) AS media_count,c.observed"
             " FROM media_sources s LEFT JOIN retained r ON r.sid=s.id::text"
             " LEFT JOIN coverage c ON c.workspace_id=s.workspace_id AND c.source_id=s.id"
@@ -203,9 +203,9 @@ async def resource(executor, *, workspace_id, destination_projection=None):
             "ratio": ratio_string(r["ratio"]),
             "target_share": ratio_string(targets[r["source_id"]]),
             "media_count": int(counts[r["source_id"]]["media_count"]),
-            # Observations are an archive's alone: a Drive folder has none.
+            # Observations are a past-posts source's alone: a Drive folder has none.
             "indexed": observed_count(counts[r["source_id"]]["observed"])
-            if r["provider"] == "instagram_archive"
+            if r["provider"] == "instagram_past_posts"
             else None,
         }
         for r in rows
@@ -238,7 +238,7 @@ async def resource(executor, *, workspace_id, destination_projection=None):
         },
         # Only a trusted composition root injects the capability; the mix is
         # converted on this branch, and both are required.
-        "archive_available": is_activated(executor.info.get("archive_capability"))
+        "past_posts_available": is_activated(executor.info.get("past_posts_capability"))
         and converted(saved),
         "rows": output,
         "destinations": destinations,
@@ -410,7 +410,7 @@ def check_revision(saved, expected):
 
 
 async def allocate_membership(executor, request):
-    # The membership service owns the prefix and archive state transition.
+    # The membership service owns the prefix and past-posts state transition.
     ws = str(request.workspace_id)
     saved = await state(executor, ws)
     if not converted(saved):
@@ -452,10 +452,10 @@ async def mutate(
         if action == "set_enabled":
             sid = body.get("source_id")
             selected = next((r for r in rows if r["source_id"] == sid), None)
-            if selected and selected["provider"] == "instagram_archive":
-                from src.services.target.source_membership import set_archive_enabled
+            if selected and selected["provider"] == "instagram_past_posts":
+                from src.services.target.source_membership import set_past_posts_enabled
 
-                await set_archive_enabled(
+                await set_past_posts_enabled(
                     executor,
                     workspace_id=ws,
                     source_id=sid,
@@ -541,7 +541,7 @@ async def preview(executor, *, workspace_id, body):
                     workspace_id=ws,
                     body=body,
                     by_user_id=None,
-                    capability=executor.info.get("archive_capability"),
+                    capability=executor.info.get("past_posts_capability"),
                 )
             )
             raise _PreviewRollback()
@@ -610,18 +610,18 @@ async def remove_drive(executor, *, workspace_id, source_id, body):
             check_revision(saved, body.get("expected_revision"))
         elif not pending(saved) or body.get("protocol_version") == 2:
             raise MixProtocolRequired()
-        archive = await readers.row(
+        past_posts = await readers.row(
             executor,
-            "SELECT id FROM media_sources WHERE workspace_id=:ws AND id=:sid AND provider='instagram_archive'",
+            "SELECT id FROM media_sources WHERE workspace_id=:ws AND id=:sid AND provider='instagram_past_posts'",
             ws=ws,
             sid=sid,
         )
-        if archive is not None:
-            # An archive is retired, not paused: every use stops and its origin
+        if past_posts is not None:
+            # A past-posts source is retired, not paused: every use stops and its origin
             # assignment retires, through the epoch writer. The origin account,
             # its credential and the source's history stay, and a source already
             # removed is a replay that changes nothing.
-            await retire_archive(
+            await retire_past_posts(
                 executor,
                 workspace_id=ws,
                 source_id=sid,

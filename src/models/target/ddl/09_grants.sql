@@ -116,7 +116,7 @@ GRANT SELECT ON waitlist_entries TO svc_membership;
 
 GRANT SELECT, INSERT, UPDATE ON media_source_destinations TO svc_ingress, svc_worker;
 
-GRANT SELECT, INSERT, UPDATE ON instagram_archive_generations TO svc_ingress, svc_worker;
+GRANT SELECT, INSERT, UPDATE ON instagram_past_posts_generations TO svc_ingress, svc_worker;
 
 GRANT SELECT, INSERT, UPDATE ON instagram_source_policies TO svc_ingress, svc_worker;
 
@@ -222,17 +222,17 @@ GRANT SELECT (workspace_id, source_id, ig_account_id, state) ON media_source_des
 
 GRANT SELECT (workspace_id, source_id, ig_account_id, state) ON media_source_destinations TO svc_maintenance;
 
-GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle) ON instagram_archive_generations TO svc_claim;
+GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle) ON instagram_past_posts_generations TO svc_claim;
 
-GRANT UPDATE (id) ON instagram_archive_generations TO svc_claim;
+GRANT UPDATE (id) ON instagram_past_posts_generations TO svc_claim;
 
-GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle) ON instagram_archive_generations TO svc_clock;
+GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle) ON instagram_past_posts_generations TO svc_clock;
 
-GRANT UPDATE (id) ON instagram_archive_generations TO svc_clock;
+GRANT UPDATE (id) ON instagram_past_posts_generations TO svc_clock;
 
-GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle, authorization_id) ON instagram_archive_generations TO svc_maintenance;
+GRANT SELECT (id, workspace_id, source_id, origin_ig_account_id, credential_id, lifecycle, authorization_id) ON instagram_past_posts_generations TO svc_maintenance;
 
-GRANT UPDATE (id) ON instagram_archive_generations TO svc_maintenance;
+GRANT UPDATE (id) ON instagram_past_posts_generations TO svc_maintenance;
 
 GRANT SELECT (workspace_id, source_id, media_item_id, data_generation_id, observation_revision, first_child_id, parent_media_id, validation_fingerprint, validation_state, validation_generation_id, validation_observation_revision, validated_at) ON instagram_media_index TO svc_maintenance;
 
@@ -448,7 +448,7 @@ REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) FRO
 
 GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) TO svc_worker;
 
-REVOKE ALL ON FUNCTION trg_archive_validation_capture_reset() FROM PUBLIC;
+REVOKE ALL ON FUNCTION trg_past_posts_validation_capture_reset() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION fn_mix_conversion_jobs(integer, text, text) FROM PUBLIC;
 
@@ -484,16 +484,16 @@ REVOKE ALL ON FUNCTION fn_meta_receipt_progress(uuid, uuid, uuid, text, jsonb, t
 
 GRANT EXECUTE ON FUNCTION fn_meta_receipt_progress(uuid, uuid, uuid, text, jsonb, text, integer) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_archive_redact_generation_records(uuid, uuid[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_past_posts_redact_generation_records(uuid, uuid[]) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_archive_redact_generation_records(uuid, uuid[]) TO svc_worker;
+GRANT EXECUTE ON FUNCTION fn_past_posts_redact_generation_records(uuid, uuid[]) TO svc_worker;
 
 REVOKE ALL ON FUNCTION fn_meta_receipt_cleanup_jobs(integer) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_meta_receipt_cleanup_jobs(integer) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_archive_reconcile_jobs(integer, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_past_posts_reconcile_jobs(integer, text, text) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_archive_reconcile_jobs(integer, text, text) TO svc_worker;
+GRANT EXECUTE ON FUNCTION fn_past_posts_reconcile_jobs(integer, text, text) TO svc_worker;
 
 REVOKE ALL ON FUNCTION trg_instagram_media_assets_validation_reset() FROM PUBLIC;

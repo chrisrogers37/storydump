@@ -30,10 +30,10 @@ const ACCOUNT = "55555555-5555-4555-8555-555555555555";
 const DRIVE = "33333333-3333-4333-8333-333333333333";
 const AUTHORIZE = "https://api.instagram.com/oauth/authorize?state=s";
 
-/** `connect_choice.preview` for the header's Add, archive live, mix at revision 8. */
+/** `connect_choice.preview` for the header's Add, past-posts source live, mix at revision 8. */
 function addPreview(over: Record<string, unknown> = {}) {
   return {
-    archive_available: true,
+    past_posts_available: true,
     entry: "add",
     account_id: null,
     handle: null,
@@ -44,7 +44,7 @@ function addPreview(over: Record<string, unknown> = {}) {
       applies: true,
       mode_after: "equal",
       rows_after: [
-        { source_id: null, provider: "instagram_archive", name: null, target_share: "0.5" },
+        { source_id: null, provider: "instagram_past_posts", name: null, target_share: "0.5" },
         { source_id: DRIVE, provider: "gdrive", name: "Event photos", target_share: "0.5" },
       ],
     },
@@ -59,7 +59,7 @@ const FIRST_CONNECT = addPreview({
 });
 
 const RECONNECT = {
-  archive_available: true,
+  past_posts_available: true,
   entry: "reconnect",
   account_id: ACCOUNT,
   handle: "example_handle",
@@ -71,7 +71,7 @@ const RECONNECT = {
 
 /** The default: no capability, so no choice and no revision. */
 const UNAVAILABLE = {
-  archive_available: false,
+  past_posts_available: false,
   entry: "add",
   account_id: null,
   handle: null,
@@ -134,7 +134,7 @@ const granted = ok({ authorizationUrl: AUTHORIZE });
 describe("reading the preview", () => {
   it("reads each entry the API sends", () => {
     expect(parsed(addPreview())).toEqual({
-      archiveAvailable: true,
+      pastPostsAvailable: true,
       entry: "add",
       handle: null,
       defaultOn: true,
@@ -142,7 +142,7 @@ describe("reading the preview", () => {
       expectedMixRevision: 8,
       previewVersion: 1,
       reset: [
-        { sourceId: null, provider: "instagram_archive", name: null, targetShare: "0.5" },
+        { sourceId: null, provider: "instagram_past_posts", name: null, targetShare: "0.5" },
         { sourceId: DRIVE, provider: "gdrive", name: "Event photos", targetShare: "0.5" },
       ],
     });
@@ -154,7 +154,7 @@ describe("reading the preview", () => {
       expectedMixRevision: null,
       reset: null,
     });
-    expect(parsed(UNAVAILABLE)).toMatchObject({ archiveAvailable: false, reset: null });
+    expect(parsed(UNAVAILABLE)).toMatchObject({ pastPostsAvailable: false, reset: null });
   });
 
   it("follows the server's default rather than assuming On", () => {
@@ -169,11 +169,11 @@ describe("reading the preview", () => {
       ["another preview version", addPreview({ preview_version: 2 })],
       ["a switch the server says is not editable", addPreview({ history: { editable: false, default: true } })],
       ["an unknown entry", addPreview({ entry: "adopt" })],
-      ["no archive_available", { ...UNAVAILABLE, archive_available: undefined }],
+      ["no past_posts_available", { ...UNAVAILABLE, past_posts_available: undefined }],
       ["a reconnect without its saved setting", { ...RECONNECT, history: { editable: false } }],
       [
         "a reset row without a share",
-        addPreview({ reset: { applies: true, rows_after: [{ source_id: null, provider: "instagram_archive" }] } }),
+        addPreview({ reset: { applies: true, rows_after: [{ source_id: null, provider: "instagram_past_posts" }] } }),
       ],
       ["a reset row with a float share", addPreview({ reset: { applies: true, rows_after: [{ source_id: null, provider: "gdrive", target_share: 0.5 }] } })],
     ] as const) {
@@ -192,15 +192,15 @@ describe("reading the preview", () => {
 describe("the body each entry sends", () => {
   it("sends the choice with the preview's revision and version for Add and a first connect", () => {
     expect(startBody(parsed(addPreview()), true)).toEqual({
-      archive_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 },
+      past_posts_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 },
     });
     expect(startBody(parsed(FIRST_CONNECT), false)).toEqual({
-      archive_choice: { use_history: false, expected_mix_revision: 8, preview_version: 1 },
+      past_posts_choice: { use_history: false, expected_mix_revision: 8, preview_version: 1 },
     });
   });
 
   it("sends no choice on a reconnect, whatever the switch would have said", () => {
-    expect(startBody(parsed(RECONNECT), true)).toEqual({ archive_choice: null });
+    expect(startBody(parsed(RECONNECT), true)).toEqual({ past_posts_choice: null });
   });
 
   it("sends the empty body where past posts are no choice", () => {
@@ -260,7 +260,7 @@ describe("a preview that cannot be had does not stop a connect", () => {
     ["a 503", { status: 503, body: { error: "target_router_unreachable" } }],
     ["a 502 whose body is a page", { status: 502, raw: "<html>Bad Gateway</html>" }],
     ["a 200 whose body is not JSON", { status: 200, raw: "<html>ok</html>" }],
-    ["a 200 that is not a preview", ok({ archive_available: true, entry: "add" })],
+    ["a 200 that is not a preview", ok({ past_posts_available: true, entry: "add" })],
     ["a 200 with no revision to send back", ok(addPreview({ expected_mix_revision: null }))],
     ["a 200 with a malformed reset row", ok(addPreview({ reset: { applies: true, rows_after: [{ source_id: null, provider: "gdrive", target_share: 0.5 }] } }))],
     ["a dropped connection", { network: true }],
@@ -268,7 +268,7 @@ describe("a preview that cannot be had does not stop a connect", () => {
     serve(answer, granted);
     expect(await beginConnect(add)).toEqual({ kind: "redirect", url: AUTHORIZE });
     expect(calls).toEqual(PLAIN_START);
-    // Not `archive_choice: null` either: exactly the plain start's request.
+    // Not `past_posts_choice: null` either: exactly the plain start's request.
     expect(Object.keys(calls[1].body as object)).toEqual([]);
   });
 
@@ -323,7 +323,7 @@ describe("the dialog's Continue", () => {
       {
         url: `/api/workspaces/${WS}/accounts/connect`,
         method: "POST",
-        body: { archive_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 } },
+        body: { past_posts_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 } },
       },
     ]);
   });
@@ -332,7 +332,7 @@ describe("the dialog's Continue", () => {
     serve(granted);
     await confirmConnect(add, parsed(addPreview()), false);
     expect(calls[0].body).toEqual({
-      archive_choice: { use_history: false, expected_mix_revision: 8, preview_version: 1 },
+      past_posts_choice: { use_history: false, expected_mix_revision: 8, preview_version: 1 },
     });
   });
 
@@ -342,7 +342,7 @@ describe("the dialog's Continue", () => {
     expect(calls[0]).toEqual({
       url: `/api/workspaces/${WS}/accounts/${ACCOUNT}/connect`,
       method: "POST",
-      body: { archive_choice: null },
+      body: { past_posts_choice: null },
     });
   });
 
@@ -365,7 +365,7 @@ describe("the dialog's Continue", () => {
     serve(granted);
     expect(await confirmConnect(add, parsed(fresh), true)).toEqual({ kind: "redirect", url: AUTHORIZE });
     expect(calls[2].body).toEqual({
-      archive_choice: { use_history: true, expected_mix_revision: 9, preview_version: 1 },
+      past_posts_choice: { use_history: true, expected_mix_revision: 9, preview_version: 1 },
     });
   });
 
@@ -378,7 +378,7 @@ describe("the dialog's Continue", () => {
       error: "target_router_unreachable",
       status: 503,
     });
-    serve({ status: 409, body: { error: "mix_conflict", current_revision: 9 } }, ok({ archive_available: true, entry: "add" }));
+    serve({ status: 409, body: { error: "mix_conflict", current_revision: 9 } }, ok({ past_posts_available: true, entry: "add" }));
     expect(await confirmConnect(add, parsed(addPreview()), true)).toEqual({
       kind: "refused",
       error: UNREADABLE_PREVIEW,
@@ -386,14 +386,14 @@ describe("the dialog's Continue", () => {
     });
     // Each time: the refused start, then the refresh. No second start.
     expect(calls.map((c) => c.method)).toEqual(["POST", "GET", "POST", "GET"]);
-    expect(calls.filter((c) => c.method === "POST").every((c) => "archive_choice" in (c.body as object))).toBe(true);
+    expect(calls.filter((c) => c.method === "POST").every((c) => "past_posts_choice" in (c.body as object))).toBe(true);
   });
 
   it("ends the dialog when the fresh preview no longer offers the choice", async () => {
     serve({ status: 409, body: { error: "mix_conflict", current_revision: 9 } }, ok(UNAVAILABLE));
     expect(await confirmConnect(add, parsed(addPreview()), true)).toEqual({
       kind: "refused",
-      error: "archive_not_activated",
+      error: "past_posts_not_activated",
       status: 503,
     });
   });
@@ -408,10 +408,10 @@ describe("the dialog's Continue", () => {
   });
 
   it("says any other refusal by name and fetches nothing more", async () => {
-    serve({ status: 400, body: { error: "invalid_archive_choice" } });
+    serve({ status: 400, body: { error: "invalid_past_posts_choice" } });
     expect(await confirmConnect(add, parsed(addPreview()), true)).toEqual({
       kind: "refused",
-      error: "invalid_archive_choice",
+      error: "invalid_past_posts_choice",
       status: 400,
     });
     expect(calls).toHaveLength(1);
@@ -420,8 +420,8 @@ describe("the dialog's Continue", () => {
 
 describe("connectRefusalCopy", () => {
   it("says the past-posts reasons in their own words and everything else as the connect leg does", () => {
-    expect(connectRefusalCopy("archive_not_activated", 503)).toBe(SOURCE_REFUSAL_COPY.archive_not_activated);
-    expect(connectRefusalCopy("invalid_archive_choice", 400)).toBe(SOURCE_REFUSAL_COPY.invalid_archive_choice);
+    expect(connectRefusalCopy("past_posts_not_activated", 503)).toBe(SOURCE_REFUSAL_COPY.past_posts_not_activated);
+    expect(connectRefusalCopy("invalid_past_posts_choice", 400)).toBe(SOURCE_REFUSAL_COPY.invalid_past_posts_choice);
     expect(connectRefusalCopy("mix_conflict", 409)).toMatch(/after this preview was shown/);
     expect(connectRefusalCopy(UNREADABLE_PREVIEW, 200)).toMatch(/nothing was started/i);
     expect(connectRefusalCopy("http_403", 403)).toMatch(/admin/i);

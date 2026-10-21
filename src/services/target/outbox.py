@@ -1573,9 +1573,9 @@ class OutboxPoller:
         chat_window_seconds: int,
         global_limit: int,
         global_window_seconds: int,
-        archive_capability=None,
+        past_posts_capability=None,
     ):
-        self._archive_capability = archive_capability
+        self._past_posts_capability = past_posts_capability
         self._session_factory = session_factory
         self._binding_id = binding_id
         self._transport = transport
@@ -1610,8 +1610,8 @@ class OutboxPoller:
         self.ticks += 1
         try:
             async with self._session_factory() as session:
-                if self._archive_capability is not None:
-                    session.info["archive_capability"] = self._archive_capability
+                if self._past_posts_capability is not None:
+                    session.info["past_posts_capability"] = self._past_posts_capability
                 row = await pace_and_claim(
                     session,
                     binding_id=self._binding_id,

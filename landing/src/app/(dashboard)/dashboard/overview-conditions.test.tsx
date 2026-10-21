@@ -321,11 +321,11 @@ describe("a converted workspace's overview (protocol 2)", () => {
     mode: "custom",
     supported_actions: ["reset_equal", "set_enabled", "save_custom"],
     conversion: { state: "complete", kind: "explicit_preserved" },
-    archive_available: true,
+    past_posts_available: true,
     rows: [
       {
         source_id: IG,
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         state: "active",
         origin_account_id: "a1",
         origin_handle: "example_handle",
@@ -403,7 +403,7 @@ describe("a converted workspace's overview (protocol 2)", () => {
     const card = elements.find((el) => el.type === SourcePostingMixCard);
     const { mix } = card!.props as { mix: SourceShares };
     expect(mix.sources.map((s) => [s.title, s.subtitle, s.target, s.posted])).toEqual([
-      ["Your Instagram", "@example_handle · Instagram", "100%", 75],
+      ["Instagram past posts", "@example_handle · Instagram", "100%", 75],
       ["Event photos", "Google Drive", "Off", 25],
     ]);
     expect(JSON.stringify(mix)).not.toContain("NaN");

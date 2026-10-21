@@ -35,7 +35,7 @@ the process-global ``cloudinary.config()`` (#1216).
 ## Seams, stated
 
 The five SDK callables (``upload_fn``, ``destroy_fn``, ``resources_fn`` — the
-sweep's listing — ``resource_fn`` — one asset's details, the archive lookup's
+sweep's listing — ``resource_fn`` — one asset's details, the past-posts lookup's
 door — and ``url_fn``) are injectable for the same reason the reconciler's
 ``poll`` and the reap executor's ``lister``/``deleter`` are: the properties
 under test are THIS module's parameter sets, and a real provider client would
@@ -51,15 +51,15 @@ transaction-per-checkpoint discipline for transit is the CALLER's to hold:
 upload/destroy outside any open unit of work. The floor cannot see SDK
 internals and will not catch a violation here — named rather than implied.
 
-An explicit preallocated archive reference instead uses one owned async HTTP
+An explicit preallocated past-posts reference instead uses one owned async HTTP
 transmission through the egress floor. Its uncertainty is not retryable Drive
 orphan behavior. Durable attempt/completion ownership and remote settlement are
 caller responsibilities; this transport does not implement or prove them.
 
 The cleanup of such a reference has two typed doors, both on the SDK seams
 because a read and a delete are recoverable where the one-send upload is not:
-:meth:`TransitStore.archive_lookup` answers what the provider holds for it (the
-creation evidence, or None) and :meth:`TransitStore.destroy_archive` keeps
+:meth:`TransitStore.past_posts_lookup` answers what the provider holds for it (the
+creation evidence, or None) and :meth:`TransitStore.destroy_past_posts` keeps
 ``destroyed`` and ``not_found`` apart, which :meth:`TransitStore.destroy`
 deliberately does not. Neither answer settles an admitted upload: a ``not
 found`` is absence at that instant only. The order (settle, destroy, verify)
@@ -271,7 +271,7 @@ class TransitError(StorydumpError):
 
 
 @dataclass(frozen=True)
-class ArchiveUploadEvidence:
+class PastPostsUploadEvidence:
     """Matching affirmative provider creation; never an allocated reference alone."""
 
     public_id: str
@@ -282,27 +282,27 @@ class ArchiveUploadEvidence:
     signature: str
 
 
-class ArchiveUploadUncertain(StorydumpError):
-    """An archive upload lacks matching affirmative creation evidence.
+class PastPostsUploadUncertain(StorydumpError):
+    """A past-posts upload lacks matching affirmative creation evidence.
 
     Distinct from Drive's retryable TransitError: retrying this attempt is not
     authorized. Cancellation also leaves the caller's durable attempt unsettled.
-    :meth:`TransitStore.archive_lookup` raises it too, for a provider answer
+    :meth:`TransitStore.past_posts_lookup` raises it too, for a provider answer
     that does not identify the asset asked about.
     """
 
 
-_ARCHIVE_UPLOAD_RESPONSE_BYTES = 64 * 1024
+_PAST_POSTS_UPLOAD_RESPONSE_BYTES = 64 * 1024
 
-#: The one reference shape an archive upload can have created (and the database
+#: The one reference shape a past-posts upload can have created (and the database
 #: admits): ``ws/{canonical lowercase uuid}/{20-64 lowercase hex}``. The workspace
 #: is not a separate argument to the cleanup doors, so the shape is checked here.
-_ARCHIVE_REF = re.compile(
+_PAST_POSTS_REF = re.compile(
     r"ws/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{20,64}"
 )
 
 #: A name the provider issues that this module puts in a URL path or an evidence
-#: record: the cloud name an archive upload is sent to, the asset id an answer
+#: record: the cloud name a past-posts upload is sent to, the asset id an answer
 #: carries. One component of at most 128 letters, digits, ``_`` and ``-``.
 _PROVIDER_COMPONENT = re.compile(r"[a-zA-Z0-9_-]{1,128}")
 
@@ -338,7 +338,7 @@ class TransitDestroyRefused(StorydumpError):
     """The provider answered a destroy politely with a non-ok result. Raised
     by the sweep's deleter so `execute_reap_transit_assets` counts only
     completed destroys — a refusal silently counted as reaped would overstate
-    the sweep and strand the asset uncounted. :meth:`TransitStore.destroy_archive`
+    the sweep and strand the asset uncounted. :meth:`TransitStore.destroy_past_posts`
     raises it for any answer other than ``ok`` or ``not found``."""
 
 
@@ -361,7 +361,7 @@ class TransitStore:
         url_fn: Optional[Callable[..., tuple]] = None,
         probe_fn: Optional[Callable[[str], Any]] = None,
         probe_resolver: Optional[Callable[[str], list]] = None,
-        archive_resolver: Optional[Callable[[str], list]] = None,
+        past_posts_resolver: Optional[Callable[[str], list]] = None,
     ):
         for name, value in (
             ("cloud_name", cloud_name),
@@ -398,7 +398,7 @@ class TransitStore:
         self._destroy_fn = destroy_fn
         self._resources_fn = resources_fn
         #: ``resources_fn`` LISTS (the sweep); this READS one asset (the
-        #: archive lookup). One letter apart, two different Admin API doors.
+        #: past-posts lookup). One letter apart, two different Admin API doors.
         self._resource_fn = resource_fn
         self._url_fn = url_fn
         #: `ready`'s probe: `url -> ProbeAnswer` (or the pair
@@ -409,7 +409,7 @@ class TransitStore:
         self._probe_fn = probe_fn or self._default_probe
         self._probe_client = None
         self._probe_resolver = probe_resolver
-        self._archive_resolver = archive_resolver
+        self._past_posts_resolver = past_posts_resolver
 
     @staticmethod
     def _resource_type(media_kind: str) -> str:
@@ -438,25 +438,30 @@ class TransitStore:
         return f"ws/{parsed}"
 
     @staticmethod
-    def _archive_target(public_id: Any, resource_type: Any) -> None:
+    def _past_posts_target(public_id: Any, resource_type: Any) -> None:
         """Refuse, before any provider call, a reference or resource_type an
-        archive upload cannot have created. A destroy or lookup aimed at the
+        past-posts upload cannot have created. A destroy or lookup aimed at the
         wrong namespace (``raw``) answers ``not found`` for an asset that
         exists, and the caller reads that as absence; the Admin API puts the
         public id in the request path, so one carrying path syntax would name
         another endpoint."""
-        if not isinstance(public_id, str) or _ARCHIVE_REF.fullmatch(public_id) is None:
-            raise ValueError("archive reference must be canonical and workspace scoped")
+        if (
+            not isinstance(public_id, str)
+            or _PAST_POSTS_REF.fullmatch(public_id) is None
+        ):
+            raise ValueError(
+                "past-posts reference must be canonical and workspace scoped"
+            )
         if resource_type not in _SWEEP_RESOURCE_TYPES:
             raise ValueError(
-                f"not an archive resource_type: {resource_type!r} "
+                f"not a past-posts resource_type: {resource_type!r} "
                 f"(closed to {list(_SWEEP_RESOURCE_TYPES)})"
             )
 
     def _creation_evidence(
         self, result: Any, *, public_id: str, resource_type: str
-    ) -> Optional[ArchiveUploadEvidence]:
-        """The creation evidence a provider's answer amounts to for the archive
+    ) -> Optional[PastPostsUploadEvidence]:
+        """The creation evidence a provider's answer amounts to for the past-posts
         asset asked about, or None when the answer does not identify it: not a
         mapping, another public id or resource_type, not ``authenticated``, or
         no usable asset id or version. The one reading of an answer, for the
@@ -478,7 +483,7 @@ class TransitStore:
             and 0 < result["version"] <= 2**63 - 1
         ):
             return None
-        return ArchiveUploadEvidence(
+        return PastPostsUploadEvidence(
             public_id=public_id,
             asset_id=result["asset_id"],
             version=result["version"],
@@ -501,10 +506,10 @@ class TransitStore:
         workspace_id: str,
         media_kind: str,
         preallocated_ref: Optional[str] = None,
-    ) -> str | ArchiveUploadEvidence:
+    ) -> str | PastPostsUploadEvidence:
         """Upload one transit asset; returns the provider public id — the
         value the pipeline persists as ``post_intents.transit_asset_ref``.
-        An explicit preallocated_ref selects the archive one-send path and
+        An explicit preallocated_ref selects the past-posts source one-send path and
         returns structured matching creation evidence instead of a bare ref.
         Its durable admitted attempt and completion owner belong to the caller.
 
@@ -514,7 +519,7 @@ class TransitStore:
         folder = self._workspace_folder(workspace_id)
         resource_type = self._resource_type(media_kind)
         if preallocated_ref is not None:
-            return await self._archive_upload(
+            return await self._past_posts_upload(
                 content,
                 folder=folder,
                 resource_type=resource_type,
@@ -561,21 +566,27 @@ class TransitStore:
             ) from exc
         return result["public_id"]
 
-    async def _archive_upload(self, content, *, folder, resource_type, media_kind, ref):
+    async def _past_posts_upload(
+        self, content, *, folder, resource_type, media_kind, ref
+    ):
         """One owned async multipart send; attempt durability belongs to the caller."""
         import cloudinary.utils
         import httpx
 
         if type(content) is not bytes or not content:
-            raise ValueError("archive upload requires nonempty immutable bytes")
+            raise ValueError("past-posts upload requires nonempty immutable bytes")
         if (
             not isinstance(ref, str)
             or re.fullmatch(re.escape(folder) + r"/[0-9a-f]{20,64}", ref) is None
         ):
-            raise ValueError("archive reference must be canonical and workspace scoped")
+            raise ValueError(
+                "past-posts reference must be canonical and workspace scoped"
+            )
         cloud = self._credentials["cloud_name"]
         if not isinstance(cloud, str) or _PROVIDER_COMPONENT.fullmatch(cloud) is None:
-            raise ValueError("archive cloud_name must be one provider path component")
+            raise ValueError(
+                "past-posts cloud_name must be one provider path component"
+            )
         # Neutralize SDK transformation defaults without mutating its config.
         neutral = {"responsive_width": False, "dpr": None, "use_fetch_format": False}
         eager = cloudinary.utils.build_eager(
@@ -611,14 +622,14 @@ class TransitStore:
             timeout_class="upload",
             total_budget_s=TIMEOUT_CLASSES["upload"],
             max_attempts=1,
-            max_response_bytes=_ARCHIVE_UPLOAD_RESPONSE_BYTES,
+            max_response_bytes=_PAST_POSTS_UPLOAD_RESPONSE_BYTES,
             allowed_hosts=frozenset({"api.cloudinary.com"}),
             allow_redirects=False,
         )
         seam = (
             {}
-            if self._archive_resolver is None
-            else {"resolver": self._archive_resolver}
+            if self._past_posts_resolver is None
+            else {"resolver": self._past_posts_resolver}
         )
         try:
             async with httpx.AsyncClient(
@@ -637,14 +648,16 @@ class TransitStore:
                     **seam,
                 )
             if response.status_code != 200:
-                raise ArchiveUploadUncertain(
-                    "archive upload provider response uncertain"
+                raise PastPostsUploadUncertain(
+                    "past-posts upload provider response uncertain"
                 )
             result = response.json()
-        except ArchiveUploadUncertain:
+        except PastPostsUploadUncertain:
             raise
         except Exception:  # noqa: BLE001 — no error establishes remote no-effect
-            raise ArchiveUploadUncertain("archive upload response uncertain") from None
+            raise PastPostsUploadUncertain(
+                "past-posts upload response uncertain"
+            ) from None
         evidence = self._creation_evidence(
             result, public_id=ref, resource_type=resource_type
         )
@@ -657,7 +670,7 @@ class TransitStore:
             or re.fullmatch(r"[0-9a-f]{40}", sent) is None
             or not hmac.compare_digest(evidence.signature, sent)
         ):
-            raise ArchiveUploadUncertain("archive upload identity uncertain")
+            raise PastPostsUploadUncertain("past-posts upload identity uncertain")
         return evidence
 
     # -- readiness -------------------------------------------------------------
@@ -812,8 +825,8 @@ class TransitStore:
         'not found' counts as gone — a prior destroy or the sweep won, and the
         goal state (no asset, every URL 404) holds. Any other result is False;
         the sweep is the retry. That reading fits the Drive path and not
-        an archive reference, where it cannot tell destroyed from never created
-        yet: :meth:`destroy_archive` keeps the two answers apart.
+        a past-posts reference, where it cannot tell destroyed from never created
+        yet: :meth:`destroy_past_posts` keeps the two answers apart.
         """
         return await self._destroy(transit_asset_ref, self._resource_type(media_kind))
 
@@ -835,7 +848,7 @@ class TransitStore:
 
     async def _destroy_call(self, public_id: str, resource_type: str) -> Any:
         """The one spelling of the SDK destroy call, shared by :meth:`destroy`,
-        :meth:`destroy_asset` and :meth:`destroy_archive`: the authenticated
+        :meth:`destroy_asset` and :meth:`destroy_past_posts`: the authenticated
         type, ``invalidate``, the time bound and this store's
         own credentials. Returns the SDK's answer unread."""
         return await asyncio.to_thread(
@@ -848,12 +861,12 @@ class TransitStore:
             **self._credentials,
         )
 
-    # -- archive references: the typed cleanup doors ---------------------------
+    # -- past-posts references: the typed cleanup doors ---------------------------
 
-    async def destroy_archive(
+    async def destroy_past_posts(
         self, public_id: str, *, resource_type: str
     ) -> Literal["destroyed", "not_found"]:
-        """Destroy one archive transit asset and say which answer the provider
+        """Destroy one past-posts transit asset and say which answer the provider
         gave: ``'destroyed'`` for ``ok``, ``'not_found'`` for ``not found``.
         Any other answer is a polite refusal and raises
         :class:`TransitDestroyRefused`; an SDK error (timeout, auth, rate
@@ -864,14 +877,14 @@ class TransitStore:
         an upload that was admitted and may still land (a held request, a lost
         answer): the asset can appear after this call returns, so it never
         shows that no upload was made. Settle the attempt first
-        (:meth:`archive_lookup`), destroy what it created, then confirm
+        (:meth:`past_posts_lookup`), destroy what it created, then confirm
         absence with a lookup.
 
         Both answers are the goal state to the Drive path's :meth:`destroy`,
         which says only whether the asset is gone; this keeps them apart so a
         cleanup can record what it saw. Call OUTSIDE any open unit of work.
         """
-        self._archive_target(public_id, resource_type)
+        self._past_posts_target(public_id, resource_type)
         result = await self._destroy_call(public_id, resource_type)
         answer = result.get("result") if isinstance(result, dict) else None
         if answer == "ok":
@@ -883,10 +896,10 @@ class TransitStore:
             f"{public_id!r}; the asset may still exist"
         )
 
-    async def archive_lookup(
+    async def past_posts_lookup(
         self, public_id: str, *, resource_type: str
-    ) -> Optional[ArchiveUploadEvidence]:
-        """What the provider holds for one archive reference RIGHT NOW: the
+    ) -> Optional[PastPostsUploadEvidence]:
+        """What the provider holds for one past-posts reference RIGHT NOW: the
         creation evidence for it, or None.
 
         The asset's details are read through ``resource_fn`` as the
@@ -898,17 +911,17 @@ class TransitStore:
         that created the asset yield equal evidence.
 
         None is returned ONLY when the provider itself answers ``not found``,
-        and like :meth:`destroy_archive`'s it proves absence at that instant
+        and like :meth:`destroy_past_posts`'s it proves absence at that instant
         only: an upload still in flight can create the asset afterwards.
         Everything else raises, because none of it is absence and a cleanup
         reads None as "gone": an SDK error (timeout, auth, rate limit, 5xx)
         propagates unchanged, and an answer that does not identify the asset
         asked about (another public id or resource_type, not ``authenticated``,
-        no usable asset id or version) raises :class:`ArchiveUploadUncertain`.
+        no usable asset id or version) raises :class:`PastPostsUploadUncertain`.
 
         Call OUTSIDE any open unit of work.
         """
-        self._archive_target(public_id, resource_type)
+        self._past_posts_target(public_id, resource_type)
         import cloudinary.exceptions
 
         try:
@@ -926,7 +939,7 @@ class TransitStore:
             result, public_id=public_id, resource_type=resource_type
         )
         if evidence is None:
-            raise ArchiveUploadUncertain("archive lookup identity uncertain")
+            raise PastPostsUploadUncertain("past-posts lookup identity uncertain")
         return evidence
 
     # -- discovery -------------------------------------------------------------

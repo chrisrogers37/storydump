@@ -403,10 +403,10 @@ describe("the calendar's pictures (#1634)", () => {
   });
 });
 
-describe("an archive story on the calendar (#1644)", () => {
+describe("a past-posts story on the calendar (#1644)", () => {
   const FAKE_ID = "17900000000000001";
   const provenance = {
-    provider: "instagram_archive",
+    provider: "instagram_past_posts",
     origin_handle: "example_handle",
     original_at: "2020-01-01T12:00:00+00:00",
   };
@@ -417,14 +417,14 @@ describe("an archive story on the calendar (#1644)", () => {
     thumbnail_version: "gen.7",
     ...over,
   });
-  /** The month read's newest, one archive story and one Drive story. */
+  /** The month read's newest, one past-posts story and one Drive story. */
   const history: IntentDay = {
     date: "2026-10-01",
     count: 2,
     newest: [
       {
         ...postedDay("2026-10-01", 2, [`Instagram ${FAKE_ID}`, "d.jpg"]).newest[0],
-        id: "story-archive",
+        id: "story-past-posts",
         ...pictured({ provenance }),
       },
       {
@@ -445,7 +445,7 @@ describe("an archive story on the calendar (#1644)", () => {
   it("draws a chip's glyph and asks for nothing, as a chip is too small for the placeholder and sits in a link", () => {
     const tree = DayChips({ day: day(), size: "cell", workspaceId: "ws-1" }) as ReactElement;
     const pictures = [...walk(tree)].filter((el) => el.type === MediaThumbnail);
-    // The Drive chip's picture only; the archive chip draws the glyph.
+    // The Drive chip's picture only; the past-posts chip draws the glyph.
     expect(pictures.map((el) => (el.props as { src: string }).src)).toEqual([
       "/api/workspaces/ws-1/media/media-d/thumbnail?v=v1",
     ]);
@@ -454,8 +454,8 @@ describe("an archive story on the calendar (#1644)", () => {
     expect([...walk(tree)].some((el) => el.type === "button")).toBe(false);
   });
 
-  it("takes the archive path for a story as the API serves it: already named, told by its provenance alone", () => {
-    // The API names an archive item itself and sends no Graph id; the chip is told from a
+  it("takes the past-posts path for a story as the API serves it: already named, told by its provenance alone", () => {
+    // The API names a past-posts item itself and sends no Graph id; the chip is told from a
     // Drive chip by the provenance on the month read's row.
     const served: IntentDay = {
       ...history,

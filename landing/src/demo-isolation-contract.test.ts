@@ -50,10 +50,10 @@ const SHARED_FILES = [
   // too; it passes no workspace, so it never asks for a thumbnail.
   path.join("components", "dashboard", "media", "media-thumbnail.tsx"),
   path.join("lib", "thumbnails.ts"),
-  // The thumbnail hands an archive item's picture to these, and the Queue draws
-  // its provenance with the last; the sample has no archive item and no workspace.
-  path.join("components", "dashboard", "media", "archive-thumbnail.tsx"),
-  path.join("lib", "archive-media.ts"),
+  // The thumbnail hands a past-posts item's picture to these, and the Queue draws
+  // its provenance with the last; the sample has no past-posts item and no workspace.
+  path.join("components", "dashboard", "media", "past-posts-thumbnail.tsx"),
+  path.join("lib", "past-posts-media.ts"),
   path.join("lib", "preview-limiter.ts"),
   path.join("lib", "preview-loader.ts"),
   // The sample's Calendar opens the product's day view over its own stories.

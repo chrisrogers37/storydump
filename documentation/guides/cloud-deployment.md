@@ -235,7 +235,7 @@ reads. Variables are per service on Railway.
 | `TARGET_ACTIVATION_NUDGE_ENABLED` | Optional, default off: the activation nudge, one email, once, to a person who stopped part-way through setup. It also needs `RESEND_API_KEY` and `EMAIL_FROM` and the web origin | `true` |
 | `TARGET_ACTIVATION_NUDGE_LIMIT` | Optional, default 3: the nudge's emails per daily run. Each person is marked nudged as their email is queued, so a provider mistake uses up that run. Arm the nudge at the default once email is on and a send has been confirmed, then raise it | `20` |
 | `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
-| `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter and the Instagram archive adapter call (`instagram_graph.graph_version`) | `v21.0` |
+| `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter and the Instagram past-posts adapter call (`instagram_graph.graph_version`) | `v21.0` |
 | `RESEND_API_KEY`, `EMAIL_FROM` | The worker's `send_email` jobs, which serve the activation nudge and admissions from the waitlist. An admission's email carries a claim link the worker draws as it sends. Set them on the worker, the same values the API has, once the claim link works at sign-in; the nudge keeps its own switch, `TARGET_ACTIVATION_NUDGE_ENABLED`. Invitations need them on the API | |
 | `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
 

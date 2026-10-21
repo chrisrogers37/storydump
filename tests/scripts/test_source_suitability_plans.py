@@ -20,7 +20,7 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts import test_source_suitability_gate as suitability_gate
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
@@ -81,7 +81,7 @@ async def fixture_10k(engine, origin, sync_conn):
             "instagram_item_tombstones",
             "media_source_destinations",
             "media_sources",
-            "instagram_archive_generations",
+            "instagram_past_posts_generations",
             "instagram_source_policies",
             "category_post_case_mix",
         ):
@@ -106,12 +106,12 @@ async def explain(conn, sql, binds):
 
 
 async def test_10k_suitability_and_selective_paths_are_bounded(
-    archive_engine, origin, sync_conn, tmp_path
+    past_posts_engine, origin, sync_conn, tmp_path
 ):
-    fixture = await fixture_10k(archive_engine, origin, sync_conn)
+    fixture = await fixture_10k(past_posts_engine, origin, sync_conn)
     sid = fixture["source"]["source_id"]
     records = {}
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         role = (await conn.execute(text("SELECT current_user"))).scalar_one()
         context = await source_policy.suitability_context(
             conn,
@@ -174,7 +174,7 @@ async def test_10k_suitability_and_selective_paths_are_bounded(
             "p_destination_id": "CAST(:acct AS uuid)",
             "p_resolved_repost_ttl_days": "CAST(:ttl AS integer)",
             "p_evaluated_at": "CAST(:at AS timestamptz)",
-            "p_archive_enabled": "CAST(:activated AS boolean)",
+            "p_past_posts_enabled": "CAST(:activated AS boolean)",
             "p_source_id": "CAST(:sid AS uuid)",
             "p_media_item_id": "CAST(:media AS uuid)",
             "p_existing_intent_id": "CAST(:intent AS uuid)",

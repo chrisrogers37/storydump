@@ -4,7 +4,7 @@ writes to a log. The door itself (the classification, the replay, the frozen
 scope, the roles) is proven against PostgreSQL as the API's own login in
 `tests/scripts/test_meta_deletion_receipts_gate.py`.
 
-Without `app.state.archive_keys` nothing about the route changes: the receipt
+Without `app.state.past_posts_keys` nothing about the route changes: the receipt
 is the logged 16-hex one and the door is never called.
 """
 
@@ -82,7 +82,7 @@ def door(monkeypatch):
 
 @pytest.fixture
 def keyed(app):
-    app.state.archive_keys = KEYS
+    app.state.past_posts_keys = KEYS
     return app
 
 
@@ -114,7 +114,7 @@ class TestWithoutTheKeyRingNothingChanges:
         assert door == []
 
     def test_an_unset_ring_is_the_same_as_an_absent_one(self, app, door):
-        app.state.archive_keys = None
+        app.state.past_posts_keys = None
         assert len(post(app).json()["confirmation_code"]) == 16
         assert door == []
 

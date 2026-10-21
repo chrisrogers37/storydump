@@ -1,8 +1,8 @@
-"""Origin-owned archive catalog writers, dormant until `archive_activation` arms a process.
+"""Origin-owned past-posts catalog writers, dormant until `past_posts_activation` arms a process.
 
 The activation capability is injected by a trusted composition root
-(`archive_composition`), which has one wherever the archive's key ring loads.
-Without it, every archive admission fails before writing.
+(`past_posts_composition`), which has one wherever the past-posts source's key ring loads.
+Without it, every past-posts admission fails before writing.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from src.services.target import readers, source_state
 
 
 @dataclass(frozen=True)
-class ArchiveCapability:
+class PastPostsCapability:
     enabled: bool = False
 
 
 @dataclass(frozen=True)
-class ArchiveAuthorization:
+class PastPostsAuthorization:
     """Identity from a verified OAuth event, never from editable policy JSON."""
 
     authorization_id: str
@@ -31,28 +31,28 @@ class ArchiveAuthorization:
     authorized_at: datetime
 
 
-class ArchiveRefused(StorydumpError):
+class PastPostsRefused(StorydumpError):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(reason)
 
 
-def is_activated(capability: ArchiveCapability | None) -> bool:
-    return isinstance(capability, ArchiveCapability) and capability.enabled is True
+def is_activated(capability: PastPostsCapability | None) -> bool:
+    return isinstance(capability, PastPostsCapability) and capability.enabled is True
 
 
-def require_activation(capability: ArchiveCapability | None) -> None:
+def require_activation(capability: PastPostsCapability | None) -> None:
     if not is_activated(capability):
-        raise ArchiveRefused("archive_not_activated")
+        raise PastPostsRefused("past_posts_not_activated")
 
 
-async def ensure_archive_source(
+async def ensure_past_posts_source(
     executor,
     *,
     workspace_id: str,
     origin_ig_account_id: str,
-    authorization: ArchiveAuthorization | None = None,
-    capability: ArchiveCapability | None = None,
+    authorization: PastPostsAuthorization | None = None,
+    capability: PastPostsCapability | None = None,
 ) -> dict:
     """Materialize one source, origin assignment and v1 policy, initially Off.
 
@@ -65,7 +65,7 @@ async def ensure_archive_source(
     """
     require_activation(capability)
     async with source_state.source_savepoint(executor):
-        return await _ensure_archive_source(
+        return await _ensure_past_posts_source(
             executor,
             workspace_id=workspace_id,
             origin_ig_account_id=origin_ig_account_id,
@@ -73,12 +73,12 @@ async def ensure_archive_source(
         )
 
 
-async def _ensure_archive_source(
+async def _ensure_past_posts_source(
     executor,
     *,
     workspace_id: str,
     origin_ig_account_id: str,
-    authorization: ArchiveAuthorization | None,
+    authorization: PastPostsAuthorization | None,
 ) -> dict:
     ws, account = str(workspace_id), str(origin_ig_account_id)
     await source_state.lock_workspace_sources(
@@ -95,10 +95,10 @@ async def _ensure_archive_source(
         or origin["state"] != "active"
         or origin["provider_account_ref"].startswith("manual:")
     ):
-        raise ArchiveRefused("archive_origin_unavailable")
+        raise PastPostsRefused("past_posts_origin_unavailable")
     found = await readers.row(
         executor,
-        "SELECT id FROM media_sources WHERE workspace_id = :ws AND origin_ig_account_id = :account AND provider = 'instagram_archive'",
+        "SELECT id FROM media_sources WHERE workspace_id = :ws AND origin_ig_account_id = :account AND provider = 'instagram_past_posts'",
         ws=ws,
         account=account,
     )
@@ -106,7 +106,7 @@ async def _ensure_archive_source(
     if created:
         found = await readers.row(
             executor,
-            "INSERT INTO media_sources (workspace_id, provider, config, origin_ig_account_id) VALUES (:ws, 'instagram_archive', jsonb_build_object('v', 1), :account) RETURNING id",
+            "INSERT INTO media_sources (workspace_id, provider, config, origin_ig_account_id) VALUES (:ws, 'instagram_past_posts', jsonb_build_object('v', 1), :account) RETURNING id",
             ws=ws,
             account=account,
         )
@@ -125,14 +125,14 @@ async def _ensure_archive_source(
         or credential["state"] != "active"
         or not credential["unexpired"]
     ):
-        raise ArchiveRefused("archive_credential_unavailable")
+        raise PastPostsRefused("past_posts_credential_unavailable")
     generations = await readers.rows(
         executor,
-        "SELECT id, authorization_id, lifecycle FROM instagram_archive_generations WHERE workspace_id = :ws AND source_id = :sid ORDER BY id FOR UPDATE",
+        "SELECT id, authorization_id, lifecycle FROM instagram_past_posts_generations WHERE workspace_id = :ws AND source_id = :sid ORDER BY id FOR UPDATE",
         ws=ws,
         sid=source_id,
     )
-    before = await source_state.archive_state(
+    before = await source_state.past_posts_state(
         executor, workspace_id=ws, source_id=source_id
     )
     current = before.generation_id
@@ -152,20 +152,20 @@ async def _ensure_archive_source(
         )
         await executor.execute(
             text(
-                "INSERT INTO category_post_case_mix (workspace_id, source_id, category, ratio) VALUES (:ws, :sid, 'Instagram archive', 0)"
+                "INSERT INTO category_post_case_mix (workspace_id, source_id, category, ratio) VALUES (:ws, :sid, 'Instagram past posts', 0)"
             ),
             {"ws": ws, "sid": source_id},
         )
     if authorization is not None and not replay:
         await executor.execute(
             text(
-                "UPDATE instagram_archive_generations SET lifecycle = 'superseded' WHERE workspace_id = :ws AND source_id = :sid AND lifecycle = 'active'"
+                "UPDATE instagram_past_posts_generations SET lifecycle = 'superseded' WHERE workspace_id = :ws AND source_id = :sid AND lifecycle = 'active'"
             ),
             {"ws": ws, "sid": source_id},
         )
         generation = await readers.row(
             executor,
-            "INSERT INTO instagram_archive_generations (workspace_id, source_id, origin_ig_account_id, credential_id, authorization_id, app_id, subject_id, authorized_at)"
+            "INSERT INTO instagram_past_posts_generations (workspace_id, source_id, origin_ig_account_id, credential_id, authorization_id, app_id, subject_id, authorized_at)"
             " VALUES (:ws, :sid, :account, :credential, :authorization, :app, :subject, :at) RETURNING id",
             ws=ws,
             sid=source_id,
@@ -189,7 +189,7 @@ async def _ensure_archive_source(
             ),
             {"ws": ws, "sid": source_id, "account": account},
         )
-    epoch = await source_state.apply_archive_transition(
+    epoch = await source_state.apply_past_posts_transition(
         executor,
         workspace_id=ws,
         source_id=source_id,

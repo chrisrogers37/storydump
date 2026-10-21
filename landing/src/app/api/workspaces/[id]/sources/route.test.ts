@@ -18,7 +18,7 @@ import { parseSourceMix } from "@/lib/source-mix";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const SRC = "22222222-2222-4222-8222-222222222222";
-const ARCHIVE = "33333333-3333-4333-8333-333333333333";
+const PAST_POSTS = "33333333-3333-4333-8333-333333333333";
 
 /** What the picker sends from a workspace on protocol 1: the folder alone. */
 const PROTOCOL_1 = { folder_ref: "f1", folder_name: "Trips" };
@@ -36,8 +36,8 @@ const MIX = {
   conversion: { state: "complete", kind: "new_equal" },
   rows: [
     {
-      source_id: ARCHIVE,
-      provider: "instagram_archive",
+      source_id: PAST_POSTS,
+      provider: "instagram_past_posts",
       name: "example_handle",
       state: "active",
       origin_account_id: "55555555-5555-4555-8555-555555555555",
@@ -64,7 +64,7 @@ const MIX = {
   ],
   destinations: [],
   guidance: { active: 0, ready: 0, intentional: null, incomplete: [] },
-  archive_available: true,
+  past_posts_available: true,
   reset_explanation: null,
 };
 

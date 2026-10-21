@@ -7,7 +7,7 @@ The destination (an `ig_accounts` row, `create_destination`) and the Google
 Drive source (a `media_sources` row, `get_or_create_media_source`).
 `workspaces.py` READS both (`list_accounts`, `list_sources`); without them a
 signed-in user with a workspace has nothing to post to and nothing to post.
-`instagram_sources.py` also writes `media_sources`, for an Instagram archive
+`instagram_sources.py` also writes `media_sources`, for an Instagram past-posts
 source.
 
 It also changes them: a destination gains its connected identity
@@ -65,7 +65,7 @@ get a NULL cursor, which nothing will ever advance.
 
 ## The schema fixes the source providers
 
-`ck_sources_provider` allows `'gdrive'` and `'instagram_archive'`, and
+`ck_sources_provider` allows `'gdrive'` and `'instagram_past_posts'`, and
 `media_items.source_id` is NOT NULL, so **every** media item hangs off a
 source of one of the two. There is no upload path without a migration, and
 this module does not pretend otherwise: it writes the Drive source ROW.

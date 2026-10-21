@@ -1,5 +1,5 @@
 /**
- * When an archive preview is asked for, and what a failure does (#1644).
+ * When a past-posts preview is asked for, and what a failure does (#1644).
  * The loader is driven with the events a tile sends, against the real lane, so
  * what is pinned is what a page of tiles does: asks for nothing until near, two
  * at a time, one more only when a place comes free, and never again by itself.

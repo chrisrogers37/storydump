@@ -11,7 +11,7 @@ from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.test_source_suitability_gate import activate
 
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 pytestmark = pytest.mark.integration
 
@@ -31,12 +31,12 @@ async def set_drive_ratio(conn, chain, ratio):
 async def metadata(
     engine, chain, *, kind="image", attribution="not_detected", recent=False
 ):
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
     src = await obs.enabled(engine, chain)
     bundle = replace(
         obs.bundle(attribution=attribution),
-        assets=(ArchiveAsset("123", kind),),
+        assets=(PastPostsAsset("123", kind),),
         original_at=datetime.now(timezone.utc)
         if recent
         else datetime(2020, 1, 1, tzinfo=timezone.utc),
@@ -49,7 +49,7 @@ async def metadata(
 
 
 async def carousel(engine, chain, count=10):
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
     src = await obs.enabled(engine, chain)
     await obs.observe(
@@ -60,7 +60,7 @@ async def carousel(engine, chain, count=10):
             obs.bundle(attribution="not_detected"),
             slide_count=count,
             assets=tuple(
-                ArchiveAsset(str(1000 + position), "image", position=position)
+                PastPostsAsset(str(1000 + position), "image", position=position)
                 for position in range(1, count + 1)
             ),
         ),
@@ -109,13 +109,13 @@ async def slide_verdicts(conn, chain, src, *, strict=False):
 
 
 async def test_ten_slide_candidates_strict_proof_and_first_policy(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import content_runway
 
-    src, slides = await carousel(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    src, slides = await carousel(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         candidates = await slide_verdicts(conn, origin, src)
         strict = await slide_verdicts(conn, origin, src, strict=True)
         assert len(candidates) == len(strict) == 10
@@ -273,9 +273,11 @@ async def test_ten_slide_candidates_strict_proof_and_first_policy(
         ]
 
 
-async def test_per_slide_lock_leaves_carousel_siblings_eligible(archive_engine, origin):
-    src, slides = await carousel(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+async def test_per_slide_lock_leaves_carousel_siblings_eligible(
+    past_posts_engine, origin
+):
+    src, slides = await carousel(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "INSERT INTO post_locks(workspace_id,media_item_id,kind,expires_at) VALUES(:ws,:item,'hold',now()+interval '1 day')"
@@ -295,10 +297,10 @@ async def test_per_slide_lock_leaves_carousel_siblings_eligible(archive_engine, 
 
 @pytest.mark.parametrize("kind", ["image", "video"])
 async def test_unvalidated_metadata_can_be_candidate_but_never_strict_ready(
-    archive_engine, origin, kind
+    past_posts_engine, origin, kind
 ):
-    src, item = await metadata(archive_engine, origin, kind=kind)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin, kind=kind)
+    async with obs.uow(past_posts_engine, origin) as conn:
         candidate = await verdict(conn, origin, src)
         strict = await verdict(conn, origin, src, strict=True)
         assert candidate["suitable"] and candidate["reason"] is None
@@ -322,12 +324,12 @@ async def test_unvalidated_metadata_can_be_candidate_but_never_strict_ready(
     ],
 )
 async def test_missing_byte_proof_cannot_hide_later_policy_refusal(
-    archive_engine, origin, recent, attribution, reason
+    past_posts_engine, origin, recent, attribution, reason
 ):
     src, item = await metadata(
-        archive_engine, origin, recent=recent, attribution=attribution
+        past_posts_engine, origin, recent=recent, attribution=attribution
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         assert (await verdict(conn, origin, src))["reason"] == reason
         assert (await verdict(conn, origin, src, strict=True))[
             "reason"
@@ -336,10 +338,10 @@ async def test_missing_byte_proof_cannot_hide_later_policy_refusal(
 
 @pytest.mark.parametrize("reason", ["helper_unavailable", "asset_unavailable"])
 async def test_current_captured_failure_blocks_candidates_but_reobservation_clears_it(
-    archive_engine, origin, reason
+    past_posts_engine, origin, reason
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         capture = {
             "generation_id": src["generation_id"],
             "observation_revision": 1,
@@ -355,17 +357,17 @@ async def test_current_captured_failure_blocks_candidates_but_reobservation_clea
         )
         assert (await verdict(conn, origin, src))["reason"] == reason
     await obs.observe(
-        archive_engine, origin, src, obs.bundle(attribution="not_detected")
+        past_posts_engine, origin, src, obs.bundle(attribution="not_detected")
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         assert (await verdict(conn, origin, src))["suitable"]
 
 
 async def test_candidate_self_context_does_not_hide_other_live_subject(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         intent = str(
             (
                 await conn.execute(
@@ -387,11 +389,11 @@ async def test_candidate_self_context_does_not_hide_other_live_subject(
         ] == "live_intent"
 
 
-async def test_10k_archive_slides_and_one_drive_file_have_equal_targets_and_role_query_plan(
-    archive_engine, origin
+async def test_10k_past_posts_slides_and_one_drive_file_have_equal_targets_and_role_query_plan(
+    past_posts_engine, origin
 ):
-    src = await obs.enabled(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await obs.enabled(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
         await conn.execute(
             text("UPDATE category_post_case_mix SET ratio=.5 WHERE source_id=:sid"),
@@ -507,16 +509,16 @@ async def selected_intent(conn, chain, item, *, state="scheduled", origin="caden
 
 
 async def test_actual_plan_slot_selects_metadata_candidate(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     from src.services.target import scheduler, content_runway
     from unittest.mock import AsyncMock
     import random
 
-    src, item = await metadata(archive_engine, origin)
+    src, item = await metadata(past_posts_engine, origin)
     monkeypatch.setattr(content_runway, "after_mint", AsyncMock())
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         outcome = await scheduler.execute_plan_slot(
             conn,
             workspace_id=str(origin["ws"]),
@@ -542,16 +544,16 @@ async def test_actual_plan_slot_selects_metadata_candidate(
 
 
 async def test_consecutive_slots_select_distinct_siblings_of_one_carousel(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     from src.services.target import scheduler, content_runway
     from unittest.mock import AsyncMock
     import random
 
-    src, slides = await carousel(archive_engine, origin)
+    src, slides = await carousel(past_posts_engine, origin)
     monkeypatch.setattr(content_runway, "after_mint", AsyncMock())
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         chosen = []
         for minute in (0, 1):
             outcome = await scheduler.execute_plan_slot(
@@ -580,13 +582,13 @@ async def test_consecutive_slots_select_distinct_siblings_of_one_carousel(
 
 
 async def test_automatic_approval_waits_for_byte_proof_then_approves_same_intent(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import auto_approval
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         await conn.execute(
             text(
                 "UPDATE workspaces SET dry_run_mode=true,api_publishing_enabled=true,approval_mode='auto' WHERE id=:ws"
@@ -631,12 +633,14 @@ async def test_automatic_approval_waits_for_byte_proof_then_approves_same_intent
         ).scalar_one() == "approved"
 
 
-async def test_prompt_sweep_defers_unverified_selected_intent(archive_engine, origin):
+async def test_prompt_sweep_defers_unverified_selected_intent(
+    past_posts_engine, origin
+):
     from src.services.target import prompts
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         intent = await selected_intent(conn, origin, item)
         if (
             await conn.execute(text("SELECT current_user"))
@@ -675,10 +679,10 @@ async def test_prompt_sweep_defers_unverified_selected_intent(archive_engine, or
 
 
 async def test_bound_card_identity_cannot_inherit_new_observation(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         intent = await selected_intent(conn, origin, item)
         await conn.execute(
             text(
@@ -694,19 +698,19 @@ async def test_bound_card_identity_cannot_inherit_new_observation(
                 epoch=src["source_use_epoch"],
             ),
         )
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
     await obs.observe(
-        archive_engine,
+        past_posts_engine,
         origin,
         src,
         replace(
             obs.bundle(attribution="not_detected"),
             slide_count=1,
-            assets=(ArchiveAsset("456", "image"),),
+            assets=(PastPostsAsset("456", "image"),),
         ),
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE instagram_media_assets SET validation_state='supported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='second',validated_at=now()"
@@ -716,13 +720,13 @@ async def test_bound_card_identity_cannot_inherit_new_observation(
         assert not v["suitable"] and v["reason"] == "selected_asset_changed"
 
 
-async def test_manual_approval_strict_uses_own_intent(archive_engine, origin):
+async def test_manual_approval_strict_uses_own_intent(past_posts_engine, origin):
     from src.services.target.commands import Command, CommandRefused
     from src.services.target import command_executors
     from src.services.target.unit_of_work import unit_of_work
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         intent = await selected_intent(conn, origin, item, state="awaiting_approval")
         await conn.execute(
             text(
@@ -738,13 +742,13 @@ async def test_manual_approval_strict_uses_own_intent(archive_engine, origin):
         args={"intent_id": intent},
     )
     async with unit_of_work(
-        archive_engine,
+        past_posts_engine,
         str(origin["ws"]),
         actor_kind="user",
         actor_user_id=str(origin["user"]),
         channel="web",
     ).begin() as conn:
-        conn.info["archive_capability"] = foundation.capability()
+        conn.info["past_posts_capability"] = foundation.capability()
         with pytest.raises(CommandRefused) as refused:
             await command_executors.approve(conn, command)
         assert refused.value.reason == "media_unsuitable"
@@ -764,14 +768,14 @@ async def test_manual_approval_strict_uses_own_intent(archive_engine, origin):
 
 
 async def test_candidate_manual_schedule_and_off_cannot_be_overridden(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target.commands import Command, CommandRefused
     from src.services.target import command_executors
     from src.services.target.unit_of_work import unit_of_work
     from datetime import timedelta
 
-    src, item = await metadata(archive_engine, origin)
+    src, item = await metadata(past_posts_engine, origin)
     args = {
         "media_item_id": item.media_item_id,
         "ig_account_id": str(origin["iga"]),
@@ -788,13 +792,13 @@ async def test_candidate_manual_schedule_and_off_cannot_be_overridden(
         args=args,
     )
     async with unit_of_work(
-        archive_engine,
+        past_posts_engine,
         str(origin["ws"]),
         actor_kind="user",
         actor_user_id=str(origin["user"]),
         channel="web",
     ).begin() as conn:
-        conn.info["archive_capability"] = foundation.capability()
+        conn.info["past_posts_capability"] = foundation.capability()
         await conn.execute(
             text("UPDATE category_post_case_mix SET ratio=0 WHERE source_id=:sid"),
             {"sid": src["source_id"]},
@@ -812,15 +816,15 @@ async def test_candidate_manual_schedule_and_off_cannot_be_overridden(
 
 
 async def test_first_policy_refuses_explicit_slide_schedule_and_reschedule(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target.commands import Command, CommandRefused
     from src.services.target import command_executors
     from src.services.target.unit_of_work import unit_of_work
     from datetime import timedelta
 
-    src, slides = await carousel(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, slides = await carousel(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await source_policy.put_policy(
             conn,
             workspace_id=str(origin["ws"]),
@@ -866,13 +870,13 @@ async def test_first_policy_refuses_explicit_slide_schedule_and_reschedule(
         ),
     )
     async with unit_of_work(
-        archive_engine,
+        past_posts_engine,
         str(origin["ws"]),
         actor_kind="user",
         actor_user_id=str(origin["user"]),
         channel="web",
     ).begin() as conn:
-        conn.info["archive_capability"] = foundation.capability()
+        conn.info["past_posts_capability"] = foundation.capability()
         for command, executor in zip(
             commands,
             (command_executors.schedule_item, command_executors.reschedule_item),
@@ -884,14 +888,14 @@ async def test_first_policy_refuses_explicit_slide_schedule_and_reschedule(
 
 
 async def test_trusted_context_cannot_cross_transaction_boundary(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         context = await source_policy.suitability_context(
             conn, workspace_id=str(origin["ws"]), capability=foundation.capability()
         )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         with pytest.raises(RuntimeError, match="suitability_context_expired"):
             await source_policy.suitability(
                 conn,
@@ -903,14 +907,14 @@ async def test_trusted_context_cannot_cross_transaction_boundary(
 
 
 async def test_destination_projection_keeps_reauth_in_readiness_denominator(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import versioned_mix
 
-    src, item = await metadata(archive_engine, origin)
+    src, item = await metadata(past_posts_engine, origin)
     account = str(origin["iga"])
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         view = await versioned_mix.resource(conn, workspace_id=str(origin["ws"]))
         destination = view["destinations"][0]
         assert destination["account_id"] == account
@@ -956,12 +960,12 @@ async def test_destination_projection_keeps_reauth_in_readiness_denominator(
 
 
 async def test_context_holds_current_credential_and_generation_before_intent(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from sqlalchemy.exc import DBAPIError
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as first:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as first:
         await source_policy.suitability_context(
             first, workspace_id=str(origin["ws"]), capability=foundation.capability()
         )
@@ -971,20 +975,20 @@ async def test_context_holds_current_credential_and_generation_before_intent(
                 str(origin["credential"]),
             ),
             (
-                "SELECT id FROM instagram_archive_generations WHERE id=:id FOR UPDATE NOWAIT",
+                "SELECT id FROM instagram_past_posts_generations WHERE id=:id FOR UPDATE NOWAIT",
                 src["generation_id"],
             ),
         ]:
-            async with obs.uow(archive_engine, origin) as second:
+            async with obs.uow(past_posts_engine, origin) as second:
                 with pytest.raises(DBAPIError, match="could not obtain lock"):
                     await second.execute(text(query), {"id": key})
 
 
 async def test_context_acquired_in_rolled_back_savepoint_is_expired(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         savepoint = await conn.begin_nested()
         captured = await source_policy.suitability_context(
             conn, workspace_id=str(origin["ws"]), capability=foundation.capability()
@@ -1026,13 +1030,13 @@ async def test_context_acquired_in_rolled_back_savepoint_is_expired(
 
 
 async def test_database_refuses_incoherent_unsupported_byte_proof(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from sqlalchemy.exc import DBAPIError
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
-        with pytest.raises(DBAPIError, match="ck_archive_asset_validation_evidence"):
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        with pytest.raises(DBAPIError, match="ck_past_posts_asset_validation_evidence"):
             async with conn.begin_nested():
                 await conn.execute(
                     text(
@@ -1049,13 +1053,13 @@ async def test_database_refuses_incoherent_unsupported_byte_proof(
 
 
 async def test_pool_rejects_supplied_expired_context_even_before_conversion(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         context = await source_policy.suitability_context(
             conn, workspace_id=str(origin["ws"])
         )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         with pytest.raises(RuntimeError, match="suitability_context_expired"):
             await category_mix.pool(
                 conn,
@@ -1067,10 +1071,10 @@ async def test_pool_rejects_supplied_expired_context_even_before_conversion(
 
 @pytest.mark.parametrize("origin_kind", ["planned", "cadence"])
 async def test_only_matching_live_planned_intent_can_override_warning_locks(
-    archive_engine, origin, origin_kind
+    past_posts_engine, origin, origin_kind
 ):
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         intent = await selected_intent(conn, origin, item, origin=origin_kind)
         await conn.execute(
             text(
@@ -1116,15 +1120,15 @@ async def test_only_matching_live_planned_intent_can_override_warning_locks(
 
 
 async def test_auto_slot_does_not_mint_for_reauth_destination(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     from src.services.target import scheduler, content_runway
     from unittest.mock import AsyncMock
 
-    src, item = await metadata(archive_engine, origin)
+    src, item = await metadata(past_posts_engine, origin)
     monkeypatch.setattr(content_runway, "after_mint", AsyncMock())
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         await conn.execute(
             text("UPDATE ig_accounts SET state='reauth_required' WHERE id=:id"),
             {"id": str(origin["iga"])},
@@ -1171,15 +1175,15 @@ async def test_auto_slot_does_not_mint_for_reauth_destination(
         assert outcome.intent_id is None
 
 
-@pytest.mark.parametrize("provider", ["gdrive", "instagram_archive"])
+@pytest.mark.parametrize("provider", ["gdrive", "instagram_past_posts"])
 async def test_off_to_on_preview_uses_draft_supply_and_rolls_back_every_write(
-    archive_engine, origin, provider
+    past_posts_engine, origin, provider
 ):
     from src.services.target import versioned_mix
 
-    src, item = await metadata(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
-        conn.info["archive_capability"] = foundation.capability()
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        conn.info["past_posts_capability"] = foundation.capability()
         await conn.execute(
             text(
                 "INSERT INTO media_items(workspace_id,source_id,content_hash,provider_file_ref,file_name,media_kind) VALUES(:ws,:sid,'synthetic-preview','synthetic-preview','x.jpg','image')"
@@ -1187,9 +1191,11 @@ async def test_off_to_on_preview_uses_draft_supply_and_rolls_back_every_write(
             {"ws": str(origin["ws"]), "sid": str(origin["src"])},
         )
         sid = (
-            src["source_id"] if provider == "instagram_archive" else str(origin["src"])
+            src["source_id"]
+            if provider == "instagram_past_posts"
+            else str(origin["src"])
         )
-        if provider == "instagram_archive":
+        if provider == "instagram_past_posts":
             await conn.execute(
                 text(
                     "UPDATE category_post_case_mix SET ratio=CASE WHEN source_id=:sid THEN 0 ELSE 1 END WHERE workspace_id=:ws AND effective_to IS NULL"

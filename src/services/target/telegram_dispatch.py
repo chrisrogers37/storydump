@@ -172,7 +172,7 @@ ANSWERS: dict[str, tuple[str, bool]] = {
     # menu's read and the flag's write (`set_item_auto_approve` refuses it as
     # `locked`).
     "locked": ("This item can't post again.", False),
-    # The archive's selected media is not authorized or ready now.
+    # The past-posts source's selected media is not authorized or ready now.
     "media_unsuitable": (f"This post's media isn't ready to use — {_WEB}.", True),
     "cancelling": ("This card is being cancelled.", False),
     "illegal_transition": ("That card can't take this action any more.", False),

@@ -12,7 +12,7 @@ import { SOURCE_REFUSAL_COPY, sourceRefusalCopy } from "./source-refusals";
  * Instagram (the API's Connect preview and Start resources, #1644).
  *
  * Every connect asks the API first (`connect-preview`). Where past posts are
- * not a choice (`archive_available` false, which is every workspace by
+ * not a choice (`past_posts_available` false, which is every workspace by
  * default), the start goes ahead at once: no dialog, and the
  * body `{}`. Where they are, the Accounts tab opens a dialog over the preview,
  * and the start carries the choice and the revision the preview was made at.
@@ -42,7 +42,7 @@ export type ResetRow = {
   /** Null for the account being connected, whose source does not exist yet. */
   sourceId: string | null;
   provider: string;
-  /** A folder's name, an archive's handle; null for an account not yet known. */
+  /** A folder's name, a past-posts source's handle; null for an account not yet known. */
   name: string | null;
   /** The share after the reset, as sent; `"0"` is a source that stays Off. */
   targetShare: string;
@@ -50,7 +50,7 @@ export type ResetRow = {
 
 export type ConnectPreview = {
   /** Whether past posts are a choice here at all. */
-  archiveAvailable: boolean;
+  pastPostsAvailable: boolean;
   entry: ConnectEntry;
   /** The named account's handle, without the `@`; null for the header's Add. */
   handle: string | null;
@@ -93,12 +93,12 @@ function readResetRow(raw: unknown): ResetRow | null {
  * reset rows are what the switch promises, so a malformed one is no preview.
  */
 export function parseConnectPreview(data: unknown): ConnectPreview | null {
-  if (!isRecord(data) || typeof data.archive_available !== "boolean") return null;
+  if (!isRecord(data) || typeof data.past_posts_available !== "boolean") return null;
   const { entry, history } = data;
   if (entry !== "add" && entry !== "first_connect" && entry !== "reconnect") return null;
   if (!isRecord(history)) return null;
-  const archiveAvailable = data.archive_available;
-  const choosing = archiveAvailable && entry !== "reconnect";
+  const pastPostsAvailable = data.past_posts_available;
+  const choosing = pastPostsAvailable && entry !== "reconnect";
   const revision = data.expected_mix_revision;
   if (
     choosing &&
@@ -110,7 +110,7 @@ export function parseConnectPreview(data: unknown): ConnectPreview | null {
   ) {
     return null;
   }
-  if (entry === "reconnect" && archiveAvailable && typeof history.saved_enabled !== "boolean") {
+  if (entry === "reconnect" && pastPostsAvailable && typeof history.saved_enabled !== "boolean") {
     return null;
   }
   let reset: ResetRow[] | null = null;
@@ -121,7 +121,7 @@ export function parseConnectPreview(data: unknown): ConnectPreview | null {
     reset = rows as ResetRow[];
   }
   return {
-    archiveAvailable,
+    pastPostsAvailable,
     entry,
     handle: bareHandle(data.handle),
     defaultOn: choosing && history.default === true,
@@ -134,15 +134,15 @@ export function parseConnectPreview(data: unknown): ConnectPreview | null {
 
 /**
  * What the start posts. `{}` where past posts are no choice: the empty start,
- * byte for byte. `{"archive_choice": null}` for a reconnect, which keeps its
+ * byte for byte. `{"past_posts_choice": null}` for a reconnect, which keeps its
  * saved setting and must carry no choice. Otherwise the choice, with the
  * revision and version of the preview it was made on.
  */
 export function startBody(preview: ConnectPreview, useHistory: boolean): Record<string, unknown> {
-  if (!preview.archiveAvailable) return {};
-  if (preview.entry === "reconnect") return { archive_choice: null };
+  if (!preview.pastPostsAvailable) return {};
+  if (preview.entry === "reconnect") return { past_posts_choice: null };
   return {
-    archive_choice: {
+    past_posts_choice: {
       use_history: useHistory,
       expected_mix_revision: preview.expectedMixRevision,
       preview_version: preview.previewVersion,
@@ -205,7 +205,7 @@ async function start(
  */
 export async function beginConnect(target: ConnectTarget): Promise<ConnectStep> {
   const read = await readPreview(target);
-  if (read.ok && read.preview.archiveAvailable) {
+  if (read.ok && read.preview.pastPostsAvailable) {
     return { kind: "ask", preview: read.preview, notice: null };
   }
   return start(target, {});
@@ -229,8 +229,8 @@ export async function confirmConnect(
   if (step.kind !== "refused" || step.error !== "mix_conflict") return step;
   const fresh = await readPreview(target);
   if (!fresh.ok) return { kind: "refused", error: fresh.error, status: fresh.status };
-  if (!fresh.preview.archiveAvailable) {
-    return { kind: "refused", error: "archive_not_activated", status: 503 };
+  if (!fresh.preview.pastPostsAvailable) {
+    return { kind: "refused", error: "past_posts_not_activated", status: 503 };
   }
   return {
     kind: "ask",
@@ -271,7 +271,7 @@ export function resetRowName(row: ResetRow, preview: ConnectPreview): string {
     const handle = bareHandle(row.name) ?? preview.handle;
     return handle ? `@${handle}'s past posts (new)` : "This account's past posts (new)";
   }
-  if (row.provider === "instagram_archive") {
+  if (row.provider === "instagram_past_posts") {
     const handle = bareHandle(row.name);
     return handle ? `@${handle}'s past posts` : "Past posts";
   }

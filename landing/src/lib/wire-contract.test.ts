@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { APPROVAL_POSITIONS, APPROVAL_RULES, RULE_LABELS } from "./approvals";
-import { ARCHIVE_ITEM_NAME, ARCHIVE_SLIDE_NAME, ARCHIVE_SLIDE_NAME_UNKNOWN } from "./archive-media";
+import { PAST_POSTS_ITEM_NAME, PAST_POSTS_SLIDE_NAME, PAST_POSTS_SLIDE_NAME_UNKNOWN } from "./past-posts-media";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
 import {
   AT_RULE_COPY,
@@ -186,13 +186,13 @@ describe("the wire spellings are the vocabulary's", () => {
     // placeholder, with no error on either side.
     expect([...THUMBNAIL_TYPES]).toEqual(tuple("THUMBNAIL_TYPES"));
   });
-  it("what an archive item is called where a file name would be", () => {
-    // The API names every archive item this way on every read, and this tier
+  it("what a past-posts item is called where a file name would be", () => {
+    // The API names every past-posts item this way on every read, and this tier
     // names one the same where it is told by its provenance: a drift would
     // show two names for one post, one from each tier.
-    expect(ARCHIVE_ITEM_NAME).toBe(scalar("ARCHIVE_ITEM_NAME"));
-    expect(ARCHIVE_SLIDE_NAME).toBe(scalar("ARCHIVE_SLIDE_NAME"));
-    expect(ARCHIVE_SLIDE_NAME_UNKNOWN).toBe(scalar("ARCHIVE_SLIDE_NAME_UNKNOWN"));
+    expect(PAST_POSTS_ITEM_NAME).toBe(scalar("PAST_POSTS_ITEM_NAME"));
+    expect(PAST_POSTS_SLIDE_NAME).toBe(scalar("PAST_POSTS_SLIDE_NAME"));
+    expect(PAST_POSTS_SLIDE_NAME_UNKNOWN).toBe(scalar("PAST_POSTS_SLIDE_NAME_UNKNOWN"));
   });
   it("the tones a destination's readiness is badged in, and the states that have words", () => {
     // A tone this build does not know would read as attention, and a state it
@@ -204,7 +204,7 @@ describe("the wire spellings are the vocabulary's", () => {
       expect(readinessStateLabel(state), state).not.toBe("Unknown state");
     }
   });
-  it("the tones of an archive's own status, which are those of the destination states they share", () => {
+  it("the tones of a past-posts source's own status, which are those of the destination states they share", () => {
     // The mix's per-source badges (indexing, stalled, needs reconnect) are drawn
     // in the tone the server gives the state of that name.
     const tones = mappingEntries("READINESS_TONES");
@@ -291,7 +291,7 @@ describe("the wire spellings are the vocabulary's", () => {
     const version = Number(apiFile("services/target/connect_choice.py").match(/^PREVIEW_VERSION\s*=\s*(\d+)\s*$/m)?.[1]);
     expect(Number.isInteger(version), "no PREVIEW_VERSION in connect_choice.py").toBe(true);
     const preview = parseConnectPreview({
-      archive_available: true,
+      past_posts_available: true,
       entry: "add",
       handle: null,
       history: { editable: true, default: true, saved_enabled: null },
@@ -301,7 +301,7 @@ describe("the wire spellings are the vocabulary's", () => {
     });
     expect(preview, `a preview at the API's version ${version}`).not.toBeNull();
     expect(startBody(preview!, true)).toEqual({
-      archive_choice: { use_history: true, expected_mix_revision: 8, preview_version: version },
+      past_posts_choice: { use_history: true, expected_mix_revision: 8, preview_version: version },
     });
   });
   it("the account states a story can be planned onto", () => {

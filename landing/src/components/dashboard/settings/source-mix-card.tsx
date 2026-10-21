@@ -60,7 +60,7 @@ import { SourcePolicyEditor, WRAPPING_BUTTON } from "./source-policy-editor";
 
 /**
  * The Posting mix of a converted workspace (protocol 2): every source, Drive
- * folders and Your Instagram alike, with its share, its counts and an On/Off
+ * folders and Instagram past posts alike, with its share, its counts and an On/Off
  * switch; Equal shares or Custom percentages; Reset to equal. The protocol-1
  * card (`category-weights-card.tsx`) stays for every workspace that has not
  * converted, and `settings/page.tsx` picks between them by the read's
@@ -446,7 +446,7 @@ function SourceRowItem({
 }) {
   const name = sourceAccessibleName(row);
   const counts = countsLine(row, viewed);
-  // An archive's own progress as the viewed account's entry for it sent it: a
+  // A past-posts source's own progress as the viewed account's entry for it sent it: a
   // Drive folder has none, and with no account to view there is nothing to say.
   const seen = isInstagram(row) ? viewedSource(row, viewed) : null;
   const badges = sourceStatusBadges(seen);
@@ -458,13 +458,13 @@ function SourceRowItem({
     pending?.action.action === "set_enabled" && pending.action.source_id === row.sourceId
       ? pending.action
       : null;
-  // Past posts that cannot be used here (`archive_available` false) hold the
-  // switch only for turning them ON. An archive already On, which is what a
+  // Past posts that cannot be used here (`past_posts_available` false) hold the
+  // switch only for turning them ON. A past-posts source already On, which is what a
   // rollback leaves behind, can still be switched Off: the API allows it without
   // the capability, because that closes something.
-  const archiveUnavailable = isInstagram(row) && !mix.archiveAvailable;
-  const archiveBlocked = archiveUnavailable && !row.enabled;
-  const switchable = editable && !flow.draft && !pending && !archiveBlocked;
+  const pastPostsUnavailable = isInstagram(row) && !mix.pastPostsAvailable;
+  const pastPostsBlocked = pastPostsUnavailable && !row.enabled;
+  const switchable = editable && !flow.draft && !pending && !pastPostsBlocked;
   const draftRow = draftOpen ? flow.draft?.rows.find((r) => r.row.sourceId === row.sourceId) : undefined;
 
   return (
@@ -527,7 +527,7 @@ function SourceRowItem({
               disabled={!switchable}
               onCheckedChange={(next) => on.toggle(row, next)}
               aria-label={name}
-              aria-describedby={describedBy(offId, archiveUnavailable && blockedId)}
+              aria-describedby={describedBy(offId, pastPostsUnavailable && blockedId)}
             />
           )}
         </div>
@@ -535,7 +535,7 @@ function SourceRowItem({
       <p id={offId} className="text-xs text-muted-foreground">
         Off: {offCopy(row.provider)}
       </p>
-      {archiveUnavailable && editable && (
+      {pastPostsUnavailable && editable && (
         <p id={blockedId} className="text-xs text-muted-foreground">
           {row.enabled
             ? "Past posts are paused for this workspace. You can switch this source off, but not back on yet."
@@ -543,7 +543,7 @@ function SourceRowItem({
         </p>
       )}
       {pendingHere && <ChangePanel mix={mix} flow={flow} ids={ids} on={on} />}
-      {isInstagram(row) && mix.archiveAvailable && (
+      {isInstagram(row) && mix.pastPostsAvailable && (
         <SourcePolicyEditor
           workspaceId={workspaceId}
           sourceId={row.sourceId}

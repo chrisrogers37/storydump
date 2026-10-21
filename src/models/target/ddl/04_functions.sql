@@ -235,7 +235,7 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM instagram_artifacts WHERE workspace_id = p_ws AND kind = 'transit'
               AND (outcome IN ('unsettled','uncertain') OR cleanup_state = 'pending')) THEN
-    RAISE EXCEPTION 'workspace % still holds archive transit cleanup obligations', p_ws;
+    RAISE EXCEPTION 'workspace % still holds past-posts transit cleanup obligations', p_ws;
   END IF;
   DELETE FROM workspaces WHERE id = p_ws;
 END $$;
@@ -680,7 +680,7 @@ CREATE FUNCTION fn_clock_tick(p_max int, p_refresh_cadence interval,
 RETURNS TABLE (o_slot_jobs int, o_refresh_jobs int, o_sync_jobs int,
                o_recurring_jobs int, o_reauth_jobs int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE p_archive_enabled boolean := false; locked_workspaces uuid[]:='{}'; source_due record; source_capture jsonb; lock_ws uuid; k text; cadence interval; last_done timestamptz; rem int;
+DECLARE p_past_posts_enabled boolean := false; locked_workspaces uuid[]:='{}'; source_due record; source_capture jsonb; lock_ws uuid; k text; cadence interval; last_done timestamptz; rem int;
         due_at timestamptz;
         n1 int := 0; n2 int := 0; n3 int := 0; n4 int := 0; n5 int := 0;
 BEGIN
@@ -695,7 +695,7 @@ BEGIN
    UNION (SELECT workspace_id FROM oauth_credentials WHERE state='active' AND provider='ig_login'
     AND next_refresh_at IS NOT NULL AND next_refresh_at<=now() ORDER BY id LIMIT GREATEST(p_max,0))
    UNION (SELECT s.workspace_id FROM media_sources s WHERE s.state='active' AND s.next_sync_at IS NOT NULL
-    AND s.next_sync_at<=now() AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_archive_enabled) r WHERE r.admitted)
+    AND s.next_sync_at<=now() AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_past_posts_enabled) r WHERE r.admitted)
     ORDER BY s.next_sync_at,s.id LIMIT GREATEST(p_max,0))
   ) candidate ORDER BY workspace_id LOOP
    PERFORM fn_lock_source_read_prefix(lock_ws);
@@ -761,15 +761,15 @@ BEGIN
   rem := rem - n2;
   FOR source_due IN SELECT s.id,s.workspace_id FROM media_sources s
    WHERE s.workspace_id=ANY(locked_workspaces) AND s.state='active' AND s.next_sync_at IS NOT NULL AND s.next_sync_at<=now()
-   AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_archive_enabled) r WHERE r.admitted)
+   AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_past_posts_enabled) r WHERE r.admitted)
    ORDER BY s.next_sync_at,s.id LIMIT rem
   LOOP
-   source_capture:=fn_source_read_capture(source_due.workspace_id,source_due.id,p_archive_enabled);
+   source_capture:=fn_source_read_capture(source_due.workspace_id,source_due.id,p_past_posts_enabled);
    IF source_capture IS NULL THEN CONTINUE; END IF;
    INSERT INTO jobs(kind,workspace_id,lane,serialization_key,run_at,max_attempts,deadline_at,payload)
     VALUES('sync_media_source',source_due.workspace_id,'bulk','src:'||source_due.id,now(),5,now()+interval '6 hours',
      jsonb_build_object('v',1,'source_id',source_due.id,'reason','baseline') ||
-     CASE WHEN source_capture->>'provider'='instagram_archive' THEN jsonb_build_object('source_read_capture',source_capture) ELSE '{}'::jsonb END);
+     CASE WHEN source_capture->>'provider'='instagram_past_posts' THEN jsonb_build_object('source_read_capture',source_capture) ELSE '{}'::jsonb END);
    UPDATE media_sources SET next_sync_at=NULL WHERE id=source_due.id AND workspace_id=source_due.workspace_id;
    n3:=n3+1;
   END LOOP;
@@ -1366,51 +1366,51 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE FUNCTION trg_archive_generation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION trg_past_posts_generation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF (NEW.workspace_id, NEW.source_id, NEW.id, NEW.origin_ig_account_id, NEW.credential_id, NEW.authorization_id, NEW.app_id, NEW.subject_id, NEW.authorized_at)
      IS DISTINCT FROM (OLD.workspace_id, OLD.source_id, OLD.id, OLD.origin_ig_account_id, OLD.credential_id, OLD.authorization_id, OLD.app_id, OLD.subject_id, OLD.authorized_at) THEN
-    RAISE EXCEPTION 'archive generation identity is immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'past-posts generation identity is immutable' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END; $$;
 
-CREATE FUNCTION trg_archive_artifact_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION trg_past_posts_artifact_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF (NEW.workspace_id, NEW.artifact_ref, NEW.source_id, NEW.data_generation_id, NEW.observation_revision, NEW.media_item_id, NEW.intent_id, NEW.kind, NEW.capture_epoch, NEW.policy_revision, NEW.selected_asset_identity, NEW.validation_fingerprint, NEW.upload_attempt_id, NEW.admitted_at, NEW.admitted_asset_ref, NEW.admitted_resource_type)
      IS DISTINCT FROM (OLD.workspace_id, OLD.artifact_ref, OLD.source_id, OLD.data_generation_id, OLD.observation_revision, OLD.media_item_id, OLD.intent_id, OLD.kind, OLD.capture_epoch, OLD.policy_revision, OLD.selected_asset_identity, OLD.validation_fingerprint, OLD.upload_attempt_id, OLD.admitted_at, OLD.admitted_asset_ref, OLD.admitted_resource_type) THEN
-    RAISE EXCEPTION 'archive artifact capture is immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'past-posts artifact capture is immutable' USING ERRCODE = '23514';
   END IF;
   IF OLD.creation_evidence IS NOT NULL AND (NEW.creation_evidence,NEW.created_asset_ref,NEW.outcome,NEW.settled_at)
     IS DISTINCT FROM (OLD.creation_evidence,OLD.created_asset_ref,OLD.outcome,OLD.settled_at) THEN
-    RAISE EXCEPTION 'archive creation evidence is immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'past-posts creation evidence is immutable' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END; $$;
 
-CREATE FUNCTION trg_archive_operation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION trg_past_posts_operation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW IS DISTINCT FROM OLD THEN
-    RAISE EXCEPTION 'archive issued operation capture is immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'past-posts issued operation capture is immutable' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END; $$;
 
-CREATE FUNCTION trg_archive_media_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION trg_past_posts_media_generation() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE source_provider TEXT;
 BEGIN
   SELECT provider INTO source_provider FROM media_sources
     WHERE workspace_id = NEW.workspace_id AND id = NEW.source_id;
-  IF (source_provider = 'instagram_archive') <> (NEW.source_data_generation_id IS NOT NULL OR NEW.source_projection_redacted) THEN
-    RAISE EXCEPTION 'archive projection requires its authorization generation' USING ERRCODE = '23514';
+  IF (source_provider = 'instagram_past_posts') <> (NEW.source_data_generation_id IS NOT NULL OR NEW.source_projection_redacted) THEN
+    RAISE EXCEPTION 'past-posts projection requires its authorization generation' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END; $$;
 
-CREATE FUNCTION trg_archive_observation_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION trg_past_posts_observation_revision() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.observation_revision < OLD.observation_revision THEN
-    RAISE EXCEPTION 'archive observation revision cannot go backwards' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'past-posts observation revision cannot go backwards' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END; $$;
@@ -1422,7 +1422,7 @@ END; $$;
 -- suitability or the database duplicate INSERT arbiter.
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_archive_enabled boolean,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid DEFAULT NULL, p_media_item_id uuid DEFAULT NULL,
   p_existing_intent_id uuid DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
@@ -1433,7 +1433,7 @@ RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
 LANGUAGE sql STABLE SECURITY INVOKER
 SET search_path=pg_catalog,public,pg_temp AS $$
  SELECT * FROM fn_source_asset_suitability(p_workspace_id,p_destination_id,
-  p_resolved_repost_ttl_days,p_evaluated_at,p_archive_enabled,p_source_id,
+  p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_source_id,
   p_media_item_id,p_existing_intent_id,true)
 $$;
 
@@ -1449,11 +1449,11 @@ WITH facts AS (
  a.provider_account_ref AS account_ref,
  CASE
  WHEN s.provider='gdrive' THEN NULL
- WHEN s.provider<>'instagram_archive' THEN 'unsupported_source_provider'
+ WHEN s.provider<>'instagram_past_posts' THEN 'unsupported_source_provider'
  WHEN p_activated IS NOT TRUE OR w.source_mix_policy_version IS DISTINCT FROM 1
   OR w.source_mix_conversion_version IS DISTINCT FROM 1 OR w.source_mix_revision IS NULL
   OR w.source_mix_converted_at IS NULL OR (w.source_mix_mode IN ('equal','custom')) IS NOT TRUE
-  OR w.source_membership_policy IS DISTINCT FROM 'reset_equal' THEN 'archive_not_activated'
+  OR w.source_membership_policy IS DISTINCT FROM 'reset_equal' THEN 'past_posts_not_activated'
  WHEN s.state<>'active' OR COALESCE((s.config->>'removed')::boolean,false) THEN 'source_unavailable'
  WHEN COALESCE(x.ratio>0,false) IS NOT TRUE THEN 'source_off'
  WHEN a.state IS DISTINCT FROM 'active' OR a.provider_account_ref LIKE 'manual:%'
@@ -1466,7 +1466,7 @@ WITH facts AS (
  FROM media_sources s JOIN workspaces w ON w.id=s.workspace_id
  LEFT JOIN category_post_case_mix x ON x.workspace_id=s.workspace_id AND x.source_id=s.id AND x.effective_to IS NULL
  LEFT JOIN ig_accounts a ON a.workspace_id=s.workspace_id AND a.id=s.origin_ig_account_id
- LEFT JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id
+ LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id
  LEFT JOIN oauth_credentials c ON c.workspace_id=g.workspace_id AND c.ig_account_id=g.origin_ig_account_id AND c.id=g.credential_id
  WHERE s.workspace_id=p_workspace_id AND s.id=p_source_id
 )
@@ -1482,7 +1482,7 @@ BEGIN
  PERFORM id FROM ig_accounts WHERE workspace_id=p_ws ORDER BY id FOR UPDATE;
  PERFORM id FROM media_sources WHERE workspace_id=p_ws ORDER BY id FOR UPDATE;
  PERFORM id FROM oauth_credentials WHERE workspace_id=p_ws ORDER BY id FOR UPDATE;
- PERFORM id FROM instagram_archive_generations WHERE workspace_id=p_ws ORDER BY id FOR UPDATE;
+ PERFORM id FROM instagram_past_posts_generations WHERE workspace_id=p_ws ORDER BY id FOR UPDATE;
 END $$;
 
 CREATE FUNCTION fn_source_read_capture(p_ws uuid,p_sid uuid,p_activated boolean)
@@ -1498,7 +1498,7 @@ DECLARE a record; capture jsonb:=p_payload->'source_read_capture';
 BEGIN
  SELECT r.* INTO a FROM media_sources s CROSS JOIN LATERAL fn_source_read_authority(p_ws,s.id,p_activated) r
  WHERE s.workspace_id=p_ws AND s.id::text=p_payload->>'source_id';
- IF NOT FOUND OR a.provider<>'instagram_archive' THEN RETURN NULL; END IF;
+ IF NOT FOUND OR a.provider<>'instagram_past_posts' THEN RETURN NULL; END IF;
  IF jsonb_typeof(capture) IS DISTINCT FROM 'object' OR capture->'v' IS DISTINCT FROM '1'::jsonb
   OR NOT capture ?& ARRAY['workspace_id','source_id','provider','source_use_epoch','generation_id','credential_id','account_ref']
   OR capture->>'source_use_epoch' IS NULL OR capture->>'generation_id' IS NULL OR capture->>'credential_id' IS NULL OR capture->>'account_ref' IS NULL
@@ -1513,7 +1513,7 @@ BEGIN
  RETURN NULL;
 END $$;
 
-CREATE FUNCTION fn_claim_job(p_lane text,p_worker text,p_lease interval,p_ws_lane_cap int,p_archive_enabled boolean)
+CREATE FUNCTION fn_claim_job(p_lane text,p_worker text,p_lease interval,p_ws_lane_cap int,p_past_posts_enabled boolean)
 RETURNS SETOF jobs LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
 DECLARE candidate record; selected jobs; refusal text; source_prefix_applied boolean;
 BEGIN
@@ -1544,7 +1544,7 @@ BEGIN
    END IF;
    refusal:=NULL;
    IF selected.kind IN ('sync_media_source','first_ingest_chunk') THEN
-    refusal:=fn_source_job_read_reason(selected.workspace_id,selected.payload,p_archive_enabled);
+    refusal:=fn_source_job_read_reason(selected.workspace_id,selected.payload,p_past_posts_enabled);
    END IF;
    IF refusal IS NOT NULL THEN
     UPDATE jobs SET state='failed',payload=payload||jsonb_build_object('source_read_refusal',refusal)
@@ -1560,9 +1560,9 @@ BEGIN
 END $$;
 
 CREATE FUNCTION fn_clock_tick(p_max int, p_refresh_cadence interval,
-                              p_recurring jsonb, p_archive_enabled boolean)
+                              p_recurring jsonb, p_past_posts_enabled boolean)
 RETURNS TABLE (o_slot_jobs int, o_refresh_jobs int, o_sync_jobs int,
-               o_recurring_jobs int, archive_reauth_jobs int)
+               o_recurring_jobs int, past_posts_reauth_jobs int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; source_due record; source_capture jsonb; lock_ws uuid; k text; cadence interval; last_done timestamptz; rem int;
         due_at timestamptz;
@@ -1579,7 +1579,7 @@ BEGIN
    UNION (SELECT workspace_id FROM oauth_credentials WHERE state='active' AND provider='ig_login'
     AND next_refresh_at IS NOT NULL AND next_refresh_at<=now() ORDER BY id LIMIT GREATEST(p_max,0))
    UNION (SELECT s.workspace_id FROM media_sources s WHERE s.state='active' AND s.next_sync_at IS NOT NULL
-    AND s.next_sync_at<=now() AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_archive_enabled) r WHERE r.admitted)
+    AND s.next_sync_at<=now() AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_past_posts_enabled) r WHERE r.admitted)
     ORDER BY s.next_sync_at,s.id LIMIT GREATEST(p_max,0))
   ) candidate ORDER BY workspace_id LOOP
    PERFORM fn_lock_source_read_prefix(lock_ws);
@@ -1645,15 +1645,15 @@ BEGIN
   rem := rem - n2;
   FOR source_due IN SELECT s.id,s.workspace_id FROM media_sources s
    WHERE s.workspace_id=ANY(locked_workspaces) AND s.state='active' AND s.next_sync_at IS NOT NULL AND s.next_sync_at<=now()
-   AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_archive_enabled) r WHERE r.admitted)
+   AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_past_posts_enabled) r WHERE r.admitted)
    ORDER BY s.next_sync_at,s.id LIMIT rem
   LOOP
-   source_capture:=fn_source_read_capture(source_due.workspace_id,source_due.id,p_archive_enabled);
+   source_capture:=fn_source_read_capture(source_due.workspace_id,source_due.id,p_past_posts_enabled);
    IF source_capture IS NULL THEN CONTINUE; END IF;
    INSERT INTO jobs(kind,workspace_id,lane,serialization_key,run_at,max_attempts,deadline_at,payload)
     VALUES('sync_media_source',source_due.workspace_id,'bulk','src:'||source_due.id,now(),5,now()+interval '6 hours',
      jsonb_build_object('v',1,'source_id',source_due.id,'reason','baseline') ||
-     CASE WHEN source_capture->>'provider'='instagram_archive' THEN jsonb_build_object('source_read_capture',source_capture) ELSE '{}'::jsonb END);
+     CASE WHEN source_capture->>'provider'='instagram_past_posts' THEN jsonb_build_object('source_read_capture',source_capture) ELSE '{}'::jsonb END);
    UPDATE media_sources SET next_sync_at=NULL WHERE id=source_due.id AND workspace_id=source_due.workspace_id;
    n3:=n3+1;
   END LOOP;
@@ -1681,7 +1681,7 @@ BEGIN
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
 
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_archive_enabled boolean)
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -1709,7 +1709,7 @@ BEGIN
   LOOP
    refusal:=NULL;
    IF expired_job.kind IN ('sync_media_source','first_ingest_chunk') THEN
-    refusal:=fn_source_job_read_reason(expired_job.workspace_id,expired_job.payload,p_archive_enabled);
+    refusal:=fn_source_job_read_reason(expired_job.workspace_id,expired_job.payload,p_past_posts_enabled);
    END IF;
    UPDATE jobs SET state=CASE WHEN refusal IS NULL THEN 'ready' ELSE 'failed' END,
     locked_by=NULL,lease_token=NULL,locked_until=NULL,
@@ -1771,15 +1771,15 @@ BEGIN
        AND s.id::text = e.source_id
        AND s.workspace_id = e.workspace_id
        AND s.state = 'active' AND s.next_sync_at IS NULL
-       AND fn_source_job_read_reason(e.workspace_id,e.payload,p_archive_enabled) IS NULL
-       AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_archive_enabled) a WHERE a.admitted)
+       AND fn_source_job_read_reason(e.workspace_id,e.payload,p_past_posts_enabled) IS NULL
+       AND EXISTS(SELECT 1 FROM fn_source_read_authority(s.workspace_id,s.id,p_past_posts_enabled) a WHERE a.admitted)
   )
   SELECT count(*) INTO c FROM ended;
   n := n + c;
   RETURN n;
 END $$;
 
-CREATE FUNCTION trg_archive_validation_capture_reset() RETURNS trigger
+CREATE FUNCTION trg_past_posts_validation_capture_reset() RETURNS trigger
 LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,public,pg_temp AS $$
 BEGIN
  IF (NEW.data_generation_id,NEW.observation_revision,NEW.first_child_id)
@@ -1824,7 +1824,7 @@ END $$;
 
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_archive_enabled boolean,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid, p_media_item_id uuid,
   p_existing_intent_id uuid, p_require_validation boolean)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
@@ -1849,7 +1849,7 @@ WITH source_facts AS (
   FROM media_sources s
   LEFT JOIN category_post_case_mix x ON x.workspace_id=s.workspace_id AND x.source_id=s.id AND x.effective_to IS NULL
   LEFT JOIN instagram_source_policies p ON p.workspace_id=s.workspace_id AND p.source_id=s.id
-  LEFT JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id
+  LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id
   LEFT JOIN oauth_credentials c ON c.workspace_id=g.workspace_id AND c.ig_account_id=g.origin_ig_account_id AND c.id=g.credential_id
   LEFT JOIN ig_accounts a ON a.workspace_id=s.workspace_id AND a.id=s.origin_ig_account_id
   WHERE s.workspace_id=p_workspace_id AND (p_source_id IS NULL OR s.id=p_source_id)
@@ -1870,7 +1870,7 @@ WITH source_facts AS (
   SELECT s.id, m.id, s.provider, s.source_use_epoch,
     i.data_generation_id, i.observation_revision, s.policy_revision, s.effective_age,
     CASE
-      WHEN p_archive_enabled IS NOT TRUE THEN 'archive_not_activated'
+      WHEN p_past_posts_enabled IS NOT TRUE THEN 'past_posts_not_activated'
       WHEN p_evaluated_at IS NULL OR p_resolved_repost_ttl_days IS NULL THEN 'context_unavailable'
       WHEN s.state<>'active' OR COALESCE((s.config->>'removed')::boolean,false) THEN 'source_unavailable'
       WHEN COALESCE(s.ratio>0,false) IS NOT TRUE THEN 'source_off'
@@ -1916,7 +1916,7 @@ WITH source_facts AS (
         WHERE b.workspace_id=p_workspace_id AND b.intent_id=p_existing_intent_id
         AND (b.capture_generation_id IS DISTINCT FROM a.data_generation_id
           OR b.capture_observation_revision IS DISTINCT FROM a.observation_revision
-          OR b.validation_fingerprint IS DISTINCT FROM a.validation_fingerprint)) THEN 'archive_revalidation_required'
+          OR b.validation_fingerprint IS DISTINCT FROM a.validation_fingerprint)) THEN 'past_posts_revalidation_required'
       WHEN p_evaluated_at-i.original_at < s.effective_age*interval '1 day' THEN 'too_recent'
       WHEN i.attribution='credited' AND s.include_credited IS NOT TRUE THEN 'credited_excluded'
       WHEN i.attribution='unknown' AND s.include_unknown IS NOT TRUE THEN 'attribution_unknown'
@@ -1926,7 +1926,7 @@ WITH source_facts AS (
   LEFT JOIN instagram_media_assets a ON a.workspace_id=i.workspace_id AND a.source_id=i.source_id
     AND a.parent_media_id=i.parent_media_id
   LEFT JOIN media_items m ON m.workspace_id=a.workspace_id AND m.source_id=a.source_id AND m.id=a.media_item_id
-  WHERE s.provider='instagram_archive' AND (p_media_item_id IS NULL OR m.id=p_media_item_id)
+  WHERE s.provider='instagram_past_posts' AND (p_media_item_id IS NULL OR m.id=p_media_item_id)
 ), context AS (
   SELECT a.*,
     EXISTS (SELECT 1 FROM post_intents p WHERE p.workspace_id=p_workspace_id
@@ -1964,13 +1964,13 @@ SET search_path=pg_catalog,public,pg_temp AS $$
  SELECT i.id,i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
  JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
  JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
- WHERE s.provider='instagram_archive'
+ WHERE s.provider='instagram_past_posts'
  AND w.state='active' AND NOT w.is_paused AND NOT i.cancel_requested
  AND NOT EXISTS (
  SELECT 1 FROM instagram_intent_provenance p
  JOIN instagram_media_assets a ON a.workspace_id=p.workspace_id
    AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id
- JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id
+ JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id
    AND g.source_id=s.id AND g.id=s.current_authorization_generation_id
  WHERE p.workspace_id=i.workspace_id AND p.intent_id=i.id
  AND p.source_id=s.id AND p.media_item_id=m.id
@@ -2112,10 +2112,10 @@ BEGIN
       INSERT INTO meta_deletion_receipt_generations (receipt_id, workspace_id, credential_id,
         authorization_id, source_id, generation_id)
       SELECT v_receipt, v_ws, m.credential_id, m.authorization_id, g.source_id, g.id
-        FROM instagram_archive_generations g
+        FROM instagram_past_posts_generations g
         JOIN media_sources s ON s.workspace_id = g.workspace_id AND s.id = g.source_id
        WHERE g.workspace_id = v_ws AND g.authorization_id = m.authorization_id
-         AND s.provider = 'instagram_archive' AND s.origin_ig_account_id = m.ig_account_id
+         AND s.provider = 'instagram_past_posts' AND s.origin_ig_account_id = m.ig_account_id
          AND g.lifecycle <> 'deleted';
     END LOOP;
   END LOOP;
@@ -2205,7 +2205,7 @@ BEGIN
   END IF;
   IF p_state = 'completed' THEN
     IF EXISTS (SELECT 1 FROM meta_deletion_receipt_generations x
-                 LEFT JOIN instagram_archive_generations g ON g.workspace_id = x.workspace_id
+                 LEFT JOIN instagram_past_posts_generations g ON g.workspace_id = x.workspace_id
                   AND g.source_id = x.source_id AND g.id = x.generation_id
                 WHERE x.receipt_id = p_receipt AND x.workspace_id = v_ws
                   AND x.credential_id = p_credential AND x.authorization_id = p_authorization
@@ -2247,7 +2247,7 @@ END $$;
 -- transit_unresolved (a transit attempt not settled and destroyed),
 -- intent_live (a non-terminal intent captured or staged in the set). SECURITY
 -- DEFINER owned by svc_maintenance; EXECUTE for svc_worker.
-CREATE FUNCTION fn_archive_redact_generation_records(p_source uuid, p_generation_ids uuid[])
+CREATE FUNCTION fn_past_posts_redact_generation_records(p_source uuid, p_generation_ids uuid[])
 RETURNS TABLE (o_operation_rows int, o_intent_rows int, o_artifact_rows int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
@@ -2258,29 +2258,29 @@ DECLARE
 BEGIN
   IF v_ws IS NULL OR p_source IS NULL OR p_generation_ids IS NULL OR cardinality(p_generation_ids) = 0
      OR array_position(p_generation_ids, NULL) IS NOT NULL
-     OR (SELECT count(*) FROM instagram_archive_generations g
+     OR (SELECT count(*) FROM instagram_past_posts_generations g
           WHERE g.workspace_id = v_ws AND g.source_id = p_source AND g.id = ANY (p_generation_ids)
             AND g.lifecycle IN ('deletion_pending','deleted'))
         <> (SELECT count(DISTINCT x) FROM unnest(p_generation_ids) x) THEN
-    RAISE EXCEPTION 'archive redaction refused: scope_unavailable' USING ERRCODE = 'P0001';
+    RAISE EXCEPTION 'past-posts redaction refused: scope_unavailable' USING ERRCODE = 'P0001';
   END IF;
   IF EXISTS (SELECT 1 FROM instagram_operation_provenance p
                JOIN provider_operations o ON o.workspace_id = p.workspace_id AND o.id = p.operation_id
               WHERE p.workspace_id = v_ws AND p.data_generation_id = ANY (p_generation_ids)
                 AND o.state IN ('permitted','ambiguous')) THEN
-    RAISE EXCEPTION 'archive redaction refused: operation_unresolved' USING ERRCODE = 'P0001';
+    RAISE EXCEPTION 'past-posts redaction refused: operation_unresolved' USING ERRCODE = 'P0001';
   END IF;
   IF EXISTS (SELECT 1 FROM instagram_artifacts a
               WHERE a.workspace_id = v_ws AND a.data_generation_id = ANY (p_generation_ids) AND a.kind = 'transit'
                 AND NOT (a.outcome = 'settled' AND a.cleanup_state = 'destroyed')) THEN
-    RAISE EXCEPTION 'archive redaction refused: transit_unresolved' USING ERRCODE = 'P0001';
+    RAISE EXCEPTION 'past-posts redaction refused: transit_unresolved' USING ERRCODE = 'P0001';
   END IF;
   IF EXISTS (SELECT 1 FROM instagram_intent_provenance p
                JOIN post_intents i ON i.workspace_id = p.workspace_id AND i.id = p.intent_id
               WHERE p.workspace_id = v_ws
                 AND (p.capture_generation_id = ANY (p_generation_ids) OR p.staged_generation_id = ANY (p_generation_ids))
                 AND i.state NOT IN ('posted','skipped','rejected','expired','failed','cancelled')) THEN
-    RAISE EXCEPTION 'archive redaction refused: intent_live' USING ERRCODE = 'P0001';
+    RAISE EXCEPTION 'past-posts redaction refused: intent_live' USING ERRCODE = 'P0001';
   END IF;
   DELETE FROM instagram_operation_provenance
    WHERE workspace_id = v_ws AND data_generation_id = ANY (p_generation_ids);
@@ -2321,7 +2321,7 @@ BEGIN
    WHERE s.next_attempt_at <= now()
      AND (s.state IN ('pending','cleaning')
       OR (s.state = 'held' AND EXISTS (SELECT 1 FROM meta_deletion_receipt_generations x
-           JOIN instagram_archive_generations g ON g.workspace_id = x.workspace_id
+           JOIN instagram_past_posts_generations g ON g.workspace_id = x.workspace_id
             AND g.source_id = x.source_id AND g.id = x.generation_id
           WHERE x.receipt_id = s.receipt_id AND x.workspace_id = s.workspace_id
             AND x.credential_id = s.credential_id AND x.authorization_id = s.authorization_id
@@ -2343,12 +2343,12 @@ BEGIN
 END $$;
 
 -- The lifecycle sweep's reconciliation leg, called only with activation
--- evidence: at most LEAST(p_limit, 5) reconcile_archive_accounts jobs for
+-- evidence: at most LEAST(p_limit, 5) reconcile_past_posts_accounts jobs for
 -- active, converted workspaces holding an active non-manual account whose
 -- active ig_login credential lacks a current mapping or whose account lacks an
--- archive source, never twice for one run digest. SECURITY DEFINER owned by
+-- past-posts source, never twice for one run digest. SECURITY DEFINER owned by
 -- svc_clock; EXECUTE for svc_worker.
-CREATE FUNCTION fn_archive_reconcile_jobs(p_limit int, p_run_id text, p_run_digest text)
+CREATE FUNCTION fn_past_posts_reconcile_jobs(p_limit int, p_run_id text, p_run_digest text)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE minted int;
@@ -2367,14 +2367,14 @@ BEGIN
      AND (NOT EXISTS (SELECT 1 FROM meta_identity_mappings m
            WHERE m.workspace_id = c.workspace_id AND m.credential_id = c.id AND m.is_current)
       OR NOT EXISTS (SELECT 1 FROM media_sources s
-           WHERE s.workspace_id = a.workspace_id AND s.provider = 'instagram_archive'
+           WHERE s.workspace_id = a.workspace_id AND s.provider = 'instagram_past_posts'
             AND s.origin_ig_account_id = a.id)))
    AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.workspace_id = w.id
-    AND j.kind = 'reconcile_archive_accounts' AND j.payload->>'run_digest' = p_run_digest)
+    AND j.kind = 'reconcile_past_posts_accounts' AND j.payload->>'run_digest' = p_run_digest)
   ORDER BY w.id LIMIT LEAST(GREATEST(p_limit, 0), 5)
  )
  INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, deadline_at, payload)
- SELECT 'reconcile_archive_accounts', id, 'bulk', 'archive-reconcile:' || id, now(), 5, now() + interval '6 hours',
+ SELECT 'reconcile_past_posts_accounts', id, 'bulk', 'past-posts-reconcile:' || id, now(), 5, now() + interval '6 hours',
   jsonb_build_object('v', 1, 'run_id', p_run_id, 'run_digest', p_run_digest)
  FROM pending;
  GET DIAGNOSTICS minted = ROW_COUNT;

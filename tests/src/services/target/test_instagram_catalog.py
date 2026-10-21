@@ -1,22 +1,22 @@
-"""Pure bundle rules for the archive's per-slide landing."""
+"""Pure bundle rules for the past-posts source's per-slide landing."""
 
 from dataclasses import replace
 from datetime import datetime, timezone
 
 from src.services.target.instagram_catalog import (
-    ArchiveAsset,
-    ArchiveObservation,
+    PastPostsAsset,
+    PastPostsObservation,
     _bundle_assets,
     _validate,
 )
 
 
 def observation(*ids, complete=True):
-    return ArchiveObservation(
+    return PastPostsObservation(
         "900",
         datetime(2020, 1, 1, tzinfo=timezone.utc),
         assets=tuple(
-            ArchiveAsset(mid, "image", position=i) for i, mid in enumerate(ids, 1)
+            PastPostsAsset(mid, "image", position=i) for i, mid in enumerate(ids, 1)
         ),
         slide_count=len(ids),
         slides_complete=complete,
@@ -57,10 +57,10 @@ def test_truncated_reorder_keeps_unseen_identities_in_unique_trailing_positions(
 
 
 def test_single_post_keeps_parent_identity_and_position_one():
-    single = ArchiveObservation(
+    single = PastPostsObservation(
         "900",
         datetime(2020, 1, 1, tzinfo=timezone.utc),
-        assets=(ArchiveAsset("900", "image"),),
+        assets=(PastPostsAsset("900", "image"),),
     )
     _validate(single)
     assert _bundle_assets(single, ()) == list(single.assets)

@@ -1,10 +1,10 @@
-"""Captured archive turns with one atomic metadata/checkpoint/job commit.
+"""Captured past-posts turns with one atomic metadata/checkpoint/job commit.
 
 Composition is explicitly injected. Provider metadata reads happen only after
 short source/lease checks have closed; the database remains the sole commit
 and suitability authority. Media bytes/probes belong after candidate selection,
-never to indexing. Only `archive_composition` constructs these ports, and only
-when `archive_activation` arms the process.
+never to indexing. Only `past_posts_composition` constructs these ports, and only
+when `past_posts_activation` arms the process.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ from sqlalchemy import text
 
 from src.services.target import instagram_catalog, jobs, readers, source_policy
 from src.services.target import source_read_admission as admission
-from src.services.target.instagram_sources import ArchiveCapability, is_activated
+from src.services.target.instagram_sources import PastPostsCapability, is_activated
 from src.services.target.media_sync import BASELINE_SECONDS
-from src.services.target.instagram_archive_adapter import (
+from src.services.target.instagram_past_posts_adapter import (
     LAUNCH_FLOOR,
     LISTING_CEILING,
     MAX_PAGE_REQUESTS,
@@ -42,8 +42,8 @@ from src.services.target.unit_of_work import unit_of_work
 
 
 @dataclass(frozen=True)
-class ArchiveSyncPorts:
-    capability: ArchiveCapability
+class PastPostsSyncPorts:
+    capability: PastPostsCapability
     tombstone_keys: instagram_catalog.TombstoneKeys
     prepare_adapter: Callable[[admission.SourceReadCapture, Any], Awaitable[Any]]
 
@@ -94,8 +94,8 @@ def _clamp_ceiling(checkpoint):
     checkpoint.pop("pending_at", None)
 
 
-class ArchiveCheckpointRefused(MediaTerminalError):
-    reason = "unsupported_archive_sync_checkpoint"
+class PastPostsCheckpointRefused(MediaTerminalError):
+    reason = "unsupported_past_posts_sync_checkpoint"
 
     def __init__(self):
         super().__init__(self.reason)
@@ -111,7 +111,7 @@ class _Start:
     adapter: Any
 
 
-_ENVELOPE_TYPE = "instagram_archive_sync"
+_ENVELOPE_TYPE = "instagram_past_posts_sync"
 _ENVELOPE_KEYS = frozenset(
     {
         "v",
@@ -138,7 +138,7 @@ def _require_envelope(stored: dict) -> None:
     :func:`_envelope` runs it before it resumes, and :func:`status` before it
     reads a lane, a queue or the progress record for display. What the sync
     would refuse is therefore read as unreadable, a named
-    :class:`ArchiveCheckpointRefused` on either path, never a ``TypeError`` or
+    :class:`PastPostsCheckpointRefused` on either path, never a ``TypeError`` or
     an ``AttributeError`` from indexing into a value of the wrong type.
     """
     if (
@@ -153,12 +153,12 @@ def _require_envelope(stored: dict) -> None:
         or stored["next_metadata"] not in ("recent", "history")
         or not isinstance(stored["progress"], dict)
     ):
-        raise ArchiveCheckpointRefused()
+        raise PastPostsCheckpointRefused()
     if "scan_seen" in stored and (
         type(stored["scan_seen"]) is not int
         or not 0 <= stored["scan_seen"] <= LISTING_CEILING
     ):
-        raise ArchiveCheckpointRefused()
+        raise PastPostsCheckpointRefused()
     for lane in ("recent", "history"):
         value = stored[lane]
         if (
@@ -167,7 +167,7 @@ def _require_envelope(stored: dict) -> None:
             or not isinstance(value["checkpoint"], dict)
             or type(value["complete"]) is not bool
         ):
-            raise ArchiveCheckpointRefused()
+            raise PastPostsCheckpointRefused()
     for queue in ("pending_helpers", "deferred_helpers"):
         if (
             not isinstance(stored[queue], list)
@@ -177,7 +177,7 @@ def _require_envelope(stored: dict) -> None:
             )
             or len(set(stored[queue])) != len(stored[queue])
         ):
-            raise ArchiveCheckpointRefused()
+            raise PastPostsCheckpointRefused()
 
 
 def _envelope(stored, capture):
@@ -197,12 +197,12 @@ def _envelope(stored, capture):
             progress={},
         )
     if not isinstance(stored, dict):
-        raise ArchiveCheckpointRefused()
+        raise PastPostsCheckpointRefused()
     if stored.get("type") != _ENVELOPE_TYPE:
         # Legacy provider state is interpreted by the adapter before
         # dispatch. Only its known version can enter the new lane envelope.
         if type(stored.get("v")) is not int or stored["v"] not in (1, 2):
-            raise ArchiveCheckpointRefused()
+            raise PastPostsCheckpointRefused()
         result = _envelope(None, capture)
         # Infer imported progress after the sole adapter normalizes legacy state.
         result.pop("scan_seen")
@@ -315,7 +315,7 @@ async def _start(engine, job, ports):
         else 0,
     )
     if envelope["scan_seen"] < active_seen:
-        raise ArchiveCheckpointRefused()
+        raise PastPostsCheckpointRefused()
     lane = envelope["next_lane"]
     if lane in ("recent", "history"):
         checkpoint = envelope[lane]["checkpoint"]
@@ -358,7 +358,7 @@ async def status(
     expected_progress_interval_seconds=BASELINE_SECONDS,
     _checkpoint=None,
 ):
-    """One archive source's coverage and scan facts, read under *context*.
+    """One past-posts source's coverage and scan facts, read under *context*.
 
     The source half of :func:`progress`, with no destination's verdicts: its
     authority, health, current-generation coverage and checkpoint. A caller
@@ -366,10 +366,10 @@ async def status(
     mix resource's readiness projection). Like :func:`progress`, displaying a
     source never grants permission for provider I/O.
 
-    Raises :class:`ArchiveCheckpointRefused`, after its statements have run, when
+    Raises :class:`PastPostsCheckpointRefused`, after its statements have run, when
     the saved checkpoint of the counted generation is not readable: a malformed
     envelope (:func:`_require_envelope`) or a progress time that does not parse.
-    What an unreadable archive shows is the caller's to decide.
+    What an unreadable past-posts source shows is the caller's to decide.
     """
     _require_interval(expected_progress_interval_seconds)
     source_policy.require_context(conn, context, context.workspace_id)
@@ -386,7 +386,7 @@ async def status(
     generation = str(authority["generation_id"]) if authority["generation_id"] else None
     health = await readers.row(
         conn,
-        "SELECT s.state,COALESCE((s.config->>'removed')::boolean,false) AS removed,s.created_at,s.source_use_epoch,s.sync_checkpoint,COALESCE(x.ratio>0,false) AS enabled,a.state AS origin_state,a.provider_account_ref,g.lifecycle,c.state AS credential_state,(c.expires_at IS NULL OR c.expires_at>clock_timestamp()) AS unexpired,EXISTS(SELECT 1 FROM media_source_destinations d WHERE d.workspace_id=s.workspace_id AND d.source_id=s.id AND d.ig_account_id=s.origin_ig_account_id AND d.state='active') AS assigned FROM media_sources s LEFT JOIN category_post_case_mix x ON x.workspace_id=s.workspace_id AND x.source_id=s.id AND x.effective_to IS NULL LEFT JOIN ig_accounts a ON a.workspace_id=s.workspace_id AND a.id=s.origin_ig_account_id LEFT JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id LEFT JOIN oauth_credentials c ON c.workspace_id=g.workspace_id AND c.ig_account_id=g.origin_ig_account_id AND c.id=g.credential_id WHERE s.workspace_id=:ws AND s.id=:sid",
+        "SELECT s.state,COALESCE((s.config->>'removed')::boolean,false) AS removed,s.created_at,s.source_use_epoch,s.sync_checkpoint,COALESCE(x.ratio>0,false) AS enabled,a.state AS origin_state,a.provider_account_ref,g.lifecycle,c.state AS credential_state,(c.expires_at IS NULL OR c.expires_at>clock_timestamp()) AS unexpired,EXISTS(SELECT 1 FROM media_source_destinations d WHERE d.workspace_id=s.workspace_id AND d.source_id=s.id AND d.ig_account_id=s.origin_ig_account_id AND d.state='active') AS assigned FROM media_sources s LEFT JOIN category_post_case_mix x ON x.workspace_id=s.workspace_id AND x.source_id=s.id AND x.effective_to IS NULL LEFT JOIN ig_accounts a ON a.workspace_id=s.workspace_id AND a.id=s.origin_ig_account_id LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id LEFT JOIN oauth_credentials c ON c.workspace_id=g.workspace_id AND c.ig_account_id=g.origin_ig_account_id AND c.id=g.credential_id WHERE s.workspace_id=:ws AND s.id=:sid",
         ws=ws,
         sid=sid,
     )
@@ -452,7 +452,7 @@ async def status(
                 if at.utcoffset() is not None:
                     anchors.append(at)
             except (TypeError, ValueError):
-                raise ArchiveCheckpointRefused() from None
+                raise PastPostsCheckpointRefused() from None
     return dict(
         generation_id=generation,
         observed=int(facts["observed"]),
@@ -711,7 +711,7 @@ async def _capture_helper_terminal(conn, capture, candidate):
             "AND a.data_generation_id=CAST(:gid AS uuid) AND a.observation_revision=:rev "
             "AND m.workspace_id=a.workspace_id AND m.source_id=a.source_id "
             "AND (m.id=a.media_item_id OR "
-            "m.content_hash='instagram_archive:media:'||a.asset_media_id)"
+            "m.content_hash='instagram_past_posts:media:'||a.asset_media_id)"
         ),
         params,
     )
@@ -842,7 +842,7 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
             ),
         )
         if moved.rowcount != 1:
-            raise RuntimeError("archive checkpoint compare-and-swap failed")
+            raise RuntimeError("past-posts checkpoint compare-and-swap failed")
         await _fault(fault, "checkpoint")
         if next_lane:
             await jobs.enqueue(
@@ -904,7 +904,7 @@ async def _persistent_error(engine, job, start, ports, exc):
 
 
 async def run_sync(
-    engine, job, *, ports: ArchiveSyncPorts, fault=None
+    engine, job, *, ports: PastPostsSyncPorts, fault=None
 ) -> SyncTurnResult:
     """Index one captured metadata turn. Never fetch or decode media bytes."""
     start = page = failure = None
@@ -937,7 +937,7 @@ async def run_sync(
         except MEDIA_FAILURES as exc:
             raise redacted_error(exc) from None
         if not isinstance(page, MediaPage):
-            raise MediaTerminalError("archive observation page required")
+            raise MediaTerminalError("past-posts observation page required")
         return await _land(
             engine,
             job,

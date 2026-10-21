@@ -208,16 +208,16 @@ async def load_credential(conn, *, credential_id, captured) -> str:
     and the account `reauth_required`. It never guesses and never logs
     ciphertext — the exception carries the credential id and nothing else.
 
-    **The flip is `archive_lifecycle.credential_rejected`'s, the one door every
+    **The flip is `past_posts_lifecycle.credential_rejected`'s, the one door every
     definitive rejection takes**, so it keeps the common lock
-    order and moves an archive's epoch like the others. A caller passes the
-    credential's `captured` (`archive_lifecycle.capture_credential`), read
+    order and moves a past-posts source's epoch like the others. A caller passes the
+    credential's `captured` (`past_posts_lifecycle.capture_credential`), read
     BEFORE this call: the flip then takes the account's source prefix first,
-    writes an archive's state change through the epoch writer, and flips
+    writes a past-posts source's state change through the epoch writer, and flips
     nothing when the credential was reconnected since (the unreadable payload
     is not what is stored now). It is a required argument so that a bare flip
     is never silent: None, which `capture_credential` answers for a credential
-    no archive can be on, is the bare `mark_dead`.
+    no past-posts source can be on, is the bare `mark_dead`.
 
     The ring is built FIRST, outside the `try`: one that cannot be built
     (:class:`~src.services.target.oauth_states.RingUnavailable`) propagates
@@ -238,15 +238,15 @@ async def load_credential(conn, *, credential_id, captured) -> str:
     try:
         return keys.decrypt(row[0])
     except Exception as exc:
-        # Imported late: `archive_lifecycle` imports this module for `mark_dead`.
-        from src.services.target import archive_lifecycle
+        # Imported late: `past_posts_lifecycle` imports this module for `mark_dead`.
+        from src.services.target import past_posts_lifecycle
 
         # COMMIT the flip before raising. Fail-closed means the state change
         # SURVIVES the failure — if it rides on the caller's transaction it is
         # rolled back with the exception, and the credential stays `active`
         # while nothing can read it. A test asserts the flip, not only that the
         # call raised.
-        outcome = await archive_lifecycle.credential_rejected(
+        outcome = await past_posts_lifecycle.credential_rejected(
             conn,
             workspace_id=row[1],
             credential_id=credential_id,

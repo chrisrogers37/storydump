@@ -2,10 +2,10 @@
 
 What is pinned here, without a database: the start body's shape and every
 refusal it names; that nothing is read, and nothing recorded, where the
-archive is not live; what a start records for each entry; the preview's
+past-posts source is not live; what a start records for each entry; the preview's
 fields and its equal-reset arithmetic; and what the callback hands
-`connect_archive` and writes as the result. The SQL itself, the CHECKs and the
-real composition are `tests/scripts/test_oauth_archive_choice_gate.py`'s.
+`connect_past_posts` and writes as the result. The SQL itself, the CHECKs and the
+real composition are `tests/scripts/test_oauth_past_posts_choice_gate.py`'s.
 """
 
 from __future__ import annotations
@@ -23,20 +23,20 @@ from src.services.target import (
 )
 from src.services.target.connect_choice import ConnectChoiceRefused
 from src.services.target.instagram_sources import (
-    ArchiveAuthorization,
-    ArchiveCapability,
+    PastPostsAuthorization,
+    PastPostsCapability,
 )
-from src.services.target.source_membership import ArchiveChoice, MembershipResult
+from src.services.target.source_membership import PastPostsChoice, MembershipResult
 from src.services.target.versioned_mix import MixConflict
 
 WS = "33333333-3333-4333-8333-333333333333"
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
-LIVE = ArchiveCapability(enabled=True)
+LIVE = PastPostsCapability(enabled=True)
 
 
 def body(use_history=True, revision=8, version=1, **extra):
     return {
-        "archive_choice": {
+        "past_posts_choice": {
             "use_history": use_history,
             "expected_mix_revision": revision,
             "preview_version": version,
@@ -49,7 +49,7 @@ class _RefusesSQL:
     """An executor that must never be reached."""
 
     async def execute(self, *args, **kwargs):
-        raise AssertionError("reached SQL where the archive is not live")
+        raise AssertionError("reached SQL where the past-posts source is not live")
 
 
 class _Scripted:
@@ -74,13 +74,15 @@ class _Scripted:
 
 
 class TestParseChoice:
-    @pytest.mark.parametrize("value", [{}, {"archive_choice": None}])
+    @pytest.mark.parametrize("value", [{}, {"past_posts_choice": None}])
     def test_no_choice_parses_to_none(self, value):
         assert connect_choice.parse_choice(value) is None
 
     def test_a_choice_carries_its_three_facts(self):
-        assert connect_choice.parse_choice(body()) == ArchiveChoice(True, 8, 1)
-        assert connect_choice.parse_choice(body(False, 0)) == ArchiveChoice(False, 0, 1)
+        assert connect_choice.parse_choice(body()) == PastPostsChoice(True, 8, 1)
+        assert connect_choice.parse_choice(body(False, 0)) == PastPostsChoice(
+            False, 0, 1
+        )
 
     def test_the_revision_is_bounded_by_its_bigint_column(self):
         assert (
@@ -92,12 +94,12 @@ class TestParseChoice:
         "value",
         [
             [],
-            "archive_choice",
-            {"archive_choice": None, "purpose": "connect"},
-            {"archive_choice": []},
-            {"archive_choice": "on"},
+            "past_posts_choice",
+            {"past_posts_choice": None, "purpose": "connect"},
+            {"past_posts_choice": []},
+            {"past_posts_choice": "on"},
             body(extra=True),
-            {"archive_choice": {"use_history": True, "expected_mix_revision": 8}},
+            {"past_posts_choice": {"use_history": True, "expected_mix_revision": 8}},
             body(use_history="true"),
             body(use_history=1),
             body(revision="8"),
@@ -132,7 +134,7 @@ class TestParseChoice:
     def test_anything_else_is_refused_by_name(self, value):
         with pytest.raises(ConnectChoiceRefused) as refused:
             connect_choice.parse_choice(value)
-        assert refused.value.reason == "invalid_archive_choice"
+        assert refused.value.reason == "invalid_past_posts_choice"
 
     def test_an_unknown_reason_cannot_be_raised(self):
         with pytest.raises(ValueError):
@@ -155,7 +157,7 @@ class TestLiveRevision:
         monkeypatch.setattr(versioned_mix, "state", state)
         return log
 
-    @pytest.mark.parametrize("capability", [None, ArchiveCapability(enabled=False)])
+    @pytest.mark.parametrize("capability", [None, PastPostsCapability(enabled=False)])
     async def test_without_an_enabled_capability_nothing_is_read(
         self, seams, capability
     ):
@@ -213,10 +215,10 @@ def world(monkeypatch):
     return log
 
 
-def facts(*, handle="example_handle", has_archive=False, history_enabled=False):
+def facts(*, handle="example_handle", has_past_posts=False, history_enabled=False):
     return {
         "handle": handle,
-        "has_archive": has_archive,
+        "has_past_posts": has_past_posts,
         "history_enabled": history_enabled,
     }
 
@@ -236,19 +238,21 @@ class TestStartFields:
             capability=capability,
         )
 
-    async def test_no_choice_where_the_archive_is_not_live_records_nothing(self, world):
+    async def test_no_choice_where_the_past_posts_is_not_live_records_nothing(
+        self, world
+    ):
         assert await self.start({}, capability=None) == {}
 
     @pytest.mark.parametrize(
         "revision", [8, None], ids=["no-capability", "unconverted"]
     )
-    async def test_a_choice_where_the_archive_is_not_live_is_refused(
+    async def test_a_choice_where_the_past_posts_is_not_live_is_refused(
         self, world, revision
     ):
         world["revision"] = revision
         with pytest.raises(ConnectChoiceRefused) as refused:
             await self.start(body(), capability=None if revision else LIVE)
-        assert refused.value.reason == "archive_not_activated"
+        assert refused.value.reason == "past_posts_not_activated"
 
     async def test_a_shape_that_is_not_the_contracts_never_reaches_the_service(
         self, world
@@ -257,7 +261,7 @@ class TestStartFields:
         hand and before its session opens (the gate proves the connection)."""
         with pytest.raises(ConnectChoiceRefused) as refused:
             await self.start(body(version=2))
-        assert refused.value.reason == "invalid_archive_choice"
+        assert refused.value.reason == "invalid_past_posts_choice"
         assert world["asked"] == []
 
     async def test_the_service_takes_the_parsed_choice_and_never_a_body(self, world):
@@ -268,15 +272,17 @@ class TestStartFields:
 
     async def test_add_records_the_entry_and_the_choice(self, world):
         assert await self.start(body(True, 8)) == {
-            "archive_entry": "add",
-            "archive_use_history": True,
-            "archive_expected_mix_revision": 8,
-            "archive_preview_version": 1,
+            "past_posts_entry": "add",
+            "past_posts_use_history": True,
+            "past_posts_expected_mix_revision": 8,
+            "past_posts_preview_version": 1,
         }
         assert ("account", WS, None) not in world["asked"]
 
     async def test_add_without_a_choice_records_the_entry_alone(self, world):
-        assert await self.start({"archive_choice": None}) == {"archive_entry": "add"}
+        assert await self.start({"past_posts_choice": None}) == {
+            "past_posts_entry": "add"
+        }
 
     async def test_on_against_a_moved_revision_is_a_mix_conflict(self, world):
         world["revision"] = 9
@@ -287,30 +293,30 @@ class TestStartFields:
     async def test_off_is_never_stale(self, world):
         world["revision"] = 9
         fields = await self.start(body(False, 8))
-        assert fields["archive_use_history"] is False
-        assert fields["archive_expected_mix_revision"] == 8
+        assert fields["past_posts_use_history"] is False
+        assert fields["past_posts_expected_mix_revision"] == 8
 
     async def test_a_handle_only_account_is_a_first_connect(self, world):
         world["account"] = facts()
         fields = await self.start(body(True, 8), account_id=ACCOUNT)
-        assert fields["archive_entry"] == "first_connect"
+        assert fields["past_posts_entry"] == "first_connect"
         assert world["asked"][-1] == ("account", WS, ACCOUNT)
 
     @pytest.mark.parametrize(
-        "purpose,has_archive",
+        "purpose,has_past_posts",
         [("reconnect", False), ("connect", True)],
-        ids=["prior-grant", "archive-row"],
+        ids=["prior-grant", "past-posts-row"],
     )
     async def test_a_reconnect_keeps_its_setting_and_takes_no_choice(
-        self, world, purpose, has_archive
+        self, world, purpose, has_past_posts
     ):
-        world["account"] = facts(has_archive=has_archive)
+        world["account"] = facts(has_past_posts=has_past_posts)
         with pytest.raises(ConnectChoiceRefused) as refused:
             await self.start(body(False, 8), account_id=ACCOUNT, purpose=purpose)
-        assert refused.value.reason == "invalid_archive_choice"
+        assert refused.value.reason == "invalid_past_posts_choice"
         assert await self.start(
-            {"archive_choice": None}, account_id=ACCOUNT, purpose=purpose
-        ) == {"archive_entry": "reconnect"}
+            {"past_posts_choice": None}, account_id=ACCOUNT, purpose=purpose
+        ) == {"past_posts_entry": "reconnect"}
 
 
 class TestPreview:
@@ -343,7 +349,7 @@ class TestPreview:
 
     async def test_add_is_the_contract_example(self, world, rows):
         assert await self.preview() == {
-            "archive_available": True,
+            "past_posts_available": True,
             "entry": "add",
             "account_id": None,
             "handle": None,
@@ -356,7 +362,7 @@ class TestPreview:
                 "rows_after": [
                     {
                         "source_id": None,
-                        "provider": "instagram_archive",
+                        "provider": "instagram_past_posts",
                         "name": None,
                         "target_share": "0.5",
                     },
@@ -408,7 +414,7 @@ class TestPreview:
 
     @pytest.mark.parametrize("saved", [True, False])
     async def test_a_reconnect_shows_the_setting_it_keeps(self, world, rows, saved):
-        world["account"] = facts(has_archive=True, history_enabled=saved)
+        world["account"] = facts(has_past_posts=True, history_enabled=saved)
         value = await self.preview(account_id=ACCOUNT, purpose="reconnect")
         assert value["entry"] == "reconnect"
         assert value["history"] == {
@@ -419,9 +425,11 @@ class TestPreview:
         assert value["reset"] is None
         assert value["expected_mix_revision"] == 8
 
-    async def test_where_the_archive_is_not_live_nothing_is_a_choice(self, world, rows):
+    async def test_where_the_past_posts_is_not_live_nothing_is_a_choice(
+        self, world, rows
+    ):
         value = await self.preview(capability=None)
-        assert value["archive_available"] is False
+        assert value["past_posts_available"] is False
         assert value["history"] == {
             "editable": False,
             "default": False,
@@ -453,7 +461,7 @@ class TestPreview:
         assert first["history"]["default"] is default
         # A reconnect has no switch to start: it names what it keeps, whatever
         # the definition says.
-        world["account"] = facts(has_archive=True, history_enabled=True)
+        world["account"] = facts(has_past_posts=True, history_enabled=True)
         kept = await self.preview(account_id=ACCOUNT, purpose="reconnect")
         assert kept["history"] == {
             "editable": False,
@@ -465,25 +473,25 @@ class TestPreview:
 class TestRecordedChoice:
     def test_a_state_that_recorded_none_is_off(self):
         assert connect_choice.recorded_choice(
-            {"archive_entry": "add", "archive_use_history": None}
-        ) == ArchiveChoice(use_history=False)
+            {"past_posts_entry": "add", "past_posts_use_history": None}
+        ) == PastPostsChoice(use_history=False)
 
     def test_a_state_written_before_the_columns_existed_is_off(self):
-        assert connect_choice.recorded_choice({}) == ArchiveChoice(use_history=False)
+        assert connect_choice.recorded_choice({}) == PastPostsChoice(use_history=False)
 
     def test_a_recorded_choice_is_handed_on_as_recorded(self):
         assert connect_choice.recorded_choice(
             {
-                "archive_use_history": True,
-                "archive_expected_mix_revision": 8,
-                "archive_preview_version": 1,
+                "past_posts_use_history": True,
+                "past_posts_expected_mix_revision": 8,
+                "past_posts_preview_version": 1,
             }
-        ) == ArchiveChoice(True, 8, 1)
+        ) == PastPostsChoice(True, 8, 1)
 
 
 #: The authorization the callback mints: one id and one time, which the
 #: identity mapping is recorded under as well (`identity_mappings`).
-AUTHORIZATION = ArchiveAuthorization(
+AUTHORIZATION = PastPostsAuthorization(
     "99999999-9999-4999-8999-999999999999",
     "app-1",
     "17841400000000001",
@@ -501,11 +509,11 @@ class TestLandChoice:
             )
         }
 
-        async def connect_archive(executor, **kw):
+        async def connect_past_posts(executor, **kw):
             seen.update(kw)
             return result["value"]
 
-        monkeypatch.setattr(connect_choice, "connect_archive", connect_archive)
+        monkeypatch.setattr(connect_choice, "connect_past_posts", connect_past_posts)
         seen["result"] = result
         return seen
 
@@ -517,9 +525,9 @@ class TestLandChoice:
             state=state
             or {
                 "user_id": "22222222-2222-4222-8222-222222222222",
-                "archive_use_history": True,
-                "archive_expected_mix_revision": 8,
-                "archive_preview_version": 1,
+                "past_posts_use_history": True,
+                "past_posts_expected_mix_revision": 8,
+                "past_posts_preview_version": 1,
             },
             authorization=authorization or AUTHORIZATION,
             had_prior_grant=False,
@@ -542,7 +550,7 @@ class TestLandChoice:
         assert await self.land(ex) == "88888888-8888-4888-8888-888888888888"
         assert applied["workspace_id"] == WS
         assert applied["origin_ig_account_id"] == ACCOUNT
-        assert applied["choice"] == ArchiveChoice(True, 8, 1)
+        assert applied["choice"] == PastPostsChoice(True, 8, 1)
         assert applied["had_prior_grant"] is False
         assert applied["allocation_writer"] is versioned_mix.allocate_membership
         assert applied["capability"] is LIVE
@@ -568,7 +576,7 @@ class TestLandChoice:
     async def test_the_choice_is_applied_under_whatever_authorization_it_is_given(
         self, applied
     ):
-        other = ArchiveAuthorization(
+        other = PastPostsAuthorization(
             "88888888-8888-4888-8888-888888888888",
             "app-2",
             "17841400000000002",

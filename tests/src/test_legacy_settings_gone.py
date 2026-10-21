@@ -252,7 +252,7 @@ def env_names_the_tree_reads() -> set[str]:
     """Every environment variable the code reads OUTSIDE `Settings`: the
     `environ.get("X")` / `env.get("X")` / `getenv("X")` / `environ["X"]`
     calls, the `*_VAR = "X"` / `*_ENV = "X"` constants the Telegram
-    registration, the worker, the archive and the vocabulary read through, and
+    registration, the worker, the past-posts source and the vocabulary read through, and
     every `TARGET_*` name spelled as a literal (the worker's lane knobs live in
     a dict of names)."""
     text = _code_text()
@@ -457,9 +457,9 @@ def _assignments(text: str) -> set[str]:
 #: run-time read is a visible line in a diff, and a name that stops being read
 #: is one too.
 ENV_READ_OUTSIDE_SETTINGS = {
-    # the Instagram archive's key ring, which arms it wherever it loads
-    # (`src/services/target/archive_activation.py`)
-    "ARCHIVE_HMAC_KEYS",
+    # the Instagram past-posts source's key ring, which arms it wherever it loads
+    # (`src/services/target/past_posts_activation.py`)
+    "PAST_POSTS_HMAC_KEYS",
     # the deployed roots' database, and the runner's and the schema builder's
     "TARGET_DATABASE_URL",
     "DATABASE_URL",

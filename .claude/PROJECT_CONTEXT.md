@@ -75,7 +75,7 @@ conversation usually needs:
 | `workspace_members`, `users`, `user_identities` | Who belongs to a workspace, and how they sign in |
 | `ig_accounts` | A workspace's Instagram accounts; the slot cursor (`next_slot_at`) and per-account schedule overrides |
 | `media_sources`, `media_items` | Connected Drive folders and the media synced from them |
-| `instagram_media_index`, `instagram_media_assets` | Archive posts and each postable file, including excluded unsupported children |
+| `instagram_media_index`, `instagram_media_assets` | Past-posts posts and each postable file, including excluded unsupported children |
 | `post_intents` | The ledger: one story, for one account, at one slot — its state and publish step |
 | `audit_events` | Every state change, with who made it and through which channel |
 | `jobs` | The worker's queue: kind, lane, lease |

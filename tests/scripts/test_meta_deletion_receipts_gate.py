@@ -22,7 +22,7 @@ What is asserted is what the tables hold, read as the migration actor:
 * no raw payload, secret, capability or (outside the mapping itself) subject is
   stored anywhere, or logged.
 
-Without `ARCHIVE_HMAC_KEYS` the route answers with the logged 16-hex receipt
+Without `PAST_POSTS_HMAC_KEYS` the route answers with the logged 16-hex receipt
 and stores nothing.
 """
 
@@ -44,12 +44,12 @@ from sqlalchemy.pool import NullPool
 
 from src.api.app import create_app
 from src.config.settings import settings
-from src.services.target import archive_activation, meta_callbacks
+from src.services.target import past_posts_activation, meta_callbacks
 from src.services.target.instagram_catalog import TombstoneKeys
 from src.services.target.unit_of_work import asyncpg_url
-from tests.scripts import test_oauth_archive_choice_gate as oauth_gate
+from tests.scripts import test_oauth_past_posts_choice_gate as oauth_gate
 from tests.scripts.conftest import rows_holding
-from tests.scripts.test_oauth_archive_choice_gate import (
+from tests.scripts.test_oauth_past_posts_choice_gate import (
     API,
     app_scoped_of,
     one,
@@ -168,7 +168,7 @@ def generations_of(world, ws):
     return rows(
         world,
         "SELECT id::text AS id, authorization_id::text AS authorization"
-        "  FROM instagram_archive_generations WHERE workspace_id = %s"
+        "  FROM instagram_past_posts_generations WHERE workspace_id = %s"
         " ORDER BY created_at, id",
         ws,
     )
@@ -195,7 +195,7 @@ async def restarted(scene, keys):
     )
     try:
         app = create_app(
-            engine=engine, env={archive_activation.KEYS_VAR: ring_of(keys)}
+            engine=engine, env={past_posts_activation.KEYS_VAR: ring_of(keys)}
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=API
@@ -208,14 +208,14 @@ async def restarted(scene, keys):
 @pytest.fixture
 def armed(monkeypatch):
     """Meta's two candidate secrets, distinctive, and the keys a deployment with
-    the archive's key ring has; the legacy secret is the Facebook app's."""
+    the past-posts source's key ring has; the legacy secret is the Facebook app's."""
 
     def arm(scene, keys=KEYS_V2):
         monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", SECRET, raising=False)
         monkeypatch.setattr(
             settings, "FACEBOOK_APP_SECRET", LEGACY_SECRET, raising=False
         )
-        scene.app.state.archive_keys = keys
+        scene.app.state.past_posts_keys = keys
 
     return arm
 
@@ -530,7 +530,7 @@ async def test_a_key_rotation_keeps_one_episode_and_stores_the_version_it_first_
     r1 = receipt_of(world, first.json()["confirmation_code"])
     assert r1["version"] == 1
 
-    scene.app.state.archive_keys = KEYS_V2
+    scene.app.state.past_posts_keys = KEYS_V2
     again, _, _ = await request_deletion(scene, SECRET, subject, segment=segment)
     r2 = receipt_of(world, again.json()["confirmation_code"])
     assert r2["id"] == r1["id"], "matched by the older version's fingerprint"
@@ -605,7 +605,7 @@ async def test_a_receipt_reads_back_through_its_capability_after_the_app_is_rebu
 
     async with restarted(scene, KEYS_V2) as rebuilt:
         assert rebuilt.app is not scene.app
-        assert rebuilt.app.state.archive_keys == KEYS_V2
+        assert rebuilt.app.state.past_posts_keys == KEYS_V2
 
         for status, code in codes.items():
             page = await status_of(rebuilt, code)

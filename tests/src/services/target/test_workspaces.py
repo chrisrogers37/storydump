@@ -105,12 +105,12 @@ class TestAnOrdinarySettingsWriteIsUnchanged:
         assert params == {**changes, "ws": WS}
 
 
-class TestArchiveSlideRead:
+class TestPastPostsSlideRead:
     def row(
         self, *, position=3, count=10, post_ref="44444444-4444-4444-8444-444444444444"
     ):
         return {
-            "source_provider": "instagram_archive",
+            "source_provider": "instagram_past_posts",
             "origin_handle": "example_handle",
             "original_at": "2020-01-01T00:00:00Z",
             "slide_post_ref": post_ref,
@@ -122,7 +122,7 @@ class TestArchiveSlideRead:
         }
 
     def test_slide_read_names_own_position_and_keeps_only_internal_provenance(self):
-        row = workspaces._archive_row(self.row())
+        row = workspaces._past_posts_row(self.row())
         assert row["file_name"] == "Instagram post, slide 3 of 10"
         assert row["provenance"]["slide"] == {
             "post_ref": "44444444-4444-4444-8444-444444444444",
@@ -134,10 +134,10 @@ class TestArchiveSlideRead:
 
     def test_truncated_and_single_names(self):
         assert (
-            workspaces._archive_row(self.row(count=None))["file_name"]
+            workspaces._past_posts_row(self.row(count=None))["file_name"]
             == "Instagram post, slide 3"
         )
-        single = workspaces._archive_row(
+        single = workspaces._past_posts_row(
             self.row(position=None, count=None, post_ref=None)
         )
         assert single["file_name"] == "Instagram post"
@@ -145,7 +145,7 @@ class TestArchiveSlideRead:
         removed = self.row(position=None, count=None, post_ref=None)
         removed["file_name"] = "Instagram post, slide 3 of 10"
         assert (
-            workspaces._archive_row(removed)["file_name"]
+            workspaces._past_posts_row(removed)["file_name"]
             == "Instagram post, slide 3 of 10"
         )
 

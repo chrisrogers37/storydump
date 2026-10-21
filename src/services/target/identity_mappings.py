@@ -9,7 +9,7 @@ OAuth exchange itself: the long-lived token it produced, read once at `/me`
 verified for. A row is evidence: it never changes, and only its `is_current`
 flag falls, when a newer authorization replaces it.
 
-The connect callback writes the row where the archive is live, in the same unit
+The connect callback writes the row where the past-posts source is live, in the same unit
 of work as the credential and under the source prefix it already holds. The
 bounded reconciliation of older credentials writes `reconciled_read` rows
 through the same writer. Reading is the callbacks' own: `fn_meta_subject_mappings`
@@ -22,7 +22,10 @@ from datetime import datetime
 from typing import Optional
 
 from src.services.target import readers
-from src.services.target.instagram_sources import ArchiveAuthorization, ArchiveRefused
+from src.services.target.instagram_sources import (
+    PastPostsAuthorization,
+    PastPostsRefused,
+)
 from src.services.target.meta_callbacks import UNCONFIGURED_APP
 
 METHOD_OAUTH_EXCHANGE = "oauth_exchange"
@@ -104,25 +107,25 @@ async def record_oauth_exchange(
     workspace_id: str,
     ig_account_id: str,
     credential_id: str,
-    authorization: ArchiveAuthorization,
+    authorization: PastPostsAuthorization,
     app_identity: str,
     app_scoped_id: Optional[str],
 ) -> None:
     """The connect callback's mapping, from the exchange that just succeeded.
 
-    `authorization` is the one the archive generation is bound to, so the
+    `authorization` is the one the past-posts generation is bound to, so the
     mapping and the generation share an authorization id and the callback's
     time (`authorized_at`, which is also when the exchange verified). Its
     `subject_id` is the account's own id. The person's app-scoped id is the one
     the identity read proved.
 
-    Refuses `archive_identity_unverified` when there is nothing to map: the
+    Refuses `past_posts_identity_unverified` when there is nothing to map: the
     read carried no app-scoped id, or the deployment names no Instagram app.
     The caller is in the landing's unit of work, so the refusal rolls the whole
     landing back (`history_setup_failed`).
     """
     if not app_scoped_id or app_identity == UNCONFIGURED_APP:
-        raise ArchiveRefused("archive_identity_unverified")
+        raise PastPostsRefused("past_posts_identity_unverified")
     await record(
         executor,
         workspace_id=workspace_id,
