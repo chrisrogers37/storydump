@@ -63,6 +63,7 @@ from src.services.target.source_read_admission import (
 )
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
+    as_made_before_conversion,
     _scratch,
     as_user,
     execute,
@@ -386,6 +387,10 @@ class Scene:
                 scene.owner, scene.user_id, scene.ws = await owned_workspace(
                     client, monkeypatch, tag=tag
                 )
+                # A workspace made today starts converted; these scenes are of
+                # one made before, as every existing workspace is until its
+                # conversion job runs.
+                as_made_before_conversion(world["stream"], scene.ws)
                 if converted:
                     await scene.convert(tmp_path, folders)
                 yield scene
@@ -394,8 +399,8 @@ class Scene:
 
     async def convert(self, tmp_path, folders):
         """The Drive *folders* (three, at 70 / 30 / Off, unless a scene says
-        otherwise), then the operator's conversion to the versioned mix at
-        revision 1."""
+        otherwise), then the conversion job's conversion to the versioned mix
+        at revision 1."""
         async with unit_of_work(
             self.engine, self.ws, actor_kind="system"
         ).begin() as conn:
@@ -421,7 +426,7 @@ class Scene:
                 )
                 self.drive[letter] = str(source)
             await category_mix.convert_workspace(
-                conn, workspace_id=self.ws, evidence=conversion_evidence(tmp_path)
+                conn, workspace_id=self.ws, evidence=conversion_evidence()
             )
         assert self.mix() == {
             "revision": 1,

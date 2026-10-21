@@ -902,6 +902,25 @@ def fetch_one(dsn, sql, params=None):
     return row
 
 
+def as_made_before_conversion(dsn, workspace_id):
+    """Put a workspace back on the folder-keyed posting mix: the state every
+    workspace made before new ones started converted keeps until its
+    `convert_source_mix` job runs (`fn_mix_conversion_jobs` picks exactly
+    these columns unset)."""
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        # A governed write names its actor: this is the state an earlier
+        # release's migration left, so the migration it is.
+        cur.execute("SET LOCAL app.actor_kind = 'migration'")
+        cur.execute(
+            "UPDATE workspaces SET source_mix_mode = NULL,"
+            " source_mix_policy_version = NULL, source_membership_policy = NULL,"
+            " source_mix_revision = NULL, source_mix_conversion_version = NULL,"
+            " source_mix_converted_at = NULL WHERE id = %s",
+            (str(workspace_id),),
+        )
+    conn.close()
+
+
 def rows_holding(dsn, needle):
     """Every base table whose rows, read as text, contain *needle*, as
     ``{"schema.table": rows}``. A scan rather than a list of known writers, so
