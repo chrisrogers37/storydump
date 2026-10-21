@@ -3,18 +3,18 @@
 Before OAuth a person chooses whether the account's past posts
 become a content source. The start records that choice in its one-shot state
 (`oauth_states`), the callback applies it through
-`source_membership.connect_archive` in the unit of work that lands the
+`source_membership.connect_past_posts` in the unit of work that lands the
 destination and its credential, and one `oauth_connection_results` row
 records what was applied, for the Settings banner to read back.
 
-Live only where the archive is: a capability the trusted composition root
-(`archive_composition.build_api`) injects where the archive is armed, and a
+Live only where the past-posts source is: a capability the trusted composition root
+(`past_posts_composition.build_api`) injects where the past-posts source is armed, and a
 converted mix. By default none is injected, so there every answer here is
 "not live", reached without a statement, and the connect leg accepts no
 choice: nothing recorded, no result, `?connected=instagram`.
 
-What a choice DOES is `connect_archive`'s, unchanged: a new account lands On
-or Off as chosen, an existing archive keeps its saved setting, a pre-rollout
+What a choice DOES is `connect_past_posts`'s, unchanged: a new account lands On
+or Off as chosen, an existing past-posts source keeps its saved setting, a pre-rollout
 grant lands Off, and a stale preview lands Off with
 `connected_history_off_mix_conflict`. This module owns only the wire: the
 preview, the start's refusals, what the state records, and the result.
@@ -28,8 +28,8 @@ from typing import Any, Optional
 from src.exceptions.base import RefusalError
 from src.exceptions.mix import MixInvalid
 from src.services.target import readers, source_policy, source_state, versioned_mix
-from src.services.target.instagram_sources import ArchiveAuthorization, is_activated
-from src.services.target.source_membership import ArchiveChoice, connect_archive
+from src.services.target.instagram_sources import PastPostsAuthorization, is_activated
+from src.services.target.source_membership import PastPostsChoice, connect_past_posts
 from src.services.target.versioned_mix import MixConflict
 
 #: The one preview shape a start may say it was shown.
@@ -38,32 +38,32 @@ PREVIEW_VERSION = 1
 #: Results expire after 15 minutes.
 RESULT_TTL_SECONDS = 900
 
-#: `oauth_states.archive_expected_mix_revision` is a BIGINT.
+#: `oauth_states.past_posts_expected_mix_revision` is a BIGINT.
 REVISION_MAX = 2**63 - 1
 
 #: The one outcome that asks the person to act: review the mix, then enable.
 NEXT_ACTION = {"connected_history_off_mix_conflict": "review_mix"}
 
 #: The body a start accepts, and the keys of its choice.
-BODY_KEYS = frozenset({"archive_choice"})
+BODY_KEYS = frozenset({"past_posts_choice"})
 CHOICE_KEYS = frozenset({"use_history", "expected_mix_revision", "preview_version"})
 
-#: The share arithmetic's key for the archive the preview would create, which
+#: The share arithmetic's key for the past-posts source the preview would create, which
 #: has no id yet. Empty, so it sorts before every id.
 PROSPECTIVE = ""
 
 #: `ConnectChoiceRefused.reason`, closed.
-REASONS = ("invalid_archive_choice", "archive_not_activated")
+REASONS = ("invalid_past_posts_choice", "past_posts_not_activated")
 
 
 class ConnectChoiceRefused(RefusalError):
     """A start's history choice refused, by name. ``reason`` is one of
-    :data:`REASONS`: ``invalid_archive_choice`` (the body is not the contract's
+    :data:`REASONS`: ``invalid_past_posts_choice`` (the body is not the contract's
     shape, or it carries a choice on a reconnect, which keeps its saved
-    setting) or ``archive_not_activated`` (a choice where the archive is not
+    setting) or ``past_posts_not_activated`` (a choice where the past-posts source is not
     live)."""
 
-    _prefix = "archive choice refused"
+    _prefix = "past-posts choice refused"
 
     def __init__(self, reason: str, detail: str = ""):
         if reason not in REASONS:
@@ -76,17 +76,17 @@ def _count(value: Any, *, high: int) -> bool:
     return type(value) is int and 0 <= value <= high
 
 
-def parse_choice(body: Any) -> Optional[ArchiveChoice]:
+def parse_choice(body: Any) -> Optional[PastPostsChoice]:
     """The choice a start body carries, or None for none.
 
-    ``{"archive_choice": {"use_history": bool, "expected_mix_revision": int,
-    "preview_version": 1}}``. An absent body, ``{}`` and ``{"archive_choice":
+    ``{"past_posts_choice": {"use_history": bool, "expected_mix_revision": int,
+    "preview_version": 1}}``. An absent body, ``{}`` and ``{"past_posts_choice":
     null}`` carry none: a start with no choice. Anything else — an unknown key
     at either level, a missing one, a wrong type, another preview version — is
-    ``invalid_archive_choice`` before anything is read."""
+    ``invalid_past_posts_choice`` before anything is read."""
     if not isinstance(body, dict) or set(body) - BODY_KEYS:
-        raise ConnectChoiceRefused("invalid_archive_choice")
-    raw = body.get("archive_choice")
+        raise ConnectChoiceRefused("invalid_past_posts_choice")
+    raw = body.get("past_posts_choice")
     if raw is None:
         return None
     if (
@@ -97,15 +97,15 @@ def parse_choice(body: Any) -> Optional[ArchiveChoice]:
         or type(raw["preview_version"]) is not int
         or raw["preview_version"] != PREVIEW_VERSION
     ):
-        raise ConnectChoiceRefused("invalid_archive_choice")
-    return ArchiveChoice(
+        raise ConnectChoiceRefused("invalid_past_posts_choice")
+    return PastPostsChoice(
         raw["use_history"], raw["expected_mix_revision"], raw["preview_version"]
     )
 
 
 async def live_revision(executor, *, workspace_id: str, capability) -> Optional[int]:
     """The mix revision a history choice is checked against, or None where the
-    archive is not live here: no capability injected (the default, where this
+    past-posts source is not live here: no capability injected (the default, where this
     issues no statement) or a mix not yet converted.
 
     With a capability the canonical source prefix is taken first
@@ -122,14 +122,14 @@ async def live_revision(executor, *, workspace_id: str, capability) -> Optional[
 
 
 async def _account(executor, ws: str, account_id: str) -> Optional[dict]:
-    """A named destination's handle and its archive's saved setting."""
+    """A named destination's handle and its past-posts source's saved setting."""
     return await readers.row(
         executor,
-        "SELECT a.handle, s.id IS NOT NULL AS has_archive,"
+        "SELECT a.handle, s.id IS NOT NULL AS has_past_posts,"
         "       COALESCE(x.ratio > 0, false) AS history_enabled"
         "  FROM ig_accounts a"
         "  LEFT JOIN media_sources s ON s.workspace_id = a.workspace_id"
-        "   AND s.origin_ig_account_id = a.id AND s.provider = 'instagram_archive'"
+        "   AND s.origin_ig_account_id = a.id AND s.provider = 'instagram_past_posts'"
         "  LEFT JOIN category_post_case_mix x ON x.workspace_id = s.workspace_id"
         "   AND x.source_id = s.id AND x.effective_to IS NULL"
         " WHERE a.workspace_id = :ws AND a.id = :account",
@@ -140,18 +140,18 @@ async def _account(executor, ws: str, account_id: str) -> Optional[dict]:
 
 def _entry(account: Optional[dict], purpose: str) -> str:
     """``add`` names no account; ``reconnect`` names one with a prior grant
-    (the start's own ``reconnect`` purpose) or an archive; ``first_connect``
+    (the start's own ``reconnect`` purpose) or a past-posts source; ``first_connect``
     names one with neither."""
     if account is None:
         return "add"
-    if purpose == "reconnect" or account["has_archive"]:
+    if purpose == "reconnect" or account["has_past_posts"]:
         return "reconnect"
     return "first_connect"
 
 
 async def _reset(executor, ws: str, account: Optional[dict]) -> dict:
     """The mix an On choice would leave: equal over the enabled sources and the
-    new archive, Off kept Off — the allocation's own `versioned_mix.equal`,
+    new past-posts source, Off kept Off — the allocation's own `versioned_mix.equal`,
     over the rows the mix resource lists."""
     rows = await versioned_mix.sources(executor, ws)
     if any(r["ratio"] is None for r in rows):
@@ -161,7 +161,7 @@ async def _reset(executor, ws: str, account: Optional[dict]) -> dict:
     )
     prospective = {
         "source_id": None,
-        "provider": "instagram_archive",
+        "provider": "instagram_past_posts",
         "name": None if account is None else account["handle"],
         "target_share": versioned_mix.ratio_string(shares[PROSPECTIVE]),
     }
@@ -215,7 +215,7 @@ async def preview(
             "saved_enabled": None,
         }
     return {
-        "archive_available": revision is not None,
+        "past_posts_available": revision is not None,
         "entry": entry,
         "account_id": None if account_id is None else str(account_id),
         "handle": None if account is None else account["handle"],
@@ -230,55 +230,55 @@ async def start_fields(
     executor,
     *,
     workspace_id: str,
-    choice: Optional[ArchiveChoice],
+    choice: Optional[PastPostsChoice],
     account_id: Optional[str] = None,
     purpose: str = "connect",
     capability=None,
 ) -> dict:
     """What a start records about the history choice — `issue_state`'s
-    ``archive_*`` keywords — or nothing where the archive is not live.
+    ``past_posts_*`` keywords — or nothing where the past-posts source is not live.
 
     *choice* is what :func:`parse_choice` made of the body, which the route read
     and judged before it opened the session this runs in: a body not of the
-    contract's shape (`invalid_archive_choice`, 400) never gets here. Refused
+    contract's shape (`invalid_past_posts_choice`, 400) never gets here. Refused
     in the contract's order, all before any state is issued: a choice where the
-    archive is not live (`archive_not_activated`, 503); a choice on a reconnect,
-    which keeps its saved setting (`invalid_archive_choice`); and On against a
+    past-posts source is not live (`past_posts_not_activated`, 503); a choice on a reconnect,
+    which keeps its saved setting (`invalid_past_posts_choice`); and On against a
     revision the mix has moved past (`MixConflict`, 409). Off is never stale: an
     Off add resets nothing."""
     ws = str(workspace_id)
     revision = await live_revision(executor, workspace_id=ws, capability=capability)
     if revision is None:
         if choice is not None:
-            raise ConnectChoiceRefused("archive_not_activated")
+            raise ConnectChoiceRefused("past_posts_not_activated")
         return {}
     account = None if account_id is None else await _account(executor, ws, account_id)
     entry = _entry(account, purpose)
     if choice is None:
-        return {"archive_entry": entry}
+        return {"past_posts_entry": entry}
     if entry == "reconnect":
         raise ConnectChoiceRefused(
-            "invalid_archive_choice", "a reconnect keeps its saved history setting"
+            "invalid_past_posts_choice", "a reconnect keeps its saved history setting"
         )
     if choice.use_history and choice.expected_mix_revision != revision:
         raise MixConflict(revision)
     return {
-        "archive_entry": entry,
-        "archive_use_history": choice.use_history,
-        "archive_expected_mix_revision": choice.expected_mix_revision,
-        "archive_preview_version": choice.preview_version,
+        "past_posts_entry": entry,
+        "past_posts_use_history": choice.use_history,
+        "past_posts_expected_mix_revision": choice.expected_mix_revision,
+        "past_posts_preview_version": choice.preview_version,
     }
 
 
-def recorded_choice(state: dict) -> ArchiveChoice:
+def recorded_choice(state: dict) -> PastPostsChoice:
     """The choice a consumed state recorded. A state that recorded none is
     Off: a new account with no recorded choice does not use its history."""
-    if state.get("archive_use_history") is None:
-        return ArchiveChoice(use_history=False)
-    return ArchiveChoice(
-        state["archive_use_history"],
-        state["archive_expected_mix_revision"],
-        state["archive_preview_version"],
+    if state.get("past_posts_use_history") is None:
+        return PastPostsChoice(use_history=False)
+    return PastPostsChoice(
+        state["past_posts_use_history"],
+        state["past_posts_expected_mix_revision"],
+        state["past_posts_preview_version"],
     )
 
 
@@ -288,7 +288,7 @@ async def land_choice(
     workspace_id: str,
     ig_account_id: str,
     state: dict,
-    authorization: ArchiveAuthorization,
+    authorization: PastPostsAuthorization,
     had_prior_grant: bool,
     session_id: str,
     capability,
@@ -296,14 +296,14 @@ async def land_choice(
     """Apply the recorded choice where the destination just landed, and record
     what was applied. Returns the result's id.
 
-    In the callback's unit of work, after the credential: `connect_archive`
-    decides, and an `ArchiveRefused` it raises rolls the whole landing back.
+    In the callback's unit of work, after the credential: `connect_past_posts`
+    decides, and a `PastPostsRefused` it raises rolls the whole landing back.
     The authorization is the exchange that just succeeded, minted by the
     callback: a fresh id, the configured app, the grant's account and the
     callback time. The callback also records the verified app/subject mapping
     (`identity_mappings`) under that same id and time. The result is bound to
     the workspace, the state's user and the returning session."""
-    applied = await connect_archive(
+    applied = await connect_past_posts(
         executor,
         workspace_id=str(workspace_id),
         origin_ig_account_id=str(ig_account_id),

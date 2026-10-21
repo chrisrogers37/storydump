@@ -260,10 +260,10 @@ describe("the editor's states", () => {
   it("fails a first read with the reason, and keeps saved values through a failed re-read", () => {
     const failed = run([
       { type: "load_started" },
-      { type: "loaded", result: { ok: false, error: "archive_not_activated", status: 503, currentRevision: null } },
+      { type: "loaded", result: { ok: false, error: "past_posts_not_activated", status: 503, currentRevision: null } },
     ]);
     expect(failed.status).toBe("failed");
-    expect(failed.error).toBe(SOURCE_REFUSAL_COPY.archive_not_activated);
+    expect(failed.error).toBe(SOURCE_REFUSAL_COPY.past_posts_not_activated);
     const kept = run(
       [{ type: "loaded", result: { ok: false, error: "unreachable", status: 0, currentRevision: null } }],
       loaded,

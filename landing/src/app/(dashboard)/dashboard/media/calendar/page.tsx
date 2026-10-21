@@ -28,7 +28,7 @@ import {
   type RepeatOccurrence,
   type UpcomingResponse,
 } from "@/lib/calendar-month";
-import { withArchiveName } from "@/lib/archive-media";
+import { withPastPostsName } from "@/lib/past-posts-media";
 import { postingIntervalMinutes } from "@/lib/schedule";
 import { thumbnailMedia, type ThumbnailMedia } from "@/lib/thumbnails";
 import { dateInZone } from "@/lib/zoned-dates";
@@ -45,9 +45,9 @@ import { StatCard } from "@/components/ui/card";
 const lane = (
   story: Pick<Intent, "schedule_slot_at" | "file_name" | "category"> & ThumbnailMedia,
 ) => {
-  // An archive item goes by its own name; the API sends it, and this is the
+  // A past-posts item goes by its own name; the API sends it, and this is the
   // guard for a row that arrives without it.
-  const row = withArchiveName(story);
+  const row = withPastPostsName(story);
   return {
     scheduled_for: row.schedule_slot_at,
     media_name: row.file_name,

@@ -11,11 +11,11 @@ import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
 import { TONE_CLASS } from "@/components/dashboard/tone";
 import { RULE_LABELS, autoApproveHint } from "@/lib/approvals";
 import {
-  ARCHIVE_MEDIA_CHECKED_COPY,
-  archiveProvenance,
+  PAST_POSTS_MEDIA_CHECKED_COPY,
+  pastPostsProvenance,
   provenanceLabel,
   slideLabel,
-} from "@/lib/archive-media";
+} from "@/lib/past-posts-media";
 import {
   autoApproveRefusalCopy,
   linkRefusalCopy,
@@ -47,9 +47,9 @@ import { thumbnailFor } from "@/lib/thumbnails";
  *
  * ── An item from a connected account's past posts (#1644) ─────────────────
  *
- * `item` is the row to draw, an archive item already under its own name
- * (`withArchiveName`). Its picture is asked for in the card's own lane
- * (`ArchiveThumbnail`), and its card says what is known of it and no more:
+ * `item` is the row to draw, a past-posts item already under its own name
+ * (`withPastPostsName`). Its picture is asked for in the card's own lane
+ * (`PastPostsThumbnail`), and its card says what is known of it and no more:
  * where it came from, and that its media is checked when it is used. It does
  * not say the item matches: the library lists items whatever a source's
  * settings leave out of the pool.
@@ -91,7 +91,7 @@ export function MediaCard({
 }: {
   item: MediaRow;
   workspaceId: string;
-  /** The zone the day an archive item was posted is read on: the workspace's. */
+  /** The zone the day a past-posts item was posted is read on: the workspace's. */
   tz: string;
   /** Whether the workspace posts through the Instagram API; null when it could not be read. */
   apiPublishing: boolean | null;
@@ -137,7 +137,7 @@ export function MediaCard({
     });
   }
 
-  const origin = archiveProvenance(item);
+  const origin = pastPostsProvenance(item);
   const picture = thumbnailFor(
     {
       file_name: item.file_name,
@@ -162,7 +162,7 @@ export function MediaCard({
             // The kind label below is drawn under the picture, so a
             // thumbnail that fails leaves it showing.
             fallback={null}
-            archive={origin ? { workspaceId, layout: "card" } : undefined}
+            pastPosts={origin ? { workspaceId, layout: "card" } : undefined}
           />
         ) : null}
         <span className="pointer-events-none text-xs uppercase tracking-wider">
@@ -177,7 +177,7 @@ export function MediaCard({
         {origin && (
           <div className="space-y-0.5 text-xs text-muted-foreground">
             <p>{provenanceLabel(origin, tz)}</p>
-            <p>{ARCHIVE_MEDIA_CHECKED_COPY}</p>
+            <p>{PAST_POSTS_MEDIA_CHECKED_COPY}</p>
           </div>
         )}
         {item.link_url && <ItemLink link={item.link_url} />}

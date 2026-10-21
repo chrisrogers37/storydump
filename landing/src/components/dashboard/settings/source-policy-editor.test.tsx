@@ -477,13 +477,13 @@ describe("the collapsed toggle under a source's row", () => {
       createElement(SourcePolicyEditor, {
         workspaceId: "ws-1",
         sourceId: "22222222-2222-4222-8222-222222222222",
-        sourceName: "Your Instagram @example_handle",
+        sourceName: "Instagram past posts @example_handle",
         editable: true,
       }),
     );
     const toggle = button(html, "Past posts settings");
     expect(toggle).not.toBe("");
-    expect(attr(toggle, "aria-label")).toBe("Past posts settings for Your Instagram @example_handle");
+    expect(attr(toggle, "aria-label")).toBe("Past posts settings for Instagram past posts @example_handle");
     // The accessible name keeps the visible words in it.
     expect(attr(toggle, "aria-label")).toContain("Past posts settings");
     expect(attr(toggle, "aria-expanded")).toBe("false");

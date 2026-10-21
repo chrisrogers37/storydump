@@ -54,7 +54,7 @@ function row(over: Record<string, unknown>) {
 
 /**
  * The whole protocol-2 resource,
- * including every key this page never reads: what Your Instagram turned on
+ * including every key this page never reads: what Instagram past posts turned on
  * would make of three sources, at the revision the preview was asked at.
  */
 const PREVIEW = {
@@ -64,12 +64,12 @@ const PREVIEW = {
   mode: "equal",
   supported_actions: ["reset_equal", "set_enabled", "save_custom"],
   conversion: { state: "complete", kind: "automatic_to_equal" },
-  archive_available: true,
+  past_posts_available: true,
   reset_explanation: "enabled_membership_changed",
   rows: [
     row({
       source_id: IG,
-      provider: "instagram_archive",
+      provider: "instagram_past_posts",
       name: "example_handle",
       origin_account_id: ACCOUNT,
       origin_handle: "example_handle",

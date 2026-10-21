@@ -65,13 +65,13 @@ class OAuthState(TargetBase):
     #: ciphertext under the credential ring, never the verifier itself. NULL on
     #: a state minted without one.
     encrypted_code_verifier = Column(Text, nullable=True)
-    #: The Instagram connect's history choice (OAuth archive choice): the entry the
+    #: The Instagram connect's history choice (OAuth past-posts choice): the entry the
     #: start previewed, and the choice with the mix revision it was shown.
     #: NULL on every state that records none.
-    archive_entry = Column(Text, nullable=True)
-    archive_use_history = Column(Boolean, nullable=True)
-    archive_expected_mix_revision = Column(BigInteger, nullable=True)
-    archive_preview_version = Column(Integer, nullable=True)
+    past_posts_entry = Column(Text, nullable=True)
+    past_posts_use_history = Column(Boolean, nullable=True)
+    past_posts_expected_mix_revision = Column(BigInteger, nullable=True)
+    past_posts_preview_version = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -79,18 +79,18 @@ class OAuthState(TargetBase):
             name="ck_oauth_state_provider",
         ),
         CheckConstraint(
-            "archive_entry IN ('add','first_connect','reconnect')"
-            " AND archive_expected_mix_revision >= 0 AND archive_preview_version = 1",
-            name="ck_oauth_state_archive_values",
+            "past_posts_entry IN ('add','first_connect','reconnect')"
+            " AND past_posts_expected_mix_revision >= 0 AND past_posts_preview_version = 1",
+            name="ck_oauth_state_past_posts_values",
         ),
         CheckConstraint(
-            "(archive_use_history IS NULL) = (archive_expected_mix_revision IS NULL)"
-            " AND (archive_use_history IS NULL) = (archive_preview_version IS NULL)"
-            " AND (archive_use_history IS NULL"
-            " OR archive_entry IN ('add','first_connect')) IS TRUE"
-            " AND (archive_entry IS NULL OR (provider = 'ig_login'"
-            " AND (archive_entry = 'add') = (reconnect_target IS NULL)))",
-            name="ck_oauth_state_archive_choice",
+            "(past_posts_use_history IS NULL) = (past_posts_expected_mix_revision IS NULL)"
+            " AND (past_posts_use_history IS NULL) = (past_posts_preview_version IS NULL)"
+            " AND (past_posts_use_history IS NULL"
+            " OR past_posts_entry IN ('add','first_connect')) IS TRUE"
+            " AND (past_posts_entry IS NULL OR (provider = 'ig_login'"
+            " AND (past_posts_entry = 'add') = (reconnect_target IS NULL)))",
+            name="ck_oauth_state_past_posts_choice",
         ),
         CheckConstraint(
             "purpose IN ('connect','reconnect','signin','link','bind')",
@@ -155,7 +155,7 @@ class ServiceToken(TargetBase):
 
 
 class OAuthConnectionResult(TargetBase):
-    """What one Instagram connect's callback applied (OAuth archive choice): read back
+    """What one Instagram connect's callback applied (OAuth past-posts choice): read back
     by the person who started it, in the session that returned, until it
     expires fifteen minutes later. A row is written once and never updated."""
 

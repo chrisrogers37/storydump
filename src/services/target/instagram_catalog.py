@@ -1,4 +1,4 @@
-"""Complete archive observations and generation-scoped metadata erasure.
+"""Complete past-posts observations and generation-scoped metadata erasure.
 
 These transaction-only seams do no provider I/O and are not composed by default.
 A parsed bundle contains allowlisted metadata only. Policy does not decide whether
@@ -19,8 +19,8 @@ from typing import Mapping
 from sqlalchemy import text
 
 from src.services.target import readers, source_state, vocabulary
-from src.services.target.instagram_archive_adapter import identity
-from src.services.target.instagram_sources import ArchiveRefused, require_activation
+from src.services.target.instagram_past_posts_adapter import identity
+from src.services.target.instagram_sources import PastPostsRefused, require_activation
 
 _ID = re.compile(r"[0-9]{1,64}\Z")
 _PERMALINK = re.compile(
@@ -29,7 +29,7 @@ _PERMALINK = re.compile(
 
 
 @dataclass(frozen=True)
-class ArchiveAsset:
+class PastPostsAsset:
     selected_asset_id: str
     media_kind: str
     mime_type: str | None = None
@@ -40,7 +40,7 @@ class ArchiveAsset:
 
 
 @dataclass(frozen=True)
-class ArchiveObservation:
+class PastPostsObservation:
     """Fully parsed response: identity/time required; absent optional data is NULL.
 
     A failed/partial parse must never construct this bundle. A complete response
@@ -50,7 +50,7 @@ class ArchiveObservation:
 
     parent_media_id: str
     original_at: datetime
-    assets: tuple[ArchiveAsset, ...] = ()
+    assets: tuple[PastPostsAsset, ...] = ()
     slide_count: int | None = None
     slides_complete: bool = True
     permalink: str | None = None
@@ -95,20 +95,20 @@ class TombstoneKeys:
                 for k, v in copied.items()
             )
         ):
-            raise ArchiveRefused("archive_tombstone_key_unavailable")
+            raise PastPostsRefused("past_posts_tombstone_key_unavailable")
         object.__setattr__(self, "keys", MappingProxyType(copied))
 
     def digest(self, version: int, parent: str) -> str:
         key = self.keys.get(version)
         if key is None:
-            raise ArchiveRefused("archive_tombstone_key_unavailable")
+            raise PastPostsRefused("past_posts_tombstone_key_unavailable")
         payload = b"storydump:instagram-parent:v1\x00" + identity(parent).encode(
             "ascii"
         )
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _validate(observation: ArchiveObservation) -> None:
+def _validate(observation: PastPostsObservation) -> None:
     def media_id(value):
         return isinstance(value, str) and _ID.fullmatch(value)
 
@@ -116,8 +116,8 @@ def _validate(observation: ArchiveObservation) -> None:
         return value is None or type(value) is int and value >= 0
 
     o = observation
-    if not isinstance(o, ArchiveObservation):
-        raise ArchiveRefused("invalid_archive_observation")
+    if not isinstance(o, PastPostsObservation):
+        raise PastPostsRefused("invalid_past_posts_observation")
     valid = (
         media_id(o.parent_media_id)
         and isinstance(o.original_at, datetime)
@@ -153,7 +153,7 @@ def _validate(observation: ArchiveObservation) -> None:
     assets = o.assets if isinstance(o.assets, tuple) else ()
     for a in assets:
         valid = valid and (
-            isinstance(a, ArchiveAsset)
+            isinstance(a, PastPostsAsset)
             and media_id(a.selected_asset_id)
             and a.selected_asset_id not in ids
             and type(a.position) is int
@@ -179,7 +179,7 @@ def _validate(observation: ArchiveObservation) -> None:
                 and a.exclusion_reason == "unsupported_media"
             )
         )
-        if isinstance(a, ArchiveAsset):
+        if isinstance(a, PastPostsAsset):
             ids.add(a.selected_asset_id)
             positions.add(a.position)
     valid = valid and (
@@ -198,10 +198,10 @@ def _validate(observation: ArchiveObservation) -> None:
         )
     )
     if not valid:
-        raise ArchiveRefused("invalid_archive_observation")
+        raise PastPostsRefused("invalid_past_posts_observation")
 
 
-async def lock_archive(executor, *, workspace_id: str, source_id: str):
+async def lock_past_posts(executor, *, workspace_id: str, source_id: str):
     """Common prefix, origin/source, then credential and generation rows.
 
     The first source read discovers its immutable origin under the workspace
@@ -212,7 +212,7 @@ async def lock_archive(executor, *, workspace_id: str, source_id: str):
     await source_state.lock_workspace_sources(executor, workspace_id=ws)
     source = await readers.row(
         executor,
-        "SELECT origin_ig_account_id FROM media_sources WHERE workspace_id=:ws AND id=:sid AND provider='instagram_archive'",
+        "SELECT origin_ig_account_id FROM media_sources WHERE workspace_id=:ws AND id=:sid AND provider='instagram_past_posts'",
         ws=ws,
         sid=sid,
     )
@@ -232,7 +232,7 @@ async def lock_archive(executor, *, workspace_id: str, source_id: str):
     )
     generations = await readers.rows(
         executor,
-        "SELECT * FROM instagram_archive_generations WHERE workspace_id=:ws AND source_id=:sid ORDER BY id FOR UPDATE",
+        "SELECT * FROM instagram_past_posts_generations WHERE workspace_id=:ws AND source_id=:sid ORDER BY id FOR UPDATE",
         ws=ws,
         sid=sid,
     )
@@ -253,26 +253,26 @@ async def lock_archive(executor, *, workspace_id: str, source_id: str):
 
 def _drop(locked, generation_id, captured_epoch):
     if locked is None:
-        return "archive_source_unavailable"
+        return "past_posts_source_unavailable"
     source, credentials, generations = locked
     if (
         source["state"] != "active"
         or source["config"].get("removed")
         or not source["assigned"]
     ):
-        return "archive_source_unavailable"
+        return "past_posts_source_unavailable"
     if source["origin_state"] != "active" or source["provider_account_ref"].startswith(
         "manual:"
     ):
-        return "archive_origin_unavailable"
+        return "past_posts_origin_unavailable"
     if (
         not credentials
         or credentials[0]["state"] != "active"
         or not credentials[0]["unexpired"]
     ):
-        return "archive_credential_unavailable"
+        return "past_posts_credential_unavailable"
     if not source["enabled"]:
-        return "archive_source_off"
+        return "past_posts_source_off"
     if source["source_use_epoch"] != captured_epoch or not any(
         str(g["id"]) == str(generation_id)
         and g["id"] == source["current_authorization_generation_id"]
@@ -280,7 +280,7 @@ def _drop(locked, generation_id, captured_epoch):
         and g["credential_id"] == credentials[0]["id"]
         for g in generations
     ):
-        return "archive_stale_capture"
+        return "past_posts_stale_capture"
     return None
 
 
@@ -291,14 +291,14 @@ async def write_observation(
     source_id: str,
     generation_id: str,
     captured_epoch: int,
-    observation: ArchiveObservation,
+    observation: PastPostsObservation,
     keys: TombstoneKeys,
     capability=None,
 ) -> ObservationResult:
     require_activation(capability)
     _validate(observation)
     async with source_state.source_savepoint(executor):
-        locked = await lock_archive(
+        locked = await lock_past_posts(
             executor, workspace_id=workspace_id, source_id=source_id
         )
         reason = _drop(locked, generation_id, captured_epoch)
@@ -327,7 +327,7 @@ def _bundle_assets(o, previous):
         )
         for row in unseen:
             assets.append(
-                ArchiveAsset(
+                PastPostsAsset(
                     row["asset_media_id"],
                     row["media_kind"],
                     row["mime_type"],
@@ -457,7 +457,7 @@ async def _land(executor, ws, sid, gid, o, keys):
         if known is not None:
             own.add(known)
         if len(own) > 1:
-            raise ArchiveRefused("archive_identity_inconsistent")
+            raise PastPostsRefused("past_posts_identity_inconsistent")
         conflict = asset.media_kind != "unknown" and (
             found is not None
             and str(found["source_id"]) != sid
@@ -467,17 +467,19 @@ async def _land(executor, ws, sid, gid, o, keys):
         if project_item is not None and (
             project_item not in by_id or str(by_id[project_item]["source_id"]) != sid
         ):
-            raise ArchiveRefused("archive_identity_inconsistent")
+            raise PastPostsRefused("past_posts_identity_inconsistent")
         item = None if asset.media_kind == "unknown" else project_item
         slide = o.slide_count is not None
         name = (
-            vocabulary.ARCHIVE_SLIDE_NAME.format(
+            vocabulary.PAST_POSTS_SLIDE_NAME.format(
                 position=asset.position, count=o.slide_count
             )
             if slide and o.slides_complete
-            else vocabulary.ARCHIVE_SLIDE_NAME_UNKNOWN.format(position=asset.position)
+            else vocabulary.PAST_POSTS_SLIDE_NAME_UNKNOWN.format(
+                position=asset.position
+            )
             if slide
-            else vocabulary.ARCHIVE_ITEM_NAME
+            else vocabulary.PAST_POSTS_ITEM_NAME
         )
         rows.append(
             {
@@ -555,7 +557,7 @@ async def _land(executor, ws, sid, gid, o, keys):
                 or str(t["media_item_id"]) != previous_ids[prior["asset_media_id"]]
                 for t in prior_matches
             ):
-                raise ArchiveRefused("archive_identity_inconsistent")
+                raise PastPostsRefused("past_posts_identity_inconsistent")
         removed = [
             {
                 "asset_id": row["asset_media_id"],
@@ -591,7 +593,7 @@ async def _land(executor, ws, sid, gid, o, keys):
                 "WHERE a.workspace_id=:ws AND a.source_id=:sid AND a.parent_media_id=:parent "
                 "AND a.asset_media_id <> ALL(CAST(:observed AS text[])) "
                 "AND m.workspace_id=a.workspace_id AND m.source_id=a.source_id "
-                "AND (m.id=a.media_item_id OR m.content_hash='instagram_archive:media:'||a.asset_media_id)"
+                "AND (m.id=a.media_item_id OR m.content_hash='instagram_past_posts:media:'||a.asset_media_id)"
             ),
             {**params, "observed": sorted(observed_ids)},
         )
@@ -763,7 +765,7 @@ async def retire_selected_asset(
                 or str(row["media_item_id"]) != params["item"]
                 for row in matches
             ):
-                raise ArchiveRefused("archive_identity_inconsistent")
+                raise PastPostsRefused("past_posts_identity_inconsistent")
         deleted = await executor.execute(
             text(
                 "DELETE FROM instagram_media_assets WHERE workspace_id=:ws AND source_id=:sid "
@@ -773,7 +775,7 @@ async def retire_selected_asset(
             params,
         )
         if deleted.rowcount != 1:
-            raise ArchiveRefused("archive_stale_capture")
+            raise PastPostsRefused("past_posts_stale_capture")
         digest = keys.digest(keys.current_version, asset_media_id)
         tombstone = await executor.execute(
             text(
@@ -789,7 +791,7 @@ async def retire_selected_asset(
             {**params, "version": keys.current_version, "digest": digest},
         )
         if tombstone.scalar_one_or_none() is None:
-            raise ArchiveRefused("archive_identity_inconsistent")
+            raise PastPostsRefused("past_posts_identity_inconsistent")
         item = await executor.execute(
             text(
                 "UPDATE media_items SET state='removed' WHERE workspace_id=:ws "
@@ -798,7 +800,7 @@ async def retire_selected_asset(
             params,
         )
         if item.rowcount != 1:
-            raise ArchiveRefused("archive_identity_inconsistent")
+            raise PastPostsRefused("past_posts_identity_inconsistent")
         await executor.execute(
             text(
                 "UPDATE instagram_media_index SET slides_complete=false WHERE workspace_id=:ws "
@@ -840,7 +842,7 @@ async def redact_generations(
     deletion. Landing an observation (write_observation) still does.
     """
     async with source_state.source_savepoint(executor):
-        locked = await lock_archive(
+        locked = await lock_past_posts(
             executor, workspace_id=workspace_id, source_id=source_id
         )
         scope = frozenset(str(g) for g in generation_ids)
@@ -854,7 +856,7 @@ async def redact_generations(
             else set()
         )
         if not scope or not scope <= available:
-            raise ArchiveRefused("archive_generation_scope_unavailable")
+            raise PastPostsRefused("past_posts_generation_scope_unavailable")
         params = {"ws": str(workspace_id), "sid": str(source_id), "gids": sorted(scope)}
         items = await readers.rows(executor, _REDACTION_ITEM_LOOKUP, **params)
         # One executemany for the whole scope, not a round trip per item (a scope

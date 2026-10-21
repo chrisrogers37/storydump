@@ -122,14 +122,14 @@ const COMMON_REFUSALS: Array<[string, number, Record<string, unknown>, Record<st
   [
     "unsupported_source_provider",
     400,
-    { detail: "not an archive source", reason: "unsupported_source_provider" },
+    { detail: "not a past-posts source", reason: "unsupported_source_provider" },
     { error: "unsupported_source_provider" },
   ],
   [
-    "archive_not_activated",
+    "past_posts_not_activated",
     503,
-    { detail: "archive is not activated", reason: "archive_not_activated" },
-    { error: "archive_not_activated" },
+    { detail: "past-posts source is not activated", reason: "past_posts_not_activated" },
+    { error: "past_posts_not_activated" },
   ],
   [
     "a refusal that names no reason, as the tenancy gate's do",

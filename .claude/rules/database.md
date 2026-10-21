@@ -28,7 +28,7 @@ Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
 | `intent_ledger.py` | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |
 | `auth_plane.py` | `session_tokens`, `oauth_states`, `service_tokens`, `oauth_connection_results` |
-| `instagram_catalog.py` | `media_source_destinations`, `instagram_archive_generations`, `instagram_source_policies`, `instagram_media_index`, `instagram_media_assets`, `instagram_item_tombstones`, `instagram_artifacts`, `instagram_intent_provenance`, `instagram_operation_provenance` |
+| `instagram_catalog.py` | `media_source_destinations`, `instagram_past_posts_generations`, `instagram_source_policies`, `instagram_media_index`, `instagram_media_assets`, `instagram_item_tombstones`, `instagram_artifacts`, `instagram_intent_provenance`, `instagram_operation_provenance` |
 | `meta_receipts.py` | `meta_identity_mappings`, `meta_deletion_receipts`, `meta_deletion_receipt_scopes`, `meta_deletion_receipt_generations`, `meta_deletion_receipt_capabilities` |
 
 - **`workspaces` is the tenant** (`tenant_id == workspaces.id`). Product settings

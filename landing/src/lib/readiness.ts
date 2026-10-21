@@ -42,7 +42,7 @@ export type ReadinessDestination = {
   /** Metadata-matching posts for this account, never verified media. */
   candidates: number | null;
   leadingExclusion: { reason: string; count: number } | null;
-  /** The oldest post indexed from an archive it draws on: coverage evidence only. */
+  /** The oldest post indexed from a past-posts source it draws on: coverage evidence only. */
   oldestObservedAt: string | null;
   /** An enabled Drive folder it draws on is in `error`: where its retry is done. */
   driveError: boolean;
@@ -123,7 +123,7 @@ function readDestination(raw: unknown, rows: Map<string, RowFacts>): ReadinessDe
     const row = rows.get(source.source_id);
     if (!row?.enabled) continue;
     const at = source.oldest_observed_at;
-    if (row.provider === "instagram_archive" && typeof at === "string" && !Number.isNaN(Date.parse(at))) {
+    if (row.provider === "instagram_past_posts" && typeof at === "string" && !Number.isNaN(Date.parse(at))) {
       if (oldest === null || Date.parse(at) < Date.parse(oldest)) oldest = at;
     }
     if (row.provider === "gdrive" && row.state === "error") driveError = true;

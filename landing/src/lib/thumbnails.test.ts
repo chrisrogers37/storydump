@@ -38,14 +38,14 @@ describe("thumbnailFor (#1634)", () => {
     expect(thumbnailFor({ file_name: "a.jpg" }, "ws-1")).toBeNull();
   });
 
-  it("names an archive item's picture by its generation and epoch, as the API wrote them (#1644)", () => {
+  it("names a past-posts item's picture by its generation and epoch, as the API wrote them (#1644)", () => {
     const pair = "5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b.7";
     expect(thumbnailFor({ ...row, thumbnail_version: pair }, "ws-1")).toBe(
       `/api/workspaces/ws-1/media/media-1/thumbnail?v=${pair}`,
     );
   });
 
-  it("is nothing for an archive item awaiting observation again, which has no version to name", () => {
+  it("is nothing for a past-posts item awaiting observation again, which has no version to name", () => {
     expect(thumbnailFor({ ...row, has_thumbnail: false, thumbnail_version: null }, "ws-1")).toBeNull();
     // Nor does a flag with no version make a URL: `v=null` would name nothing the API holds.
     expect(thumbnailFor({ ...row, thumbnail_version: null }, "ws-1")).toBeNull();
@@ -72,13 +72,13 @@ describe("thumbnailMedia (#1634)", () => {
     });
   });
 
-  it("hands over an archive item's provenance, and a Drive row's null is left out (#1644)", () => {
+  it("hands over a past-posts item's provenance, and a Drive row's null is left out (#1644)", () => {
     const provenance = {
-      provider: "instagram_archive",
+      provider: "instagram_past_posts",
       origin_handle: "example_handle",
       original_at: "2020-01-01T12:00:00+00:00",
     };
-    const archive = {
+    const pastPosts = {
       file_name: "a.jpg",
       media_kind: "image",
       media_item_id: "media-1",
@@ -86,8 +86,8 @@ describe("thumbnailMedia (#1634)", () => {
       thumbnail_version: "gen.1",
       provenance,
     };
-    expect(thumbnailMedia(archive)).toStrictEqual(archive);
-    expect(Object.keys(thumbnailMedia({ ...archive, provenance: null })).sort()).toEqual([
+    expect(thumbnailMedia(pastPosts)).toStrictEqual(pastPosts);
+    expect(Object.keys(thumbnailMedia({ ...pastPosts, provenance: null })).sort()).toEqual([
       "file_name",
       "has_thumbnail",
       "media_item_id",

@@ -198,15 +198,15 @@ describe("the day view's later occurrences of a series (#485)", () => {
   });
 });
 
-describe("an archive story in the day view (#1644)", () => {
+describe("a past-posts story in the day view (#1644)", () => {
   const FAKE_ID = "17900000000000001";
   const GENERATION = "5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b";
-  const archive = (id: string, over: Partial<Intent> = {}) =>
+  const pastPosts = (id: string, over: Partial<Intent> = {}) =>
     story(id, {
       file_name: `Instagram ${FAKE_ID}`,
       thumbnail_version: `${GENERATION}.7`,
       provenance: {
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         origin_handle: "example_handle",
         original_at: "2020-01-01T12:00:00+00:00",
       },
@@ -214,7 +214,7 @@ describe("an archive story in the day view (#1644)", () => {
     });
 
   it("goes by its own name, never the id it is stored under, beside a Drive story's", () => {
-    const tree = day([archive("a"), story("b")]);
+    const tree = day([pastPosts("a"), story("b")]);
     expect(rowsOf(tree)).toEqual(["2:00 PMInstagram postposted", "2:00 PMb.jpgposted"]);
     expect(JSON.stringify(textOf(tree))).not.toContain(FAKE_ID);
     const titles = [...walk(tree)]
@@ -223,11 +223,11 @@ describe("an archive story in the day view (#1644)", () => {
     expect(titles).toEqual(["Instagram post", "b.jpg"]);
   });
 
-  it("asks for its picture under the archive's limits, in the row's box; a Drive story's stays the browser's", () => {
-    const tree = day([archive("a"), story("b")]);
+  it("asks for its picture under the past-posts source's limits, in the row's box; a Drive story's stays the browser's", () => {
+    const tree = day([pastPosts("a"), story("b")]);
     const pictures = [...walk(tree)].filter((el) => el.type === MediaThumbnail);
     expect(
-      pictures.map((el) => (el.props as { archive?: unknown }).archive),
+      pictures.map((el) => (el.props as { pastPosts?: unknown }).pastPosts),
     ).toEqual([{ workspaceId: "ws-1", layout: "tile" }, undefined]);
     expect((pictures[0].props as { src: string; alt: string }).src).toBe(
       `/api/workspaces/ws-1/media/media-a/thumbnail?v=${GENERATION}.7`,

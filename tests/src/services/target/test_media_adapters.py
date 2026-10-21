@@ -28,7 +28,7 @@ class BytesAdapter:
         self.calls.append((config, file_ref, kwargs))
         if self.error:
             raise self.error
-        return b"archive", "story.jpg", "image/jpeg"
+        return b"past_posts", "story.jpg", "image/jpeg"
 
 
 def _source_factory(monkeypatch, row):
@@ -90,21 +90,21 @@ def test_existing_drive_error_types_keep_their_neutral_routing(
 async def test_both_byte_paths_select_the_second_provider_and_pass_its_config(
     monkeypatch,
 ):
-    config = {"v": 9, "bucket": "archive-a"}
+    config = {"v": 9, "bucket": "past-posts-a"}
     observed = _source_factory(
-        monkeypatch, {"provider": "fake_archive", "config": config}
+        monkeypatch, {"provider": "fake_past_posts", "config": config}
     )
 
     def outside_transaction():
         assert not observed["open"]
 
     adapter = BytesAdapter(before_fetch=outside_transaction)
-    adapters = {"gdrive": object(), "fake_archive": adapter}
+    adapters = {"gdrive": object(), "fake_past_posts": adapter}
     fetch = worker._publish_media_fetch(adapters)
     assert (
         await fetch(
             {
-                "provider": "fake_archive",
+                "provider": "fake_past_posts",
                 "source_config": config,
                 "source_state": "active",
                 "source_id": "src-a",
@@ -113,10 +113,10 @@ async def test_both_byte_paths_select_the_second_provider_and_pass_its_config(
                 "media_kind": "video",
             }
         )
-        == b"archive"
+        == b"past_posts"
     )
     assert await worker._card_media_fetch(object(), adapters)(_card()) == (
-        b"archive",
+        b"past_posts",
         "story.jpg",
         "image/jpeg",
     )
@@ -143,13 +143,13 @@ async def test_a_missing_or_unwired_card_source_is_unavailable(monkeypatch, sour
     "state, provider",
     [
         (None, "gdrive"),
-        (None, "fake_archive"),
-        ("paused", "fake_archive"),
-        ("error", "fake_archive"),
+        (None, "fake_past_posts"),
+        ("paused", "fake_past_posts"),
+        ("error", "fake_past_posts"),
     ],
 )
 async def test_publish_refuses_missing_or_inactive_source(state, provider):
-    adapters = {"gdrive": BytesAdapter(), "fake_archive": BytesAdapter()}
+    adapters = {"gdrive": BytesAdapter(), "fake_past_posts": BytesAdapter()}
     with pytest.raises(media_adapters.MediaTerminalError):
         await worker._publish_media_fetch(adapters)(
             {"source_state": state, "provider": provider}
@@ -173,7 +173,7 @@ async def test_an_inactive_drive_folder_still_reaches_its_credential_door(state)
         "provider_file_ref": "file",
         "media_kind": "image",
     }
-    assert await fetch(intent) == b"archive"
+    assert await fetch(intent) == b"past_posts"
     assert [call[:2] for call in drive.calls] == [({"folder_ref": "folder"}, "file")]
 
 
@@ -193,10 +193,10 @@ async def test_an_unwired_publish_provider_is_terminal():
     ],
 )
 async def test_card_errors_use_provider_neutral_types(monkeypatch, fault, expected):
-    _source_factory(monkeypatch, {"provider": "fake_archive", "config": {"v": 1}})
+    _source_factory(monkeypatch, {"provider": "fake_past_posts", "config": {"v": 1}})
     with pytest.raises(expected):
         await worker._card_media_fetch(
-            object(), {"fake_archive": BytesAdapter(error=fault)}
+            object(), {"fake_past_posts": BytesAdapter(error=fault)}
         )(_card())
 
 
@@ -211,12 +211,12 @@ async def test_card_errors_use_provider_neutral_types(monkeypatch, fault, expect
 async def test_card_error_wrappers_do_not_expose_provider_exception_text(
     monkeypatch, error_type, expected
 ):
-    _source_factory(monkeypatch, {"provider": "fake_archive", "config": {"v": 1}})
+    _source_factory(monkeypatch, {"provider": "fake_past_posts", "config": {"v": 1}})
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
     fetch = worker._card_media_fetch(
         object(),
         {
-            "fake_archive": BytesAdapter(error=error_type(secret)),
+            "fake_past_posts": BytesAdapter(error=error_type(secret)),
         },
     )
     with pytest.raises(expected) as caught:
@@ -235,10 +235,10 @@ async def test_card_connection_failures_stay_counted_without_provider_text(
 ):
     from src.channels.telegram_transport import TelegramTransport
 
-    _source_factory(monkeypatch, {"provider": "fake_archive", "config": {"v": 1}})
+    _source_factory(monkeypatch, {"provider": "fake_past_posts", "config": {"v": 1}})
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
     fetch = worker._card_media_fetch(
-        object(), {"fake_archive": BytesAdapter(error=error_type(secret))}
+        object(), {"fake_past_posts": BytesAdapter(error=error_type(secret))}
     )
     transport = TelegramTransport(
         "test-token", client=SimpleNamespace(), media_fetch=fetch
@@ -285,11 +285,11 @@ def test_publish_error_record_keeps_only_media_error_class(error_type):
 async def test_publish_fetch_boundary_hides_secrets_from_later_sql_failure(error_type):
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
     fetch = worker._publish_media_fetch(
-        {"fake_archive": BytesAdapter(error=error_type(secret))}
+        {"fake_past_posts": BytesAdapter(error=error_type(secret))}
     )
     intent = {
         "source_state": "active",
-        "provider": "fake_archive",
+        "provider": "fake_past_posts",
         "source_config": {"v": 1},
         "source_id": "source-a",
         "workspace_id": "workspace-a",
@@ -307,12 +307,14 @@ async def test_publish_fetch_boundary_hides_secrets_from_later_sql_failure(error
     assert "provider.invalid" not in rendered
 
 
-async def test_archive_card_fetch_uses_server_intent_bound_preparation(monkeypatch):
+async def test_past_posts_card_fetch_uses_server_intent_bound_preparation(monkeypatch):
     from types import SimpleNamespace
     from src.services.target import source_policy
     from src.services.target.outbox import MediaAdmissionNotSent
 
-    _source_factory(monkeypatch, {"provider": "instagram_archive", "config": {"v": 1}})
+    _source_factory(
+        monkeypatch, {"provider": "instagram_past_posts", "config": {"v": 1}}
+    )
     calls = []
 
     async def selected(**kwargs):
@@ -343,12 +345,14 @@ async def test_archive_card_fetch_uses_server_intent_bound_preparation(monkeypat
         media_adapters.MediaLostResponse,
     ],
 )
-async def test_archive_source_failure_never_uses_drive_text_degradation(
+async def test_past_posts_source_failure_never_uses_drive_text_degradation(
     monkeypatch, failure
 ):
     from src.services.target.outbox import MediaAdmissionNotSent
 
-    _source_factory(monkeypatch, {"provider": "instagram_archive", "config": {"v": 1}})
+    _source_factory(
+        monkeypatch, {"provider": "instagram_past_posts", "config": {"v": 1}}
+    )
 
     async def selected(**kwargs):
         raise failure("synthetic provider failure")
@@ -359,7 +363,7 @@ async def test_archive_source_failure_never_uses_drive_text_degradation(
         )
 
 
-async def test_missing_archive_source_is_a_no_send_refusal(monkeypatch):
+async def test_missing_past_posts_source_is_a_no_send_refusal(monkeypatch):
     from src.services.target.outbox import MediaAdmissionNotSent
 
     _source_factory(monkeypatch, None)

@@ -42,9 +42,9 @@ from src.services.target import (
 )
 
 from src.services.target import (
-    archive_activation,
-    archive_deletion,
-    archive_reconciliation,
+    past_posts_activation,
+    past_posts_deletion,
+    past_posts_reconciliation,
     bindings,
     content_runway,
     jobs,
@@ -258,21 +258,21 @@ class WorkerDeps:
     #: One provider registry for listing, publishing and approval-card media.
     adapters: media_adapters.MediaAdapters = field(default_factory=dict)
     media_fetch: Optional[Callable[[dict], Any]] = None
-    #: Explicit captured archive turns, composed by `archive_composition` and only
-    #: when `archive_activation` arms the worker.
-    archive_sync: Any = None
-    #: The archive coordinator (`instagram_publish.ArchivePipeline`), handed to
-    #: the publish pipeline; None unless `archive_activation` armed this worker,
-    #: and then an archive intent is refused `archive_pipeline_not_configured`.
-    archive: Any = None
-    #: The tombstone key ring (`archive_activation.load_keys`): it arms the
-    #: archive, and a deletion receipt is redacted with it either way.
-    archive_keys: Any = None
-    #: The armed archive's release run (`archive_activation.release_evidence`),
+    #: Explicit captured past-posts turns, composed by `past_posts_composition` and only
+    #: when `past_posts_activation` arms the worker.
+    past_posts_sync: Any = None
+    #: The past-posts coordinator (`instagram_publish.PastPostsPipeline`), handed to
+    #: the publish pipeline; None unless `past_posts_activation` armed this worker,
+    #: and then a past-posts intent is refused `past_posts_pipeline_not_configured`.
+    past_posts: Any = None
+    #: The tombstone key ring (`past_posts_activation.load_keys`): it arms the
+    #: past-posts source, and a deletion receipt is redacted with it either way.
+    past_posts_keys: Any = None
+    #: The armed past-posts source's release run (`past_posts_activation.release_evidence`),
     #: which keys its reconciliation jobs, or None.
-    archive_evidence: Any = None
-    #: The archive adapter's HTTP client, closed at shutdown, or None.
-    archive_client: Any = None
+    past_posts_evidence: Any = None
+    #: The past-posts adapter's HTTP client, closed at shutdown, or None.
+    past_posts_client: Any = None
     mix_conversion_evidence: Any = None
     #: The EmailSender port, or None when no provider is wired.
     email: Optional[Any] = None
@@ -286,7 +286,7 @@ class WorkerDeps:
     config: WorkerConfig = field(default_factory=WorkerConfig)
     #: Selected-only preparation, outside SQL; strict fresh DB evidence remains authoritative.
     selected_prepare: Any = None
-    archive_capability: Any = None
+    past_posts_capability: Any = None
 
 
 _UNBUILT_REASON = (
@@ -296,8 +296,8 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-#: (The three archive lifecycle kinds all have executors; the
-#: existing-account reconciliation parks only while the archive is not armed.)
+#: (The three past-posts lifecycle kinds all have executors; the
+#: existing-account reconciliation parks only while the past-posts source is not armed.)
 UNBUILT_KINDS = ("reencrypt_credentials",)
 
 
@@ -313,7 +313,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         return sessions(job) if session is None else nullcontext(session)
 
     async def plan_slot(session, job):
-        session.info["archive_capability"] = deps.archive_capability
+        session.info["past_posts_capability"] = deps.past_posts_capability
         payload = job.get("payload") or {}
         # The slot rides jsonb as a string Postgres rendered, so POSTGRES
         # parses it back: PG strips trailing fractional zeros when
@@ -390,7 +390,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             limit=cfg.reap_limit,
             approval_ttl_seconds=cfg.approval_ttl_seconds,
             approved_ttl_seconds=cfg.approved_ttl_seconds,
-            capability=deps.archive_capability,
+            capability=deps.past_posts_capability,
         )
 
     @own_transactions
@@ -586,7 +586,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             transit=deps.transit,
             media_fetch=deps.media_fetch,
             precheck=deps.precheck,
-            archive=deps.archive,
+            past_posts=deps.past_posts,
         )
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
         # The pipeline finalizes or reschedules its own job in its own
@@ -648,7 +648,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         poller = outbox.OutboxPoller(
             unit_of_work.poller_session_factory(deps.engine, str(row["workspace_id"])),
             binding_id=binding_id,
-            archive_capability=deps.archive_capability,
+            past_posts_capability=deps.past_posts_capability,
             transport=deps.transport.for_chat(row["external_ref"]),
             clock=utcnow,
             interval_seconds=cfg.poller_interval_seconds,
@@ -716,89 +716,91 @@ def build_registry(deps: WorkerDeps) -> dict:
         )
 
     # The existing-account reconciliation backfills grants made before the
-    # archive was live, so it exists only where the archive is armed and its
+    # past-posts source was live, so it exists only where the past-posts source is armed and its
     # client built. The sweep mints for it on the same condition, and only with
     # the release run its jobs are keyed to, so nothing here mints a job that
     # would only park; each deploy's run retries what an earlier one left.
     reconciling = (
-        is_activated(deps.archive_capability) and deps.archive_client is not None
+        is_activated(deps.past_posts_capability) and deps.past_posts_client is not None
     )
 
-    # The sweep mints the cleanup jobs, then, when the archive is armed, the
+    # The sweep mints the cleanup jobs, then, when the past-posts source is armed, the
     # reconciliation jobs. Own transactions: each door commits on its own,
     # outside any job session, so a failing leg never takes the other back.
     @own_transactions
-    async def archive_lifecycle_sweep(session, job):
+    async def past_posts_lifecycle_sweep(session, job):
         async with short(session, job) as writer:
             minted = (
                 await writer.execute(
                     text("SELECT fn_meta_receipt_cleanup_jobs(:n)"),
-                    {"n": ARCHIVE_SWEEP_LIMIT},
+                    {"n": PAST_POSTS_SWEEP_LIMIT},
                 )
             ).scalar()
         reconcile_minted = 0
-        evidence = deps.archive_evidence
+        evidence = deps.past_posts_evidence
         if reconciling and isinstance(
-            evidence, archive_activation.ArchiveActivationEvidence
+            evidence, past_posts_activation.PastPostsActivationEvidence
         ):
             async with short(session, job) as writer:
                 reconcile_minted = (
                     await writer.execute(
-                        text("SELECT fn_archive_reconcile_jobs(:n, :run_id, :digest)"),
+                        text(
+                            "SELECT fn_past_posts_reconcile_jobs(:n, :run_id, :digest)"
+                        ),
                         {
-                            "n": ARCHIVE_RECONCILE_LIMIT,
+                            "n": PAST_POSTS_RECONCILE_LIMIT,
                             "run_id": evidence.run_id,
                             "digest": evidence.digest,
                         },
                     )
                 ).scalar()
-        # It runs every minute whether or not the archive is on: say so only when
+        # It runs every minute whether or not the past-posts source is on: say so only when
         # it minted something.
         if minted or reconcile_minted:
             logger.info(
-                "archive_lifecycle_sweep %s: %s cleanup job(s), %s reconciliation job(s)",
+                "past_posts_lifecycle_sweep %s: %s cleanup job(s), %s reconciliation job(s)",
                 job["id"],
                 minted,
                 reconcile_minted,
             )
 
     # Own transactions: its transit drain asks the provider between its short
-    # transactions, never inside one (`archive_deletion`'s docstring).
+    # transactions, never inside one (`past_posts_deletion`'s docstring).
     @own_transactions
     async def meta_deletion_cleanup(session, job):
-        outcome = await archive_deletion.execute(deps, job)
+        outcome = await past_posts_deletion.execute(deps, job)
         logger.info("meta_deletion_cleanup %s -> %s", job["id"], outcome)
 
     # Own transactions: it asks the provider who a token is for between its
     # short transactions, never inside one. A turn that left accounts over put
-    # its job back itself (`archive_reconciliation.CONTINUED`).
+    # its job back itself (`past_posts_reconciliation.CONTINUED`).
     @own_transactions
-    async def reconcile_archive_accounts(session, job):
-        outcome = await archive_reconciliation.execute(deps, job)
-        logger.info("reconcile_archive_accounts %s -> %s", job["id"], outcome)
-        if outcome == archive_reconciliation.CONTINUED:
+    async def reconcile_past_posts_accounts(session, job):
+        outcome = await past_posts_reconciliation.execute(deps, job)
+        logger.info("reconcile_past_posts_accounts %s -> %s", job["id"], outcome)
+        if outcome == past_posts_reconciliation.CONTINUED:
             return jobs.SELF_FINALIZED
 
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
-    registry["archive_lifecycle_sweep"] = archive_lifecycle_sweep
+    registry["past_posts_lifecycle_sweep"] = past_posts_lifecycle_sweep
     # Needs no activation: a deletion closes things (every lifecycle entry point
     # does), so it runs with the keys alone. Without a transit store it asks the
     # provider nothing and counts any upload still owed as unresolved, so a scope
     # with none completes and one with some waits (then needs review).
     registry["meta_deletion_cleanup"] = (
         meta_deletion_cleanup
-        if deps.archive_keys is not None
-        else Parked("deletion cleanup needs ARCHIVE_HMAC_KEYS")
+        if deps.past_posts_keys is not None
+        else Parked("deletion cleanup needs PAST_POSTS_HMAC_KEYS")
     )
     if reconciling:
-        registry["reconcile_archive_accounts"] = reconcile_archive_accounts
-    elif not is_activated(deps.archive_capability):
-        registry["reconcile_archive_accounts"] = Parked(
-            "instagram archive not armed (ARCHIVE_HMAC_KEYS missing or invalid)"
+        registry["reconcile_past_posts_accounts"] = reconcile_past_posts_accounts
+    elif not is_activated(deps.past_posts_capability):
+        registry["reconcile_past_posts_accounts"] = Parked(
+            "instagram past posts off (PAST_POSTS_HMAC_KEYS missing or invalid)"
         )
     else:
-        registry["reconcile_archive_accounts"] = Parked(
-            "archive reconciliation needs the archive adapter's HTTP client"
+        registry["reconcile_past_posts_accounts"] = Parked(
+            "past-posts reconciliation needs the past-posts adapter's HTTP client"
         )
     registry["convert_source_mix"] = (
         convert_source_mix
@@ -981,15 +983,15 @@ _REMINTED_KINDS = frozenset(
         # The sweep re-mints cleanup for as long as a scope is due, and a
         # reconciliation is re-found by its own door.
         "meta_deletion_cleanup",
-        "reconcile_archive_accounts",
+        "reconcile_past_posts_accounts",
     }
 )
 
 #: The most cleanup jobs one sweep mints (the door caps it at 25 itself).
-ARCHIVE_SWEEP_LIMIT = 25
+PAST_POSTS_SWEEP_LIMIT = 25
 
 #: The most reconciliation jobs one sweep mints (the door caps it at 5 itself).
-ARCHIVE_RECONCILE_LIMIT = 5
+PAST_POSTS_RECONCILE_LIMIT = 5
 
 #: The user-language sentence for a tenant kind whose budget is spent — the
 #: thing, not the kind.
@@ -1056,7 +1058,7 @@ async def _rearm_source(session, job, *, capability=None) -> int:
         ws=str(workspace_id),
         sid=str(source_id),
     )
-    if source is not None and source["provider"] == "instagram_archive":
+    if source is not None and source["provider"] == "instagram_past_posts":
         try:
             capture = source_read_admission.capture_from_payload(
                 (job.get("payload") or {}).get("source_read_capture")
@@ -1168,7 +1170,7 @@ class WorkLoop:
         heartbeat,
         config: WorkerConfig,
         worker_name: str,
-        archive_capability=None,
+        past_posts_capability=None,
     ):
         self._claim_conn = claim_conn
         #: A claim checks out a pooled connection, claims (the door
@@ -1182,9 +1184,9 @@ class WorkLoop:
         self._heartbeat = heartbeat
         self._config = config
         self._worker_name = worker_name
-        #: The archive's activation: the claim door and a spent sync's re-arm
-        #: judge an archive source by it, and None is an inactive archive.
-        self._archive_capability = archive_capability
+        #: The past-posts source's activation: the claim door and a spent sync's re-arm
+        #: judge a past-posts source by it, and None is an inactive past-posts source.
+        self._past_posts_capability = past_posts_capability
         self.processed = 0
         self.parked = 0
         self.failures = 0
@@ -1212,7 +1214,7 @@ class WorkLoop:
             worker=self._worker_name,
             lease_seconds=self._config.lease_seconds,
             ws_lane_cap=self._config.ws_lane_cap_for(self.lane),
-            capability=self._archive_capability,
+            capability=self._past_posts_capability,
         )
         if self._claim_conn is not None:
             return await jobs.claim_job(self._claim_conn, **claim)
@@ -1355,7 +1357,7 @@ class WorkLoop:
                         # Ahead of the notice's savepoint, so a failed notice
                         # cannot roll the spent job's state back.
                         parked = await _settle_exhausted(
-                            session, job, capability=self._archive_capability
+                            session, job, capability=self._past_posts_capability
                         )
                         # The notice rides a savepoint: a failure writing it
                         # must not take the finalize down with it (the log

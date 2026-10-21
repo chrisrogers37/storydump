@@ -21,15 +21,15 @@ from types import SimpleNamespace
 
 from src.models.target.machinery import Job
 from src.services.target import (
-    archive_reconciliation,
+    past_posts_reconciliation,
     email_sender,
     sessions,
     signup_admissions,
     unit_of_work,
     work_loop,
 )
-from src.services.target.archive_activation import ArchiveActivationEvidence
-from src.services.target.instagram_sources import ArchiveCapability
+from src.services.target.past_posts_activation import PastPostsActivationEvidence
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.jobs import SELF_FINALIZED, JobFenced
 from src.services.target.mix_conversion import MixConversionEvidence
 from src.services.target.work_loop import (
@@ -69,11 +69,11 @@ def full_deps(**over):
         refresh=_fake_seam,
         adapters={"gdrive": object()},
         email=object(),
-        archive_keys=object(),
-        # the archive armed, with the client its adapter reads
+        past_posts_keys=object(),
+        # the past-posts source armed, with the client its adapter reads
         # through, which is what makes the reconciliation executor live.
-        archive_capability=ArchiveCapability(enabled=True),
-        archive_client=object(),
+        past_posts_capability=PastPostsCapability(enabled=True),
+        past_posts_client=object(),
         config=WorkerConfig(**FULL_CONFIG),
     )
     base.update(over)
@@ -132,9 +132,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
     #: and the reconciliation's, which asks Meta who a token is for between its
     #: short transactions (through the floor, one request per account).
     OWNS_ITS_STEPS = {
-        "archive_lifecycle_sweep",
+        "past_posts_lifecycle_sweep",
         "meta_deletion_cleanup",
-        "reconcile_archive_accounts",
+        "reconcile_past_posts_accounts",
     }
 
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
@@ -213,11 +213,11 @@ class TestRegistryCoversTheSchema:
             "activation_nudge_sweep",
             # the sweep needs nothing; the cleanup needs the
             # key ring alone, which `full_deps` supplies.
-            "archive_lifecycle_sweep",
+            "past_posts_lifecycle_sweep",
             "meta_deletion_cleanup",
-            # live once the archive is armed with its client,
+            # live once the past-posts source is armed with its client,
             # which `full_deps` supplies.
-            "reconcile_archive_accounts",
+            "reconcile_past_posts_accounts",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -242,9 +242,9 @@ class TestRegistryCoversTheSchema:
             "retention_sweep",
             "activation_nudge_sweep",  # , with `FULL_CONFIG`
             "convert_source_mix",  # typed operator record in full_deps
-            "archive_lifecycle_sweep",  #
+            "past_posts_lifecycle_sweep",  #
             "meta_deletion_cleanup",  # , with the key ring
-            "reconcile_archive_accounts",  # , with the archive armed
+            "reconcile_past_posts_accounts",  # , with the past-posts source armed
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         assert unbuilt == set(UNBUILT_KINDS)
@@ -266,40 +266,40 @@ class TestDeletionCleanupNeedsOnlyTheKeyRing:
         assert entry.owns_transactions is True
 
     def test_without_the_ring_it_parks_naming_it(self):
-        entry = build_registry(full_deps(archive_keys=None))["meta_deletion_cleanup"]
+        entry = build_registry(full_deps(past_posts_keys=None))["meta_deletion_cleanup"]
         assert isinstance(entry, Parked)
-        assert "ARCHIVE_HMAC_KEYS" in entry.reason
+        assert "PAST_POSTS_HMAC_KEYS" in entry.reason
 
 
-SWEEP_EVIDENCE = ArchiveActivationEvidence("synthetic-run", "e" * 64)
+SWEEP_EVIDENCE = PastPostsActivationEvidence("synthetic-run", "e" * 64)
 
 
-class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
+class TestReconciliationIsLiveOnlyWhereThePastPostsIsArmed:
     """The existing-account reconciliation backfills grants made
-    before the archive was live, so it needs the capability AND the archive
+    before the past-posts source was live, so it needs the capability AND the past-posts
     adapter's client; the sweep mints its jobs only on the same terms, plus the
     release run the door keys them to."""
 
     def test_armed_with_its_client_it_is_live_and_owns_its_transactions(self):
-        entry = build_registry(full_deps())["reconcile_archive_accounts"]
+        entry = build_registry(full_deps())["reconcile_past_posts_accounts"]
         assert not isinstance(entry, Parked)
         assert entry.owns_transactions is True
 
     @pytest.mark.parametrize(
-        "capability", [None, ArchiveCapability(enabled=False)], ids=["none", "off"]
+        "capability", [None, PastPostsCapability(enabled=False)], ids=["none", "off"]
     )
     def test_without_an_active_capability_it_parks_naming_the_key_ring(
         self, capability
     ):
-        entry = build_registry(full_deps(archive_capability=capability))[
-            "reconcile_archive_accounts"
+        entry = build_registry(full_deps(past_posts_capability=capability))[
+            "reconcile_past_posts_accounts"
         ]
         assert isinstance(entry, Parked)
-        assert "ARCHIVE_HMAC_KEYS" in entry.reason
+        assert "PAST_POSTS_HMAC_KEYS" in entry.reason
 
     def test_without_the_adapters_client_it_parks_naming_the_client(self):
-        entry = build_registry(full_deps(archive_client=None))[
-            "reconcile_archive_accounts"
+        entry = build_registry(full_deps(past_posts_client=None))[
+            "reconcile_past_posts_accounts"
         ]
         assert isinstance(entry, Parked)
         assert "HTTP client" in entry.reason
@@ -307,8 +307,8 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
     @pytest.mark.parametrize(
         "outcome, result",
         [
-            (archive_reconciliation.CONTINUED, SELF_FINALIZED),
-            (archive_reconciliation.DONE, None),
+            (past_posts_reconciliation.CONTINUED, SELF_FINALIZED),
+            (past_posts_reconciliation.DONE, None),
         ],
     )
     async def test_a_continuing_turn_has_put_its_job_back_and_a_finished_one_has_not(
@@ -322,10 +322,10 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
             seen.append((deps, job))
             return outcome
 
-        monkeypatch.setattr(archive_reconciliation, "execute", turn)
+        monkeypatch.setattr(past_posts_reconciliation, "execute", turn)
         deps = full_deps()
-        job = {"id": "j-rec", "kind": "reconcile_archive_accounts"}
-        entry = build_registry(deps)["reconcile_archive_accounts"]
+        job = {"id": "j-rec", "kind": "reconcile_past_posts_accounts"}
+        entry = build_registry(deps)["reconcile_past_posts_accounts"]
         assert await entry(None, job) is result
         assert seen == [(deps, job)]
 
@@ -340,21 +340,21 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
                 sent.append((str(statement), params))
                 answer = (
                     reconcile
-                    if "fn_archive_reconcile_jobs" in str(statement)
+                    if "fn_past_posts_reconcile_jobs" in str(statement)
                     else cleanup
                 )
                 return SimpleNamespace(scalar=lambda: answer)
 
         registry = build_registry(full_deps(**over))
-        await registry["archive_lifecycle_sweep"](Writer(), {"id": "j-sweep"})
+        await registry["past_posts_lifecycle_sweep"](Writer(), {"id": "j-sweep"})
         return sent
 
     async def test_the_sweep_mints_reconciliation_jobs_with_the_evidence(self):
-        sent = await self._sweep(archive_evidence=SWEEP_EVIDENCE)
+        sent = await self._sweep(past_posts_evidence=SWEEP_EVIDENCE)
         assert sent == [
             ("SELECT fn_meta_receipt_cleanup_jobs(:n)", {"n": 25}),
             (
-                "SELECT fn_archive_reconcile_jobs(:n, :run_id, :digest)",
+                "SELECT fn_past_posts_reconcile_jobs(:n, :run_id, :digest)",
                 {"n": 5, "run_id": "synthetic-run", "digest": "e" * 64},
             ),
         ]
@@ -363,13 +363,13 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
         "over",
         [
             {},
-            {"archive_evidence": object()},
-            {"archive_evidence": SWEEP_EVIDENCE, "archive_capability": None},
-            {"archive_evidence": SWEEP_EVIDENCE, "archive_client": None},
+            {"past_posts_evidence": object()},
+            {"past_posts_evidence": SWEEP_EVIDENCE, "past_posts_capability": None},
+            {"past_posts_evidence": SWEEP_EVIDENCE, "past_posts_client": None},
         ],
         ids=["no evidence", "untyped evidence", "no capability", "no client"],
     )
-    async def test_the_sweep_mints_none_without_the_evidence_or_the_armed_archive(
+    async def test_the_sweep_mints_none_without_the_evidence_or_the_armed_past_posts(
         self, over
     ):
         """Cleanup is minted regardless; a reconciliation job that would only
@@ -390,18 +390,18 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
     async def test_the_sweep_says_so_only_when_it_minted_something(
         self, caplog, minted, line
     ):
-        """It runs every minute, armed or not, and an archive that is off mints
+        """It runs every minute, armed or not, and a past-posts source that is off mints
         nothing: a line a minute reading `0... 0` is noise a log reader has to
         learn to skip. A leg that minted is reported whichever leg it was."""
         with caplog.at_level("INFO", logger=work_loop.logger.name):
-            await self._sweep(minted=minted, archive_evidence=SWEEP_EVIDENCE)
+            await self._sweep(minted=minted, past_posts_evidence=SWEEP_EVIDENCE)
         said = [
             r.getMessage()
             for r in caplog.records
-            if r.getMessage().startswith("archive_lifecycle_sweep")
+            if r.getMessage().startswith("past_posts_lifecycle_sweep")
         ]
         assert said == (
-            [] if line is None else [f"archive_lifecycle_sweep j-sweep: {line}"]
+            [] if line is None else [f"past_posts_lifecycle_sweep j-sweep: {line}"]
         )
 
 
@@ -912,7 +912,7 @@ class TestAJobThatReachedNobodyIsNotASuccess:
         loop = WorkLoop.__new__(WorkLoop)
         loop._registry = {"deliver_outbox": executor}
         loop._config = WorkerConfig()
-        loop._archive_capability = None
+        loop._past_posts_capability = None
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = 0
         loop.exhausted = 0
@@ -1780,7 +1780,7 @@ class TestTheBudgetCeiling:
         loop = WorkLoop.__new__(WorkLoop)
         loop._registry = {"sync_media_source": executor, "deliver_outbox": executor}
         loop._config = WorkerConfig()
-        loop._archive_capability = None
+        loop._past_posts_capability = None
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
 
@@ -2390,7 +2390,7 @@ class TestAFailureToRecordAFailureDoesNotTakeTheLane:
         loop = WorkLoop.__new__(WorkLoop)
         loop._registry = {"k": executor}
         loop._config = WorkerConfig()
-        loop._archive_capability = None
+        loop._past_posts_capability = None
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
         loop.claim_waits = 0
@@ -2475,7 +2475,7 @@ class TestAnExecutorThatFinalizesItself:
         loop = WorkLoop.__new__(WorkLoop)
         loop._registry = {"publish_pipeline": executor}
         loop._config = WorkerConfig()
-        loop._archive_capability = None
+        loop._past_posts_capability = None
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
 
@@ -2650,7 +2650,7 @@ class TestAnExecutorThatOwnsItsTransactions:
         loop = WorkLoop.__new__(WorkLoop)
         loop._registry = {"k": executor}
         loop._config = WorkerConfig()
-        loop._archive_capability = None
+        loop._past_posts_capability = None
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
 

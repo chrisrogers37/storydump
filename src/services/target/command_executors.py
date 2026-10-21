@@ -69,7 +69,7 @@ from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
     _dbapi,
-    archive_lifecycle,
+    past_posts_lifecycle,
     audit,
     google_drive_oauth,
     identity,
@@ -1630,7 +1630,7 @@ async def sync_now(session, command: Command, *, capability=None) -> CommandResu
     # The command port passes no capability: the session carries what the
     # composition root injected (`principal`, `work_loop`), None by default.
     if capability is None:
-        capability = session.info.get("archive_capability")
+        capability = session.info.get("past_posts_capability")
     source_id = _arg(command, "source_id")
     source = (
         await session.execute(
@@ -1643,7 +1643,7 @@ async def sync_now(session, command: Command, *, capability=None) -> CommandResu
     if source is None:
         raise CommandRefused("not_found", f"media source {source_id}")
     payload = {"v": 1, "source_id": source_id, "reason": "demand"}
-    if source[2] == "instagram_archive":
+    if source[2] == "instagram_past_posts":
         from src.services.target import source_read_admission
 
         try:
@@ -1777,14 +1777,14 @@ async def disable_account(session, command: Command) -> CommandResult:
     The audit row is the governance trigger's, under this unit of work's
     actor. No provider call — the same scope statement as `disconnect_account`.
 
-    The account's archive goes first: the canonical source
-    prefix, then the archive it originates retired through the epoch writer
-    (`archive_lifecycle.remove_account_archive`), and only then the account,
+    The account's past-posts source goes first: the canonical source
+    prefix, then the past-posts source it originates retired through the epoch writer
+    (`past_posts_lifecycle.remove_account_past_posts`), and only then the account,
     credential and intent rows below. Every other source is untouched, and the
     source stays the account's to restore on reconnect.
     """
     account_id = _arg(command, "ig_account_id")
-    await archive_lifecycle.remove_account_archive(
+    await past_posts_lifecycle.remove_account_past_posts(
         session, workspace_id=command.workspace_id, ig_account_id=account_id
     )
     try:

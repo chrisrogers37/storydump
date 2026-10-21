@@ -4,7 +4,7 @@ import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
 import { OpenedDayTitle } from "@/components/dashboard/media/opened-day";
 import { RepeatMark } from "@/components/dashboard/repeat-mark";
-import { withArchiveName } from "@/lib/archive-media";
+import { withPastPostsName } from "@/lib/past-posts-media";
 import type { PredictedSlot, RepeatOccurrence } from "@/lib/calendar-month";
 import { isLive, plannedStoryHref, type Intent } from "@/lib/intents";
 import type { RepeatRule } from "@/lib/repeat";
@@ -146,12 +146,12 @@ export function CalendarDay({
   );
 
   // Each list's rows by their times. The sort is stable and the stories come
-  // first, so a story precedes a place at its time. An archive item goes by its
-  // own name; the API sends it, and `withArchiveName` is the guard for a row
+  // first, so a story precedes a place at its time. A past-posts item goes by its
+  // own name; the API sends it, and `withPastPostsName` is the guard for a row
   // that arrives without it.
   const rows = [
-    ...intents.map((row) => [row.schedule_slot_at, storyRow(withArchiveName(row))] as const),
-    ...repeating.map((row) => [row.schedule_slot_at, repeatRow(withArchiveName(row))] as const),
+    ...intents.map((row) => [row.schedule_slot_at, storyRow(withPastPostsName(row))] as const),
+    ...repeating.map((row) => [row.schedule_slot_at, repeatRow(withPastPostsName(row))] as const),
     ...predicted.map((row) => [row.schedule_slot_at, slotRow(row)] as const),
   ].sort(([a], [b]) => instant(a).getTime() - instant(b).getTime());
 

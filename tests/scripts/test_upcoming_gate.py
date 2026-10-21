@@ -891,7 +891,7 @@ class TestARepeatingSeries:
             "thumbnail_version",
             "repeat",
             # the Queue's projection, as on the planned list: None for
-            # a Drive story, the archive's origin for an archive one
+            # a Drive story, the past-posts source's origin for a past-posts source one
             "provenance",
         )
         # the whole row: a kind, never a state

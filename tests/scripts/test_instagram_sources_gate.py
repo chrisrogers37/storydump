@@ -1,4 +1,4 @@
-"""Archive-only writers, exercised under the deployed database identities."""
+"""Past-posts-only writers, exercised under the deployed database identities."""
 
 import asyncio
 import uuid
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture(params=("svc_ingress", "svc_worker"))
-async def archive_engine(request, world_db, admin_conn):
+async def past_posts_engine(request, world_db, admin_conn):
     set_test_passwords(admin_conn)
     engine = create_async_engine(async_url(as_user(world_db, request.param)))
     try:
@@ -35,7 +35,7 @@ async def archive_engine(request, world_db, admin_conn):
 
 @pytest.fixture
 def origin(sync_conn):
-    chain = seed_workspace_chain(sync_conn, "archive-service")
+    chain = seed_workspace_chain(sync_conn, "past-posts-service")
     with sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO oauth_credentials (workspace_id, ig_account_id, provider, encrypted_payload)"
@@ -48,9 +48,9 @@ def origin(sync_conn):
 
 
 def authorization():
-    from src.services.target.instagram_sources import ArchiveAuthorization
+    from src.services.target.instagram_sources import PastPostsAuthorization
 
-    return ArchiveAuthorization(
+    return PastPostsAuthorization(
         str(uuid.uuid4()),
         "verified-app",
         "verified-subject",
@@ -59,18 +59,18 @@ def authorization():
 
 
 def capability():
-    from src.services.target.instagram_sources import ArchiveCapability
+    from src.services.target.instagram_sources import PastPostsCapability
 
-    return ArchiveCapability(enabled=True)
+    return PastPostsCapability(enabled=True)
 
 
 async def ensure(engine, origin, event=None, **kw):
-    from src.services.target.instagram_sources import ensure_archive_source
+    from src.services.target.instagram_sources import ensure_past_posts_source
 
     async with unit_of_work(
         engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
-        return await ensure_archive_source(
+        return await ensure_past_posts_source(
             conn,
             workspace_id=str(origin["ws"]),
             origin_ig_account_id=str(origin["iga"]),
@@ -147,7 +147,7 @@ async def switch(engine, origin, source_id, *, on):
             ig_account_ids=[str(origin["iga"])],
             source_ids=[source_id],
         )
-        before = await source_state.archive_state(
+        before = await source_state.past_posts_state(
             conn, workspace_id=ws, source_id=source_id
         )
         await conn.execute(
@@ -156,7 +156,7 @@ async def switch(engine, origin, source_id, *, on):
             ),
             {"ratio": 1 if on else 0, "id": source_id},
         )
-        return await source_state.apply_archive_transition(
+        return await source_state.apply_past_posts_transition(
             conn,
             workspace_id=ws,
             source_id=source_id,
@@ -165,42 +165,45 @@ async def switch(engine, origin, source_id, *, on):
         )
 
 
-async def test_default_feature_gate_refuses_before_any_creation(archive_engine, origin):
+async def test_default_feature_gate_refuses_before_any_creation(
+    past_posts_engine, origin
+):
     from src.services.target.instagram_sources import (
-        ArchiveRefused,
-        ensure_archive_source,
+        PastPostsRefused,
+        ensure_past_posts_source,
     )
 
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
-        with pytest.raises(ArchiveRefused) as refused:
-            await ensure_archive_source(
+        with pytest.raises(PastPostsRefused) as refused:
+            await ensure_past_posts_source(
                 conn,
                 workspace_id=str(origin["ws"]),
                 origin_ig_account_id=str(origin["iga"]),
             )
-        assert refused.value.reason == "archive_not_activated"
+        assert refused.value.reason == "past_posts_not_activated"
         assert (
             await conn.execute(
                 text(
-                    "SELECT count(*) FROM media_sources WHERE provider = 'instagram_archive'"
+                    "SELECT count(*) FROM media_sources WHERE provider = 'instagram_past_posts'"
                 )
             )
         ).scalar_one() == 0
 
 
 async def test_duplicate_callbacks_keep_one_source_generation_and_policy(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     event = authorization()
     results = await asyncio.gather(
-        ensure(archive_engine, origin, event), ensure(archive_engine, origin, event)
+        ensure(past_posts_engine, origin, event),
+        ensure(past_posts_engine, origin, event),
     )
     assert results[0]["source_id"] == results[1]["source_id"]
     assert results[0]["generation_id"] == results[1]["generation_id"]
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
         source = (
             (
@@ -227,7 +230,7 @@ async def test_duplicate_callbacks_keep_one_source_generation_and_policy(
         ).scalar_one() == 0
         assert (
             await conn.execute(
-                text("SELECT count(*) FROM instagram_archive_generations")
+                text("SELECT count(*) FROM instagram_past_posts_generations")
             )
         ).scalar_one() == 1
         assert (
@@ -236,19 +239,19 @@ async def test_duplicate_callbacks_keep_one_source_generation_and_policy(
 
 
 async def test_reauthorization_reuses_source_but_mints_new_generation(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await ensure(archive_engine, origin, authorization())
-    second = await ensure(archive_engine, origin, authorization())
+    first = await ensure(past_posts_engine, origin, authorization())
+    second = await ensure(past_posts_engine, origin, authorization())
     assert first["source_id"] == second["source_id"]
     assert first["generation_id"] != second["generation_id"]
     assert second["source_use_epoch"] == first["source_use_epoch"] + 1
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
         states = (
             await conn.execute(
-                text("SELECT id::text, lifecycle FROM instagram_archive_generations")
+                text("SELECT id::text, lifecycle FROM instagram_past_posts_generations")
             )
         ).all()
         assert dict(states) == {
@@ -258,41 +261,45 @@ async def test_reauthorization_reuses_source_but_mints_new_generation(
         assert (
             await conn.execute(
                 text(
-                    "SELECT count(DISTINCT credential_id) FROM instagram_archive_generations"
+                    "SELECT count(DISTINCT credential_id) FROM instagram_past_posts_generations"
                 )
             )
         ).scalar_one() == 1
 
 
 async def test_epoch_bumps_only_on_logical_changes_once_per_transaction(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     ws, sid = str(origin["ws"]), result["source_id"]
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, ig_account_ids=[str(origin["iga"])], source_ids=[sid]
         )
-        before = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        before = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         await conn.execute(
             text(
                 "UPDATE category_post_case_mix SET ratio = 1 WHERE source_id = :id AND effective_to IS NULL"
             ),
             {"id": sid},
         )
-        first = await source_state.apply_archive_transition(
+        first = await source_state.apply_past_posts_transition(
             conn, workspace_id=ws, source_id=sid, before=before, reason="enabled"
         )
-        enabled = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        enabled = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         await conn.execute(
             text(
                 "UPDATE category_post_case_mix SET ratio = 0.5 WHERE source_id = :id AND effective_to IS NULL"
             ),
             {"id": sid},
         )
-        same = await source_state.apply_archive_transition(
+        same = await source_state.apply_past_posts_transition(
             conn, workspace_id=ws, source_id=sid, before=enabled, reason="ratio_changed"
         )
         assert same == first
@@ -303,7 +310,7 @@ async def test_epoch_bumps_only_on_logical_changes_once_per_transaction(
             {"id": sid},
         )
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=enabled, reason="disabled"
             )
             == first
@@ -312,17 +319,19 @@ async def test_epoch_bumps_only_on_logical_changes_once_per_transaction(
 
 
 async def test_routine_payload_refresh_is_not_new_lineage_or_epoch(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     ws, sid = str(origin["ws"]), result["source_id"]
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, ig_account_ids=[str(origin["iga"])], source_ids=[sid]
         )
-        before = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        before = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         await conn.execute(
             text(
                 "UPDATE oauth_credentials SET encrypted_payload = 'refreshed' WHERE id = :id"
@@ -330,7 +339,7 @@ async def test_routine_payload_refresh_is_not_new_lineage_or_epoch(
             {"id": str(origin["credential"])},
         )
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=before, reason="refresh"
             )
             == result["source_use_epoch"]
@@ -338,23 +347,23 @@ async def test_routine_payload_refresh_is_not_new_lineage_or_epoch(
 
 
 async def test_a_change_that_makes_a_source_readable_arms_it_after_the_fence_was_minted(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     ws, sid = str(origin["ws"]), result["source_id"]
     # Born Off, so nothing is armed; turned On, so the first read is.
-    assert await clock_fields(archive_engine, origin, sid) == UNARMED
-    epoch = await switch(archive_engine, origin, sid, on=True)
+    assert await clock_fields(past_posts_engine, origin, sid) == UNARMED
+    epoch = await switch(past_posts_engine, origin, sid, on=True)
     assert epoch == result["source_use_epoch"] + 1
-    assert_armed(await clock_fields(archive_engine, origin, sid))
-    await stamp(archive_engine, origin, sid)
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    assert_armed(await clock_fields(past_posts_engine, origin, sid))
+    await stamp(past_posts_engine, origin, sid)
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, ig_account_ids=[str(origin["iga"])], source_ids=[sid]
         )
-        readable = await source_state.archive_state(
+        readable = await source_state.past_posts_state(
             conn, workspace_id=ws, source_id=sid
         )
         assert readable.readable
@@ -364,7 +373,7 @@ async def test_a_change_that_makes_a_source_readable_arms_it_after_the_fence_was
             text("UPDATE oauth_credentials SET state = 'expired' WHERE id = :id"),
             {"id": str(origin["credential"])},
         )
-        first = await source_state.apply_archive_transition(
+        first = await source_state.apply_past_posts_transition(
             conn,
             workspace_id=ws,
             source_id=sid,
@@ -375,13 +384,13 @@ async def test_a_change_that_makes_a_source_readable_arms_it_after_the_fence_was
         assert await read_clock(conn, sid) == UNTOUCHED
         # The same transaction reauthorizes it. The fence cannot move twice, but
         # the source is readable again, and that arms its first read all the same.
-        dead = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        dead = await source_state.past_posts_state(conn, workspace_id=ws, source_id=sid)
         assert not dead.readable
         await conn.execute(
             text("UPDATE oauth_credentials SET state = 'active' WHERE id = :id"),
             {"id": str(origin["credential"])},
         )
-        second = await source_state.apply_archive_transition(
+        second = await source_state.apply_past_posts_transition(
             conn, workspace_id=ws, source_id=sid, before=dead, reason="reauthorized"
         )
         assert second == first
@@ -397,17 +406,17 @@ async def test_a_change_that_makes_a_source_readable_arms_it_after_the_fence_was
     ],
     ids=["errored", "paused", "active"],
 )
-async def test_an_errored_archive_comes_back_active_when_it_is_switched_on(
-    archive_engine, origin, parked, state, reason
+async def test_an_errored_past_posts_comes_back_active_when_it_is_switched_on(
+    past_posts_engine, origin, parked, state, reason
 ):
-    """A persistent sync failure parks an archive in `error`, with the stamp and
+    """A persistent sync failure parks a past-posts source in `error`, with the stamp and
     the alert it leaves behind. Switched Off then On it is armed (its read is
     due), but admission needs `active`: an armed source nothing admits is never
     minted, so the switch must bring it back. A paused source is left exactly as
     it is, and the active one is the positive control: nothing else changes."""
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     ws, sid = str(origin["ws"]), result["source_id"]
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await conn.execute(
             text(
                 "UPDATE workspaces SET source_mix_mode='equal', source_mix_policy_version=1,"
@@ -424,10 +433,10 @@ async def test_an_errored_archive_comes_back_active_when_it_is_switched_on(
             ),
             {"state": parked, "at": STAMP, "alerted": ALERTED, "id": sid},
         )
-    await switch(archive_engine, origin, sid, on=True)
+    await switch(past_posts_engine, origin, sid, on=True)
     if parked != "paused":
-        assert_armed(await clock_fields(archive_engine, origin, sid))
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+        assert_armed(await clock_fields(past_posts_engine, origin, sid))
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         held = (
             await conn.execute(
                 text("SELECT state FROM media_sources WHERE id = :id"), {"id": sid}
@@ -450,19 +459,21 @@ async def test_an_errored_archive_comes_back_active_when_it_is_switched_on(
 
 
 async def test_a_routine_refresh_of_an_on_source_leaves_its_read_clock_alone(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     ws, sid = str(origin["ws"]), result["source_id"]
-    epoch = await switch(archive_engine, origin, sid, on=True)
-    await stamp(archive_engine, origin, sid)
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    epoch = await switch(past_posts_engine, origin, sid, on=True)
+    await stamp(past_posts_engine, origin, sid)
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, ig_account_ids=[str(origin["iga"])], source_ids=[sid]
         )
-        before = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        before = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         assert before.readable
         await conn.execute(
             text(
@@ -471,28 +482,28 @@ async def test_a_routine_refresh_of_an_on_source_leaves_its_read_clock_alone(
             {"id": str(origin["credential"])},
         )
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=before, reason="refresh"
             )
             == epoch
         )
-    assert await clock_fields(archive_engine, origin, sid) == UNTOUCHED
+    assert await clock_fields(past_posts_engine, origin, sid) == UNTOUCHED
     # The same stamp is not out of an arm's reach: a change of state replaces it.
-    await switch(archive_engine, origin, sid, on=False)
-    assert await clock_fields(archive_engine, origin, sid) == UNTOUCHED
-    await switch(archive_engine, origin, sid, on=True)
-    assert_armed(await clock_fields(archive_engine, origin, sid))
+    await switch(past_posts_engine, origin, sid, on=False)
+    assert await clock_fields(past_posts_engine, origin, sid) == UNTOUCHED
+    await switch(past_posts_engine, origin, sid, on=True)
+    assert_armed(await clock_fields(past_posts_engine, origin, sid))
 
 
-async def test_transition_requires_the_common_source_lock(archive_engine, origin):
+async def test_transition_requires_the_common_source_lock(past_posts_engine, origin):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
         with pytest.raises(RuntimeError, match="source_lock_required"):
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn,
                 workspace_id=str(origin["ws"]),
                 source_id=result["source_id"],
@@ -502,13 +513,13 @@ async def test_transition_requires_the_common_source_lock(archive_engine, origin
 
 
 async def test_lock_helper_rejects_new_account_after_source_lock(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import source_state
 
-    result = await ensure(archive_engine, origin, authorization())
+    result = await ensure(past_posts_engine, origin, authorization())
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=str(origin["ws"]), source_ids=[result["source_id"]]
@@ -523,9 +534,9 @@ async def test_lock_helper_rejects_new_account_after_source_lock(
 
 @pytest.mark.parametrize("state", ["expired", "revoked", "past_expiry"])
 async def test_unusable_origin_credential_cannot_start_a_generation(
-    archive_engine, origin, sync_conn, state
+    past_posts_engine, origin, sync_conn, state
 ):
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
     with sync_conn.cursor() as cur:
         if state == "past_expiry":
@@ -539,12 +550,12 @@ async def test_unusable_origin_credential_cannot_start_a_generation(
                 (state, origin["credential"]),
             )
     sync_conn.commit()
-    with pytest.raises(ArchiveRefused) as refused:
-        await ensure(archive_engine, origin, authorization())
-    assert refused.value.reason == "archive_credential_unavailable"
+    with pytest.raises(PastPostsRefused) as refused:
+        await ensure(past_posts_engine, origin, authorization())
+    assert refused.value.reason == "past_posts_credential_unavailable"
     with sync_conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM media_sources WHERE provider = 'instagram_archive'"
+            "SELECT count(*) FROM media_sources WHERE provider = 'instagram_past_posts'"
         )
         assert cur.fetchone()[0] == 0
 
@@ -553,11 +564,11 @@ async def test_unusable_origin_credential_cannot_start_a_generation(
     "credential_state", ["missing", "revoked", "expired", "past_expiry"]
 )
 async def test_caught_credential_refusal_cannot_commit_partial_source(
-    archive_engine, origin, sync_conn, credential_state
+    past_posts_engine, origin, sync_conn, credential_state
 ):
     from src.services.target.instagram_sources import (
-        ArchiveRefused,
-        ensure_archive_source,
+        PastPostsRefused,
+        ensure_past_posts_source,
     )
 
     with sync_conn.cursor() as cur:
@@ -578,10 +589,10 @@ async def test_caught_credential_refusal_cannot_commit_partial_source(
     sync_conn.commit()
     event = authorization()
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
-        with pytest.raises(ArchiveRefused, match="archive_credential_unavailable"):
-            await ensure_archive_source(
+        with pytest.raises(PastPostsRefused, match="past_posts_credential_unavailable"):
+            await ensure_past_posts_source(
                 conn,
                 workspace_id=str(origin["ws"]),
                 origin_ig_account_id=str(origin["iga"]),
@@ -608,7 +619,7 @@ async def test_caught_credential_refusal_cannot_commit_partial_source(
             "category_post_case_mix",
         ):
             where = (
-                " AND provider = 'instagram_archive'"
+                " AND provider = 'instagram_past_posts'"
                 if table == "media_sources"
                 else ""
             )
@@ -628,7 +639,7 @@ async def test_caught_credential_refusal_cannot_commit_partial_source(
                 (origin["credential"],),
             )
     sync_conn.commit()
-    result = await ensure(archive_engine, origin, event)
+    result = await ensure(past_posts_engine, origin, event)
     assert result["created"] is True
     with sync_conn.cursor() as cur:
         for table in (
@@ -644,12 +655,12 @@ async def test_caught_credential_refusal_cannot_commit_partial_source(
 
 
 async def test_refused_provisioning_does_not_retain_rolled_back_source_locks(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     from src.services.target import source_state
     from src.services.target.instagram_sources import (
-        ArchiveRefused,
-        ensure_archive_source,
+        PastPostsRefused,
+        ensure_past_posts_source,
     )
 
     with sync_conn.cursor() as cur:
@@ -664,10 +675,10 @@ async def test_refused_provisioning_does_not_retain_rolled_back_source_locks(
         other = str(cur.fetchone()[0])
     sync_conn.commit()
     async with unit_of_work(
-        archive_engine, str(origin["ws"]), actor_kind="system"
+        past_posts_engine, str(origin["ws"]), actor_kind="system"
     ).begin() as conn:
-        with pytest.raises(ArchiveRefused):
-            await ensure_archive_source(
+        with pytest.raises(PastPostsRefused):
+            await ensure_past_posts_source(
                 conn,
                 workspace_id=str(origin["ws"]),
                 origin_ig_account_id=str(origin["iga"]),
@@ -681,12 +692,12 @@ async def test_refused_provisioning_does_not_retain_rolled_back_source_locks(
 
 
 async def test_refused_provisioning_preserves_outer_writes_and_locks(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     from src.services.target import source_state
     from src.services.target.instagram_sources import (
-        ArchiveRefused,
-        ensure_archive_source,
+        PastPostsRefused,
+        ensure_past_posts_source,
     )
 
     with sync_conn.cursor() as cur:
@@ -696,7 +707,7 @@ async def test_refused_provisioning_preserves_outer_writes_and_locks(
         )
     sync_conn.commit()
     ws, account, source = map(str, (origin["ws"], origin["iga"], origin["src"]))
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, ig_account_ids=[account], source_ids=[source]
         )
@@ -706,8 +717,8 @@ async def test_refused_provisioning_preserves_outer_writes_and_locks(
             ),
             {"sid": source},
         )
-        with pytest.raises(ArchiveRefused):
-            await ensure_archive_source(
+        with pytest.raises(PastPostsRefused):
+            await ensure_past_posts_source(
                 conn,
                 workspace_id=ws,
                 origin_ig_account_id=account,
@@ -718,7 +729,7 @@ async def test_refused_provisioning_preserves_outer_writes_and_locks(
         assert (
             await conn.execute(
                 text(
-                    "SELECT count(*) FROM media_sources WHERE provider = 'instagram_archive'"
+                    "SELECT count(*) FROM media_sources WHERE provider = 'instagram_past_posts'"
                 )
             )
         ).scalar_one() == 0
@@ -731,19 +742,19 @@ async def test_refused_provisioning_preserves_outer_writes_and_locks(
 
 @pytest.mark.parametrize("actor_mode", ["unset", "empty"])
 async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_retry(
-    archive_engine, origin, actor_mode
+    past_posts_engine, origin, actor_mode
 ):
     from sqlalchemy.exc import DBAPIError
     from src.services.target import source_state
     from src.services.target.unit_of_work import apply_gucs
 
-    source = await ensure(archive_engine, origin, authorization())
+    source = await ensure(past_posts_engine, origin, authorization())
     # A new pool proves the genuinely unset GUC case; recycled sessions may
     # expose an empty setting after a previous SET LOCAL transaction.
     engine = (
-        create_async_engine(archive_engine.url)
+        create_async_engine(past_posts_engine.url)
         if actor_mode == "unset"
-        else archive_engine
+        else past_posts_engine
     )
     ws, sid = str(origin["ws"]), source["source_id"]
     try:
@@ -767,7 +778,7 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
                     await source_state.lock_workspace_sources(
                         conn, workspace_id=ws, source_ids=[sid]
                     )
-                    before = await source_state.archive_state(
+                    before = await source_state.past_posts_state(
                         conn, workspace_id=ws, source_id=sid
                     )
                     await conn.execute(
@@ -776,7 +787,7 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
                         ),
                         {"sid": sid},
                     )
-                    await source_state.apply_archive_transition(
+                    await source_state.apply_past_posts_transition(
                         conn,
                         workspace_id=ws,
                         source_id=sid,
@@ -828,7 +839,7 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
                 await source_state.lock_workspace_sources(
                     conn, workspace_id=ws, source_ids=[sid]
                 )
-                before = await source_state.archive_state(
+                before = await source_state.past_posts_state(
                     conn, workspace_id=ws, source_id=sid
                 )
                 await conn.execute(
@@ -837,7 +848,7 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
                     ),
                     {"sid": sid},
                 )
-                epoch = await source_state.apply_archive_transition(
+                epoch = await source_state.apply_past_posts_transition(
                     conn,
                     workspace_id=ws,
                     source_id=sid,
@@ -846,7 +857,7 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
                 )
                 assert epoch == source["source_use_epoch"] + 1
                 assert (
-                    await source_state.apply_archive_transition(
+                    await source_state.apply_past_posts_transition(
                         conn,
                         workspace_id=ws,
                         source_id=sid,
@@ -899,11 +910,11 @@ async def test_source_epoch_missing_actor_refuses_and_savepoint_rolls_back_for_r
 
 
 async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_states_once(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     from src.services.target import audit, source_state
 
-    source = await ensure(archive_engine, origin, authorization())
+    source = await ensure(past_posts_engine, origin, authorization())
     original, calls = audit.record, []
 
     async def observed(executor, **kw):
@@ -913,7 +924,7 @@ async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_state
     monkeypatch.setattr(audit, "record", observed)
     ws, sid = str(origin["ws"]), source["source_id"]
     async with unit_of_work(
-        archive_engine,
+        past_posts_engine,
         ws,
         actor_kind="user",
         actor_user_id=str(origin["user"]),
@@ -922,7 +933,9 @@ async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_state
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, source_ids=[sid]
         )
-        before = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        before = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         count = (
             await conn.execute(
                 text(
@@ -934,17 +947,17 @@ async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_state
             text("UPDATE category_post_case_mix SET ratio=1 WHERE source_id=:sid"),
             {"sid": sid},
         )
-        epoch = await source_state.apply_archive_transition(
+        epoch = await source_state.apply_past_posts_transition(
             conn, workspace_id=ws, source_id=sid, before=before, reason="enabled"
         )
         # Repeating, then changing the logical state again, still audits once.
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=before, reason="enabled"
             )
             == epoch
         )
-        enabled_state = await source_state.archive_state(
+        enabled_state = await source_state.past_posts_state(
             conn, workspace_id=ws, source_id=sid
         )
         await conn.execute(
@@ -952,7 +965,7 @@ async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_state
             {"sid": sid},
         )
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=enabled_state, reason="off"
             )
             == epoch
@@ -995,13 +1008,15 @@ async def test_epoch_audit_uses_shared_writer_and_preserves_actor_and_null_state
                 )
             )
         ).scalar_one() == count + 1
-    async with unit_of_work(archive_engine, ws, actor_kind="system").begin() as conn:
+    async with unit_of_work(past_posts_engine, ws, actor_kind="system").begin() as conn:
         await source_state.lock_workspace_sources(
             conn, workspace_id=ws, source_ids=[sid]
         )
-        before = await source_state.archive_state(conn, workspace_id=ws, source_id=sid)
+        before = await source_state.past_posts_state(
+            conn, workspace_id=ws, source_id=sid
+        )
         assert (
-            await source_state.apply_archive_transition(
+            await source_state.apply_past_posts_transition(
                 conn, workspace_id=ws, source_id=sid, before=before, reason="unchanged"
             )
             == epoch

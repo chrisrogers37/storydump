@@ -33,7 +33,7 @@ def release_run(release_sha) -> tuple[str, str]:
     """`(run_id, digest)` for *release_sha*: one run per deployed commit.
 
     The shapes are the ones `fn_mix_conversion_jobs` and
-    `fn_archive_reconcile_jobs` accept. A process with no usable commit (a
+    `fn_past_posts_reconcile_jobs` accept. A process with no usable commit (a
     local run, a test) is `release-local`."""
     sha = release_sha.strip().lower() if isinstance(release_sha, str) else ""
     if _SHA.fullmatch(sha) is None:

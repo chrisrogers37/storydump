@@ -1,4 +1,4 @@
-"""Archive upload ownership and atomic stage/permit provenance.
+"""Past-posts upload ownership and atomic stage/permit provenance.
 
 Selected bytes are input only. Every media authorization comes from the shared
 strict database relation under its canonical outer prefix. Completion owns only
@@ -18,13 +18,13 @@ from sqlalchemy import text
 from src.exceptions import StorydumpError
 from src.services.target import audit, instagram_artifacts, jobs, readers, source_policy
 from src.services.target import source_read_admission as admission
-from src.services.target.transit import ArchiveUploadUncertain
+from src.services.target.transit import PastPostsUploadUncertain
 from src.services.target.unit_of_work import unit_of_work
 
 logger = logging.getLogger(__name__)
 
 
-class ArchiveEffectRefused(StorydumpError):
+class PastPostsEffectRefused(StorydumpError):
     def __init__(self, reason):
         self.reason = reason
         super().__init__(reason)
@@ -49,7 +49,7 @@ async def lock_pipeline(
         "pol.revision AS policy_revision "
         "FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id "
         "JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id "
-        "LEFT JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id AND g.id=s.current_authorization_generation_id "
+        "LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.id=s.current_authorization_generation_id "
         "LEFT JOIN instagram_media_assets a ON a.workspace_id=m.workspace_id AND a.source_id=m.source_id AND a.media_item_id=m.id "
         "LEFT JOIN instagram_media_index x ON x.workspace_id=a.workspace_id AND x.source_id=a.source_id AND x.parent_media_id=a.parent_media_id AND x.data_generation_id=a.data_generation_id AND x.observation_revision=a.observation_revision "
         "LEFT JOIN instagram_source_policies pol ON pol.workspace_id=s.workspace_id AND pol.source_id=s.id "
@@ -57,7 +57,7 @@ async def lock_pipeline(
         ws=ws,
         id=iid,
     )
-    if subject is not None and subject["provider"] == "instagram_archive":
+    if subject is not None and subject["provider"] == "instagram_past_posts":
         subject["provenance"] = await readers.row(
             conn,
             "SELECT * FROM instagram_intent_provenance WHERE workspace_id=:ws AND intent_id=:id FOR UPDATE",
@@ -100,34 +100,34 @@ async def authorize(
     )
     if (
         subject is None
-        or subject["provider"] != "instagram_archive"
+        or subject["provider"] != "instagram_past_posts"
         or subject["cancel_requested"]
     ):
-        raise ArchiveEffectRefused("archive_content_unavailable")
+        raise PastPostsEffectRefused("past_posts_content_unavailable")
     if require_validation and subject["state"] not in ("approved", "publishing"):
-        raise ArchiveEffectRefused("archive_content_unavailable")
+        raise PastPostsEffectRefused("past_posts_content_unavailable")
     if staged and subject["state"] != "publishing":
-        raise ArchiveEffectRefused("archive_content_unavailable")
+        raise PastPostsEffectRefused("past_posts_content_unavailable")
     p = subject.get("provenance")
     if p is None:
-        raise ArchiveEffectRefused("archive_revalidation_required")
+        raise PastPostsEffectRefused("past_posts_revalidation_required")
     if subject["current_asset"] is None:
-        raise ArchiveEffectRefused(
-            "archive_content_unavailable"
+        raise PastPostsEffectRefused(
+            "past_posts_content_unavailable"
             if subject["media_item_state"] == "removed"
-            else "archive_revalidation_required"
+            else "past_posts_revalidation_required"
         )
     if p["selected_asset_identity"] != subject["current_asset"]:
-        raise ArchiveEffectRefused("archive_revalidation_required")
+        raise PastPostsEffectRefused("past_posts_revalidation_required")
     if p["staged_generation_id"] is not None:
         lifecycle = await readers.row(
             conn,
-            "SELECT lifecycle FROM instagram_archive_generations WHERE workspace_id=:ws AND id=:id",
+            "SELECT lifecycle FROM instagram_past_posts_generations WHERE workspace_id=:ws AND id=:id",
             ws=str(workspace_id),
             id=str(p["staged_generation_id"]),
         )
         if lifecycle is None or lifecycle["lifecycle"] != "active":
-            raise ArchiveEffectRefused("archive_generation_deleted")
+            raise PastPostsEffectRefused("past_posts_generation_deleted")
     verdict = await source_policy.intent_suitability(
         conn,
         workspace_id=str(workspace_id),
@@ -136,26 +136,26 @@ async def authorize(
         require_validation=require_validation,
     )
     if verdict is None or not verdict["suitable"]:
-        reason = verdict["reason"] if verdict else "archive_content_unavailable"
+        reason = verdict["reason"] if verdict else "past_posts_content_unavailable"
         if reason == "selected_asset_changed":
-            reason = "archive_content_changed"
-        elif reason in ("archive_revalidation_required", "validation_pending"):
-            reason = "archive_revalidation_required"
+            reason = "past_posts_content_changed"
+        elif reason in ("past_posts_revalidation_required", "validation_pending"):
+            reason = "past_posts_revalidation_required"
         elif reason not in (
             "source_off",
-            "archive_generation_deleted",
-            "archive_content_unavailable",
-            "archive_content_changed",
+            "past_posts_generation_deleted",
+            "past_posts_content_unavailable",
+            "past_posts_content_changed",
         ):
             reason = "source_policy_ineligible"
-        raise ArchiveEffectRefused(reason)
+        raise PastPostsEffectRefused(reason)
     if staged and (
         p["transit_artifact_ref"] is None
         or str(p["staged_generation_id"])
         != str(subject["current_authorization_generation_id"])
         or p["staged_observation_revision"] != subject["observation_revision"]
     ):
-        raise ArchiveEffectRefused("archive_revalidation_required")
+        raise PastPostsEffectRefused("past_posts_revalidation_required")
     if staged:
         artifact = await readers.row(
             conn,
@@ -170,7 +170,7 @@ async def authorize(
             or artifact["creation_evidence"] is None
             or artifact["created_asset_ref"] != subject["transit_asset_ref"]
         ):
-            raise ArchiveEffectRefused("archive_revalidation_required")
+            raise PastPostsEffectRefused("past_posts_revalidation_required")
         subject["_stage_artifact"] = artifact
     if require_validation and (
         p["capture_epoch"] != subject["source_use_epoch"]
@@ -197,7 +197,7 @@ async def authorize(
             to_state=None,
             actor_sql=audit.ACTOR_SYSTEM_CHANNEL,
             detail=dict(
-                reason="archive_authorization_renewed",
+                reason="past_posts_authorization_renewed",
                 capture_epoch=subject["source_use_epoch"],
                 policy_revision=subject["policy_revision"],
             ),
@@ -255,10 +255,10 @@ async def _write_stage(conn, *, workspace_id, intent_id, subject, artifact):
         ),
     )
     if moved.first() is None:
-        raise ArchiveEffectRefused("archive_content_unavailable")
+        raise PastPostsEffectRefused("past_posts_content_unavailable")
 
 
-class ArchivePipeline:
+class PastPostsPipeline:
     def __init__(self, *, capability, fetch_selected, prepare_selected=None):
         self.capability, self.fetch_selected = capability, fetch_selected
         self.prepare_selected = prepare_selected
@@ -274,7 +274,7 @@ class ArchivePipeline:
         subjects cannot acquire a new review transition. Selection stays immutable.
         """
         if self.prepare_selected is None:
-            raise ArchiveEffectRefused("archive_pipeline_not_configured")
+            raise PastPostsEffectRefused("past_posts_pipeline_not_configured")
         ws, iid = str(workspace_id), str(intent_id)
         # Fence the whole delegated turn, including typed failures. A later
         # current capture cannot turn an old content refusal into new evidence.
@@ -324,9 +324,9 @@ class ArchivePipeline:
             ):
                 raise
             reason = (
-                "archive_content_changed"
+                "past_posts_content_changed"
                 if exc.reason == "selected_asset_changed"
-                else "archive_content_unavailable"
+                else "past_posts_content_unavailable"
             )
             from src.services.target import audit, publish_pipeline
 
@@ -362,11 +362,11 @@ class ArchivePipeline:
                     )
                 ):
                     raise source_policy.MediaAdmissionPending(
-                        "archive_revalidation_required"
+                        "past_posts_revalidation_required"
                     ) from None
                 if (
                     subject is None
-                    or subject["provider"] != "instagram_archive"
+                    or subject["provider"] != "instagram_past_posts"
                     or str(subject["source_id"]) != capture.source_id
                     or subject["state"]
                     not in ("scheduled", "prompt_pending", "awaiting_approval")
@@ -385,7 +385,7 @@ class ArchivePipeline:
                             {
                                 "v": 1,
                                 "error": {
-                                    "type": "ArchiveEffectRefused",
+                                    "type": "PastPostsEffectRefused",
                                     "reason": reason,
                                     "message": reason,
                                 },
@@ -412,7 +412,7 @@ class ArchivePipeline:
                     intent_id=iid,
                     from_state=state,
                     tz=str(tz or "UTC"),
-                    notice="This archive story's selected content is unavailable or changed. Open the Queue to review it.",
+                    notice="This story from your Instagram past posts has selected content that is unavailable or changed. Open the Queue to review it.",
                 )
 
     async def _inspect(self, conn, ws, iid, *, capture=None):
@@ -430,7 +430,7 @@ class ArchivePipeline:
             id=iid,
         )
         if any(a["outcome"] in ("unsettled", "uncertain") for a in attempts):
-            raise ArchiveEffectRefused("archive_upload_uncertain")
+            raise PastPostsEffectRefused("past_posts_upload_uncertain")
         pending = await readers.row(
             conn,
             "SELECT id FROM provider_operations WHERE workspace_id=:ws AND intent_id=:id AND (state='permitted' OR (op_kind='publish' AND state='succeeded')) LIMIT 1",
@@ -438,7 +438,7 @@ class ArchivePipeline:
             id=iid,
         )
         if pending is not None:
-            raise ArchiveEffectRefused("archive_operation_unresolved")
+            raise PastPostsEffectRefused("past_posts_operation_unresolved")
         return locked, attempts
 
     async def stage(self, *, engine, job, intent_id, transit):
@@ -446,7 +446,7 @@ class ArchivePipeline:
         async with self._uow(engine, ws).begin() as conn:
             locked, attempts = await self._inspect(conn, ws, iid)
             if locked[0] is None or locked[0]["state"] != "publishing":
-                raise ArchiveEffectRefused("archive_content_unavailable")
+                raise PastPostsEffectRefused("past_posts_content_unavailable")
             subject = await authorize(
                 conn,
                 workspace_id=ws,
@@ -503,7 +503,7 @@ class ArchivePipeline:
                 or p["selected_asset_identity"] != v.selected_asset_id
                 or p["validation_fingerprint"] != v.fingerprint
             ):
-                raise ArchiveEffectRefused("archive_revalidation_required")
+                raise PastPostsEffectRefused("past_posts_revalidation_required")
             ref = "ws/" + ws + "/" + uuid.uuid4().hex
             artifact_ref = await instagram_artifacts.admit_upload(
                 conn,
@@ -559,7 +559,7 @@ class ArchivePipeline:
                 or p["validation_fingerprint"] != selected.validation.fingerprint
                 or artifact["created_asset_ref"] != evidence.public_id
             ):
-                raise ArchiveEffectRefused("archive_revalidation_required")
+                raise PastPostsEffectRefused("past_posts_revalidation_required")
             await _write_stage(
                 conn, workspace_id=ws, intent_id=iid, subject=subject, artifact=artifact
             )
@@ -586,8 +586,8 @@ class ArchivePipeline:
                 await instagram_artifacts.mark_uncertain(
                     conn, workspace_id=ws, artifact_ref=artifact_ref
                 )
-            if isinstance(exc, ArchiveUploadUncertain):
-                raise ArchiveEffectRefused("archive_upload_uncertain") from None
+            if isinstance(exc, PastPostsUploadUncertain):
+                raise PastPostsEffectRefused("past_posts_upload_uncertain") from None
             raise
         async with self._uow(engine, ws).begin() as conn:
             await lock_pipeline(
@@ -623,7 +623,7 @@ class ArchivePipeline:
                 id=iid,
             )
             if pending is not None:
-                raise ArchiveEffectRefused("archive_operation_unresolved")
+                raise PastPostsEffectRefused("past_posts_operation_unresolved")
             if subject is None or subject["state"] in (
                 "posted",
                 "failed",
@@ -633,7 +633,7 @@ class ArchivePipeline:
                 "rejected",
                 "publishing_ambiguous",
             ):
-                raise ArchiveEffectRefused("archive_content_unavailable")
+                raise PastPostsEffectRefused("past_posts_content_unavailable")
             p = subject.get("provenance")
             if p is None or p["transit_artifact_ref"] is None:
                 return False
@@ -663,10 +663,13 @@ class ArchivePipeline:
                 await authorize(conn, workspace_id=ws, intent_id=iid, locked=locked)
                 await jobs.assert_lease(conn, job["id"], job["lease_token"])
                 return
-        except ArchiveEffectRefused as exc:
+        except PastPostsEffectRefused as exc:
             if (
                 exc.reason
-                not in ("archive_revalidation_required", "archive_generation_deleted")
+                not in (
+                    "past_posts_revalidation_required",
+                    "past_posts_generation_deleted",
+                )
                 or not allow_fetch
             ):
                 raise
@@ -686,7 +689,7 @@ class ArchivePipeline:
             locked, _ = await self._inspect(conn, ws, iid)
             subject, _ = locked
             if subject is None:
-                raise ArchiveEffectRefused("archive_content_unavailable")
+                raise PastPostsEffectRefused("past_posts_content_unavailable")
             if subject["publish_step"] != "none":
                 try:
                     await authorize(
@@ -694,10 +697,10 @@ class ArchivePipeline:
                     )
                     await jobs.assert_lease(conn, job["id"], job["lease_token"])
                     return
-                except ArchiveEffectRefused as exc:
+                except PastPostsEffectRefused as exc:
                     if exc.reason not in (
-                        "archive_revalidation_required",
-                        "archive_generation_deleted",
+                        "past_posts_revalidation_required",
+                        "past_posts_generation_deleted",
                     ):
                         raise
                     needs_release = True
@@ -727,7 +730,8 @@ class ArchivePipeline:
                 )
             except Exception as exc:
                 logger.warning(
-                    "archive owned cleanup remains pending (%s)", type(exc).__name__
+                    "past-posts source owned cleanup remains pending (%s)",
+                    type(exc).__name__,
                 )
         # Legacy bool destroy merges 'ok' and 'not found'. It proves neither
         # pending-transmission drain nor eager derivative completion; do not

@@ -205,20 +205,20 @@ def _card_for(row, *, intent_id: str, note: Optional[str] = None) -> dict:
         api_publishing_enabled=bool(row.get("api_publishing_enabled")),
         note=note,
     )
-    if row.get("source_provider") == "instagram_archive" and "media" in card:
+    if row.get("source_provider") == "instagram_past_posts" and "media" in card:
         if (
             row.get("state") == "review_required"
             or row.get("state") in intent_ledger.TERMINAL_STATES
         ):
-            # Reviews/terminal outcomes never request replacement archive bytes.
+            # Reviews/terminal outcomes never request replacement past-posts bytes.
             card.pop("media", None)
             card.pop("caption", None)
             if row.get("state") in intent_ledger.TERMINAL_STATES:
                 card.pop("reply_markup", None)
         else:
-            # An archive card's bytes are the server-selected intent's, never a
+            # A past-posts card's bytes are the server-selected intent's, never a
             # stored reference (`worker._card_media_fetch`): the block names the
-            # intent and leaves out `ref`, which for an archive item is the Graph id.
+            # intent and leaves out `ref`, which for a past-posts item is the Graph id.
             card["media"].pop("ref", None)
             card["media"]["intent_id"] = str(intent_id)
     return card

@@ -1,6 +1,6 @@
-"""Versioned persisted archive policy and trusted suitability query context.
+"""Versioned persisted past-posts policy and trusted suitability query context.
 
-No provider calls or production archive composition. Policy changes are resources,
+No provider calls or production past-posts composition. Policy changes are resources,
 not posting commands. Suitability is a database relation; this module supplies its
 internal time/TTL/activation context under the canonical transaction locks.
 """
@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from src.exceptions import StorydumpError
 from src.services.target import audit, intent_ledger, readers, source_state
-from src.services.target.instagram_sources import ArchiveCapability, is_activated
+from src.services.target.instagram_sources import PastPostsCapability, is_activated
 
 # Reader compatibility, distinct from the schema's future-extensible positive versions.
 SUPPORTED_MIX_VERSIONS = (1, 1)  # (policy version, conversion version)
@@ -46,7 +46,7 @@ REASONS = (
     "invalid_source_policy",
     "source_not_found",
     "unsupported_source_provider",
-    "archive_not_activated",
+    "past_posts_not_activated",
 )
 
 
@@ -179,10 +179,10 @@ async def _lock_policy(executor, ws, sid, capability):
     )
     if source is None:
         raise PolicyRefused("source_not_found")
-    if source["provider"] != "instagram_archive":
+    if source["provider"] != "instagram_past_posts":
         raise PolicyRefused("unsupported_source_provider")
     if not is_activated(capability):
-        raise PolicyRefused("archive_not_activated")
+        raise PolicyRefused("past_posts_not_activated")
     await source_state.lock_workspace_sources(
         executor,
         workspace_id=ws,
@@ -207,7 +207,7 @@ async def get_policy(
     *,
     workspace_id: str,
     source_id: str,
-    capability: ArchiveCapability | None = None,
+    capability: PastPostsCapability | None = None,
 ) -> dict:
     ws, sid = str(workspace_id), str(source_id)
     saved = await _lock_policy(executor, ws, sid, capability)
@@ -220,7 +220,7 @@ async def put_policy(
     workspace_id: str,
     source_id: str,
     body: dict,
-    capability: ArchiveCapability | None = None,
+    capability: PastPostsCapability | None = None,
 ) -> dict:
     values = validate_update(body)
     ws, sid = str(workspace_id), str(source_id)
@@ -272,7 +272,7 @@ class SuitabilityContext:
     workspace_id: str
     resolved_repost_ttl_days: int
     evaluated_at: datetime
-    archive_enabled: bool
+    past_posts_enabled: bool
     transaction: object = field(default=None, repr=False, compare=False)
     nested_transaction: object = field(default=None, repr=False, compare=False)
 
@@ -281,7 +281,7 @@ class SuitabilityContext:
             ws=self.workspace_id,
             ttl=self.resolved_repost_ttl_days,
             at=self.evaluated_at,
-            activated=self.archive_enabled,
+            activated=self.past_posts_enabled,
         )
 
 
@@ -290,7 +290,7 @@ async def suitability_context(
     *,
     workspace_id: str,
     ig_account_ids=(),
-    capability: ArchiveCapability | None = None,
+    capability: PastPostsCapability | None = None,
 ) -> SuitabilityContext:
     ws = str(workspace_id)
     await source_state.lock_all_workspace_sources(
@@ -298,13 +298,13 @@ async def suitability_context(
     )
     await executor.execute(
         text(
-            "SELECT c.id FROM oauth_credentials c JOIN instagram_archive_generations g ON g.workspace_id=c.workspace_id AND g.credential_id=c.id JOIN media_sources s ON s.workspace_id=g.workspace_id AND s.id=g.source_id AND s.current_authorization_generation_id=g.id WHERE s.workspace_id=:ws ORDER BY c.id FOR UPDATE OF c"
+            "SELECT c.id FROM oauth_credentials c JOIN instagram_past_posts_generations g ON g.workspace_id=c.workspace_id AND g.credential_id=c.id JOIN media_sources s ON s.workspace_id=g.workspace_id AND s.id=g.source_id AND s.current_authorization_generation_id=g.id WHERE s.workspace_id=:ws ORDER BY c.id FOR UPDATE OF c"
         ),
         {"ws": ws},
     )
     await executor.execute(
         text(
-            "SELECT g.id FROM instagram_archive_generations g JOIN media_sources s ON s.workspace_id=g.workspace_id AND s.id=g.source_id AND s.current_authorization_generation_id=g.id WHERE s.workspace_id=:ws ORDER BY g.id FOR UPDATE OF g"
+            "SELECT g.id FROM instagram_past_posts_generations g JOIN media_sources s ON s.workspace_id=g.workspace_id AND s.id=g.source_id AND s.current_authorization_generation_id=g.id WHERE s.workspace_id=:ws ORDER BY g.id FOR UPDATE OF g"
         ),
         {"ws": ws},
     )
@@ -312,16 +312,16 @@ async def suitability_context(
 
 
 async def unlocked_context(
-    executor, *, workspace_id: str, capability: ArchiveCapability | None = None
+    executor, *, workspace_id: str, capability: PastPostsCapability | None = None
 ) -> SuitabilityContext:
     """A context with no lock taken, for DISPLAYING a workspace that has not
-    converted: its legacy pool reads no archive fact and none of the binds, so
+    converted: its legacy pool reads no past-posts fact and none of the binds, so
     there is nothing for the prefix to protect, and a page load need not
     row-lock what the worker writes (`versioned_mix.resource` reads its state
-    first for the same reason). It refuses a workspace whose archive is live,
+    first for the same reason). It refuses a workspace whose past-posts source is live,
     whose facts are only one view under the prefix (:func:`suitability_context`)."""
     context = await _read_context(executor, str(workspace_id), capability)
-    if context.archive_enabled:
+    if context.past_posts_enabled:
         raise RuntimeError("unlocked_context_for_an_activated_workspace")
     return context
 
@@ -338,7 +338,7 @@ async def _read_context(executor, ws: str, capability) -> SuitabilityContext:
     if row is None:
         raise PolicyRefused("source_not_found")
     if capability is None:
-        capability = executor.info.get("archive_capability")
+        capability = executor.info.get("past_posts_capability")
     activated = is_activated(capability) and mix_supported(row)
     return SuitabilityContext(
         ws,
@@ -391,7 +391,7 @@ async def suitability(
     source_id: str | None = None,
     media_item_id: str | None = None,
     existing_intent_id: str | None = None,
-    capability: ArchiveCapability | None = None,
+    capability: PastPostsCapability | None = None,
     require_validation: bool = True,
     context: SuitabilityContext | None = None,
 ) -> list[dict]:

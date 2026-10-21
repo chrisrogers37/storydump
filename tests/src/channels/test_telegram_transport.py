@@ -1223,13 +1223,15 @@ class TestAFloodLimitIsPacedNotFailed:
 
 
 @pytest.mark.parametrize("attempts", [1, 3])
-async def test_selected_archive_no_send_never_falls_back_to_actionable_text(attempts):
+async def test_selected_past_posts_no_send_never_falls_back_to_actionable_text(
+    attempts,
+):
     from src.services.target.outbox import MediaAdmissionNotSent
 
     sent = []
 
     async def fetch(media):
-        raise MediaAdmissionNotSent("archive_revalidation_required")
+        raise MediaAdmissionNotSent("past_posts_revalidation_required")
 
     def handler(request):
         sent.append(request)
@@ -1243,7 +1245,7 @@ async def test_selected_archive_no_send_never_falls_back_to_actionable_text(atte
     assert sent == [] and transport.media_fetch_failures == 0
 
 
-async def test_archive_media_intent_mismatch_refuses_before_fetch_or_send():
+async def test_past_posts_media_intent_mismatch_refuses_before_fetch_or_send():
     from src.services.target.outbox import MediaAdmissionNotSent
 
     called = []
@@ -1270,14 +1272,16 @@ async def test_archive_media_intent_mismatch_refuses_before_fetch_or_send():
     assert called == []
 
 
-async def test_unexpected_archive_preparation_failure_is_no_send_and_counted(
+async def test_unexpected_past_posts_preparation_failure_is_no_send_and_counted(
     monkeypatch,
 ):
     from src import worker
     from src.services.target.outbox import MediaAdmissionNotSent
     from tests.src.services.target.test_media_adapters import _source_factory
 
-    _source_factory(monkeypatch, {"provider": "instagram_archive", "config": {"v": 1}})
+    _source_factory(
+        monkeypatch, {"provider": "instagram_past_posts", "config": {"v": 1}}
+    )
     sent = []
 
     async def selected(**kwargs):
@@ -1307,7 +1311,7 @@ async def test_unexpected_archive_preparation_failure_is_no_send_and_counted(
 
 
 @pytest.mark.parametrize("fault", ["foreign_workspace", "unsupported_kind", "no_fetch"])
-async def test_archive_card_setup_refusal_never_uses_actionable_text(fault):
+async def test_past_posts_card_setup_refusal_never_uses_actionable_text(fault):
     from src.services.target.outbox import MediaAdmissionNotSent
 
     sent = []

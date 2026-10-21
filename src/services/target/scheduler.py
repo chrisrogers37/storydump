@@ -174,7 +174,7 @@ async def tick(
             text(
                 "SELECT o_slot_jobs, o_refresh_jobs, o_sync_jobs, o_recurring_jobs"
                 + (
-                    ", archive_reauth_jobs AS o_reauth_jobs"
+                    ", past_posts_reauth_jobs AS o_reauth_jobs"
                     if activated
                     else ", o_reauth_jobs"
                 )
@@ -528,10 +528,10 @@ async def execute_reap_expired(
     carries that prefix into a later workspace. Cleanup does not authorize
     new media effects, so an Off source still receives terminal healing.
 
-    *capability* is the archive's activation. It reaches only the legs that
-    judge a sync job or re-arm its source: an expired archive sync is re-readied
+    *capability* is the past-posts source's activation. It reaches only the legs that
+    judge a sync job or re-arm its source: an expired past-posts sync is re-readied
     or ended by whether its source may still be read. Without it the
-    three-argument door runs, which answers as an inactive archive does.
+    three-argument door runs, which answers as an inactive past-posts source does.
     """
     from src.services.target import publish_pipeline, unit_of_work
     from src.services.target.instagram_sources import is_activated
@@ -699,8 +699,8 @@ class Clock:
         self._refresh_cadence_seconds = refresh_cadence_seconds
         self._recurring = recurring
         self._conversion_evidence = conversion_evidence
-        #: The archive's activation, handed to every tick; None keeps the
-        #: five-leg door an inactive archive gets.
+        #: The past-posts source's activation, handed to every tick; None keeps the
+        #: five-leg door an inactive past-posts source gets.
         self._capability = capability
         self.ticks = 0
         self.inserts = 0

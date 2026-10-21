@@ -1,4 +1,4 @@
-"""Archive bundle landing and scoped erasure through actual tenant roles."""
+"""Past-posts bundle landing and scoped erasure through actual tenant roles."""
 
 import uuid
 from dataclasses import replace
@@ -17,17 +17,20 @@ from tests.scripts.test_instagram_sources_gate import (
 from tests.scripts.conftest import seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
 def bundle(parent="123", **kw):
-    from src.services.target.instagram_catalog import ArchiveAsset, ArchiveObservation
+    from src.services.target.instagram_catalog import (
+        PastPostsAsset,
+        PastPostsObservation,
+    )
 
-    return ArchiveObservation(
+    return PastPostsObservation(
         parent_media_id=parent,
         original_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
-        assets=(ArchiveAsset(selected_asset_id=parent, media_kind="image"),),
+        assets=(PastPostsAsset(selected_asset_id=parent, media_kind="image"),),
         **kw,
     )
 
@@ -82,7 +85,7 @@ async def redact(engine, chain, source, ring=None):
     async with uow(engine, chain) as conn:
         await conn.execute(
             text(
-                "UPDATE instagram_archive_generations SET lifecycle = 'deletion_pending' WHERE id = :gid"
+                "UPDATE instagram_past_posts_generations SET lifecycle = 'deletion_pending' WHERE id = :gid"
             ),
             {"gid": source["generation_id"]},
         )
@@ -97,11 +100,11 @@ async def redact(engine, chain, source, ring=None):
 
 
 async def test_complete_replacement_clears_optional_fields_and_keeps_history(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
-    first = await enabled(archive_engine, origin)
+    first = await enabled(past_posts_engine, origin)
     observation = replace(
         bundle(
             permalink="https://www.instagram.com/p/abc/",
@@ -109,10 +112,10 @@ async def test_complete_replacement_clears_optional_fields_and_keeps_history(
             comments_count=3,
             attribution="credited",
         ),
-        assets=(ArchiveAsset("123", "video", "video/mp4", 99),),
+        assets=(PastPostsAsset("123", "video", "video/mp4", 99),),
     )
-    landed = await observe(archive_engine, origin, first, observation)
-    async with uow(archive_engine, origin) as conn:
+    landed = await observe(past_posts_engine, origin, first, observation)
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE media_items SET times_posted = 4, last_posted_at = now() WHERE id = :id"
@@ -130,11 +133,11 @@ async def test_complete_replacement_clears_optional_fields_and_keeps_history(
                 "UPDATE instagram_media_assets SET validation_state='supported', validation_generation_id=data_generation_id, validation_observation_revision=observation_revision, validation_fingerprint='checked', validated_at=now()"
             )
         )
-    second = await ensure(archive_engine, origin, authorization())
-    landed2 = await observe(archive_engine, origin, second, bundle())
+    second = await ensure(past_posts_engine, origin, authorization())
+    landed2 = await observe(past_posts_engine, origin, second, bundle())
     assert landed2.media_item_id == landed.media_item_id
     assert landed2.observation_revision == 2
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         index = await row(conn, "SELECT * FROM instagram_media_index")
         assert str(index["data_generation_id"]) == second["generation_id"]
         assert index["attribution"] == "unknown"
@@ -172,24 +175,24 @@ async def test_complete_replacement_clears_optional_fields_and_keeps_history(
                 {"id": landed.media_item_id},
             )
         ).scalar_one() == 1
-    cleanup = await redact(archive_engine, origin, first)
+    cleanup = await redact(past_posts_engine, origin, first)
     assert cleanup.observations_deleted == 0 and cleanup.items_redacted == 0
 
 
-async def test_an_archive_item_is_stored_under_a_neutral_name_never_its_graph_id(
-    archive_engine, origin
+async def test_a_past_posts_item_is_stored_under_a_neutral_name_never_its_graph_id(
+    past_posts_engine, origin
 ):
     """The stored name is what the Telegram card and the missed-story notice say,
-    so an archive post is named for where it came from, not by Instagram's id
+    so a past-posts post is named for where it came from, not by Instagram's id
     (`provider_file_ref` keeps the id). Landing names it so, and a landing over a
     row stored as `Instagram <Graph id>` renames it."""
     from src.services.target import vocabulary
 
-    first = await enabled(archive_engine, origin)
-    landed = await observe(archive_engine, origin, first, bundle("123"))
+    first = await enabled(past_posts_engine, origin)
+    landed = await observe(past_posts_engine, origin, first, bundle("123"))
 
     async def stored():
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             found = await row(
                 conn,
                 "SELECT file_name, provider_file_ref FROM media_items WHERE id = :id",
@@ -197,68 +200,68 @@ async def test_an_archive_item_is_stored_under_a_neutral_name_never_its_graph_id
             )
         return found["file_name"], found["provider_file_ref"]
 
-    assert await stored() == (vocabulary.ARCHIVE_ITEM_NAME, "123")
-    assert vocabulary.ARCHIVE_ITEM_NAME == "Instagram post"
-    async with uow(archive_engine, origin) as conn:
+    assert await stored() == (vocabulary.PAST_POSTS_ITEM_NAME, "123")
+    assert vocabulary.PAST_POSTS_ITEM_NAME == "Instagram post"
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE media_items SET file_name = 'Instagram 123' WHERE id = :id"),
             {"id": landed.media_item_id},
         )
     assert await stored() == ("Instagram 123", "123"), "the id-bearing name, as stored"
-    second = await ensure(archive_engine, origin, authorization())
-    again = await observe(archive_engine, origin, second, bundle("123"))
+    second = await ensure(past_posts_engine, origin, authorization())
+    again = await observe(past_posts_engine, origin, second, bundle("123"))
     assert again.media_item_id == landed.media_item_id
-    assert await stored() == (vocabulary.ARCHIVE_ITEM_NAME, "123")
+    assert await stored() == (vocabulary.PAST_POSTS_ITEM_NAME, "123")
 
 
 @pytest.mark.parametrize(
     "mutation,reason",
     [
-        ("epoch", "archive_stale_capture"),
-        ("off", "archive_source_off"),
-        ("removed", "archive_source_unavailable"),
-        ("credential", "archive_credential_unavailable"),
-        ("expired", "archive_credential_unavailable"),
-        ("origin", "archive_origin_unavailable"),
-        ("binding", "archive_source_unavailable"),
-        ("generation", "archive_stale_capture"),
+        ("epoch", "past_posts_stale_capture"),
+        ("off", "past_posts_source_off"),
+        ("removed", "past_posts_source_unavailable"),
+        ("credential", "past_posts_credential_unavailable"),
+        ("expired", "past_posts_credential_unavailable"),
+        ("origin", "past_posts_origin_unavailable"),
+        ("binding", "past_posts_source_unavailable"),
+        ("generation", "past_posts_stale_capture"),
     ],
 )
 async def test_stale_or_unavailable_capture_drops_without_writes(
-    archive_engine, origin, mutation, reason
+    past_posts_engine, origin, mutation, reason
 ):
-    src = await enabled(archive_engine, origin)
+    src = await enabled(past_posts_engine, origin)
     if mutation == "epoch":
         src = {**src, "source_use_epoch": src["source_use_epoch"] + 1}
     elif mutation == "generation":
-        await ensure(archive_engine, origin, authorization())
+        await ensure(past_posts_engine, origin, authorization())
     else:
         queries = {
             "off": "UPDATE category_post_case_mix SET ratio = 0",
-            "removed": "UPDATE media_sources SET config = config || jsonb_build_object('removed', true) WHERE provider='instagram_archive'",
+            "removed": "UPDATE media_sources SET config = config || jsonb_build_object('removed', true) WHERE provider='instagram_past_posts'",
             "credential": "UPDATE oauth_credentials SET state='revoked'",
             "expired": "UPDATE oauth_credentials SET expires_at=now()-interval '1 second'",
             "origin": "UPDATE ig_accounts SET state='disabled'",
             "binding": "UPDATE media_source_destinations SET state='retired'",
         }
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             await conn.execute(text(queries[mutation]))
-    result = await observe(archive_engine, origin, src, bundle())
+    result = await observe(past_posts_engine, origin, src, bundle())
     assert not result.accepted and result.reason == reason
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert (
             await conn.execute(text("SELECT count(*) FROM instagram_media_index"))
         ).scalar_one() == 0
 
 
 async def test_invalid_partial_parse_does_not_relabel_but_optional_absence_can_land(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
-    first = await enabled(archive_engine, origin)
-    item = await observe(archive_engine, origin, first, bundle(like_count=9))
-    second = await ensure(archive_engine, origin, authorization())
+    first = await enabled(past_posts_engine, origin)
+    item = await observe(past_posts_engine, origin, first, bundle(like_count=9))
+    second = await ensure(past_posts_engine, origin, authorization())
     for changes in (
         {"original_at": None},
         {"original_at": datetime(2020, 1, 1)},
@@ -267,14 +270,16 @@ async def test_invalid_partial_parse_does_not_relabel_but_optional_absence_can_l
         {"comments_count": True},
         {"permalink": "https://cdn.example/image?token=secret"},
     ):
-        with pytest.raises(ArchiveRefused, match="invalid_archive_observation"):
-            await observe(archive_engine, origin, second, replace(bundle(), **changes))
-    async with uow(archive_engine, origin) as conn:
+        with pytest.raises(PastPostsRefused, match="invalid_past_posts_observation"):
+            await observe(
+                past_posts_engine, origin, second, replace(bundle(), **changes)
+            )
+    async with uow(past_posts_engine, origin) as conn:
         current = await row(conn, "SELECT * FROM instagram_media_index")
         assert str(current["data_generation_id"]) == first["generation_id"]
         assert current["like_count"] == 9
     landed = await observe(
-        archive_engine,
+        past_posts_engine,
         origin,
         second,
         replace(
@@ -286,7 +291,7 @@ async def test_invalid_partial_parse_does_not_relabel_but_optional_absence_can_l
     )
     assert landed.media_item_id is None
     assert landed.observation_revision == 2
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         prior = await row(
             conn, "SELECT state FROM media_items WHERE id=:id", id=item.media_item_id
         )
@@ -294,25 +299,27 @@ async def test_invalid_partial_parse_does_not_relabel_but_optional_absence_can_l
 
 
 async def test_excluded_observation_gains_first_item_and_policy_never_rejects_raw_data(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src = await enabled(archive_engine, origin)
+    src = await enabled(past_posts_engine, origin)
     excluded = replace(
         bundle(),
         assets=(),
         availability="excluded",
         exclusion_reason="unsupported_media",
     )
-    first = await observe(archive_engine, origin, src, excluded)
+    first = await observe(past_posts_engine, origin, src, excluded)
     assert first.accepted and first.media_item_id is None
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE instagram_source_policies SET minimum_age_days=36500, include_credited=false, include_unknown=false"
             )
         )
-    second = await observe(archive_engine, origin, src, bundle(attribution="credited"))
-    third = await observe(archive_engine, origin, src, bundle())
+    second = await observe(
+        past_posts_engine, origin, src, bundle(attribution="credited")
+    )
+    third = await observe(past_posts_engine, origin, src, bundle())
     assert second.accepted and second.media_item_id is not None
     assert (
         third.media_item_id == second.media_item_id and third.observation_revision == 3
@@ -340,52 +347,54 @@ async def second_origin(engine, chain):
 
 
 async def test_cross_origin_conflict_is_successful_index_only_and_drive_namespace_distinct(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await enabled(archive_engine, origin)
-    incoming = await second_origin(archive_engine, origin)
-    one = await observe(archive_engine, origin, first, bundle())
-    conflict = await observe(archive_engine, origin, incoming, bundle())
+    first = await enabled(past_posts_engine, origin)
+    incoming = await second_origin(past_posts_engine, origin)
+    one = await observe(past_posts_engine, origin, first, bundle())
+    conflict = await observe(past_posts_engine, origin, incoming, bundle())
     assert conflict.accepted and conflict.reason == "origin_identity_conflict"
     assert conflict.media_item_id is None
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         own = await row(
             conn,
             "SELECT source_id, content_hash FROM media_items WHERE id=:id",
             id=one.media_item_id,
         )
         assert str(own["source_id"]) == first["source_id"]
-        assert own["content_hash"] == "instagram_archive:media:123"
-        # A raw-ID or byte hash from Drive does not occupy the archive namespace.
+        assert own["content_hash"] == "instagram_past_posts:media:123"
+        # A raw-ID or byte hash from Drive does not occupy the past-posts namespace.
         await conn.execute(
             text(
                 "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name, media_kind, provider_file_ref) VALUES (:ws, :src, '999', 'drive.jpg', 'image', '999')"
             ),
             {"ws": str(origin["ws"]), "src": str(origin["src"])},
         )
-    assert (await observe(archive_engine, origin, first, bundle("999"))).media_item_id
+    assert (
+        await observe(past_posts_engine, origin, first, bundle("999"))
+    ).media_item_id
 
 
 async def test_redaction_restores_only_from_fresh_generation_using_retained_hmac_key(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, first, bundle())
-    untouched = await observe(archive_engine, origin, first, bundle("789"))
-    async with uow(archive_engine, origin) as conn:
+    first = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, first, bundle())
+    untouched = await observe(past_posts_engine, origin, first, bundle("789"))
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE media_items SET times_posted=2 WHERE id=:id"),
             {"id": original.media_item_id},
         )
-    erased = await redact(archive_engine, origin, first)
+    erased = await redact(past_posts_engine, origin, first)
     assert erased.observations_deleted == 2 and erased.items_redacted == 2
     assert set(erased.media_item_ids) == {
         original.media_item_id,
         untouched.media_item_id,
     }
-    again = await redact(archive_engine, origin, first)
+    again = await redact(past_posts_engine, origin, first)
     assert again.observations_deleted == again.items_redacted == 0
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         item = await row(
             conn, "SELECT * FROM media_items WHERE id=:id", id=original.media_item_id
         )
@@ -400,24 +409,24 @@ async def test_redaction_restores_only_from_fresh_generation_using_retained_hmac
         )
         assert tomb["parent_hmac"] == keys().digest(1, "123")
         assert "parent_media_id" not in tomb and tomb["key_version"] == 1
-    stale = await observe(archive_engine, origin, first, bundle())
+    stale = await observe(past_posts_engine, origin, first, bundle())
     assert not stale.accepted
-    second = await ensure(archive_engine, origin, authorization())
+    second = await ensure(past_posts_engine, origin, authorization())
     # Reauthorization itself does not restore any data.
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert (
             await conn.execute(text("SELECT count(*) FROM instagram_media_index"))
         ).scalar_one() == 0
-    restored = await observe(archive_engine, origin, second, bundle(), ring=keys(2))
+    restored = await observe(past_posts_engine, origin, second, bundle(), ring=keys(2))
     assert (
         restored.media_item_id == original.media_item_id
         and restored.observation_revision == 2
     )
-    other = await second_origin(archive_engine, origin)
+    other = await second_origin(past_posts_engine, origin)
     assert (
-        await observe(archive_engine, origin, other, bundle("789"), ring=keys(2))
+        await observe(past_posts_engine, origin, other, bundle("789"), ring=keys(2))
     ).reason == "origin_identity_conflict"
-    cleanup = await redact(archive_engine, origin, first, ring=keys(2))
+    cleanup = await redact(past_posts_engine, origin, first, ring=keys(2))
     assert cleanup.items_redacted == 0
 
 
@@ -436,39 +445,39 @@ async def tombstones(conn):
 
 
 async def test_an_item_erased_again_after_a_restore_keeps_one_tombstone_at_the_newer_revision(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, first, bundle())
-    await redact(archive_engine, origin, first)
-    async with uow(archive_engine, origin) as conn:
+    first = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, first, bundle())
+    await redact(past_posts_engine, origin, first)
+    async with uow(past_posts_engine, origin) as conn:
         assert await tombstones(conn) == [(original.media_item_id, 1, 1)]
-    second = await ensure(archive_engine, origin, authorization())
-    restored = await observe(archive_engine, origin, second, bundle())
+    second = await ensure(past_posts_engine, origin, authorization())
+    restored = await observe(past_posts_engine, origin, second, bundle())
     assert restored.media_item_id == original.media_item_id
     assert restored.observation_revision == 2
 
-    erased = await redact(archive_engine, origin, second)
+    erased = await redact(past_posts_engine, origin, second)
 
     # The tombstone the first erasure left is the one the second finds: merged,
     # at the revision the restore reached, not a second row and not a refusal.
     assert erased.items_redacted == 1
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert await tombstones(conn) == [(original.media_item_id, 1, 2)]
 
 
 async def test_items_that_share_a_parent_merge_into_one_tombstone_at_the_highest_revision(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, first, bundle())
-    again = await observe(archive_engine, origin, first, bundle())
+    first = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, first, bundle())
+    again = await observe(past_posts_engine, origin, first, bundle())
     assert again.observation_revision == 2
     # A second shared item for the same parent, as a dedup race could leave one:
     # its own hash and no index row, so it reads as revision 1. Its id sorts first,
     # so the lower revision is written before the higher one.
     twin = "00000000-0000-0000-0000-000000000001"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "INSERT INTO media_items (id, workspace_id, source_id, source_data_generation_id,"
@@ -481,27 +490,29 @@ async def test_items_that_share_a_parent_merge_into_one_tombstone_at_the_highest
             {"twin": twin, "id": original.media_item_id},
         )
 
-    erased = await redact(archive_engine, origin, first)
+    erased = await redact(past_posts_engine, origin, first)
 
     # One statement per row, as a loop made it: the second row meets the first's
     # tombstone and raises it to its own revision; neither is refused.
     assert (erased.observations_deleted, erased.items_redacted) == (1, 2)
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert await tombstones(conn) == [(twin, 1, 2)]
 
 
 async def test_missing_historical_key_refuses_atomically_and_retry_recovers(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target.instagram_catalog import write_observation
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
-    first = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, first, bundle())
-    await redact(archive_engine, origin, first)
-    second = await ensure(archive_engine, origin, authorization())
-    async with uow(archive_engine, origin) as conn:
-        with pytest.raises(ArchiveRefused, match="archive_tombstone_key_unavailable"):
+    first = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, first, bundle())
+    await redact(past_posts_engine, origin, first)
+    second = await ensure(past_posts_engine, origin, authorization())
+    async with uow(past_posts_engine, origin) as conn:
+        with pytest.raises(
+            PastPostsRefused, match="past_posts_tombstone_key_unavailable"
+        ):
             await write_observation(
                 conn,
                 workspace_id=str(origin["ws"]),
@@ -513,33 +524,33 @@ async def test_missing_historical_key_refuses_atomically_and_retry_recovers(
                 capability=capability(),
             )
         await conn.execute(text("UPDATE workspaces SET name='continued'"))
-    result = await observe(archive_engine, origin, second, bundle(), ring=keys(2))
+    result = await observe(past_posts_engine, origin, second, bundle(), ring=keys(2))
     assert result.media_item_id == original.media_item_id
 
 
 async def test_wrong_source_generation_and_foreign_tenant_cannot_land_or_redact(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     from src.services.target.instagram_catalog import redact_generations
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
-    own = await enabled(archive_engine, origin)
-    other = await second_origin(archive_engine, origin)
+    own = await enabled(past_posts_engine, origin)
+    other = await second_origin(past_posts_engine, origin)
     assert not (
         await observe(
-            archive_engine,
+            past_posts_engine,
             origin,
             {**own, "generation_id": other["generation_id"]},
             bundle(),
         )
     ).accepted
     foreign = seed_workspace_chain(sync_conn, "foreign-observation")
-    assert not (await observe(archive_engine, foreign, own, bundle())).accepted
-    await observe(archive_engine, origin, own, bundle())
+    assert not (await observe(past_posts_engine, foreign, own, bundle())).accepted
+    await observe(past_posts_engine, origin, own, bundle())
     for chain, source, generation in ((foreign, own, own), (origin, other, own)):
-        async with uow(archive_engine, chain) as conn:
+        async with uow(past_posts_engine, chain) as conn:
             with pytest.raises(
-                ArchiveRefused, match="archive_generation_scope_unavailable"
+                PastPostsRefused, match="past_posts_generation_scope_unavailable"
             ):
                 await redact_generations(
                     conn,
@@ -549,36 +560,36 @@ async def test_wrong_source_generation_and_foreign_tenant_cannot_land_or_redact(
                     keys=keys(),
                     capability=capability(),
                 )
-    async with uow(archive_engine, foreign) as conn:
+    async with uow(past_posts_engine, foreign) as conn:
         result = await conn.execute(
             text("DELETE FROM instagram_media_index WHERE workspace_id=:ws"),
             {"ws": str(origin["ws"])},
         )
         assert result.rowcount == 0
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert (
             await conn.execute(text("SELECT count(*) FROM instagram_media_index"))
         ).scalar_one() == 1
 
 
 @pytest.mark.parametrize("projection_state", ["removed", "missing", "redacted"])
-async def test_drive_page_cannot_adopt_archive_projection_or_redaction_sentinel(
-    archive_engine, origin, projection_state
+async def test_drive_page_cannot_adopt_past_posts_projection_or_redaction_sentinel(
+    past_posts_engine, origin, projection_state
 ):
     from src.services.target import media_sync
     from src.services.target.google_drive_adapter import GoogleDriveAdapter
 
-    source = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, source, bundle())
+    source = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, source, bundle())
     if projection_state == "redacted":
-        await redact(archive_engine, origin, source)
+        await redact(past_posts_engine, origin, source)
     else:
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             await conn.execute(
                 text("UPDATE media_items SET state=:state WHERE id=:id"),
                 {"id": original.media_item_id, "state": projection_state},
             )
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         item = await row(
             conn,
             "SELECT content_hash, provider_file_ref, source_projection_redacted FROM media_items WHERE id=:id",
@@ -586,7 +597,7 @@ async def test_drive_page_cannot_adopt_archive_projection_or_redaction_sentinel(
         )
 
     def factory():
-        return uow(archive_engine, origin)
+        return uow(past_posts_engine, origin)
 
     outcome = await media_sync._land_page(
         factory,
@@ -610,7 +621,7 @@ async def test_drive_page_cannot_adopt_archive_projection_or_redaction_sentinel(
         reason="fixture",
     )
     assert outcome == "synced"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         after = await row(
             conn,
             "SELECT source_id, provider_file_ref, source_projection_redacted FROM media_items WHERE id=:id",
@@ -622,17 +633,17 @@ async def test_drive_page_cannot_adopt_archive_projection_or_redaction_sentinel(
 
 
 async def test_late_g1_cleanup_erases_unobserved_g1_but_preserves_refreshed_g2(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    first = await enabled(archive_engine, origin)
-    refreshed = await observe(archive_engine, origin, first, bundle())
-    old = await observe(archive_engine, origin, first, bundle("789"))
-    second = await ensure(archive_engine, origin, authorization())
-    await observe(archive_engine, origin, second, bundle())
-    result = await redact(archive_engine, origin, first)
+    first = await enabled(past_posts_engine, origin)
+    refreshed = await observe(past_posts_engine, origin, first, bundle())
+    old = await observe(past_posts_engine, origin, first, bundle("789"))
+    second = await ensure(past_posts_engine, origin, authorization())
+    await observe(past_posts_engine, origin, second, bundle())
+    result = await redact(past_posts_engine, origin, first)
     assert result.media_item_ids == (old.media_item_id,)
     assert result.observations_deleted == result.items_redacted == 1
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         fresh = await row(
             conn,
             "SELECT source_data_generation_id, source_projection_redacted FROM media_items WHERE id=:id",
@@ -646,14 +657,14 @@ async def test_late_g1_cleanup_erases_unobserved_g1_but_preserves_refreshed_g2(
 
 
 async def test_caught_observation_constraint_failure_rolls_back_shared_projection_then_retries(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     from src.services.target.instagram_catalog import write_observation
     from sqlalchemy.exc import IntegrityError
 
-    first = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, first, bundle(like_count=7))
-    second = await ensure(archive_engine, origin, authorization())
+    first = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, first, bundle(like_count=7))
+    second = await ensure(past_posts_engine, origin, authorization())
     with sync_conn.cursor() as cur:
         cur.execute(
             "CREATE FUNCTION fixture_refuse_observation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture observation refusal' USING ERRCODE='23514'; END $$"
@@ -662,7 +673,7 @@ async def test_caught_observation_constraint_failure_rolls_back_shared_projectio
             "CREATE TRIGGER fixture_refuse_observation BEFORE UPDATE ON instagram_media_index FOR EACH ROW EXECUTE FUNCTION fixture_refuse_observation()"
         )
     sync_conn.commit()
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         with pytest.raises(IntegrityError, match="fixture observation refusal"):
             await write_observation(
                 conn,
@@ -675,7 +686,7 @@ async def test_caught_observation_constraint_failure_rolls_back_shared_projectio
                 capability=capability(),
             )
         await conn.execute(text("UPDATE workspaces SET name='observation-continued'"))
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         item = await row(
             conn,
             "SELECT source_data_generation_id FROM media_items WHERE id=:id",
@@ -693,7 +704,7 @@ async def test_caught_observation_constraint_failure_rolls_back_shared_projectio
     with sync_conn.cursor() as cur:
         cur.execute("DROP TRIGGER fixture_refuse_observation ON instagram_media_index")
     sync_conn.commit()
-    retry = await observe(archive_engine, origin, second, bundle())
+    retry = await observe(past_posts_engine, origin, second, bundle())
     assert (
         retry.media_item_id == original.media_item_id
         and retry.observation_revision == 2
@@ -701,13 +712,13 @@ async def test_caught_observation_constraint_failure_rolls_back_shared_projectio
 
 
 async def test_redacted_projection_constraint_refuses_every_provider_field_and_delete_stays_narrow(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from sqlalchemy.exc import IntegrityError, ProgrammingError
 
-    source = await enabled(archive_engine, origin)
-    original = await observe(archive_engine, origin, source, bundle())
-    await redact(archive_engine, origin, source)
+    source = await enabled(past_posts_engine, origin)
+    original = await observe(past_posts_engine, origin, source, bundle())
+    await redact(past_posts_engine, origin, source)
     mutations = (
         "source_data_generation_id=:gid",
         "provider_file_ref='123'",
@@ -728,7 +739,7 @@ async def test_redacted_projection_constraint_refuses_every_provider_field_and_d
         "custom_metadata=jsonb_build_object('provider', true)",
         "thumbnail_url='https://example.test/signed'",
     )
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         for mutation in mutations:
             with pytest.raises(IntegrityError, match="ck_media_redacted_projection"):
                 async with conn.begin_nested():
@@ -748,45 +759,52 @@ def test_tombstone_keys_are_keyed_domain_separated_retained_and_not_printed():
     import hashlib
     import hmac
     from src.services.target.instagram_catalog import TombstoneKeys
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
     ring = keys(2)
     expected = hmac.new(
         b"\x01" * 32,
-        b"storydump:instagram-parent:v1\x00instagram_archive:media:123",
+        b"storydump:instagram-parent:v1\x00instagram_past_posts:media:123",
         hashlib.sha256,
     ).hexdigest()
+    assert (
+        expected == "3ec4ce02b4208aae6a72a18fa4970696a5c091fc939fb73c06d0fdc83cf8ae3c"
+    )
     assert ring.digest(1, "123") == expected
     assert ring.digest(2, "123") != expected
     assert "keys=" not in repr(ring)
     for mapping in ({}, {1: b"short"}, {0: b"x" * 32}):
-        with pytest.raises(ArchiveRefused, match="archive_tombstone_key_unavailable"):
+        with pytest.raises(
+            PastPostsRefused, match="past_posts_tombstone_key_unavailable"
+        ):
             TombstoneKeys(1, mapping)
 
 
 async def test_complete_response_without_optional_asset_is_explicitly_incomplete(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    source = await enabled(archive_engine, origin)
-    result = await observe(archive_engine, origin, source, replace(bundle(), assets=()))
+    source = await enabled(past_posts_engine, origin)
+    result = await observe(
+        past_posts_engine, origin, source, replace(bundle(), assets=())
+    )
     assert result.accepted and result.media_item_id is None
     assert result.reason == "incomplete_observation"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert (await row(conn, "SELECT availability FROM instagram_media_index"))[
             "availability"
         ] == "excluded"
 
 
 async def test_raw_asset_source_generation_and_item_relationships_are_database_enforced(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from sqlalchemy.exc import IntegrityError
 
-    first = await enabled(archive_engine, origin)
-    second = await second_origin(archive_engine, origin)
-    await observe(archive_engine, origin, first, bundle("123"))
-    second_item = await observe(archive_engine, origin, second, bundle("789"))
-    async with uow(archive_engine, origin) as conn:
+    first = await enabled(past_posts_engine, origin)
+    second = await second_origin(past_posts_engine, origin)
+    await observe(past_posts_engine, origin, first, bundle("123"))
+    second_item = await observe(past_posts_engine, origin, second, bundle("789"))
+    async with uow(past_posts_engine, origin) as conn:
         for gid, item_id in (
             (second["generation_id"], None),
             (first["generation_id"], second_item.media_item_id),
@@ -808,25 +826,25 @@ async def test_raw_asset_source_generation_and_item_relationships_are_database_e
                         },
                     )
                     await conn.execute(
-                        text("SET CONSTRAINTS fk_archive_asset_item IMMEDIATE")
+                        text("SET CONSTRAINTS fk_past_posts_asset_item IMMEDIATE")
                     )
 
 
 async def test_a_rollback_still_redacts_but_landing_an_observation_needs_the_capability(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    """Archive rows present, no capability. Erasure closes, so it still runs;
+    """Past-posts rows present, no capability. Erasure closes, so it still runs;
     landing a new observation opens, so it is refused by name and writes nothing."""
     from src.services.target.instagram_catalog import (
         redact_generations,
         write_observation,
     )
-    from src.services.target.instagram_sources import ArchiveRefused
+    from src.services.target.instagram_sources import PastPostsRefused
 
-    source = await enabled(archive_engine, origin)
-    landed = await observe(archive_engine, origin, source, bundle())
-    async with uow(archive_engine, origin) as conn:
-        with pytest.raises(ArchiveRefused, match="archive_not_activated"):
+    source = await enabled(past_posts_engine, origin)
+    landed = await observe(past_posts_engine, origin, source, bundle())
+    async with uow(past_posts_engine, origin) as conn:
+        with pytest.raises(PastPostsRefused, match="past_posts_not_activated"):
             await write_observation(
                 conn,
                 workspace_id=str(origin["ws"]),
@@ -841,7 +859,7 @@ async def test_a_rollback_still_redacts_but_landing_an_observation_needs_the_cap
         ).scalar_one() == 1
         await conn.execute(
             text(
-                "UPDATE instagram_archive_generations SET lifecycle = 'deletion_pending' WHERE id = :gid"
+                "UPDATE instagram_past_posts_generations SET lifecycle = 'deletion_pending' WHERE id = :gid"
             ),
             {"gid": source["generation_id"]},
         )
@@ -854,7 +872,7 @@ async def test_a_rollback_still_redacts_but_landing_an_observation_needs_the_cap
         )
     assert erased.observations_deleted == erased.items_redacted == 1
     assert erased.media_item_ids == (landed.media_item_id,)
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         assert (
             await conn.execute(text("SELECT count(*) FROM instagram_media_index"))
         ).scalar_one() == 0

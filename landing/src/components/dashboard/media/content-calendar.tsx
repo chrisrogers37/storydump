@@ -22,7 +22,7 @@ import {
 import { TONE_CLASS, TONE_DOT, type BadgeTone } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
 import { RepeatMark } from "@/components/dashboard/repeat-mark";
-import { withArchiveName } from "@/lib/archive-media";
+import { withPastPostsName } from "@/lib/past-posts-media";
 import type { RepeatRule } from "@/lib/repeat";
 import type { ThumbnailMedia } from "@/lib/thumbnails";
 
@@ -113,9 +113,9 @@ export function buildCalendarDays(
   for (const day of history) {
     postedByDate.set(day.date, day);
     for (const item of day.newest) {
-      // An archive item goes by its own name; the API sends it, and this is the
+      // A past-posts item goes by its own name; the API sends it, and this is the
       // guard for a row that arrives without it.
-      const story = withArchiveName(item);
+      const story = withPastPostsName(item);
       add(day.date, {
         label: story.file_name,
         category: story.category ?? "uncategorised",
@@ -288,7 +288,7 @@ export function DayChips({
             workspaceId,
             ...CHIP_TILE[size],
             badge: false,
-            archivePreview: false,
+            pastPostsPreview: false,
           })}
           <span className="min-w-0 truncate">
             {post.type === "planned" && <span className="sr-only">Planned: </span>}

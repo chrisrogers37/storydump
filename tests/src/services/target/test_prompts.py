@@ -1811,40 +1811,40 @@ def trusted_policy_seam(monkeypatch):
     )
 
 
-def test_archive_card_media_binds_server_intent_but_drive_contract_is_unchanged():
+def test_past_posts_card_media_binds_server_intent_but_drive_contract_is_unchanged():
     row = dict(
         workspace_id="ws",
         source_id="source",
         provider_file_ref="123",
         media_kind="image",
         file_name="synthetic",
-        source_provider="instagram_archive",
+        source_provider="instagram_past_posts",
         schedule_slot_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
-    archive = prompts._card_for(row, intent_id="server-intent")
-    assert archive["media"]["intent_id"] == "server-intent"
+    past_posts = prompts._card_for(row, intent_id="server-intent")
+    assert past_posts["media"]["intent_id"] == "server-intent"
     drive = prompts._card_for(
         {**row, "source_provider": "gdrive"}, intent_id="server-intent"
     )
     assert "intent_id" not in drive["media"]
 
 
-#: The Instagram id an archive item is stored under, as its file reference. It is
+#: The Instagram id a past-posts item is stored under, as its file reference. It is
 #: distinctive, so a leak is found by a plain substring.
 GRAPH_ID = "17841400000000771"
 SLOT_WORDS = "2026-10-01 14:00 America/New_York"
 
 
 def _stored(provider, **over):
-    """The item of a story as `_CARD_WITH_PROVIDER` reads it. An archive item is
+    """The item of a story as `_CARD_WITH_PROVIDER` reads it. A past-posts item is
     stored under the neutral name (`instagram_catalog._project`), with the Graph
     id for its file reference."""
-    archive = provider == "instagram_archive"
+    past_posts = provider == "instagram_past_posts"
     return {
         "workspace_id": "ws-1",
         "source_id": "src-1",
-        "provider_file_ref": GRAPH_ID if archive else "drive-file-ref",
-        "file_name": vocabulary.ARCHIVE_ITEM_NAME if archive else "sunset.jpg",
+        "provider_file_ref": GRAPH_ID if past_posts else "drive-file-ref",
+        "file_name": vocabulary.PAST_POSTS_ITEM_NAME if past_posts else "sunset.jpg",
         "media_kind": "image",
         "mime_type": "image/jpeg",
         "source_provider": provider,
@@ -1855,18 +1855,18 @@ def _stored(provider, **over):
     }
 
 
-class TestAnArchiveItemOnTheTelegramSurfaces:
+class TestAPastPostsItemOnTheTelegramSurfaces:
     """The stored name is what the card and the missed-story notice say, so an
-    archive item is named for where it came from there, as on the web, and a
+    past-posts item is named for where it came from there, as on the web, and a
     card carries no Instagram id."""
 
     def test_the_card_names_the_item_and_carries_no_graph_id(self):
-        card = prompts._card_for(_stored("instagram_archive"), intent_id=INTENT)
+        card = prompts._card_for(_stored("instagram_past_posts"), intent_id=INTENT)
         assert card["text"] == f"📸 Instagram post (image)\nSlot: {SLOT_WORDS}"
         # With no account handle the caption falls back to the item's name.
         assert card["caption"] == f"📸 Instagram post\nSlot: {SLOT_WORDS}"
         # The block binds the server-selected intent and leaves out the file
-        # reference, which for an archive item is the Graph id.
+        # reference, which for a past-posts item is the Graph id.
         assert card["media"] == {
             "workspace_id": "ws-1",
             "source_id": "src-1",
@@ -1882,7 +1882,7 @@ class TestAnArchiveItemOnTheTelegramSurfaces:
     )
     def test_photo_caption_names_the_selected_slide_beside_the_account(self, name):
         card = prompts._card_for(
-            _stored("instagram_archive", handle="example_handle", file_name=name),
+            _stored("instagram_past_posts", handle="example_handle", file_name=name),
             intent_id=INTENT,
         )
         assert card["caption"] == f"📸 @example_handle\n{name}\nSlot: {SLOT_WORDS}"
@@ -1911,7 +1911,7 @@ class TestAnArchiveItemOnTheTelegramSurfaces:
             return 1
 
         monkeypatch.setattr(prompts.outbox, "fanout_notification", fanout)
-        for provider in ("instagram_archive", "gdrive"):
+        for provider in ("instagram_past_posts", "gdrive"):
             name = _stored(provider)["file_name"]
             row = {**_miss_row("i-1", "ws-1"), "file_name": name}
             await prompts.say_not_served(
@@ -1928,7 +1928,7 @@ class TestAnArchiveItemOnTheTelegramSurfaces:
         assert control == f"🗓 Not served: sunset.jpg {words}"
 
 
-def test_archive_review_card_is_textual_and_never_requests_replacement_bytes():
+def test_past_posts_review_card_is_textual_and_never_requests_replacement_bytes():
     row = {
         **_card_input(
             workspace_id="synthetic-workspace",
@@ -1936,7 +1936,7 @@ def test_archive_review_card_is_textual_and_never_requests_replacement_bytes():
             provider_file_ref="synthetic-file",
         ),
         "state": "review_required",
-        "source_provider": "instagram_archive",
+        "source_provider": "instagram_past_posts",
     }
     card = prompts._card_for(row, intent_id="server-intent")
     assert "media" not in card and "caption" not in card and card["text"]

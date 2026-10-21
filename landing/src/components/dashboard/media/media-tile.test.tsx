@@ -64,46 +64,46 @@ describe("mediaTile", () => {
   });
 });
 
-describe("mediaTile for an archive item (#1644)", () => {
-  const archive = {
+describe("mediaTile for a past-posts item (#1644)", () => {
+  const pastPosts = {
     ...clip,
     thumbnail_version: "5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b.7",
     provenance: {
-      provider: "instagram_archive",
+      provider: "instagram_past_posts",
       origin_handle: "example_handle",
       original_at: "2020-01-01T12:00:00+00:00",
     },
   };
   const row = { box: "h-10 w-10 rounded-md", glyph: "h-5 w-5" };
 
-  it("asks for its picture under the archive's limits, in the row's small box, by the version the API named", () => {
-    const [thumb] = thumbnails(mediaTile({ media: archive, workspaceId: "ws-1", ...row }));
+  it("asks for its picture under the past-posts source's limits, in the row's small box, by the version the API named", () => {
+    const [thumb] = thumbnails(mediaTile({ media: pastPosts, workspaceId: "ws-1", ...row }));
     expect(thumb.props.src).toBe(
       "/api/workspaces/ws-1/media/media-1/thumbnail?v=5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b.7",
     );
-    expect(thumb.props.archive).toEqual({ workspaceId: "ws-1", layout: "tile" });
+    expect(thumb.props.pastPosts).toEqual({ workspaceId: "ws-1", layout: "tile" });
     expect(thumb.props.video).toBe(true);
   });
 
   it("leaves a Drive item to the browser, whether its provenance is null or its read has none", () => {
     for (const media of [{ ...clip, provenance: null }, clip]) {
       const [thumb] = thumbnails(mediaTile({ media, workspaceId: "ws-1", ...row }));
-      expect(thumb.props.archive).toBeUndefined();
+      expect(thumb.props.pastPosts).toBeUndefined();
     }
   });
 
-  it("draws a chip's archive item as its glyph and asks for nothing, which a Drive chip does not", () => {
+  it("draws a chip's past-posts item as its glyph and asks for nothing, which a Drive chip does not", () => {
     const chip = { box: "h-3.5 w-3.5 rounded-sm", glyph: "h-2.5 w-2.5", badge: false };
-    const archived = mediaTile({ media: archive, workspaceId: "ws-1", ...chip, archivePreview: false });
+    const archived = mediaTile({ media: pastPosts, workspaceId: "ws-1", ...chip, pastPostsPreview: false });
     expect(thumbnails(archived)).toEqual([]);
     expect(types(archived)).toContain(Video);
     // The positive control: the same chip for a Drive item still draws its picture.
-    expect(thumbnails(mediaTile({ media: clip, workspaceId: "ws-1", ...chip, archivePreview: false }))).toHaveLength(1);
+    expect(thumbnails(mediaTile({ media: clip, workspaceId: "ws-1", ...chip, pastPostsPreview: false }))).toHaveLength(1);
   });
 
   it("asks for nothing without a workspace, or when the item awaits observation again", () => {
-    expect(thumbnails(mediaTile({ media: archive, workspaceId: null, ...row }))).toEqual([]);
-    const waiting = { ...archive, has_thumbnail: false, thumbnail_version: null };
+    expect(thumbnails(mediaTile({ media: pastPosts, workspaceId: null, ...row }))).toEqual([]);
+    const waiting = { ...pastPosts, has_thumbnail: false, thumbnail_version: null };
     expect(thumbnails(mediaTile({ media: waiting, workspaceId: "ws-1", ...row }))).toEqual([]);
   });
 });

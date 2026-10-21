@@ -301,15 +301,15 @@ THUMBNAIL_TYPES: tuple[str, ...] = (
     "image/avif",
 )
 
-#: What an item of an Instagram archive source is called where a file name
+#: What an item of an Instagram past-posts source is called where a file name
 #: would be: stored (`instagram_catalog._project`, so the Telegram card and the
 #: missed-story notice say it) and on every read that carries it
-#: (`workspaces._archive_row`). A post is labelled by where it came from, never
+#: (`workspaces._past_posts_row`). A post is labelled by where it came from, never
 #: by Instagram's id. The web says the same words
-#: (`landing/src/lib/archive-media.ts`, held to this by `wire-contract.test.ts`).
-ARCHIVE_ITEM_NAME = "Instagram post"
-ARCHIVE_SLIDE_NAME = "Instagram post, slide {position} of {count}"
-ARCHIVE_SLIDE_NAME_UNKNOWN = "Instagram post, slide {position}"
+#: (`landing/src/lib/past-posts-media.ts`, held to this by `wire-contract.test.ts`).
+PAST_POSTS_ITEM_NAME = "Instagram post"
+PAST_POSTS_SLIDE_NAME = "Instagram post, slide {position} of {count}"
+PAST_POSTS_SLIDE_NAME_UNKNOWN = "Instagram post, slide {position}"
 
 #: What a story may weigh on the way to Meta, by `media_items.media_kind`
 #: (Meta's own limits: 8 MB for a story image, 100 MB for a story video pulled

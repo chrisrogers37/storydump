@@ -7,15 +7,15 @@ a scene names, with the app-scoped id the identity read proved). What is
 asserted is what the callback LEFT in the tables, read as the migration actor,
 and what the tenant-free door finds as the API's own login with no tenant:
 
-* where the archive is live, one mapping per (credential, authorization),
+* where the past-posts source is live, one mapping per (credential, authorization),
   current, joined to the generation on the SAME authorization id and time; a
   reconnect lands a new one and the previous falls;
 * an exchange that proved no app-scoped id refuses the whole landing;
-* where the archive is not live nothing is recorded;
+* where the past-posts source is not live nothing is recorded;
 * the door finds the mapping by (app, the person's id) and by nothing else: not
   by the account's own id, and not under another app;
 * deauthorize runs the account-reference lookup where no mapping names the
-  subject, and only the archive-aware revocation where one does (nothing is
+  subject, and only the past-posts-aware revocation where one does (nothing is
   revoked twice).
 """
 
@@ -30,8 +30,8 @@ import time
 import psycopg2
 import pytest
 
-from tests.scripts import test_oauth_archive_choice_gate as oauth_gate
-from tests.scripts.test_oauth_archive_choice_gate import (
+from tests.scripts import test_oauth_past_posts_choice_gate as oauth_gate
+from tests.scripts.test_oauth_past_posts_choice_gate import (
     APP_ID,
     LIVE,
     REF_NEW,
@@ -87,7 +87,7 @@ def generations(world, ws):
     return rows(
         world,
         "SELECT authorization_id::text AS authorization, authorized_at, subject_id"
-        "  FROM instagram_archive_generations WHERE workspace_id = %s"
+        "  FROM instagram_past_posts_generations WHERE workspace_id = %s"
         " ORDER BY created_at, id",
         ws,
     )
@@ -112,7 +112,7 @@ def door(world, app, subject):
         conn.close()
 
 
-async def test_the_callback_records_one_current_mapping_joined_to_the_archive_generation(
+async def test_the_callback_records_one_current_mapping_joined_to_the_past_posts_generation(
     scene,
 ):
     world, ws = scene.world, scene.ws
@@ -202,7 +202,7 @@ async def test_an_exchange_that_proved_no_app_scoped_id_refuses_the_whole_landin
     [(None, True), (LIVE, False)],
     ids=["no-capability", "capability-but-unconverted-mix"],
 )
-async def test_where_the_archive_is_not_live_no_mapping_is_recorded(
+async def test_where_the_past_posts_is_not_live_no_mapping_is_recorded(
     world,
     google_configured,
     instagram_configured,
@@ -258,7 +258,7 @@ async def test_a_reconnect_leaves_the_door_two_rows_one_of_them_current(scene):
     assert {row[2] for row in found} == {credential_of(world, ws, first.account)}
 
 
-# --- deauthorize: by account reference, or the archive-aware path, never both ------
+# --- deauthorize: by account reference, or the past-posts-aware path, never both ------
 
 #: Accounts only the deauthorize tests use (and the legacy lookup's key: the
 #: account's own id, which a callback's subject equals only when Meta says so).
@@ -298,7 +298,7 @@ def credential_state(world, ws):
 async def test_deauthorize_with_no_mapping_runs_the_account_reference_lookup(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
-    """While the archive is not live the callback records no mapping, so the
+    """While the past-posts source is not live the callback records no mapping, so the
     subject is matched by the account's own id and its credential revoked."""
     async with Scene.open(
         world, monkeypatch, tmp_path, capability=None, converted=True

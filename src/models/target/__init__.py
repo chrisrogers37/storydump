@@ -59,7 +59,7 @@ from src.models.target.meta_receipts import (
 )
 from src.models.target.instagram_catalog import (
     MediaSourceDestination,
-    InstagramArchiveGeneration,
+    InstagramPastPostsGeneration,
     InstagramSourcePolicy,
     InstagramMediaIndex,
     InstagramMediaAsset,
@@ -71,7 +71,7 @@ from src.models.target.instagram_catalog import (
 
 __all__ = [
     "MediaSourceDestination",
-    "InstagramArchiveGeneration",
+    "InstagramPastPostsGeneration",
     "InstagramSourcePolicy",
     "InstagramMediaIndex",
     "InstagramMediaAsset",

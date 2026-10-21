@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { emptyLibrary } from "./archive-media";
+import { emptyLibrary } from "./past-posts-media";
 import { RESOLVED_IN } from "./conditions";
 import {
   POSTING_MIX_HREF,

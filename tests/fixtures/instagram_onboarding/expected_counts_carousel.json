@@ -188,11 +188,11 @@
       },
       "partial_coverage": true,
       "partial_coverage_basis": [
-        "src/services/target/instagram_archive_adapter.py:42 LISTING_CEILING = 10_000, and :10-11: the newest 10,000 posts are the documented listing ceiling, not a complete inventory.",
-        "instagram_archive_adapter.py:505-506 _advance: ceiling_reached = (seen == LISTING_CEILING) and more = not ceiling_reached; :548 takes no next window once it is reached; :699-702 novel[:LISTING_CEILING - seen] lets the 10,000th parent in exactly, so all 10,000 are observed.",
+        "src/services/target/instagram_past_posts_adapter.py:42 LISTING_CEILING = 10_000, and :10-11: the newest 10,000 posts are the documented listing ceiling, not a complete inventory.",
+        "instagram_past_posts_adapter.py:505-506 _advance: ceiling_reached = (seen == LISTING_CEILING) and more = not ceiling_reached; :548 takes no next window once it is reached; :699-702 novel[:LISTING_CEILING - seen] lets the 10,000th parent in exactly, so all 10,000 are observed.",
         "src/services/target/instagram_sync.py:693-696 _land: when the coordinated scan_seen equals LISTING_CEILING both lanes are marked complete and clamped; :88-91 _clamp_ceiling sets ceiling_reached true in each.",
         "instagram_sync.py:419-425 status(): partial = remaining OR any lane checkpoint's ceiling_reached. remaining clears when the helpers drain (:374-376) but ceiling_reached stays, so the flag is still true at completion; progress() passes it through at :531.",
-        "src/services/target/destination_readiness.py:109-116 partial_coverage(): any drawn archive source is partial; src/services/target/category_mix.py:615 and :635 expose it as partial_coverage, and it is compatible with state ready (its docstring, :110-111).",
+        "src/services/target/destination_readiness.py:109-116 partial_coverage(): any drawn past-posts source is partial; src/services/target/category_mix.py:615 and :635 expose it as partial_coverage, and it is compatible with state ready (its docstring, :110-111).",
         "So at N = 10000 the flag is true even though nothing was skipped: an account with exactly 10,000 posts cannot be told from a longer, truncated one."
       ],
       "runway_days": 13193,

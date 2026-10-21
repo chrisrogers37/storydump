@@ -1,8 +1,8 @@
-"""The archive sync's saved checkpoint, and the one validator both its readers use.
+"""The past-posts sync's saved checkpoint, and the one validator both its readers use.
 
 `instagram_sync._envelope` resumes from a stored checkpoint and `status`
 displays one. Each refuses a malformed envelope by name
-(`ArchiveCheckpointRefused`), never with the `TypeError` or `AttributeError` an
+(`PastPostsCheckpointRefused`), never with the `TypeError` or `AttributeError` an
 unvalidated read would raise, so the mix resource's degrade can catch it. This
 pins the shapes through the worker's entry point; the same shapes through
 `status`, and the GET that must still answer, are
@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.services.target import instagram_sync
-from src.services.target.instagram_archive_adapter import LISTING_CEILING
+from src.services.target.instagram_past_posts_adapter import LISTING_CEILING
 
 GENERATION = "11111111-1111-4111-8111-111111111111"
 CAPTURE = SimpleNamespace(generation_id=GENERATION)
@@ -28,7 +28,7 @@ def saved(**fields):
     top-level fields of it."""
     return {
         "v": 1,
-        "type": "instagram_archive_sync",
+        "type": "instagram_past_posts_sync",
         "generation_id": GENERATION,
         "revision": 3,
         "next_lane": "history",
@@ -93,10 +93,10 @@ class TestTheSharedValidator:
 
     @pytest.mark.parametrize("fields", MALFORMED.values(), ids=MALFORMED.keys())
     def test_each_malformed_shape_is_refused_by_name(self, fields):
-        with pytest.raises(instagram_sync.ArchiveCheckpointRefused) as refused:
+        with pytest.raises(instagram_sync.PastPostsCheckpointRefused) as refused:
             instagram_sync._envelope(saved(**fields), CAPTURE)
 
-        assert refused.value.reason == "unsupported_archive_sync_checkpoint"
+        assert refused.value.reason == "unsupported_past_posts_sync_checkpoint"
 
     # Not `type`: it decides which reader a dict reaches. Without it the dict is
     # provider state for the adapter to interpret (`TestAProviderCursor…`).
@@ -105,12 +105,12 @@ class TestTheSharedValidator:
         stored = saved()
         del stored[missing]
 
-        with pytest.raises(instagram_sync.ArchiveCheckpointRefused):
+        with pytest.raises(instagram_sync.PastPostsCheckpointRefused):
             instagram_sync._envelope(stored, CAPTURE)
 
     @pytest.mark.parametrize("stored", [[], "abc", 7, True, ["recent"]])
     def test_a_checkpoint_that_is_not_an_object_is_refused(self, stored):
-        with pytest.raises(instagram_sync.ArchiveCheckpointRefused):
+        with pytest.raises(instagram_sync.PastPostsCheckpointRefused):
             instagram_sync._envelope(stored, CAPTURE)
 
     def test_validity_is_judged_before_the_generation_is_compared(self):
@@ -122,7 +122,7 @@ class TestTheSharedValidator:
 
         assert fresh["generation_id"] == GENERATION
         assert fresh["revision"] == 0 and fresh["pending_helpers"] == []
-        with pytest.raises(instagram_sync.ArchiveCheckpointRefused):
+        with pytest.raises(instagram_sync.PastPostsCheckpointRefused):
             instagram_sync._envelope(
                 saved(generation_id=other, pending_helpers=None), CAPTURE
             )
@@ -145,10 +145,10 @@ class TestAProviderCursorIsNotAnEnvelope:
         wrapped = instagram_sync._envelope(cursor, CAPTURE)
 
         assert wrapped["history"] == {"checkpoint": cursor, "complete": False}
-        assert wrapped["type"] == "instagram_archive_sync"
+        assert wrapped["type"] == "instagram_past_posts_sync"
         assert "scan_seen" not in wrapped
 
     @pytest.mark.parametrize("cursor", [{}, {"v": 3}, {"v": True}, {"v": "2"}])
     def test_an_unknown_cursor_version_is_refused(self, cursor):
-        with pytest.raises(instagram_sync.ArchiveCheckpointRefused):
+        with pytest.raises(instagram_sync.PastPostsCheckpointRefused):
             instagram_sync._envelope(cursor, CAPTURE)

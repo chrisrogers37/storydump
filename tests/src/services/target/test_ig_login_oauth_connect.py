@@ -262,7 +262,7 @@ class TestTheGrantCarriesTheIdentity:
     async def test_an_exchange_whose_profile_has_no_usable_id_still_grants(
         self, monkeypatch
     ):
-        """The exchange does not judge the id: a deployment without the archive
+        """The exchange does not judge the id: a deployment without the past-posts source
         connects as usual, and the callback that needs the id is the
         one that refuses."""
         queued_egress(

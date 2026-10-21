@@ -530,8 +530,10 @@ class TelegramTransport:
         except MediaAdmissionNotSent as exc:
             if exc.preparation_failed:
                 self.media_fetch_failures += 1
-                logger.error("archive media preparation failed before channel dispatch")
-            # The archive has not authorized these bytes; no text fallback or
+                logger.error(
+                    "past-posts media preparation failed before channel dispatch"
+                )
+            # The past-posts source has not authorized these bytes; no text fallback or
             # channel request has occurred, regardless of earlier attempts.
             raise
         except MediaUnavailable as exc:
@@ -639,7 +641,7 @@ class TelegramTransport:
             ):
                 self.media_fetch_failures += 1
                 raise MediaAdmissionNotSent(
-                    "archive_revalidation_required", preparation_failed=True
+                    "past_posts_revalidation_required", preparation_failed=True
                 )
             if (
                 media

@@ -20,7 +20,7 @@ tests/
 ├── scripts/             # the DB gates: real PostgreSQL, the schema built from code, the production roles
 │   ├── conftest.py      #   scratch databases, actors, the world builders
 │   ├── load/            #   the load harness (marker `load`, opt-in)
-│   └── onboarding_10k/  #   the 10,000-post Instagram onboarding archives (`RUN_ONBOARDING_10K=1`, opt-in)
+│   └── onboarding_10k/  #   the 10,000-post Instagram onboarding past-posts sources (`RUN_ONBOARDING_10K=1`, opt-in)
 └── fixtures/            # shared data files and fake providers
 ```
 
@@ -101,10 +101,10 @@ live-drift audit, which runs only where `SCHEMA_DRIFT_DSN` is supplied
 - An opt-in suite DESELECTS instead of skipping — the load harness drops its
   `load` items at collection unless `RUN_LOAD_HARNESS=1`
   (`tests/scripts/load/conftest.py:14`), and the 10,000-post onboarding
-  archives (`tests/scripts/onboarding_10k/`, minutes rather than seconds) drop
+  past-posts sources (`tests/scripts/onboarding_10k/`, minutes rather than seconds) drop
   out unless `RUN_ONBOARDING_10K=1`
   (`tests/scripts/onboarding_10k/conftest.py:20`). The 100, 500 and 2,000-post
-  archives run by default (`tests/scripts/test_instagram_onboarding_budgets.py`).
+  past-posts run by default (`tests/scripts/test_instagram_onboarding_budgets.py`).
 - Report a green result only from a run that had a database:
   `N passed, M skipped` at exit 0 says nothing about tests that did not execute.
 

@@ -365,7 +365,7 @@ def require_own_workspace(principal: Principal, workspace_id: str) -> None:
 def not_found(headers: Optional[dict[str, str]] = None) -> HTTPException:
     """The house 404: a row the caller may not see and a row that is not
     there answer identically (no existence oracle). *headers* ride
-    along, for a route whose every answer carries its own (an archive
+    along, for a route whose every answer carries its own (a past-posts
     thumbnail's no-store).
 
     A FUNCTION rather than a module constant, deliberately: a raised
@@ -447,8 +447,8 @@ async def open_tenant(request: Request, workspace_id: str, principal: Principal)
         actor_user_id=principal.user_id,
         channel=principal.channel,
     ).begin() as session:
-        session.info["archive_capability"] = getattr(
-            request.app.state, "archive_capability", None
+        session.info["past_posts_capability"] = getattr(
+            request.app.state, "past_posts_capability", None
         )
         yield session
 

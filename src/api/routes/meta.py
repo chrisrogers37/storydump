@@ -9,7 +9,7 @@ treats them as different events and so do we:
 * `POST /webhooks/meta/data-deletion` — record a receipt and return it.
   **Deletes nothing synchronously**; see the module docstring in
   `services/target/meta_callbacks.py` and the runbook for why. With the
-  archive's key ring configured the receipt is durable: a row behind a random
+  past-posts source's key ring configured the receipt is durable: a row behind a random
   capability, its cleanup done afterwards by the worker.
 * `GET /webhooks/meta/data-deletion/status` — what Meta's returned URL points
   at, so a person can check a request they made: `in_progress` or `completed`.
@@ -26,7 +26,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length, require_engine
-from src.services.target import archive_lifecycle, meta_callbacks
+from src.services.target import past_posts_lifecycle, meta_callbacks
 from src.utils.logger import logger
 
 router = APIRouter(tags=["meta"])
@@ -144,10 +144,10 @@ async def deauthorize(request: Request):
     Meta's id names. Each account's current authorization is revoked only when
     the request's order evidence puts it before the request, so a late
     callback never revokes a newer grant
-    (`archive_lifecycle.revoke_subject_authorizations`).
+    (`past_posts_lifecycle.revoke_subject_authorizations`).
 
     **For an account no mapping names, the account-reference lookup decides.**
-    No mapping is recorded while the archive is not live, so the lookup
+    No mapping is recorded while the past-posts source is not live, so the lookup
     (`resolve_ig_accounts`, then `revoke_for_accounts`) runs for every
     request. It skips only the (workspace, account) pairs a mapping names for
     the subject, whatever the mapped path decided about them (revoked, held,
@@ -166,7 +166,7 @@ async def deauthorize(request: Request):
     """
     subject, verified = _verified_subject(await _signed_request(request))
     engine = require_engine(request)
-    outcome = await archive_lifecycle.revoke_subject_authorizations(
+    outcome = await past_posts_lifecycle.revoke_subject_authorizations(
         engine,
         app_identity=meta_callbacks.app_identity(verified.setting_name),
         subject=subject,
@@ -221,7 +221,7 @@ async def data_deletion(request: Request):
        caller must not reach a stronger deletion than the owner's own
        confirmed one.
 
-    **With the archive's key ring configured the receipt is durable**:
+    **With the past-posts source's key ring configured the receipt is durable**:
     a tenant-free door records the request under a keyed
     fingerprint of its signed payload — never the payload, the subject or a
     secret — freezes which authorizations are in scope, and the response
@@ -239,7 +239,7 @@ async def data_deletion(request: Request):
     """
     subject, verified = _verified_subject(await _signed_request(request))
     status_url = request.url_for("data_deletion_status")
-    keys = getattr(request.app.state, "archive_keys", None)
+    keys = getattr(request.app.state, "past_posts_keys", None)
     if keys is None:
         code = meta_callbacks.confirmation_code(subject, verified.secret)
         logger.info("meta data-deletion requested, receipt %s", code)

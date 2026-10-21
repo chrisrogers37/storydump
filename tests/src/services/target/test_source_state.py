@@ -1,4 +1,4 @@
-"""Application SQL site guard for the archive fence's single writer."""
+"""Application SQL site guard for the past-posts fence's single writer."""
 
 import ast
 import re
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from src.services.target.source_state import ArchiveState
+from src.services.target.source_state import PastPostsState
 
 
 UPDATE_EPOCH = re.compile(
@@ -31,10 +31,10 @@ def epoch_writers(root):
     return writers
 
 
-def test_only_the_archive_transition_writer_updates_source_epoch():
+def test_only_the_past_posts_transition_writer_updates_source_epoch():
     source = Path(__file__).resolve().parents[4] / "src"
     assert epoch_writers(source) == {
-        ("services/target/source_state.py", "apply_archive_transition")
+        ("services/target/source_state.py", "apply_past_posts_transition")
     }
 
 
@@ -46,7 +46,7 @@ def test_epoch_guard_catches_an_unapproved_sql_site(tmp_path):
     assert epoch_writers(tmp_path) == {("rogue.py", "callback")}
 
 
-READABLE = ArchiveState(
+READABLE = PastPostsState(
     enabled=True,
     removed=False,
     generation_id="generation",

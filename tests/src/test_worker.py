@@ -799,8 +799,8 @@ class TestThePublishLegIsWired:
 class TestThePublishAdapterTakesTheSharedGraphVersion:
     """The application has one Graph version, `instagram_graph.graph_version`:
     `META_GRAPH_VERSION`, else the default. The publish adapter is built with
-    it here; the archive composition takes the same function's answer
-    (`test_archive_composition.py`)."""
+    it here; the past-posts composition takes the same function's answer
+    (`test_past_posts_composition.py`)."""
 
     @pytest.mark.parametrize("env", [{}, {"META_GRAPH_VERSION": ""}])
     def test_unset_or_blank_is_the_default(self, env):
@@ -871,7 +871,7 @@ class TestTheConversionRunIsReadOnce:
         record, reads, handed = _a_conversion_record(), [], {}
 
         def build_worker(**kwargs):
-            handed["archive"] = kwargs
+            handed["past_posts"] = kwargs
 
         def fake_compose(**kwargs):
             handed["compose"] = kwargs
@@ -884,13 +884,13 @@ class TestTheConversionRunIsReadOnce:
             worker, "_conversion_evidence", lambda env: reads.append(env) or record
         )
         monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
-        monkeypatch.setattr(worker.archive_composition, "build_worker", build_worker)
+        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
         monkeypatch.setattr(worker, "compose", fake_compose)
         monkeypatch.setattr(worker, "run", lambda app: app)
         monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
         worker.main()
         assert len(reads) == 1
-        assert "conversion" not in handed["archive"]
+        assert "conversion" not in handed["past_posts"]
         assert handed["compose"]["conversion_evidence"] is record
 
 

@@ -223,7 +223,7 @@ describe("the reasons the API sends are the ones that have sentences", () => {
         "invalid_source_policy",
         "source_not_found",
         "unsupported_source_provider",
-        "archive_not_activated",
+        "past_posts_not_activated",
       ]),
     );
     for (const reason of reasons) {
@@ -248,13 +248,13 @@ describe("the reasons the API sends are the ones that have sentences", () => {
   });
 
   it("the past-posts refusals a switch or a connect can meet are raised by the API, and have sentences", () => {
-    // `ArchiveRefused` also carries the sync and fence machinery's reasons
+    // `PastPostsRefused` also carries the sync and fence machinery's reasons
     // (observations, tombstone keys, stale captures, an allocation writer that is
     // missing), which no request of a browser can cause, so the fallback says
     // those ("this one is on us") and no sentence is owed. These three are what
     // turning a source on or off, or choosing history at connect, can say.
-    const raised = new Set(codes(/ArchiveRefused\(\s*"([a-z0-9_]+)"\s*\)/g, pythonSource()));
-    for (const reason of ["archive_not_activated", "invalid_archive_choice", "archive_source_unavailable"]) {
+    const raised = new Set(codes(/PastPostsRefused\(\s*"([a-z0-9_]+)"\s*\)/g, pythonSource()));
+    for (const reason of ["past_posts_not_activated", "invalid_past_posts_choice", "past_posts_source_unavailable"]) {
       expect(raised.has(reason), `${reason} is no longer raised`).toBe(true);
       expect(NAMED, `${reason} has no sentence`).toContain(reason);
     }

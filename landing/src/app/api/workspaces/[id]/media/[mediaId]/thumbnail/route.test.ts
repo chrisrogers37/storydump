@@ -4,8 +4,8 @@
  * policy. Nothing that is not a raster picture is relayed, and every failure
  * is a bare status the browser never keeps, so the page draws its placeholder.
  *
- * `?v=` goes to the API, which needs it for an archive item, and only after it
- * is checked; an archive item's `private, no-store, max-age=0` is relayed as it
+ * `?v=` goes to the API, which needs it for a past-posts item, and only after it
+ * is checked; a past-posts item's `private, no-store, max-age=0` is relayed as it
  * came and nothing is added that would let a browser or a CDN keep it.
  */
 
@@ -50,9 +50,9 @@ function get(mediaId = MEDIA, id = WS, query = "v=0123456789abcdef") {
 }
 
 const DRIVE_POLICY = "private, max-age=2592000";
-/** What the API says of an archive item's picture, and of its refusal. */
-const ARCHIVE_POLICY = "private, no-store, max-age=0";
-/** An archive item's `thumbnail_version`: `<generation id>.<source use epoch>`. */
+/** What the API says of a past-posts item's picture, and of its refusal. */
+const PAST_POSTS_POLICY = "private, no-store, max-age=0";
+/** A past-posts item's `thumbnail_version`: `<generation id>.<source use epoch>`. */
 const PAIR = "5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b.7";
 
 const picture =
@@ -134,7 +134,7 @@ describe("a failed answer waits on nothing (#1644)", () => {
   // pending for good (reproduced under `next dev` and `next build` + `next
   // start`, on Node 20 and 22). A route that waits on it never answers a 404:
   // an Off source's, a stale version's, a Drive item's with no link. The page
-  // asks for archive pictures two at a time, so two such requests hold every
+  // asks for past-posts pictures two at a time, so two such requests hold every
   // other preview in the tab. The body below is one whose cancel never settles,
   // and each test's short timeout is what a route that waits on it would hit.
   const NEVER = 1000;
@@ -209,7 +209,7 @@ describe("a failed answer waits on nothing (#1644)", () => {
 describe("the version the page names (#1644)", () => {
   const path = (query: string) => `/workspaces/${WS}/media/${MEDIA}/thumbnail${query}`;
 
-  it("forwards a Drive item's version, and an archive item's generation and epoch, as written", async () => {
+  it("forwards a Drive item's version, and a past-posts item's generation and epoch, as written", async () => {
     expect((await get(MEDIA, WS, "v=0123456789abcdef")).status).toBe(200);
     expect((await get(MEDIA, WS, `v=${PAIR}`)).status).toBe(200);
     expect(captured.map((c) => c.path)).toEqual([
@@ -218,7 +218,7 @@ describe("the version the page names (#1644)", () => {
     ]);
   });
 
-  it("asks the API with no version when the page names none, which the API refuses for an archive item", async () => {
+  it("asks the API with no version when the page names none, which the API refuses for a past-posts item", async () => {
     expect((await get(MEDIA, WS, "")).status).toBe(200);
     expect(captured.map((c) => c.path)).toEqual([path("")]);
   });
@@ -263,17 +263,17 @@ describe("the version the page names (#1644)", () => {
   });
 });
 
-describe("an archive item's picture is never kept (#1644)", () => {
+describe("a past-posts item's picture is never kept (#1644)", () => {
   it("relays the API's no-store policy as it came, and its bytes", async () => {
-    state.upstream = picture("image/jpeg", ARCHIVE_POLICY);
+    state.upstream = picture("image/jpeg", PAST_POSTS_POLICY);
     const res = await get(MEDIA, WS, `v=${PAIR}`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe(ARCHIVE_POLICY);
+    expect(res.headers.get("cache-control")).toBe(PAST_POSTS_POLICY);
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(PICTURE);
   });
 
   it("relays no validator and no freshness of its own, so nothing can answer 304 or be reused", async () => {
-    state.upstream = picture("image/jpeg", ARCHIVE_POLICY, {
+    state.upstream = picture("image/jpeg", PAST_POSTS_POLICY, {
       ETag: '"abc"',
       "Last-Modified": "Wed, 01 Jan 2020 00:00:00 GMT",
       Expires: "Wed, 01 Jan 2030 00:00:00 GMT",
@@ -284,7 +284,7 @@ describe("an archive item's picture is never kept (#1644)", () => {
     for (const header of ["etag", "last-modified", "expires", "age", "vary"]) {
       expect(res.headers.get(header), header).toBeNull();
     }
-    expect(res.headers.get("cache-control")).toBe(ARCHIVE_POLICY);
+    expect(res.headers.get("cache-control")).toBe(PAST_POSTS_POLICY);
   });
 
   it("says no-store, not a default that could be kept, when the API names no policy", async () => {
@@ -299,7 +299,7 @@ describe("an archive item's picture is never kept (#1644)", () => {
       state.upstream = () =>
         new Response(JSON.stringify({ detail: "not found", url: "https://upstream.example/p" }), {
           status,
-          headers: { "Cache-Control": ARCHIVE_POLICY, ETag: '"abc"' },
+          headers: { "Cache-Control": PAST_POSTS_POLICY, ETag: '"abc"' },
         });
       const res = await get(MEDIA, WS, `v=${PAIR}`);
       expect(res.status, String(status)).toBe(status);
@@ -324,7 +324,7 @@ describe("an archive item's picture is never kept (#1644)", () => {
     expect((await get(MEDIA, WS, `v=${PAIR}`)).status).toBe(404);
   });
 
-  it("still relays a Drive picture's long-lived policy, which the archive's does not touch", async () => {
+  it("still relays a Drive picture's long-lived policy, which the past-posts source's does not touch", async () => {
     state.upstream = picture("image/jpeg", DRIVE_POLICY);
     const res = await get(MEDIA, WS, "v=0123456789abcdef");
     expect(res.headers.get("cache-control")).toBe(DRIVE_POLICY);

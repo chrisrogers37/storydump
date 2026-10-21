@@ -66,7 +66,7 @@ function converted(rows: Array<{ provider: string; enabled: boolean }>) {
     mode: "equal",
     supported_actions: ["reset_equal", "set_enabled", "save_custom"],
     conversion: { state: "complete", kind: "new_equal" },
-    archive_available: true,
+    past_posts_available: true,
     destinations: [],
     rows: rows.map((row, i) => ({
       source_id: `src-${i}`,
@@ -134,25 +134,25 @@ describe("the media library page's one read of the posting mix", () => {
   it("does not ask for it of a library with items: only an empty library's copy uses it", async () => {
     answer({
       media: ok({ media: [{ id: "media-1" }], limit: 100 }),
-      mix: ok(converted([{ provider: "instagram_archive", enabled: true }])),
+      mix: ok(converted([{ provider: "instagram_past_posts", enabled: true }])),
     });
     expect(gridProps(await page()).pastPosts).toBeNull();
     expect(paths()).toEqual(MAIN);
     // The positive control: the same mix, asked of an empty library, is told.
     workspaceFetch.mockClear();
-    answer({ mix: ok(converted([{ provider: "instagram_archive", enabled: true }])) });
+    answer({ mix: ok(converted([{ provider: "instagram_past_posts", enabled: true }])) });
     expect(gridProps(await page()).pastPosts).toBe("on");
     expect(paths()).toEqual([...MAIN, "category-mix"].sort());
   });
 
   it("tells the grid a workspace's past posts are on, or Off, from its converted mix", async () => {
-    answer({ mix: ok(converted([{ provider: "instagram_archive", enabled: true }])) });
+    answer({ mix: ok(converted([{ provider: "instagram_past_posts", enabled: true }])) });
     expect(gridProps(await page()).pastPosts).toBe("on");
     answer({
       mix: ok(
         converted([
           { provider: "gdrive", enabled: true },
-          { provider: "instagram_archive", enabled: false },
+          { provider: "instagram_past_posts", enabled: false },
         ]),
       ),
     });
@@ -169,7 +169,7 @@ describe("the media library page's one read of the posting mix", () => {
   it("tells it nothing for a converted mix with no past-posts source, or one it cannot read", async () => {
     answer({ mix: ok(converted([{ provider: "gdrive", enabled: true }])) });
     expect(gridProps(await page()).pastPosts).toBeNull();
-    answer({ mix: ok({ ...converted([{ provider: "instagram_archive", enabled: true }]), revision: "8" }) });
+    answer({ mix: ok({ ...converted([{ provider: "instagram_past_posts", enabled: true }]), revision: "8" }) });
     expect(gridProps(await page()).pastPosts).toBeNull();
     answer({ mix: ok({ protocol_version: 3, rows: [] }) });
     expect(gridProps(await page()).pastPosts).toBeNull();
@@ -183,7 +183,7 @@ describe("the media library page's one read of the posting mix", () => {
   });
 
   it("still stands on the library and its counts: without either it is unavailable, and asks no mix", async () => {
-    answer({ media: DOWN, mix: ok(converted([{ provider: "instagram_archive", enabled: true }])) });
+    answer({ media: DOWN, mix: ok(converted([{ provider: "instagram_past_posts", enabled: true }])) });
     expect((await page()).some((el) => el.type === RouterUnavailable)).toBe(true);
     expect(paths()).toEqual(MAIN);
     workspaceFetch.mockClear();

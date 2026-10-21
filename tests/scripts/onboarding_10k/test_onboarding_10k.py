@@ -1,4 +1,4 @@
-"""The 10,000-post archives through the real sync composition (opt-in).
+"""The 10,000-post past-posts sources through the real sync composition (opt-in).
 
 `RUN_ONBOARDING_10K=1` selects it; see `conftest.py`. The same drive, spies and
 checks as the default sizes (`tests/scripts/test_instagram_onboarding_budgets.py`),
@@ -19,7 +19,7 @@ worker = budgets.worker
 
 
 @pytest.mark.parametrize("kind", ["useful", "excluded", "carousel"])
-async def test_the_ten_thousand_post_archive_stays_within_the_budgets(
+async def test_the_ten_thousand_post_past_posts_stays_within_the_budgets(
     kind, worker, origin, sync_conn, monkeypatch
 ):
     report = await budgets.measure(
@@ -34,7 +34,7 @@ async def test_the_ten_thousand_post_archive_stays_within_the_budgets(
     # The coverage-ceiling flag stays truthful at the ceiling.
     assert report["final"]["partial_coverage"] is True
     if kind in ("useful", "carousel"):
-        # The first card does not wait for the archive: its requests are the
+        # The first card does not wait for the past-posts source: its requests are the
         # indexing that reaches the first candidate and the selected asset's own
         # fetch, inside ceil(0.1N/25)+16 Graph and four CDN, with the
         # candidate landing before a quarter of the parents are observed.

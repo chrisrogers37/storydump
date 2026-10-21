@@ -199,7 +199,7 @@ POLICY_CENSUS = {
     ): "door:fn_clock_tick",
     ("p_tenant", "media_items", "ALL", T): "matrix",
     ("p_tenant", "media_source_destinations", "ALL", T): "matrix",
-    ("p_tenant", "instagram_archive_generations", "ALL", T): "matrix",
+    ("p_tenant", "instagram_past_posts_generations", "ALL", T): "matrix",
     ("p_tenant", "instagram_source_policies", "ALL", T): "matrix",
     ("p_tenant", "instagram_media_index", "ALL", T): "matrix",
     ("p_tenant", "instagram_media_assets", "ALL", T): "matrix",
@@ -241,39 +241,39 @@ POLICY_CENSUS = {
         "meta_identity_mappings",
         "SELECT",
         ("svc_clock",),
-    ): "door:fn_archive_reconcile_jobs",
-    # archive lifecycle cleanup: the redaction door reads and deletes immutable captures of fenced
+    ): "door:fn_past_posts_reconcile_jobs",
+    # past-posts lifecycle cleanup: the redaction door reads and deletes immutable captures of fenced
     # generations (the intent provenance read is `fn_source_asset_suitability`'s policy).
     (
         "p_maint_redact_read",
         "instagram_operation_provenance",
         "SELECT",
         ("svc_maintenance",),
-    ): "door:fn_archive_redact_generation_records",
+    ): "door:fn_past_posts_redact_generation_records",
     (
         "p_maint_redact_delete",
         "instagram_operation_provenance",
         "DELETE",
         ("svc_maintenance",),
-    ): "door:fn_archive_redact_generation_records",
+    ): "door:fn_past_posts_redact_generation_records",
     (
         "p_maint_redact_delete",
         "instagram_intent_provenance",
         "DELETE",
         ("svc_maintenance",),
-    ): "door:fn_archive_redact_generation_records",
+    ): "door:fn_past_posts_redact_generation_records",
     (
         "p_maint_redact_read",
         "instagram_artifacts",
         "SELECT",
         ("svc_maintenance",),
-    ): "door:fn_archive_redact_generation_records",
+    ): "door:fn_past_posts_redact_generation_records",
     (
         "p_maint_redact_delete",
         "instagram_artifacts",
         "DELETE",
         ("svc_maintenance",),
-    ): "door:fn_archive_redact_generation_records",
+    ): "door:fn_past_posts_redact_generation_records",
     ("p_tenant", "post_locks", "ALL", T): "matrix",
     (
         "p_maint_locks",
@@ -372,7 +372,7 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
-    # OAuth archive choice: an Instagram connect's applied result, the API's alone — its
+    # OAuth past-posts choice: an Instagram connect's applied result, the API's alone — its
     # callback inserts one and the initiating member session reads it.
     (
         "p_ingress_connection_results",
@@ -470,7 +470,7 @@ for _table in (
     "ig_accounts",
     "media_sources",
     "oauth_credentials",
-    "instagram_archive_generations",
+    "instagram_past_posts_generations",
     "category_post_case_mix",
     "media_source_destinations",
 ):
@@ -482,7 +482,7 @@ for _table in (
     "ig_accounts",
     "media_sources",
     "oauth_credentials",
-    "instagram_archive_generations",
+    "instagram_past_posts_generations",
 ):
     POLICY_CENSUS[("p_source_read_lock", _table, "UPDATE", _SOURCE_READ_ROLES)] = (
         "door:fn_claim_job"
@@ -787,18 +787,18 @@ DOORS = {
         " '00000000-0000-0000-0000-000000000000'::uuid,"
         " '00000000-0000-0000-0000-000000000000'::uuid, 'nope', '{}'::jsonb, NULL, 60)",
     ),
-    "fn_archive_redact_generation_records": (
+    "fn_past_posts_redact_generation_records": (
         "svc_worker",
-        "SELECT * FROM fn_archive_redact_generation_records("
+        "SELECT * FROM fn_past_posts_redact_generation_records("
         "'00000000-0000-0000-0000-000000000000'::uuid, ARRAY[]::uuid[])",
     ),
     "fn_meta_receipt_cleanup_jobs": (
         "svc_worker",
         "SELECT fn_meta_receipt_cleanup_jobs(0)",
     ),
-    "fn_archive_reconcile_jobs": (
+    "fn_past_posts_reconcile_jobs": (
         "svc_worker",
-        "SELECT fn_archive_reconcile_jobs(0, 'synthetic-run', repeat('a', 64))",
+        "SELECT fn_past_posts_reconcile_jobs(0, 'synthetic-run', repeat('a', 64))",
     ),
 }
 
@@ -853,13 +853,13 @@ def _seed_tenant(conn, name: str) -> dict:
     ws, iga, mi = ids["ws"], ids["iga"], ids["media"]
     from tests.scripts.test_instagram_catalog_gate import (
         insert_asset,
-        seed_archive_evidence,
+        seed_past_posts_evidence,
     )
 
     with conn.cursor() as cur:
-        archive = seed_archive_evidence(cur, ids)
-        insert_asset(cur, archive, item=archive["item"])
-        # `meta_identity_mappings`: one verified mapping on the archive's credential, so the
+        past_posts = seed_past_posts_evidence(cur, ids)
+        insert_asset(cur, past_posts, item=past_posts["item"])
+        # `meta_identity_mappings`: one verified mapping on the past-posts source's credential, so the
         # mappings' matrix positives read a row of the tenant's own.
         cur.execute(
             "INSERT INTO meta_identity_mappings (workspace_id, ig_account_id,"
@@ -870,7 +870,7 @@ def _seed_tenant(conn, name: str) -> dict:
             (
                 ws,
                 iga,
-                archive["credential"],
+                past_posts["credential"],
                 str(uuid.uuid4()),
                 str(int(hashlib.sha256(name.encode()).hexdigest()[:12], 16)),
                 str(int(hashlib.sha256(name.encode()).hexdigest()[12:24], 16)),
@@ -1142,7 +1142,7 @@ class TestRuntimeTenantIsolationMatrix:
             )
 
     def test_connection_results_are_the_apis_own_tenant_rows(self, target):
-        """OAuth archive choice: the API inserts a result into its own tenant only and reads
+        """OAuth past-posts choice: the API inserts a result into its own tenant only and reads
         only that tenant's, never with no tenant set; a result is never
         rewritten (no UPDATE grant), and the worker holds no grant at all.
         Each refusal beside its positive on the same axis."""
@@ -1261,7 +1261,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        # `fn_source_asset_suitability` adds two selected-proof maintenance reads; OAuth archive choice the API's
+        # `fn_source_asset_suitability` adds two selected-proof maintenance reads; OAuth past-posts choice the API's
         # connection results; `meta_identity_mappings` has' three, the receipt tables have'
         # nine, the redaction function has five, and `instagram_media_assets` has two.
         assert len(POLICY_CENSUS) == 115
@@ -1788,12 +1788,12 @@ class TestDoorsAreExercisedAndExclusive:
 
 
 class TestDirectPathsAreShut:
-    """Only tenant-owned archive observations and assets may be deleted directly.
-    Census every runtime grant; the live archive gate proves its RLS boundary.
+    """Only tenant-owned past-posts observations and assets may be deleted directly.
+    Census every runtime grant; the live past-posts gate proves its RLS boundary.
     All other deletions require their narrow doors.
     """
 
-    def test_only_archive_catalog_rows_have_runtime_delete(self, target):
+    def test_only_past_posts_catalog_rows_have_runtime_delete(self, target):
         rows = _exec(
             target["owner_stream"],
             "SELECT grantee, table_name FROM information_schema.role_table_grants"

@@ -1,5 +1,5 @@
 /**
- * How many archive previews one workspace has in flight at once: two. Each
+ * How many past-posts previews one workspace has in flight at once: two. Each
  * preview is a fresh lookup at the provider, so a page of them is asked for
  * two at a time and the rest wait their turn; the browser's own lazy loading
  * does not bound that.

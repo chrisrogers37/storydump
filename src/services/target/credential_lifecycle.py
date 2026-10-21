@@ -33,7 +33,7 @@ here is loud, not latent.
 - **Undecryptable** (the ring cannot read the stored payload):
   :func:`ig_login_oauth.load_credential` already performed and committed the
   dead flips before raising — through the same wrapper, bound to the same
-  capture, as a rejection (`archive_lifecycle.credential_rejected`) — so the
+  capture, as a rejection (`past_posts_lifecycle.credential_rejected`) — so the
   job's work is therefore DONE: the executor returns success rather than
   retrying a payload that cannot become readable.
 
@@ -55,7 +55,7 @@ from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
 from src.services.target import (
-    archive_lifecycle,
+    past_posts_lifecycle,
     audit,
     egress,
     google_drive_oauth,
@@ -264,9 +264,9 @@ async def refresh_credential(deps, session, job) -> str:
     """Executor for the clock's `refresh_credential` mints.
 
     A routine refresh swaps the token in place and keeps its authorization, so
-    an archive keeps its generation and epoch. A rejection is bound to what the
+    a past-posts source keeps its generation and epoch. A rejection is bound to what the
     token was issued under, captured before the token is read
-    (`archive_lifecycle.credential_rejected`): after a reauthorization it
+    (`past_posts_lifecycle.credential_rejected`): after a reauthorization it
     flips nothing (`stale`).
     """
     payload = job.get("payload") or {}
@@ -293,7 +293,7 @@ async def refresh_credential(deps, session, job) -> str:
             # Before the token, never after: a reauthorization that lands
             # between the two reads then leaves the capture older than the
             # token, and a rejection of it flips nothing.
-            captured = await archive_lifecycle.capture_credential(
+            captured = await past_posts_lifecycle.capture_credential(
                 s, workspace_id=workspace_id, credential_id=credential_id
             )
             token = await oauth.load_credential(
@@ -326,7 +326,7 @@ async def refresh_credential(deps, session, job) -> str:
         # the account's source prefix. The `fn_clock_tick` mints the reauth
         # prompt on its next tick.
         async with factory() as s:
-            outcome = await archive_lifecycle.credential_rejected(
+            outcome = await past_posts_lifecycle.credential_rejected(
                 s,
                 workspace_id=workspace_id,
                 credential_id=credential_id,

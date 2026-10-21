@@ -29,7 +29,7 @@ from tests.src.services.target.test_content_runway import (
 )
 
 WS = "33333333-3333-3333-3333-333333333333"
-#: An archive item is stored under this Instagram id, which no read may give; a
+#: A past-posts item is stored under this Instagram id, which no read may give; a
 #: stored name of the form `Instagram <id>` carries it too.
 GRAPH_ID = "17841400000000771"
 POSTED_AT = datetime(2020, 1, 1, 12, 30, tzinfo=timezone.utc)
@@ -51,15 +51,15 @@ def _flat(sql: str) -> str:
 
 
 def _planned(n, provider="gdrive", **over):
-    """A planned story as the database answers it, in the columns the archive
+    """A planned story as the database answers it, in the columns the past-posts
     projection reads: a Drive story has no origin account."""
-    archive = provider == "instagram_archive"
+    past_posts = provider == "instagram_past_posts"
     return {
         "id": f"i-{n}",
-        "file_name": vocabulary.ARCHIVE_ITEM_NAME if archive else "f.jpg",
+        "file_name": vocabulary.PAST_POSTS_ITEM_NAME if past_posts else "f.jpg",
         "source_provider": provider,
-        "origin_handle": "example_handle" if archive else None,
-        "original_at": POSTED_AT if archive else None,
+        "origin_handle": "example_handle" if past_posts else None,
+        "original_at": POSTED_AT if past_posts else None,
         "slide_post_ref": None,
         "slide_position": None,
         "slide_count": None,
@@ -217,20 +217,20 @@ class TestTheBounds:
         )
 
 
-class TestAPlannedArchiveStory:
+class TestAPlannedPastPostsStory:
     """`planned` rows are the intents read's, read through the same projection
-    as the Queue's (`workspaces._archive_row`): the calendar tells an archive
+    as the Queue's (`workspaces._past_posts_row`): the calendar tells a past-posts
     story's picture from a Drive picture the way the Queue does, and names the
     story for where it came from, never by Instagram's id."""
 
     async def test_it_reads_under_its_own_name_with_its_provenance(self):
-        archive, drive = _planned(1, "instagram_archive"), _planned(2)
-        out = await _read(_Executor([archive, drive], []))
+        past_posts, drive = _planned(1, "instagram_past_posts"), _planned(2)
+        out = await _read(_Executor([past_posts, drive], []))
         assert out["planned"] == [
             _shown(
-                archive,
+                past_posts,
                 provenance={
-                    "provider": "instagram_archive",
+                    "provider": "instagram_past_posts",
                     "origin_handle": "example_handle",
                     "original_at": POSTED_AT,
                     "slide": None,
@@ -242,19 +242,19 @@ class TestAPlannedArchiveStory:
         ]
         assert GRAPH_ID not in repr(out)
 
-    async def test_a_repeating_archive_story_reads_the_same_way(self):
+    async def test_a_repeating_past_posts_story_reads_the_same_way(self):
         """The calendar's repeating list (#485) is read through the same
-        projection: an archive story's series is named for where it came from,
+        projection: a past-posts story's series is named for where it came from,
         and a name stored as `Instagram <Graph id>` never shows that id."""
         legacy = _planned(
-            1, "instagram_archive", kind="repeat", file_name=f"Instagram {GRAPH_ID}"
+            1, "instagram_past_posts", kind="repeat", file_name=f"Instagram {GRAPH_ID}"
         )
         out = await _read(_Executor([], [], [legacy]))
         assert out["repeating"] == [
             _shown(
                 legacy,
                 provenance={
-                    "provider": "instagram_archive",
+                    "provider": "instagram_past_posts",
                     "origin_handle": "example_handle",
                     "original_at": POSTED_AT,
                     "slide": None,
@@ -268,7 +268,7 @@ class TestAPlannedArchiveStory:
     async def test_planned_slide_has_its_server_name_and_public_provenance(self, count):
         slide = _planned(
             1,
-            "instagram_archive",
+            "instagram_past_posts",
             slide_post_ref=POST_REF,
             slide_position=2,
             slide_count=count,
@@ -279,7 +279,7 @@ class TestAPlannedArchiveStory:
             "Instagram post, slide 2 of 4" if count == 4 else "Instagram post, slide 2"
         )
         assert shown["provenance"] == {
-            "provider": "instagram_archive",
+            "provider": "instagram_past_posts",
             "origin_handle": "example_handle",
             "original_at": POSTED_AT,
             "slide": {"post_ref": POST_REF, "position": 2, "count": count},
@@ -288,12 +288,12 @@ class TestAPlannedArchiveStory:
         assert GRAPH_ID not in repr(out)
 
     async def test_an_instagram_graph_id_name_reads_as_the_neutral_one(self):
-        """An archive item stored as `Instagram <Graph id>` reads under the
+        """A past-posts item stored as `Instagram <Graph id>` reads under the
         neutral name: the projection hides the Graph id."""
-        legacy = _planned(1, "instagram_archive", file_name=f"Instagram {GRAPH_ID}")
+        legacy = _planned(1, "instagram_past_posts", file_name=f"Instagram {GRAPH_ID}")
         out = await _read(_Executor([legacy], []))
         assert [p["file_name"] for p in out["planned"]] == [
-            vocabulary.ARCHIVE_ITEM_NAME
+            vocabulary.PAST_POSTS_ITEM_NAME
         ]
         assert GRAPH_ID not in repr(out)
 
@@ -309,9 +309,9 @@ class TestAPlannedArchiveStory:
             assert f"AS {column}" in planned
 
     async def test_a_row_that_lacks_the_provenance_columns_is_refused(self):
-        """A statement that forgot to select them would read every archive story
+        """A statement that forgot to select them would read every past-posts story
         as a Drive story, and the calendar would draw it on the Drive path."""
-        row = _planned(1, "instagram_archive")
+        row = _planned(1, "instagram_past_posts")
         del row["source_provider"]
         with pytest.raises(KeyError):
             await _read(_Executor([row], []))

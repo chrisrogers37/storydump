@@ -10,7 +10,7 @@ from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as observations
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 uow = observations.uow
 
@@ -60,38 +60,40 @@ async def put(engine, origin, sid, body):
 
 
 async def test_saved_defaults_reconnect_and_runtime_default_change(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
-    view = await get(archive_engine, origin, src["source_id"])
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
+    view = await get(past_posts_engine, origin, src["source_id"])
     assert view["revision"] == 1 and view["policy"]["minimum_age_days"] == 90
-    await put(archive_engine, origin, src["source_id"], update(age=3, credited=True))
+    await put(past_posts_engine, origin, src["source_id"], update(age=3, credited=True))
     old = p.policy_defaults
     monkeypatch.setattr(p, "policy_defaults", lambda: dict(old(), minimum_age_days=200))
-    same = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    same = await foundation.ensure(
+        past_posts_engine, origin, foundation.authorization()
+    )
     assert same["source_id"] == src["source_id"]
-    view = await get(archive_engine, origin, src["source_id"])
+    view = await get(past_posts_engine, origin, src["source_id"])
     assert view["revision"] == 2 and view["policy"]["minimum_age_days"] == 3
     assert view["effective"]["minimum_age_days"] == 31
 
 
 async def test_saved_versions_and_legacy_put_preserve_first_choice(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     sid = src["source_id"]
-    initial = await get(archive_engine, origin, sid)
+    initial = await get(past_posts_engine, origin, sid)
     assert initial["schema_version"] == 2
     assert initial["policy"]["carousel_slides"] == "all"
     assert "carousel_slides" in initial["capabilities"]["editable"]
-    first = await put(archive_engine, origin, sid, update_v2(slides="first"))
+    first = await put(past_posts_engine, origin, sid, update_v2(slides="first"))
     assert first["revision"] == 2 and first["policy"]["carousel_slides"] == "first"
-    legacy = await put(archive_engine, origin, sid, update(revision=2, age=91))
+    legacy = await put(past_posts_engine, origin, sid, update(revision=2, age=91))
     assert legacy["schema_version"] == 2 and legacy["revision"] == 3
     assert legacy["policy"]["carousel_slides"] == "first"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         saved = (
             await conn.execute(
                 text(
@@ -121,10 +123,10 @@ async def test_saved_versions_and_legacy_put_preserve_first_choice(
             ),
             {"sid": sid},
         )
-    assert (await get(archive_engine, origin, sid))["policy"][
+    assert (await get(past_posts_engine, origin, sid))["policy"][
         "carousel_slides"
     ] == "first"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE instagram_source_policies SET schema_version=3 WHERE source_id=:sid"
@@ -132,38 +134,40 @@ async def test_saved_versions_and_legacy_put_preserve_first_choice(
             {"sid": sid},
         )
     with pytest.raises(p.PolicyRefused) as error:
-        await get(archive_engine, origin, sid)
+        await get(past_posts_engine, origin, sid)
     assert error.value.reason == "unsupported_source_policy"
 
 
-async def test_policy_v2_stale_revision_and_unsupported_choice(archive_engine, origin):
+async def test_policy_v2_stale_revision_and_unsupported_choice(
+    past_posts_engine, origin
+):
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     sid = src["source_id"]
-    await put(archive_engine, origin, sid, update_v2(slides="first"))
+    await put(past_posts_engine, origin, sid, update_v2(slides="first"))
     with pytest.raises(p.PolicyRefused) as stale:
-        await put(archive_engine, origin, sid, update_v2(slides="all"))
+        await put(past_posts_engine, origin, sid, update_v2(slides="all"))
     assert stale.value.reason == "policy_conflict" and stale.value.current_revision == 2
     for body in (
         update_v2(revision=2, slides="middle"),
         dict(update_v2(revision=2), schema_version=3),
     ):
         with pytest.raises(p.PolicyRefused) as invalid:
-            await put(archive_engine, origin, sid, body)
+            await put(past_posts_engine, origin, sid, body)
         assert invalid.value.reason == "unsupported_source_policy"
-    assert (await get(archive_engine, origin, sid))["policy"][
+    assert (await get(past_posts_engine, origin, sid))["policy"][
         "carousel_slides"
     ] == "first"
 
 
 async def test_concurrent_cas_has_one_winner_and_revision_on_conflict(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     results = await asyncio.gather(
-        put(archive_engine, origin, src["source_id"], update(age=1)),
-        put(archive_engine, origin, src["source_id"], update(age=2)),
+        put(past_posts_engine, origin, src["source_id"], update(age=1)),
+        put(past_posts_engine, origin, src["source_id"], update(age=2)),
         return_exceptions=True,
     )
     winners = [r for r in results if isinstance(r, dict)]
@@ -174,14 +178,14 @@ async def test_concurrent_cas_has_one_winner_and_revision_on_conflict(
 
 
 async def test_policy_audit_preserves_asset_evidence_and_source_epoch(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     service()
-    src = await observations.enabled(archive_engine, origin)
+    src = await observations.enabled(past_posts_engine, origin)
     await observations.observe(
-        archive_engine, origin, src, observations.bundle(attribution="not_detected")
+        past_posts_engine, origin, src, observations.bundle(attribution="not_detected")
     )
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE instagram_media_assets SET validation_state='supported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='v1',validated_at=now()"
@@ -198,8 +202,8 @@ async def test_policy_audit_preserves_asset_evidence_and_source_epoch(
                 dict(sid=src["source_id"]),
             )
         ).scalar_one()
-    await put(archive_engine, origin, src["source_id"], update(age=0, unknown=True))
-    async with uow(archive_engine, origin) as conn:
+    await put(past_posts_engine, origin, src["source_id"], update(age=0, unknown=True))
+    async with uow(past_posts_engine, origin) as conn:
         after = dict(
             (await conn.execute(text("SELECT * FROM instagram_media_assets")))
             .mappings()
@@ -231,10 +235,10 @@ async def test_policy_audit_preserves_asset_evidence_and_source_epoch(
 
 
 async def test_caught_audit_failure_rolls_back_policy_and_allows_retry(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     from src.services.target import audit
 
     original = audit.record
@@ -243,7 +247,7 @@ async def test_caught_audit_failure_rolls_back_policy_and_allows_retry(
         raise RuntimeError("audit unavailable")
 
     monkeypatch.setattr(audit, "record", fail)
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         with pytest.raises(RuntimeError, match="audit unavailable"):
             await p.put_policy(
                 conn,
@@ -257,28 +261,28 @@ async def test_caught_audit_failure_rolls_back_policy_and_allows_retry(
             dict(ws=str(origin["ws"])),
         )
     monkeypatch.setattr(audit, "record", original)
-    assert (await get(archive_engine, origin, src["source_id"]))["revision"] == 1
-    assert (await put(archive_engine, origin, src["source_id"], update(age=0)))[
+    assert (await get(past_posts_engine, origin, src["source_id"]))["revision"] == 1
+    assert (await put(past_posts_engine, origin, src["source_id"], update(age=0)))[
         "revision"
     ] == 2
 
 
 async def test_missing_wrong_provider_activation_and_foreign_are_closed(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
     import uuid
     from tests.scripts.conftest import seed_workspace_chain
 
     p = service()
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     foreign = seed_workspace_chain(sync_conn, "foreign-policy")
     for sid, cap, reason in [
         (str(uuid.uuid4()), foundation.capability(), "source_not_found"),
         (str(origin["src"]), foundation.capability(), "unsupported_source_provider"),
-        (src["source_id"], None, "archive_not_activated"),
+        (src["source_id"], None, "past_posts_not_activated"),
         (str(foreign["src"]), foundation.capability(), "source_not_found"),
     ]:
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             with pytest.raises(p.PolicyRefused) as error:
                 await p.get_policy(
                     conn, workspace_id=str(origin["ws"]), source_id=sid, capability=cap
@@ -287,13 +291,13 @@ async def test_missing_wrong_provider_activation_and_foreign_are_closed(
 
 
 async def test_safe_source_projection_preserves_drive_and_current_generation_coverage(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import workspaces
 
-    src = await observations.enabled(archive_engine, origin)
-    await observations.observe(archive_engine, origin, src, observations.bundle())
-    async with uow(archive_engine, origin) as conn:
+    src = await observations.enabled(past_posts_engine, origin)
+    await observations.observe(past_posts_engine, origin, src, observations.bundle())
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE media_sources SET config=config||jsonb_build_object('cursor','secret-cursor','signed_url','secret-url','folder_ref','drive-folder','folder_name','Drive name') WHERE workspace_id=:ws"
@@ -301,13 +305,15 @@ async def test_safe_source_projection_preserves_drive_and_current_generation_cov
             dict(ws=str(origin["ws"])),
         )
         rows = await workspaces.list_sources(conn, workspace_id=str(origin["ws"]))
-    archive = next(x for x in rows if str(x["id"]) == src["source_id"])
-    assert archive["coverage"]["observed"] == archive["coverage"]["represented"] == 1
-    assert archive["coverage"]["awaiting_reobservation"] == 0
-    assert archive["destination_scope"] == "origin_only" and str(
-        archive["origin"]["id"]
+    past_posts = next(x for x in rows if str(x["id"]) == src["source_id"])
+    assert (
+        past_posts["coverage"]["observed"] == past_posts["coverage"]["represented"] == 1
+    )
+    assert past_posts["coverage"]["awaiting_reobservation"] == 0
+    assert past_posts["destination_scope"] == "origin_only" and str(
+        past_posts["origin"]["id"]
     ) == str(origin["iga"])
-    assert archive["policy_capabilities"] == {
+    assert past_posts["policy_capabilities"] == {
         "editable": [
             "minimum_age_days",
             "include_credited",
@@ -315,8 +321,8 @@ async def test_safe_source_projection_preserves_drive_and_current_generation_cov
             "carousel_slides",
         ]
     }
-    assert archive["policy"]["policy"]["carousel_slides"] == "all"
-    assert archive["display_name"]
+    assert past_posts["policy"]["policy"]["carousel_slides"] == "all"
+    assert past_posts["display_name"]
     drive = next(x for x in rows if str(x["id"]) == str(origin["src"]))
     assert (
         drive["folder_ref"] == "drive-folder" and drive["folder_name"] == "Drive name"
@@ -335,39 +341,39 @@ async def test_safe_source_projection_preserves_drive_and_current_generation_cov
         "credential_status",
     ):
         assert secret not in projection
-    await put(archive_engine, origin, src["source_id"], update_v2(slides="first"))
-    async with uow(archive_engine, origin) as conn:
+    await put(past_posts_engine, origin, src["source_id"], update_v2(slides="first"))
+    async with uow(past_posts_engine, origin) as conn:
         changed = next(
             x
             for x in await workspaces.list_sources(conn, workspace_id=str(origin["ws"]))
             if str(x["id"]) == src["source_id"]
         )
     assert changed["policy"]["policy"]["carousel_slides"] == "first"
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE media_sources SET last_sync_success_at=now() WHERE id=:sid"),
             dict(sid=src["source_id"]),
         )
-    g2 = await foundation.ensure(archive_engine, origin, foundation.authorization())
-    async with uow(archive_engine, origin) as conn:
-        archive = next(
+    g2 = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
+    async with uow(past_posts_engine, origin) as conn:
+        past_posts = next(
             x
             for x in await workspaces.list_sources(conn, workspace_id=str(origin["ws"]))
             if str(x["id"]) == src["source_id"]
         )
-    assert archive["coverage"]["observed"] is None
-    assert archive["coverage"]["represented"] is None
-    assert archive["coverage"]["awaiting_reobservation"] == 1
-    assert str(archive["coverage"]["generation_id"]) == g2["generation_id"]
-    assert archive["coverage"]["oldest_observed_at"] is None
+    assert past_posts["coverage"]["observed"] is None
+    assert past_posts["coverage"]["represented"] is None
+    assert past_posts["coverage"]["awaiting_reobservation"] == 1
+    assert str(past_posts["coverage"]["generation_id"]) == g2["generation_id"]
+    assert past_posts["coverage"]["oldest_observed_at"] is None
 
 
 async def test_source_projection_batches_policy_and_coverage_in_one_query(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from src.services.target import workspaces
 
-    await foundation.ensure(archive_engine, origin, foundation.authorization())
+    await foundation.ensure(past_posts_engine, origin, foundation.authorization())
 
     class ObservedExecutor:
         def __init__(self, conn):
@@ -378,18 +384,18 @@ async def test_source_projection_batches_policy_and_coverage_in_one_query(
             self.calls += 1
             return await self.conn.execute(*args, **kw)
 
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         executor = ObservedExecutor(conn)
         rows = await workspaces.list_sources(executor, workspace_id=str(origin["ws"]))
         assert executor.calls == 1 and len(rows) == 2
         assert (
-            next(x for x in rows if x["provider"] == "instagram_archive")["coverage"][
-                "observed"
-            ]
+            next(x for x in rows if x["provider"] == "instagram_past_posts")[
+                "coverage"
+            ]["observed"]
             is None
         )
         assert (
-            next(x for x in rows if x["provider"] == "instagram_archive")["policy"][
+            next(x for x in rows if x["provider"] == "instagram_past_posts")["policy"][
                 "policy"
             ]["carousel_slides"]
             == "all"
@@ -397,7 +403,7 @@ async def test_source_projection_batches_policy_and_coverage_in_one_query(
 
 
 async def test_policy_http_surface_with_real_tenant_roles_and_membership(
-    archive_engine, origin, sync_conn, tmp_path
+    past_posts_engine, origin, sync_conn, tmp_path
 ):
     import json
     import uuid
@@ -406,7 +412,7 @@ async def test_policy_http_surface_with_real_tenant_roles_and_membership(
     from src.api.principal import Principal, current_principal
     from tests.scripts.conftest import seed_workspace_chain
 
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     foreign = seed_workspace_chain(sync_conn, "policy-http-foreign")
     with sync_conn.cursor() as cur:
         cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
@@ -416,8 +422,8 @@ async def test_policy_http_surface_with_real_tenant_roles_and_membership(
             (origin["ws"], member),
         )
     sync_conn.commit()
-    app = create_app(engine=archive_engine, env={})
-    app.state.archive_capability = foundation.capability()
+    app = create_app(engine=past_posts_engine, env={})
+    app.state.past_posts_capability = foundation.capability()
 
     def actor(user):
         app.dependency_overrides[current_principal] = lambda: Principal(
@@ -464,7 +470,7 @@ async def test_policy_http_surface_with_real_tenant_roles_and_membership(
         actor(foreign["user"])
         assert (await record("GET")).status_code == 404
         actor(origin["user"])
-        app.state.archive_capability = None
+        app.state.past_posts_capability = None
         assert (await record("GET")).status_code == 503
     app.dependency_overrides.clear()
     (tmp_path / "p1c-policy-http.json").write_text(json.dumps(records, indent=2) + "\n")

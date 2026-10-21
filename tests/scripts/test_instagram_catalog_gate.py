@@ -1,4 +1,4 @@
-"""Archive catalog contracts on PostgreSQL, including the real runtime roles."""
+"""Past-posts catalog contracts on PostgreSQL, including the real runtime roles."""
 
 import uuid
 
@@ -9,9 +9,9 @@ from tests.scripts.conftest import as_user, seed_workspace_chain, set_test_passw
 
 pytestmark = [pytest.mark.integration]
 
-ARCHIVE_TABLES = {
+PAST_POSTS_TABLES = {
     "media_source_destinations",
-    "instagram_archive_generations",
+    "instagram_past_posts_generations",
     "instagram_source_policies",
     "instagram_media_index",
     "instagram_media_assets",
@@ -22,18 +22,18 @@ ARCHIVE_TABLES = {
 }
 
 
-def insert_asset(cur, archive, *, asset="slide-1", position=1, item=None):
+def insert_asset(cur, past_posts, *, asset="slide-1", position=1, item=None):
     cur.execute(
         "INSERT INTO instagram_media_assets"
         " (workspace_id,source_id,parent_media_id,asset_media_id,data_generation_id,"
         " observation_revision,position,media_kind,media_item_id)"
         " VALUES (%s,%s,%s,%s,%s,1,%s,'image',%s)",
         (
-            archive["ws"],
-            archive["archive"],
-            archive["parent"],
+            past_posts["ws"],
+            past_posts["past_posts"],
+            past_posts["parent"],
             asset,
-            archive["generation"],
+            past_posts["generation"],
             position,
             item,
         ),
@@ -41,20 +41,20 @@ def insert_asset(cur, archive, *, asset="slide-1", position=1, item=None):
 
 
 def test_asset_link_requires_its_own_tenant_source_generation_and_bundle(
-    sync_conn, archive
+    sync_conn, past_posts
 ):
     other = seed_workspace_chain(sync_conn, "asset-other")
     with sync_conn.cursor() as cur:
-        foreign = seed_archive(cur, other, parent="foreign-parent")
+        foreign = seed_past_posts(cur, other, parent="foreign-parent")
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
         with sync_conn.cursor() as cur:
-            insert_asset(cur, archive, item=foreign["item"])
+            insert_asset(cur, past_posts, item=foreign["item"])
         sync_conn.commit()  # the item FK is deliberately deferred
     sync_conn.rollback()
     for wrong_ws, wrong_source in (
-        (foreign["ws"], archive["archive"]),  # right source id, wrong tenant
-        (archive["ws"], archive["src"]),  # right tenant, wrong source
+        (foreign["ws"], past_posts["past_posts"]),  # right source id, wrong tenant
+        (past_posts["ws"], past_posts["src"]),  # right tenant, wrong source
     ):
         with pytest.raises(psycopg2.errors.ForeignKeyViolation):
             with sync_conn.cursor() as cur:
@@ -63,54 +63,59 @@ def test_asset_link_requires_its_own_tenant_source_generation_and_bundle(
                     " (workspace_id,source_id,parent_media_id,asset_media_id,"
                     " data_generation_id,observation_revision,position,media_kind)"
                     " VALUES (%s,%s,%s,'slide-1',%s,1,1,'image')",
-                    (wrong_ws, wrong_source, archive["parent"], archive["generation"]),
+                    (
+                        wrong_ws,
+                        wrong_source,
+                        past_posts["parent"],
+                        past_posts["generation"],
+                    ),
                 )
             sync_conn.commit()
         sync_conn.rollback()
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
         with sync_conn.cursor() as cur:
-            insert_asset(cur, archive)
+            insert_asset(cur, past_posts)
             cur.execute(
                 "UPDATE instagram_media_assets SET data_generation_id=%s"
                 " WHERE workspace_id=%s AND source_id=%s",
-                (foreign["generation"], archive["ws"], archive["archive"]),
+                (foreign["generation"], past_posts["ws"], past_posts["past_posts"]),
             )
         sync_conn.commit()
     sync_conn.rollback()
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
         with sync_conn.cursor() as cur:
-            insert_asset(cur, archive)
+            insert_asset(cur, past_posts)
             cur.execute(
                 "UPDATE instagram_media_assets SET parent_media_id='other-post'"
                 " WHERE workspace_id=%s AND source_id=%s",
-                (archive["ws"], archive["archive"]),
+                (past_posts["ws"], past_posts["past_posts"]),
             )
         sync_conn.commit()
     sync_conn.rollback()
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive, item=archive["item"])
+        insert_asset(cur, past_posts, item=past_posts["item"])
     sync_conn.commit()
 
 
 def test_asset_rejects_item_from_another_generation_of_the_same_source(
-    sync_conn, archive
+    sync_conn, past_posts
 ):
     with sync_conn.cursor() as cur:
         cur.execute(
-            "UPDATE instagram_archive_generations SET lifecycle='superseded'"
+            "UPDATE instagram_past_posts_generations SET lifecycle='superseded'"
             " WHERE id=%s",
-            (archive["generation"],),
+            (past_posts["generation"],),
         )
         cur.execute(
-            "INSERT INTO instagram_archive_generations"
+            "INSERT INTO instagram_past_posts_generations"
             " (workspace_id,source_id,origin_ig_account_id,credential_id,"
             " authorization_id,app_id,subject_id,authorized_at)"
             " VALUES (%s,%s,%s,%s,%s,'app','subject',now()) RETURNING id",
             (
-                archive["ws"],
-                archive["archive"],
-                archive["iga"],
-                archive["credential"],
+                past_posts["ws"],
+                past_posts["past_posts"],
+                past_posts["iga"],
+                past_posts["credential"],
                 str(uuid.uuid4()),
             ),
         )
@@ -120,65 +125,69 @@ def test_asset_rejects_item_from_another_generation_of_the_same_source(
             " (workspace_id,source_id,source_data_generation_id,content_hash,"
             " file_name,media_kind,provider_file_ref)"
             " VALUES (%s,%s,%s,'instagram:later','later.jpg','image','later') RETURNING id",
-            (archive["ws"], archive["archive"], later_generation),
+            (past_posts["ws"], past_posts["past_posts"], later_generation),
         )
         later_item = cur.fetchone()[0]
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
         with sync_conn.cursor() as cur:
-            insert_asset(cur, archive, item=later_item)
+            insert_asset(cur, past_posts, item=later_item)
         sync_conn.commit()
     sync_conn.rollback()
 
 
 def test_asset_position_swap_is_deferred_and_duplicate_final_position_refused(
-    sync_conn, archive
+    sync_conn, past_posts
 ):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive, asset="slide-1", position=1)
-        insert_asset(cur, archive, asset="slide-2", position=2)
+        insert_asset(cur, past_posts, asset="slide-1", position=1)
+        insert_asset(cur, past_posts, asset="slide-2", position=2)
     sync_conn.commit()
     with sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_assets SET position=2 WHERE workspace_id=%s"
             " AND source_id=%s AND asset_media_id='slide-1'",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         cur.execute(
             "SELECT count(*) FROM instagram_media_assets WHERE workspace_id=%s"
             " AND source_id=%s AND position=2",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         assert cur.fetchone()[0] == 2  # the transient duplicate requires deferral
         cur.execute(
             "UPDATE instagram_media_assets SET position=1 WHERE workspace_id=%s"
             " AND source_id=%s AND asset_media_id='slide-2'",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
-        cur.execute("SET CONSTRAINTS uq_archive_asset_position IMMEDIATE")
+        cur.execute("SET CONSTRAINTS uq_past_posts_asset_position IMMEDIATE")
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.UniqueViolation):
         with sync_conn.cursor() as cur:
             cur.execute(
                 "UPDATE instagram_media_assets SET position=1"
                 " WHERE workspace_id=%s AND source_id=%s",
-                (archive["ws"], archive["archive"]),
+                (past_posts["ws"], past_posts["past_posts"]),
             )
         sync_conn.commit()
     sync_conn.rollback()
 
 
-def test_one_item_cannot_link_two_assets(sync_conn, archive):
+def test_one_item_cannot_link_two_assets(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive, asset="slide-1", position=1, item=archive["item"])
+        insert_asset(
+            cur, past_posts, asset="slide-1", position=1, item=past_posts["item"]
+        )
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.UniqueViolation), sync_conn.cursor() as cur:
-        insert_asset(cur, archive, asset="slide-2", position=2, item=archive["item"])
+        insert_asset(
+            cur, past_posts, asset="slide-2", position=2, item=past_posts["item"]
+        )
     sync_conn.rollback()
 
 
 def test_unknown_asset_is_retained_only_as_excluded_unsupported_without_item(
-    sync_conn, archive
+    sync_conn, past_posts
 ):
     with sync_conn.cursor() as cur:
         cur.execute(
@@ -189,51 +198,51 @@ def test_unknown_asset_is_retained_only_as_excluded_unsupported_without_item(
             " VALUES (%s,%s,%s,'unsupported-child',%s,1,2,'unknown',"
             " 'excluded','unsupported_media')",
             (
-                archive["ws"],
-                archive["archive"],
-                archive["parent"],
-                archive["generation"],
+                past_posts["ws"],
+                past_posts["past_posts"],
+                past_posts["parent"],
+                past_posts["generation"],
             ),
         )
         cur.execute(
             "SELECT media_kind,availability,exclusion_reason,media_item_id"
             " FROM instagram_media_assets WHERE workspace_id=%s AND asset_media_id='unsupported-child'",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         assert cur.fetchone() == ("unknown", "excluded", "unsupported_media", None)
     sync_conn.commit()
     for assignment, params in (
         ("availability='available'", ()),
         ("exclusion_reason='other'", ()),
-        ("media_item_id=%s", (archive["item"],)),
+        ("media_item_id=%s", (past_posts["item"],)),
     ):
         with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
             cur.execute(
                 f"UPDATE instagram_media_assets SET {assignment}"
                 " WHERE workspace_id=%s AND asset_media_id='unsupported-child'",
-                (*params, archive["ws"]),
+                (*params, past_posts["ws"]),
             )
         sync_conn.rollback()
 
 
-def test_asset_bundle_cascades_and_generation_link_restricts(sync_conn, archive):
+def test_asset_bundle_cascades_and_generation_link_restricts(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive)
+        insert_asset(cur, past_posts)
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.ForeignKeyViolation), sync_conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM instagram_archive_generations WHERE id=%s",
-            (archive["generation"],),
+            "DELETE FROM instagram_past_posts_generations WHERE id=%s",
+            (past_posts["generation"],),
         )
     sync_conn.rollback()
     with sync_conn.cursor() as cur:
         cur.execute(
             "DELETE FROM instagram_media_index WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         cur.execute(
             "SELECT count(*) FROM instagram_media_assets WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         assert cur.fetchone()[0] == 0
     sync_conn.commit()
@@ -241,7 +250,7 @@ def test_asset_bundle_cascades_and_generation_link_restricts(sync_conn, archive)
     # asset FK is catalogued as RESTRICT, independent of this cascade.
     with sync_conn.cursor() as cur:
         cur.execute(
-            "SELECT confdeltype FROM pg_constraint WHERE conname='fk_archive_asset_generation'"
+            "SELECT confdeltype FROM pg_constraint WHERE conname='fk_past_posts_asset_generation'"
         )
         assert cur.fetchone()[0] == "r"
 
@@ -256,24 +265,24 @@ def test_asset_bundle_cascades_and_generation_link_restricts(sync_conn, archive)
     ],
 )
 def test_asset_capture_is_bound_to_file_generation_revision_and_state(
-    sync_conn, archive, capture
+    sync_conn, past_posts, capture
 ):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive)
+        insert_asset(cur, past_posts)
     sync_conn.commit()
-    capture = capture.replace("GENERATION", str(archive["generation"]))
+    capture = capture.replace("GENERATION", str(past_posts["generation"]))
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_assets SET validation_capture=%s::jsonb"
             " WHERE workspace_id=%s AND source_id=%s",
-            (capture, archive["ws"], archive["archive"]),
+            (capture, past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.rollback()
 
 
-def test_asset_revision_change_clears_validation_and_capture(sync_conn, archive):
+def test_asset_revision_change_clears_validation_and_capture(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive)
+        insert_asset(cur, past_posts)
         cur.execute(
             "UPDATE instagram_media_assets SET validation_state='supported',"
             " validation_generation_id=data_generation_id,"
@@ -282,22 +291,22 @@ def test_asset_revision_change_clears_validation_and_capture(sync_conn, archive)
             " validation_capture=jsonb_build_object('generation_id',data_generation_id::text,"
             " 'observation_revision',observation_revision,'selected_asset_id',asset_media_id,"
             " 'state','supported') WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
     sync_conn.commit()
     with sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_index SET observation_revision=2 WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         cur.execute(
             "UPDATE instagram_media_assets SET observation_revision=2 WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         cur.execute(
             "SELECT validation_state,validation_capture,validation_fingerprint"
             " FROM instagram_media_assets WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         assert cur.fetchone() == ("pending", None, None)
     sync_conn.commit()
@@ -305,12 +314,12 @@ def test_asset_revision_change_clears_validation_and_capture(sync_conn, archive)
 
 @pytest.mark.parametrize("role", ["svc_worker", "svc_ingress"])
 def test_asset_runtime_rls_hides_foreign_and_unset_tenants(
-    world_db, sync_conn, admin_conn, archive, role
+    world_db, sync_conn, admin_conn, past_posts, role
 ):
     other = seed_workspace_chain(sync_conn, "asset-rls-other")
     with sync_conn.cursor() as cur:
-        foreign = seed_archive(cur, other, parent="foreign-parent")
-        insert_asset(cur, archive)
+        foreign = seed_past_posts(cur, other, parent="foreign-parent")
+        insert_asset(cur, past_posts)
         insert_asset(cur, foreign)
     sync_conn.commit()
     set_test_passwords(admin_conn)
@@ -319,7 +328,7 @@ def test_asset_runtime_rls_hides_foreign_and_unset_tenants(
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM instagram_media_assets")
             assert cur.fetchone()[0] == 0
-            cur.execute("SET LOCAL app.tenant_id=%s", (str(archive["ws"]),))
+            cur.execute("SET LOCAL app.tenant_id=%s", (str(past_posts["ws"]),))
             cur.execute("SELECT asset_media_id FROM instagram_media_assets")
             assert cur.fetchall() == [("slide-1",)]
             cur.execute(
@@ -335,81 +344,83 @@ def test_asset_runtime_rls_hides_foreign_and_unset_tenants(
                     " data_generation_id,observation_revision,position,media_kind)"
                     " VALUES (%s,%s,%s,'new-slide',%s,1,2,'image')",
                     (
-                        archive["ws"],
-                        archive["archive"],
-                        archive["parent"],
-                        archive["generation"],
+                        past_posts["ws"],
+                        past_posts["past_posts"],
+                        past_posts["parent"],
+                        past_posts["generation"],
                     ),
                 )
     finally:
         conn.close()
 
 
-def test_policy_carousel_default_and_versions_one_two(sync_conn, archive):
+def test_policy_carousel_default_and_versions_one_two(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
         cur.execute(
             "SELECT schema_version,carousel_slides FROM instagram_source_policies"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         assert cur.fetchone() == (1, "all")
         cur.execute(
             "UPDATE instagram_source_policies SET schema_version=2,carousel_slides='first'"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_source_policies SET carousel_slides='middle'"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.rollback()
 
 
-def test_post_observation_groups_assets_without_changing_its_key(sync_conn, archive):
+def test_post_observation_groups_assets_without_changing_its_key(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
         cur.execute(
             "SELECT slide_count,slides_complete,post_ref FROM instagram_media_index"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         count, complete, post_ref = cur.fetchone()
         assert count is None and complete is True and post_ref is not None
         cur.execute(
             "UPDATE instagram_media_index SET slide_count=20,slides_complete=false"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         cur.execute(
             "SELECT post_ref FROM instagram_media_index"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
         assert cur.fetchone()[0] == post_ref
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_index SET slide_count=21 WHERE workspace_id=%s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
     sync_conn.rollback()
 
 
-def test_selected_preparation_door_uses_asset_identity_and_evidence(sync_conn, archive):
+def test_selected_preparation_door_uses_asset_identity_and_evidence(
+    sync_conn, past_posts
+):
     with sync_conn.cursor() as cur:
-        insert_asset(cur, archive, item=archive["item"])
+        insert_asset(cur, past_posts, item=past_posts["item"])
         cur.execute(
             "UPDATE media_sources SET current_authorization_generation_id=%s"
             " WHERE workspace_id=%s AND id=%s",
-            (archive["generation"], archive["ws"], archive["archive"]),
+            (past_posts["generation"], past_posts["ws"], past_posts["past_posts"]),
         )
         cur.execute(
             "INSERT INTO post_intents (workspace_id,ig_account_id,media_item_id,"
             " provider_account_ref,approval_mode,schedule_slot_at)"
             " VALUES (%s,%s,%s,'synthetic','manual',now()-interval '1 minute') RETURNING id",
-            (archive["ws"], archive["iga"], archive["item"]),
+            (past_posts["ws"], past_posts["iga"], past_posts["item"]),
         )
         intent = cur.fetchone()[0]
         cur.execute(
@@ -420,13 +431,13 @@ def test_selected_preparation_door_uses_asset_identity_and_evidence(sync_conn, a
             " validation_fingerprint,capture_epoch,last_authorized_policy_revision)"
             " VALUES (%s,%s,%s,%s,%s,%s,1,%s,1,'slide-1','proof',0,1)",
             (
-                archive["ws"],
+                past_posts["ws"],
                 intent,
-                archive["archive"],
-                archive["item"],
-                archive["iga"],
-                archive["generation"],
-                archive["generation"],
+                past_posts["past_posts"],
+                past_posts["item"],
+                past_posts["iga"],
+                past_posts["generation"],
+                past_posts["generation"],
             ),
         )
     sync_conn.commit()
@@ -439,7 +450,7 @@ def test_selected_preparation_door_uses_asset_identity_and_evidence(sync_conn, a
             " validation_observation_revision=observation_revision,"
             " validation_fingerprint='proof',validated_at=now()"
             " WHERE workspace_id=%s AND source_id=%s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.commit()
     with sync_conn.cursor() as cur:
@@ -448,7 +459,7 @@ def test_selected_preparation_door_uses_asset_identity_and_evidence(sync_conn, a
         cur.execute(
             "UPDATE instagram_intent_provenance SET selected_asset_identity='wrong-slide'"
             " WHERE workspace_id=%s AND intent_id=%s",
-            (archive["ws"], intent),
+            (past_posts["ws"], intent),
         )
     sync_conn.commit()
     with sync_conn.cursor() as cur:
@@ -456,10 +467,10 @@ def test_selected_preparation_door_uses_asset_identity_and_evidence(sync_conn, a
         assert (intent,) in cur.fetchall()
 
 
-def test_archive_contracts_exist_before_any_consumer_is_enabled(sync_conn):
+def test_past_posts_contracts_exist_before_any_consumer_is_enabled(sync_conn):
     with sync_conn.cursor() as cur:
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-        assert ARCHIVE_TABLES <= {r[0] for r in cur.fetchall()}
+        assert PAST_POSTS_TABLES <= {r[0] for r in cur.fetchall()}
         cur.execute(
             "SELECT column_name FROM information_schema.columns"
             " WHERE table_schema = 'public' AND table_name = 'media_sources'"
@@ -469,11 +480,11 @@ def test_archive_contracts_exist_before_any_consumer_is_enabled(sync_conn):
         }
 
 
-def seed_archive(cur, chain, *, parent="parent-1"):
+def seed_past_posts(cur, chain, *, parent="parent-1"):
     ws, acct = chain["ws"], chain["iga"]
     cur.execute(
         "INSERT INTO media_sources (workspace_id, provider, config, origin_ig_account_id)"
-        " VALUES (%s, 'instagram_archive', '{\"v\":1}', %s) RETURNING id",
+        " VALUES (%s, 'instagram_past_posts', '{\"v\":1}', %s) RETURNING id",
         (ws, acct),
     )
     source = cur.fetchone()[0]
@@ -485,7 +496,7 @@ def seed_archive(cur, chain, *, parent="parent-1"):
     )
     credential = cur.fetchone()[0]
     cur.execute(
-        "INSERT INTO instagram_archive_generations"
+        "INSERT INTO instagram_past_posts_generations"
         " (workspace_id, source_id, origin_ig_account_id, credential_id,"
         " authorization_id, app_id, subject_id, authorized_at)"
         " VALUES (%s, %s, %s, %s, %s, 'app', 'subject', now()) RETURNING id",
@@ -504,7 +515,7 @@ def seed_archive(cur, chain, *, parent="parent-1"):
     cur.execute(
         "INSERT INTO media_items (workspace_id, source_id, source_data_generation_id,"
         " content_hash, file_name, media_kind, provider_file_ref)"
-        " VALUES (%s, %s, %s, %s, 'archive.jpg', 'image', %s) RETURNING id",
+        " VALUES (%s, %s, %s, %s, 'past-posts.jpg', 'image', %s) RETURNING id",
         (ws, source, generation, f"instagram:{parent}", parent),
     )
     item = cur.fetchone()[0]
@@ -516,7 +527,7 @@ def seed_archive(cur, chain, *, parent="parent-1"):
     )
     return {
         **chain,
-        "archive": source,
+        "past_posts": source,
         "generation": generation,
         "credential": credential,
         "item": item,
@@ -525,10 +536,10 @@ def seed_archive(cur, chain, *, parent="parent-1"):
 
 
 @pytest.fixture
-def archive(sync_conn):
+def past_posts(sync_conn):
     chain = seed_workspace_chain(sync_conn, "catalog")
     with sync_conn.cursor() as cur:
-        result = seed_archive(cur, chain)
+        result = seed_past_posts(cur, chain)
     sync_conn.commit()
     return result
 
@@ -537,10 +548,14 @@ def test_origin_is_required_and_tenant_scoped(sync_conn):
     a = seed_workspace_chain(sync_conn, "ownership-a")
     b = seed_workspace_chain(sync_conn, "ownership-b")
     cases = [
-        ("instagram_archive", None, psycopg2.errors.CheckViolation),
+        ("instagram_past_posts", None, psycopg2.errors.CheckViolation),
         ("gdrive", a["iga"], psycopg2.errors.CheckViolation),
-        ("instagram_archive", b["iga"], psycopg2.errors.ForeignKeyViolation),
-        ("instagram_archive", str(uuid.uuid4()), psycopg2.errors.ForeignKeyViolation),
+        ("instagram_past_posts", b["iga"], psycopg2.errors.ForeignKeyViolation),
+        (
+            "instagram_past_posts",
+            str(uuid.uuid4()),
+            psycopg2.errors.ForeignKeyViolation,
+        ),
     ]
     for provider, origin, refusal in cases:
         with pytest.raises(refusal), sync_conn.cursor() as cur:
@@ -552,12 +567,12 @@ def test_origin_is_required_and_tenant_scoped(sync_conn):
         sync_conn.rollback()
 
 
-def test_one_archive_per_origin_and_origin_cannot_be_deleted(sync_conn, archive):
+def test_one_past_posts_per_origin_and_origin_cannot_be_deleted(sync_conn, past_posts):
     with pytest.raises(psycopg2.errors.UniqueViolation), sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO media_sources (workspace_id, provider, config, origin_ig_account_id)"
-            " VALUES (%s, 'instagram_archive', '{\"v\":1}', %s)",
-            (archive["ws"], archive["iga"]),
+            " VALUES (%s, 'instagram_past_posts', '{\"v\":1}', %s)",
+            (past_posts["ws"], past_posts["iga"]),
         )
     sync_conn.rollback()
     # The source FK is RESTRICT by itself, apart from any intent's reference.
@@ -568,23 +583,23 @@ def test_one_archive_per_origin_and_origin_cannot_be_deleted(sync_conn, archive)
         assert cur.fetchone()[0] == "r"
 
 
-def test_assignments_keep_many_to_many_shape(sync_conn, archive):
+def test_assignments_keep_many_to_many_shape(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
             " VALUES (%s, 'second-account') RETURNING id",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
         account = cur.fetchone()[0]
         cur.execute(
             "INSERT INTO media_source_destinations (workspace_id, source_id, ig_account_id)"
             " VALUES (%s, %s, %s), (%s, %s, %s)",
             (
-                archive["ws"],
-                archive["archive"],
+                past_posts["ws"],
+                past_posts["past_posts"],
                 account,
-                archive["ws"],
-                archive["src"],
+                past_posts["ws"],
+                past_posts["src"],
                 account,
             ),
         )
@@ -593,18 +608,18 @@ def test_assignments_keep_many_to_many_shape(sync_conn, archive):
         cur.execute(
             "INSERT INTO media_source_destinations (workspace_id, source_id, ig_account_id)"
             " VALUES (%s, %s, %s)",
-            (archive["ws"], archive["archive"], account),
+            (past_posts["ws"], past_posts["past_posts"], account),
         )
     sync_conn.rollback()
 
 
-def test_index_cannot_link_a_drive_item_or_another_generation(sync_conn, archive):
+def test_index_cannot_link_a_drive_item_or_another_generation(sync_conn, past_posts):
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
         with sync_conn.cursor() as cur:
             cur.execute(
                 "UPDATE instagram_media_index SET media_item_id = %s"
                 " WHERE workspace_id = %s AND source_id = %s",
-                (archive["media"], archive["ws"], archive["archive"]),
+                (past_posts["media"], past_posts["ws"], past_posts["past_posts"]),
             )
         sync_conn.commit()
     sync_conn.rollback()
@@ -612,25 +627,25 @@ def test_index_cannot_link_a_drive_item_or_another_generation(sync_conn, archive
         with sync_conn.cursor() as cur:
             cur.execute(
                 "UPDATE media_items SET source_data_generation_id = %s WHERE id = %s",
-                (str(uuid.uuid4()), archive["item"]),
+                (str(uuid.uuid4()), past_posts["item"]),
             )
         sync_conn.commit()
     sync_conn.rollback()
 
 
-def test_generation_authorization_identity_cannot_be_rewritten(sync_conn, archive):
+def test_generation_authorization_identity_cannot_be_rewritten(sync_conn, past_posts):
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
-            "UPDATE instagram_archive_generations SET subject_id = 'different'"
+            "UPDATE instagram_past_posts_generations SET subject_id = 'different'"
             " WHERE id = %s",
-            (archive["generation"],),
+            (past_posts["generation"],),
         )
     sync_conn.rollback()
 
 
 @pytest.mark.parametrize("role", ["svc_worker", "svc_ingress"])
 def test_runtime_roles_own_rows_and_deny_missing_or_foreign_tenant(
-    world_db, sync_conn, admin_conn, archive, role
+    world_db, sync_conn, admin_conn, past_posts, role
 ):
     other = seed_workspace_chain(sync_conn, "catalog-other")
     set_test_passwords(admin_conn)
@@ -641,13 +656,13 @@ def test_runtime_roles_own_rows_and_deny_missing_or_foreign_tenant(
             assert cur.fetchone()[0] == role
             cur.execute("SELECT count(*) FROM instagram_media_index")
             assert cur.fetchone()[0] == 0
-            cur.execute("SET LOCAL app.tenant_id = %s", (str(archive["ws"]),))
+            cur.execute("SET LOCAL app.tenant_id = %s", (str(past_posts["ws"]),))
             cur.execute("SELECT count(*) FROM instagram_media_index")
             assert cur.fetchone()[0] == 1
             cur.execute(
                 "UPDATE instagram_media_index SET observation_revision = observation_revision + 1"
                 " WHERE workspace_id = %s",
-                (archive["ws"],),
+                (past_posts["ws"],),
             )
             assert cur.rowcount == 1
             cur.execute("SET LOCAL app.tenant_id = %s", (str(other["ws"]),))
@@ -656,21 +671,21 @@ def test_runtime_roles_own_rows_and_deny_missing_or_foreign_tenant(
             cur.execute(
                 "UPDATE instagram_media_index SET observation_revision = observation_revision + 1"
                 " WHERE workspace_id = %s",
-                (archive["ws"],),
+                (past_posts["ws"],),
             )
             assert cur.rowcount == 0
     finally:
         conn.close()
 
 
-def seed_archive_evidence(cur, chain):
+def seed_past_posts_evidence(cur, chain):
     """Seed a positive row on every RLS/provenance axis."""
-    archive = seed_archive(cur, chain)
+    past_posts = seed_past_posts(cur, chain)
     cur.execute(
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at)"
-        " VALUES (%s, %s, %s, 'archive-account', 'manual', now() + interval '1 year') RETURNING id",
-        (archive["ws"], archive["iga"], archive["item"]),
+        " VALUES (%s, %s, %s, 'past-posts-account', 'manual', now() + interval '1 year') RETURNING id",
+        (past_posts["ws"], past_posts["iga"], past_posts["item"]),
     )
     intent = cur.fetchone()[0]
     cur.execute(
@@ -680,10 +695,10 @@ def seed_archive_evidence(cur, chain):
         " VALUES (%s, %s, %s, 1, %s, %s, 'transit', 0, 1, 'asset-fingerprint',"
         " %s, now(), 'unsettled', 'validation') RETURNING artifact_ref",
         (
-            archive["ws"],
-            archive["archive"],
-            archive["generation"],
-            archive["item"],
+            past_posts["ws"],
+            past_posts["past_posts"],
+            past_posts["generation"],
+            past_posts["item"],
             intent,
             str(uuid.uuid4()),
         ),
@@ -696,24 +711,24 @@ def seed_archive_evidence(cur, chain):
         " selected_asset_identity, capture_epoch, last_authorized_policy_revision)"
         " VALUES (%s, %s, %s, %s, %s, %s, 1, %s, 1, 'asset-fingerprint', 0, 1)",
         (
-            archive["ws"],
+            past_posts["ws"],
             intent,
-            archive["archive"],
-            archive["item"],
-            archive["iga"],
-            archive["generation"],
-            archive["generation"],
+            past_posts["past_posts"],
+            past_posts["item"],
+            past_posts["iga"],
+            past_posts["generation"],
+            past_posts["generation"],
         ),
     )
     cur.execute(
         "INSERT INTO instagram_item_tombstones (workspace_id, source_id, media_item_id,"
         " key_version, parent_hmac) VALUES (%s, %s, %s, 1, %s)",
-        (archive["ws"], archive["archive"], archive["item"], "0" * 64),
+        (past_posts["ws"], past_posts["past_posts"], past_posts["item"], "0" * 64),
     )
     cur.execute(
         "INSERT INTO provider_operations (workspace_id, intent_id, provider, op_kind,"
         " business_key, lease_token) VALUES (%s, %s, 'ig', 'publish', %s, %s) RETURNING id",
-        (archive["ws"], intent, f"archive:{intent}", str(uuid.uuid4())),
+        (past_posts["ws"], intent, f"past_posts:{intent}", str(uuid.uuid4())),
     )
     operation = cur.fetchone()[0]
     cur.execute(
@@ -723,19 +738,19 @@ def seed_archive_evidence(cur, chain):
         " validation_fingerprint, transit_artifact_ref)"
         " VALUES (%s, %s, %s, %s, %s, %s, %s, 1, 1, 0, 'asset-fingerprint', 'validation', %s)",
         (
-            archive["ws"],
+            past_posts["ws"],
             operation,
             intent,
-            archive["archive"],
-            archive["item"],
-            archive["iga"],
-            archive["generation"],
+            past_posts["past_posts"],
+            past_posts["item"],
+            past_posts["iga"],
+            past_posts["generation"],
             artifact,
         ),
     )
     return {
-        **archive,
-        "archive_intent": intent,
+        **past_posts,
+        "past_posts_intent": intent,
         "artifact": artifact,
         "operation": operation,
     }
@@ -745,7 +760,7 @@ def seed_archive_evidence(cur, chain):
 def evidence(sync_conn):
     chain = seed_workspace_chain(sync_conn, "evidence")
     with sync_conn.cursor() as cur:
-        result = seed_archive_evidence(cur, chain)
+        result = seed_past_posts_evidence(cur, chain)
     sync_conn.commit()
     return result
 
@@ -817,29 +832,29 @@ def test_intent_capture_can_renew_without_rewriting_issued_operation(
         assert cur.fetchone()[0] == 1
 
 
-def test_archive_projection_requires_generation_even_before_index_link(
-    sync_conn, archive
+def test_past_posts_projection_requires_generation_even_before_index_link(
+    sync_conn, past_posts
 ):
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
             " media_kind, provider_file_ref) VALUES (%s, %s, 'orphan', 'orphan.jpg', 'image', 'orphan')",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.rollback()
 
 
-def test_observation_revision_cannot_go_backwards(sync_conn, archive):
+def test_observation_revision_cannot_go_backwards(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_index SET observation_revision = 2 WHERE workspace_id = %s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_index SET observation_revision = 1 WHERE workspace_id = %s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
     sync_conn.rollback()
 
@@ -850,13 +865,13 @@ def test_staged_artifact_must_belong_to_the_same_intent(sync_conn, evidence):
             "INSERT INTO media_items (workspace_id, source_id, source_data_generation_id,"
             " content_hash, file_name, media_kind, provider_file_ref)"
             " VALUES (%s, %s, %s, 'other-artifact-item', 'other.jpg', 'image', 'other') RETURNING id",
-            (evidence["ws"], evidence["archive"], evidence["generation"]),
+            (evidence["ws"], evidence["past_posts"], evidence["generation"]),
         )
         other_item = cur.fetchone()[0]
         cur.execute(
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at)"
-            " VALUES (%s, %s, %s, 'archive-account', 'manual', now() + interval '2 years') RETURNING id",
+            " VALUES (%s, %s, %s, 'past-posts-account', 'manual', now() + interval '2 years') RETURNING id",
             (evidence["ws"], evidence["iga"], other_item),
         )
         other_intent = cur.fetchone()[0]
@@ -868,7 +883,7 @@ def test_staged_artifact_must_belong_to_the_same_intent(sync_conn, evidence):
             " RETURNING artifact_ref",
             (
                 evidence["ws"],
-                evidence["archive"],
+                evidence["past_posts"],
                 evidence["generation"],
                 other_item,
                 other_intent,
@@ -882,12 +897,12 @@ def test_staged_artifact_must_belong_to_the_same_intent(sync_conn, evidence):
             "UPDATE instagram_intent_provenance SET staged_generation_id = capture_generation_id,"
             " staged_observation_revision = 1, validation_fingerprint = 'v', transit_artifact_ref = %s"
             " WHERE workspace_id = %s AND intent_id = %s",
-            (other_artifact, evidence["ws"], evidence["archive_intent"]),
+            (other_artifact, evidence["ws"], evidence["past_posts_intent"]),
         )
     sync_conn.rollback()
 
 
-def test_index_persists_only_derived_attribution(sync_conn, archive):
+def test_index_persists_only_derived_attribution(sync_conn, past_posts):
     with sync_conn.cursor() as cur:
         cur.execute(
             "SELECT column_name FROM information_schema.columns"
@@ -899,14 +914,14 @@ def test_index_persists_only_derived_attribution(sync_conn, archive):
         cur.execute(
             "UPDATE instagram_media_index SET attribution = 'not_detected'"
             " WHERE workspace_id = %s AND source_id = %s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.commit()
     with pytest.raises(psycopg2.errors.CheckViolation), sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE instagram_media_index SET attribution = 'no_credit_detected'"
             " WHERE workspace_id = %s AND source_id = %s",
-            (archive["ws"], archive["archive"]),
+            (past_posts["ws"], past_posts["past_posts"]),
         )
     sync_conn.rollback()
 
@@ -915,10 +930,10 @@ def evidence_artifact(cur, evidence, *, kind="transit", settled_at="NULL"):
     admission = "%s, now(), 'unsettled'" if kind == "transit" else "NULL, NULL, NULL"
     values = [
         evidence["ws"],
-        evidence["archive"],
+        evidence["past_posts"],
         evidence["generation"],
         evidence["item"],
-        evidence["archive_intent"],
+        evidence["past_posts_intent"],
         kind,
     ]
     if kind == "transit":
@@ -955,7 +970,7 @@ def link_evidence(
                 policy_revision,
                 epoch,
                 evidence["ws"],
-                evidence["archive_intent"],
+                evidence["past_posts_intent"],
             ),
         )
     else:
@@ -963,7 +978,7 @@ def link_evidence(
             "INSERT INTO provider_operations (workspace_id, intent_id, provider, op_kind, business_key, lease_token) VALUES (%s, %s, 'ig', 'publish', %s, %s) RETURNING id",
             (
                 evidence["ws"],
-                evidence["archive_intent"],
+                evidence["past_posts_intent"],
                 str(uuid.uuid4()),
                 str(uuid.uuid4()),
             ),
@@ -974,8 +989,8 @@ def link_evidence(
             (
                 evidence["ws"],
                 operation,
-                evidence["archive_intent"],
-                evidence["archive"],
+                evidence["past_posts_intent"],
+                evidence["past_posts"],
                 evidence["item"],
                 evidence["iga"],
                 evidence["generation"],
@@ -1045,7 +1060,7 @@ def test_non_transit_artifact_cannot_have_settlement_timestamp(
     ],
 )
 def test_validated_observation_requires_every_evidence_field(
-    sync_conn, archive, missing
+    sync_conn, past_posts, missing
 ):
     fields = {
         "validation_state": "'supported'",
@@ -1060,7 +1075,7 @@ def test_validated_observation_requires_every_evidence_field(
             "UPDATE instagram_media_index SET "
             + ", ".join(f"{k} = {v}" for k, v in fields.items())
             + " WHERE workspace_id = %s",
-            (archive["ws"],),
+            (past_posts["ws"],),
         )
     sync_conn.rollback()
 
@@ -1123,7 +1138,7 @@ def test_artifact_settlement_timestamp_matches_outcome_exactly(
                 "INSERT INTO post_intents(workspace_id,ig_account_id,media_item_id,provider_account_ref,approval_mode,schedule_slot_at)"
                 " SELECT workspace_id,%s::uuid,media_item_id,provider_account_ref,approval_mode,now()+interval '2 years'"
                 " FROM post_intents WHERE id=%s RETURNING id",
-                (account, evidence["archive_intent"]),
+                (account, evidence["past_posts_intent"]),
             )
             new_intent = cur.fetchone()[0]
             cur.execute(

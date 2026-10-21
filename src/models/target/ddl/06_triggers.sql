@@ -121,15 +121,15 @@ CREATE TRIGGER tg_users_consume_admission AFTER INSERT ON users
   FOR EACH ROW WHEN (NEW.primary_email IS NOT NULL)
   EXECUTE FUNCTION trg_users_consume_admission();
 
-CREATE TRIGGER tg_archive_generation_immutable BEFORE UPDATE ON instagram_archive_generations FOR EACH ROW EXECUTE FUNCTION trg_archive_generation_immutable();
+CREATE TRIGGER tg_past_posts_generation_immutable BEFORE UPDATE ON instagram_past_posts_generations FOR EACH ROW EXECUTE FUNCTION trg_past_posts_generation_immutable();
 
-CREATE TRIGGER tg_archive_artifact_immutable BEFORE UPDATE ON instagram_artifacts FOR EACH ROW EXECUTE FUNCTION trg_archive_artifact_immutable();
+CREATE TRIGGER tg_past_posts_artifact_immutable BEFORE UPDATE ON instagram_artifacts FOR EACH ROW EXECUTE FUNCTION trg_past_posts_artifact_immutable();
 
-CREATE TRIGGER tg_archive_operation_immutable BEFORE UPDATE ON instagram_operation_provenance FOR EACH ROW EXECUTE FUNCTION trg_archive_operation_immutable();
+CREATE TRIGGER tg_past_posts_operation_immutable BEFORE UPDATE ON instagram_operation_provenance FOR EACH ROW EXECUTE FUNCTION trg_past_posts_operation_immutable();
 
 CREATE TRIGGER tg_touch_media_source_destinations BEFORE UPDATE ON media_source_destinations FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
-CREATE TRIGGER tg_touch_instagram_archive_generations BEFORE UPDATE ON instagram_archive_generations FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+CREATE TRIGGER tg_touch_instagram_past_posts_generations BEFORE UPDATE ON instagram_past_posts_generations FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
 CREATE TRIGGER tg_touch_instagram_source_policies BEFORE UPDATE ON instagram_source_policies FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
@@ -139,12 +139,12 @@ CREATE TRIGGER tg_touch_instagram_artifacts BEFORE UPDATE ON instagram_artifacts
 
 CREATE TRIGGER tg_touch_instagram_intent_provenance BEFORE UPDATE ON instagram_intent_provenance FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
-CREATE TRIGGER tg_archive_media_generation BEFORE INSERT OR UPDATE OF source_id, source_data_generation_id, source_projection_redacted ON media_items FOR EACH ROW EXECUTE FUNCTION trg_archive_media_generation();
+CREATE TRIGGER tg_past_posts_media_generation BEFORE INSERT OR UPDATE OF source_id, source_data_generation_id, source_projection_redacted ON media_items FOR EACH ROW EXECUTE FUNCTION trg_past_posts_media_generation();
 
-CREATE TRIGGER tg_archive_observation_revision BEFORE UPDATE ON instagram_media_index FOR EACH ROW EXECUTE FUNCTION trg_archive_observation_revision();
+CREATE TRIGGER tg_past_posts_observation_revision BEFORE UPDATE ON instagram_media_index FOR EACH ROW EXECUTE FUNCTION trg_past_posts_observation_revision();
 
-CREATE TRIGGER archive_validation_capture_reset BEFORE UPDATE ON instagram_media_index
-FOR EACH ROW EXECUTE FUNCTION trg_archive_validation_capture_reset();
+CREATE TRIGGER past_posts_validation_capture_reset BEFORE UPDATE ON instagram_media_index
+FOR EACH ROW EXECUTE FUNCTION trg_past_posts_validation_capture_reset();
 
 CREATE TRIGGER tg_touch_channel_outbox BEFORE UPDATE ON channel_outbox
 FOR EACH ROW EXECUTE FUNCTION trg_touch_outbox_updated_at();

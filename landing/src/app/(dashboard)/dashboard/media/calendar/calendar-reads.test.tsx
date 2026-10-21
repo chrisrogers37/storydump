@@ -370,14 +370,14 @@ describe("the calendar's upcoming reads", () => {
   });
 });
 
-describe("an archive story on the month (#1644)", () => {
+describe("a past-posts story on the month (#1644)", () => {
   const FAKE_ID = "17900000000000001";
   const provenance = {
-    provider: "instagram_archive",
+    provider: "instagram_past_posts",
     origin_handle: "example_handle",
     original_at: "2020-01-01T12:00:00+00:00",
   };
-  const archive = (id: string, over: Partial<Intent> = {}) =>
+  const pastPosts = (id: string, over: Partial<Intent> = {}) =>
     story(id, {
       file_name: `Instagram ${FAKE_ID}`,
       has_thumbnail: true,
@@ -386,17 +386,17 @@ describe("an archive story on the month (#1644)", () => {
       ...over,
     });
 
-  it("hands the month an archive story under its own name, with its provenance and never the id", async () => {
+  it("hands the month a past-posts story under its own name, with its provenance and never the id", async () => {
     answer({
-      queue: rows(archive("a")),
+      queue: rows(pastPosts("a")),
       upcoming: coming({
-        planned: [{ ...archive("b", { origin: "planned" }), day: "2026-10-24" }],
+        planned: [{ ...pastPosts("b", { origin: "planned" }), day: "2026-10-24" }],
       }),
     });
     const { queue } = propsOf<CalendarProps>(await page(), ContentCalendar);
     expect(queue.map((item) => item.media_name)).toEqual(["Instagram post", "Instagram post"]);
     expect(queue.map((item) => item.media!.file_name)).toEqual(["Instagram post", "Instagram post"]);
-    // A chip reads the five picture fields and, for an archive story, its provenance.
+    // A chip reads the five picture fields and, for a past-posts story, its provenance.
     expect(Object.keys(queue[0].media!).sort()).toEqual([
       "file_name",
       "has_thumbnail",

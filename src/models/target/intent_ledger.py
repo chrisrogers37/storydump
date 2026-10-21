@@ -345,8 +345,8 @@ class DailyPostCount(TargetBase):
 
 class PostIntentTransition(TargetBase):
     """The legal-edge reference table. `trg_intent_guard` reads it on every
-    UPDATE, so the seeds from `intent_ledger.py`, `post_intent_transitions` and the early archive review edges
-    in the archive review transitions enforce behavior rather than
+    UPDATE, so the seeds from `intent_ledger.py`, `post_intent_transitions` and the early past-posts review edges
+    in the past-posts review transitions enforce behavior rather than
     fixture data — an unseeded copy of this schema rejects every transition.
 
     Insert-only: edges are added or deleted, never updated, so there

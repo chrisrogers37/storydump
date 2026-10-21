@@ -73,7 +73,7 @@ from src.services.target.workspaces import (
     _INTENT_FROM,
     LOCAL_DAY_SQL,
     LOCAL_MIDNIGHT_SQL,
-    _archive_row,
+    _past_posts_row,
     _picture_sql,
 )
 
@@ -103,7 +103,7 @@ _RANGE_END = LOCAL_MIDNIGHT_SQL.format(name="to_date")
 
 #: The intents read's row and its day. The row's own column list, so what the
 #: queue's row gains the calendar's gains, and read through the same
-#: `_archive_row`.
+#: `_past_posts_row`.
 _PLANNED_SQL = (
     f"SELECT {_INTENT_COLUMNS},"
     f" {LOCAL_DAY_SQL.format(slot='i.schedule_slot_at', tz='w.tz')}"
@@ -211,7 +211,7 @@ async def upcoming(
 
     **``planned``** holds the stories a person scheduled that are still
     `scheduled`. A row is the intents read's row (`workspaces._INTENT_COLUMNS`,
-    an archive item's provenance and name included) and its ``day``, so the
+    a past-posts item's provenance and name included) and its ``day``, so the
     page draws it as it draws a queue row.
 
     **``predicted``** holds the slots the cadence will open (the module
@@ -266,7 +266,7 @@ async def upcoming(
     ):
         out[name], out[f"{name}_truncated"] = rows[:limit], len(rows) > limit
     # A story's picture and provenance go through the Queue's projection, so
-    # an archive story is named for where it came from, never by its id.
+    # a past-posts story is named for where it came from, never by its id.
     for name in ("planned", "repeating"):
-        out[name] = [_archive_row(row) for row in out[name]]
+        out[name] = [_past_posts_row(row) for row in out[name]]
     return out

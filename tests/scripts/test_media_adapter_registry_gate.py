@@ -48,12 +48,12 @@ def registry_world(world_db, sync_conn):
         cur.execute("ALTER TABLE media_sources DROP CONSTRAINT ck_sources_provider")
         cur.execute(
             "ALTER TABLE media_sources ADD CONSTRAINT ck_sources_provider"
-            " CHECK (provider IN ('gdrive', 'fake_archive'))"
+            " CHECK (provider IN ('gdrive', 'fake_past_posts'))"
         )
         cur.execute(
-            "UPDATE media_sources SET provider = 'fake_archive', config = %s::jsonb"
+            "UPDATE media_sources SET provider = 'fake_past_posts', config = %s::jsonb"
             " WHERE id = %s",
-            (json.dumps({"v": 9, "bucket": "archive-a"}), chain["src"]),
+            (json.dumps({"v": 9, "bucket": "past-posts-a"}), chain["src"]),
         )
     sync_conn.commit()
     return chain
@@ -96,7 +96,7 @@ async def _assert_worker_role(engine, expected):
         ).scalar() == 0, "the worker without a tenant must see no source rows"
 
 
-class ArchiveAdapter:
+class PastPostsAdapter:
     """No Drive keys; exhaustion alone never means a whole inventory."""
 
     def __init__(self, engine):
@@ -120,7 +120,7 @@ class ArchiveAdapter:
         assert self.engine.pool.checkedout() == 0, "no SQL connection during listing"
         self.calls.append((config, checkpoint, source_id, workspace_id))
         offset = checkpoint["offset"]
-        return [_item(f"archive-{offset}")], {
+        return [_item(f"past-posts-{offset}")], {
             "offset": offset + 1,
             "has_more": offset == 0,
         }
@@ -128,7 +128,7 @@ class ArchiveAdapter:
     async def fetch_bytes(self, config, file_ref, **kwargs):
         assert self.engine.pool.checkedout() == 0, "no SQL connection during fetch"
         self.fetches.append((config, file_ref, kwargs))
-        return b"archive", "f.jpg", "image/jpeg"
+        return b"past_posts", "f.jpg", "image/jpeg"
 
 
 async def test_non_drive_checkpoint_resumes_two_chunks_without_tombstoning(
@@ -137,9 +137,9 @@ async def test_non_drive_checkpoint_resumes_two_chunks_without_tombstoning(
     chain = registry_world
     dsn, expected_role = registry_actor
     engine = create_async_engine(async_url(dsn))
-    adapter = ArchiveAdapter(engine)
+    adapter = PastPostsAdapter(engine)
     deps = SimpleNamespace(
-        engine=engine, adapters={"gdrive": object(), "fake_archive": adapter}
+        engine=engine, adapters={"gdrive": object(), "fake_past_posts": adapter}
     )
     source, workspace = str(chain["src"]), str(chain["ws"])
     job = {"id": "initial", "workspace_id": workspace, "payload": {"source_id": source}}
@@ -184,11 +184,13 @@ async def test_non_drive_checkpoint_resumes_two_chunks_without_tombstoning(
         assert len(_jobs(sync_conn, "first_ingest_chunk")) == 1
         assert {r[0] for r in _items(sync_conn, chain["ws"])} == {
             "ref-registry",
-            "archive-0",
-            "archive-1",
+            "past-posts-0",
+            "past-posts-1",
         }
         assert all(r[2] == "available" for r in _items(sync_conn, chain["ws"]))
-        assert all(call[0] == {"v": 9, "bucket": "archive-a"} for call in adapter.calls)
+        assert all(
+            call[0] == {"v": 9, "bucket": "past-posts-a"} for call in adapter.calls
+        )
         assert all(call[2:] == (source, workspace) for call in adapter.calls)
     finally:
         await engine.dispose()
@@ -229,9 +231,9 @@ async def test_old_card_ids_resolve_config_only_in_the_named_workspace(
     other = seed_workspace_chain(sync_conn, "registry-other")
     dsn, expected_role = registry_actor
     engine = create_async_engine(async_url(dsn))
-    adapter = ArchiveAdapter(engine)
+    adapter = PastPostsAdapter(engine)
     fetch = worker._card_media_fetch(
-        engine, {"gdrive": object(), "fake_archive": adapter}
+        engine, {"gdrive": object(), "fake_past_posts": adapter}
     )
     media = {
         "source_id": str(chain["src"]),
@@ -246,8 +248,8 @@ async def test_old_card_ids_resolve_config_only_in_the_named_workspace(
             await fetch(media)
         assert adapter.fetches == []
         media["workspace_id"] = str(chain["ws"])
-        assert await fetch(media) == (b"archive", "f.jpg", "image/jpeg")
-        assert adapter.fetches[0][:2] == ({"v": 9, "bucket": "archive-a"}, "opaque")
+        assert await fetch(media) == (b"past_posts", "f.jpg", "image/jpeg")
+        assert adapter.fetches[0][:2] == ({"v": 9, "bucket": "past-posts-a"}, "opaque")
         with sync_conn.cursor() as cur:
             cur.execute(
                 "UPDATE media_sources SET state = 'paused' WHERE id = %s",
@@ -271,8 +273,8 @@ async def test_equal_file_refs_from_different_providers_cannot_move_a_live_row(
     with sync_conn.cursor() as cur:
         owner = seed_intent_chain(cur, chain["ws"], "drive-owner")
         cur.execute(
-            "UPDATE media_items SET provider_file_ref = 'archive-0',"
-            " content_hash = 'hash-archive-0', created_at = now() - interval '1 day'"
+            "UPDATE media_items SET provider_file_ref = 'past-posts-0',"
+            " content_hash = 'hash-past-posts-0', created_at = now() - interval '1 day'"
             " WHERE id = %s",
             (owner["media"],),
         )
@@ -283,9 +285,10 @@ async def test_equal_file_refs_from_different_providers_cannot_move_a_live_row(
         )
     sync_conn.commit()
     engine = create_async_engine(async_url(world_db))
-    adapter = ArchiveAdapter(engine)
+    adapter = PastPostsAdapter(engine)
     deps = SimpleNamespace(
-        engine=engine, adapters={"gdrive": GoogleDriveAdapter, "fake_archive": adapter}
+        engine=engine,
+        adapters={"gdrive": GoogleDriveAdapter, "fake_past_posts": adapter},
     )
     try:
         assert (
@@ -324,12 +327,12 @@ async def test_persistent_errors_never_copy_provider_secrets_to_alerts_or_logs(
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
     engine = create_async_engine(async_url(world_db))
 
-    class BrokenAdapter(ArchiveAdapter):
+    class BrokenAdapter(PastPostsAdapter):
         async def list_changes(self, *args, **kwargs):
             raise error_type(secret)
 
     deps = SimpleNamespace(
-        engine=engine, adapters={"fake_archive": BrokenAdapter(engine)}
+        engine=engine, adapters={"fake_past_posts": BrokenAdapter(engine)}
     )
     try:
         assert (
@@ -369,7 +372,7 @@ async def test_retryable_provider_errors_do_not_leak_through_work_loop_logs(
     engine = create_async_engine(async_url(world_db))
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
 
-    class BrokenAdapter(ArchiveAdapter):
+    class BrokenAdapter(PastPostsAdapter):
         async def list_changes(self, *args, **kwargs):
             raise error_type(secret)
 
@@ -379,7 +382,7 @@ async def test_retryable_provider_errors_do_not_leak_through_work_loop_logs(
             engine=engine,
             config=WorkerConfig(),
             env={},
-            adapters={"fake_archive": BrokenAdapter(engine)},
+            adapters={"fake_past_posts": BrokenAdapter(engine)},
         )
         loop = next(loop for loop in app.loops if loop.lane == "bulk")
         async with engine.connect() as conn:
@@ -427,8 +430,8 @@ async def test_publish_source_join_reads_only_its_tenant_as_worker(
     try:
         await _assert_worker_role(engine, "svc_worker")
         loaded = await publish_pipeline._load(uow, job)
-        assert loaded.intent["provider"] == "fake_archive"
-        assert loaded.intent["source_config"] == {"v": 9, "bucket": "archive-a"}
+        assert loaded.intent["provider"] == "fake_past_posts"
+        assert loaded.intent["source_config"] == {"v": 9, "bucket": "past-posts-a"}
         assert str(loaded.intent["source_id"]) == str(chain["src"])
         # A leased job in A cannot read B's intent/source/config through _load.
         foreign = await publish_pipeline._load(
@@ -458,7 +461,7 @@ async def test_a_nested_database_failure_cannot_log_the_original_provider_secret
         else media_adapters.MediaRetryableError
     )
 
-    class BrokenAdapter(ArchiveAdapter):
+    class BrokenAdapter(PastPostsAdapter):
         async def list_changes(self, *args, **kwargs):
             raise fault_type(secret)
 
@@ -484,7 +487,7 @@ async def test_a_nested_database_failure_cannot_log_the_original_provider_secret
             engine=engine,
             config=WorkerConfig(),
             env={},
-            adapters={"fake_archive": BrokenAdapter(engine)},
+            adapters={"fake_past_posts": BrokenAdapter(engine)},
         )
         loop = next(loop for loop in app.loops if loop.lane == "bulk")
         async with engine.connect() as conn:

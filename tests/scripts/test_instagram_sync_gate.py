@@ -1,4 +1,4 @@
-"""Archive sync atomic landing, retained identities and source/lease fences."""
+"""Past-posts sync atomic landing, retained identities and source/lease fences."""
 
 import importlib.util
 import json
@@ -15,13 +15,13 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.conftest import as_user, async_url
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
 def service():
     assert importlib.util.find_spec("src.services.target.instagram_sync"), (
-        "atomic archive sync missing"
+        "atomic past-posts sync missing"
     )
     from src.services.target import instagram_sync
 
@@ -47,7 +47,7 @@ async def leased(world_db, engine, origin, src):
         job = await jobs.claim_job(
             conn,
             lane="bulk",
-            worker="archive-sync-test",
+            worker="past-posts-sync-test",
             lease_seconds=60,
             ws_lane_cap=4,
             capability=foundation.capability(),
@@ -100,7 +100,7 @@ async def ports(module, adapter, captured):
         assert callable(provider)
         return adapter
 
-    return module.ArchiveSyncPorts(
+    return module.PastPostsSyncPorts(
         capability=foundation.capability(),
         tombstone_keys=obs.keys(),
         prepare_adapter=prepare,
@@ -140,18 +140,18 @@ async def state(engine, origin, src):
 
 
 async def test_atomic_bundle_checkpoint_progress_and_continuation(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         adapter = Adapter(page(obs.bundle()))
         result = await m.run_sync(worker, job, ports=await ports(m, adapter, c))
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert result.outcome == "committed" and result.committed_observations == 1
         assert len(rows) == 1 and queued == 1
-        assert cp["type"] == "instagram_archive_sync" and cp["revision"] == 1
+        assert cp["type"] == "instagram_past_posts_sync" and cp["revision"] == 1
         assert cp["generation_id"] == c.generation_id
         assert cp["progress"]["recent"]["observations"] == 1
         assert cp["summary"]["observed"] == 1 and cp["summary"]["represented"] == 1
@@ -163,12 +163,14 @@ async def test_atomic_bundle_checkpoint_progress_and_continuation(
 @pytest.mark.parametrize(
     "stage", ["observation", "progress", "checkpoint", "continuation", "before_commit"]
 )
-async def test_fault_rolls_back_whole_landing(world_db, archive_engine, origin, stage):
+async def test_fault_rolls_back_whole_landing(
+    world_db, past_posts_engine, origin, stage
+):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
-        before = await state(archive_engine, origin, src)
+        before = await state(past_posts_engine, origin, src)
 
         async def fault(at):
             if at == stage:
@@ -181,7 +183,7 @@ async def test_fault_rolls_back_whole_landing(world_db, archive_engine, origin, 
                 ports=await ports(m, Adapter(page(obs.bundle())), c),
                 fault=fault,
             )
-        assert await state(archive_engine, origin, src) == before
+        assert await state(past_posts_engine, origin, src) == before
         result = await m.run_sync(
             worker, job, ports=await ports(m, Adapter(page(obs.bundle())), c)
         )
@@ -192,24 +194,24 @@ async def test_fault_rolls_back_whole_landing(world_db, archive_engine, origin, 
 
 @pytest.mark.parametrize("mutation", ["off", "off_on", "generation"])
 async def test_held_page_never_lands_across_source_fence(
-    world_db, archive_engine, origin, mutation
+    world_db, past_posts_engine, origin, mutation
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
-        before = await state(archive_engine, origin, src)
+        before = await state(past_posts_engine, origin, src)
 
         async def change():
             if mutation in ("off", "off_on"):
                 from src.services.target import source_state
 
                 for ratio in (0, 1) if mutation == "off_on" else (0,):
-                    async with obs.uow(archive_engine, origin) as conn:
+                    async with obs.uow(past_posts_engine, origin) as conn:
                         await source_state.lock_all_workspace_sources(
                             conn, workspace_id=str(origin["ws"])
                         )
-                        before_state = await source_state.archive_state(
+                        before_state = await source_state.past_posts_state(
                             conn,
                             workspace_id=str(origin["ws"]),
                             source_id=src["source_id"],
@@ -220,7 +222,7 @@ async def test_held_page_never_lands_across_source_fence(
                             ),
                             dict(ratio=ratio, sid=src["source_id"]),
                         )
-                        await source_state.apply_archive_transition(
+                        await source_state.apply_past_posts_transition(
                             conn,
                             workspace_id=str(origin["ws"]),
                             source_id=src["source_id"],
@@ -229,7 +231,7 @@ async def test_held_page_never_lands_across_source_fence(
                         )
             if mutation == "generation":
                 await foundation.ensure(
-                    archive_engine, origin, foundation.authorization()
+                    past_posts_engine, origin, foundation.authorization()
                 )
 
         adapter = Adapter(page(obs.bundle()), change)
@@ -239,18 +241,18 @@ async def test_held_page_never_lands_across_source_fence(
             "source_epoch_changed",
             "source_generation_changed",
         )
-        assert await state(archive_engine, origin, src) == before
+        assert await state(past_posts_engine, origin, src) == before
         assert adapter.calls == 1
     finally:
         await worker.dispose()
 
 
 async def test_missing_capture_refuses_before_provider(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         job = {
             **job,
@@ -274,7 +276,7 @@ async def next_job(worker, origin, previous):
         return await jobs.claim_job(
             conn,
             lane="bulk",
-            worker="archive-sync-test",
+            worker="past-posts-sync-test",
             lease_seconds=60,
             ws_lane_cap=4,
             capability=foundation.capability(),
@@ -300,19 +302,19 @@ class EnrichingAdapter(Adapter):
 
 
 async def test_supplementary_evidence_cannot_survive_reobservation(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src = await admission.ready(archive_engine, origin)
-    await obs.observe(archive_engine, origin, src, obs.bundle())
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    await obs.observe(past_posts_engine, origin, src, obs.bundle())
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE instagram_media_assets SET validation_capture=jsonb_build_object('generation_id',data_generation_id,'observation_revision',observation_revision,'selected_asset_id',asset_media_id,'state','validation_pending') WHERE source_id=:sid"
             ),
             dict(sid=src["source_id"]),
         )
-    await obs.observe(archive_engine, origin, src, obs.bundle())
-    async with obs.uow(archive_engine, origin) as conn:
+    await obs.observe(past_posts_engine, origin, src, obs.bundle())
+    async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.execute(
                 text(
@@ -324,13 +326,13 @@ async def test_supplementary_evidence_cannot_survive_reobservation(
 
 
 async def test_lease_loss_during_provider_rolls_back_without_continuation(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
-        before = await state(archive_engine, origin, src)
+        before = await state(past_posts_engine, origin, src)
 
         async def cancel():
             async with obs.uow(worker, origin) as conn:
@@ -342,22 +344,24 @@ async def test_lease_loss_during_provider_rolls_back_without_continuation(
                 job,
                 ports=await ports(m, Adapter(page(obs.bundle()), cancel), c),
             )
-        assert await state(archive_engine, origin, src) == before
+        assert await state(past_posts_engine, origin, src) == before
     finally:
         await worker.dispose()
 
 
-async def test_late_persistent_error_is_source_fenced(world_db, archive_engine, origin):
+async def test_late_persistent_error_is_source_fenced(
+    world_db, past_posts_engine, origin
+):
     from src.services.target.media_adapters import MediaCredentialDead
 
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
-        before = await state(archive_engine, origin, src)
+        before = await state(past_posts_engine, origin, src)
 
         async def late_error():
-            async with obs.uow(archive_engine, origin) as conn:
+            async with obs.uow(past_posts_engine, origin) as conn:
                 await conn.execute(
                     text(
                         "UPDATE category_post_case_mix SET ratio=0 WHERE source_id=:sid"
@@ -370,8 +374,8 @@ async def test_late_persistent_error_is_source_fenced(world_db, archive_engine, 
             worker, job, ports=await ports(m, Adapter(page(), late_error), c)
         )
         assert result.drop_reason == "source_off"
-        assert await state(archive_engine, origin, src) == before
-        async with obs.uow(archive_engine, origin) as conn:
+        assert await state(past_posts_engine, origin, src) == before
+        async with obs.uow(past_posts_engine, origin) as conn:
             row = await obs.row(
                 conn,
                 "SELECT state,alerted_at FROM media_sources WHERE id=:sid",
@@ -383,26 +387,26 @@ async def test_late_persistent_error_is_source_fenced(world_db, archive_engine, 
 
 
 async def test_real_metadata_indexing_never_downloads_or_decodes(
-    world_db, archive_engine, origin, monkeypatch
+    world_db, past_posts_engine, origin, monkeypatch
 ):
     from datetime import datetime, timedelta, timezone
     import httpx
     from src.services.target import (
         egress,
-        instagram_archive_adapter as archive,
+        instagram_past_posts_adapter as past_posts,
         media_validation,
     )
     from src.services.target.unit_of_work import in_transaction
 
     m = service()
     account = "17841400000000001"
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE ig_accounts SET provider_account_ref=:ref WHERE id=:id"),
             dict(ref=account, id=str(origin["iga"])),
         )
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     now = datetime.now(timezone.utc)
     decoder_calls = []
 
@@ -474,11 +478,11 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
         assert capture == c
 
         async def access(source_id, *, workspace_id):
-            return archive.ArchiveAccess(
+            return past_posts.PastPostsAccess(
                 account, "fake-internal-test-token", captured_authorization=capture
             )
 
-        return archive.InstagramArchiveAdapter(
+        return past_posts.InstagramPastPostsAdapter(
             access_provider=access,
             admission_provider=provider,
             client=client,
@@ -488,7 +492,7 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
             policy=egress.EgressPolicy().without(enforce_private_address_block=False),
         )
 
-    injected = m.ArchiveSyncPorts(
+    injected = m.PastPostsSyncPorts(
         capability=foundation.capability(),
         tombstone_keys=obs.keys(),
         prepare_adapter=prepare,
@@ -497,7 +501,7 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
         results = []
         for turn in range(5):
             results.append(await m.run_sync(worker, job, ports=injected))
-            cp, retained, queued = await state(archive_engine, origin, src)
+            cp, retained, queued = await state(past_posts_engine, origin, src)
             if turn < 4:
                 job = await next_job(worker, origin, job)
         # The fifth turn found its window empty, and one probe found nothing older.
@@ -542,7 +546,7 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
         )
         assert sum(r.cdn_attempts for r in results) == actual_cdn
         print(
-            "ARCHIVE_SYNC_SAMPLE="
+            "PAST_POSTS_SYNC_SAMPLE="
             + json.dumps(
                 {
                     "provider": "injected_fake_http",
@@ -569,12 +573,12 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
 
 @pytest.mark.parametrize("bad", ["missing", "null", "generation", "asset"])
 async def test_validation_capture_cannot_name_another_or_missing_identity(
-    archive_engine, origin, bad
+    past_posts_engine, origin, bad
 ):
     from sqlalchemy.exc import DBAPIError
 
-    src = await admission.ready(archive_engine, origin)
-    await obs.observe(archive_engine, origin, src, obs.bundle())
+    src = await admission.ready(past_posts_engine, origin)
+    await obs.observe(past_posts_engine, origin, src, obs.bundle())
     capture = dict(
         generation_id=src["generation_id"],
         observation_revision=1,
@@ -592,7 +596,7 @@ async def test_validation_capture_cannot_name_another_or_missing_identity(
     import json
 
     with pytest.raises(DBAPIError):
-        async with obs.uow(archive_engine, origin) as conn:
+        async with obs.uow(past_posts_engine, origin) as conn:
             await conn.execute(
                 text(
                     "UPDATE instagram_media_assets SET validation_capture=CAST(:capture AS jsonb) WHERE source_id=:sid"
@@ -601,32 +605,32 @@ async def test_validation_capture_cannot_name_another_or_missing_identity(
             )
 
 
-async def test_media_executor_uses_injected_archive_turn(
-    world_db, archive_engine, origin
+async def test_media_executor_uses_injected_past_posts_turn(
+    world_db, past_posts_engine, origin
 ):
     from src.services.target import media_sync, work_loop
 
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         adapter = Adapter(page(obs.bundle()))
         deps = work_loop.WorkerDeps(
-            engine=worker, archive_sync=await ports(m, adapter, c)
+            engine=worker, past_posts_sync=await ports(m, adapter, c)
         )
         assert await media_sync.sync_media_source(deps, None, job) == "committed"
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert len(rows) == 1 and cp["revision"] == 1 and queued == 1
     finally:
         await worker.dispose()
 
 
-async def test_same_checkpoint_race_commits_once(world_db, archive_engine, origin):
+async def test_same_checkpoint_race_commits_once(world_db, past_posts_engine, origin):
     import asyncio
 
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         arrivals = 0
         both = asyncio.Event()
@@ -648,18 +652,18 @@ async def test_same_checkpoint_race_commits_once(world_db, archive_engine, origi
             next(r for r in results if r.outcome == "dropped").drop_reason
             == "checkpoint_changed"
         )
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert cp["revision"] == 1 and len(rows) == 1 and queued == 1
     finally:
         await worker.dispose()
 
 
 async def test_completed_lanes_rearm_baseline_and_new_sync_refreshes(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         empty = MediaPage([], {"v": 2, "more": False}, outcome="metadata_page")
         adapter = Adapter(empty)
@@ -667,7 +671,7 @@ async def test_completed_lanes_rearm_baseline_and_new_sync_refreshes(
         await m.run_sync(worker, job, ports=injected)
         job = await next_job(worker, origin, job)
         await m.run_sync(worker, job, ports=injected)
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert cp["recent"]["complete"] and cp["history"]["complete"] and queued == 0
         assert not cp["summary"]["indexing"] and not cp["summary"]["partial"]
         assert not cp["summary"]["stalled"]
@@ -718,18 +722,18 @@ async def test_completed_lanes_rearm_baseline_and_new_sync_refreshes(
                 return page(obs.bundle("999999"))
 
         await m.run_sync(worker, fresh, ports=await ports(m, Fresh(empty), c))
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert len(rows) == 10001 and cp["summary"]["observed"] == 10001
     finally:
         await worker.dispose()
 
 
 async def test_missing_parent_enrichment_yields_to_baseline_after_finite_work(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
 
     class Missing(Adapter):
         async def enrich_parents(self, parent_media_ids, **kwargs):
@@ -749,7 +753,7 @@ async def test_missing_parent_enrichment_yields_to_baseline_after_finite_work(
         job = await next_job(worker, origin, job)
         adapter.page = MediaPage([], {"v": 2, "more": False})
         await m.run_sync(worker, job, ports=injected)
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert queued == 0 and cp["deferred_helpers"] == ["123"]
         async with obs.uow(worker, origin) as conn:
             assert (
@@ -765,12 +769,12 @@ async def test_missing_parent_enrichment_yields_to_baseline_after_finite_work(
 
 
 async def test_selected_child_change_clears_all_inherited_format_evidence(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
-        await obs.observe(archive_engine, origin, src, obs.bundle())
+        await obs.observe(past_posts_engine, origin, src, obs.bundle())
         async with obs.uow(worker, origin) as conn:
             await conn.execute(
                 text(
@@ -799,25 +803,25 @@ async def test_selected_child_change_clears_all_inherited_format_evidence(
 
 
 async def test_index_only_conflict_helper_finishes_metadata(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     m = service()
-    src = await admission.ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
-                "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name, media_kind, provider_file_ref) VALUES (:ws,:sid,'instagram_archive:media:123','retained.jpg','image','123')"
+                "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name, media_kind, provider_file_ref) VALUES (:ws,:sid,'instagram_past_posts:media:123','retained.jpg','image','123')"
             ),
             dict(ws=str(origin["ws"]), sid=str(origin["src"])),
         )
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         adapter = EnrichingAdapter(page(obs.bundle()))
         injected = await ports(m, adapter, c)
         await m.run_sync(worker, job, ports=injected)
         job = await next_job(worker, origin, job)
         await m.run_sync(worker, job, ports=injected)
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert rows[0].media_item_id is None
         assert "pending_validation" not in cp
     finally:
@@ -828,22 +832,22 @@ async def test_index_only_conflict_helper_finishes_metadata(
     "history_seen", [0, 1, "counter_behind_lane", "raw_v1", "raw_v2"]
 )
 async def test_recent_history_share_one_adapter_listing_ceiling(
-    world_db, archive_engine, origin, history_seen
+    world_db, past_posts_engine, origin, history_seen
 ):
     from datetime import datetime, timezone
     import httpx
-    from src.services.target import egress, instagram_archive_adapter as archive
+    from src.services.target import egress, instagram_past_posts_adapter as past_posts
 
     m = service()
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE ig_accounts SET provider_account_ref='17841400000000001' WHERE id=:id"
             ),
             dict(id=str(origin["iga"])),
         )
-    src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(world_db, archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     upper = int(datetime.now(timezone.utc).timestamp()) + 1
     cp = m._envelope(None, c)
     cp.pop("scan_seen", None)  # Existing envelopes have separate lane counters.
@@ -851,7 +855,7 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
         v=2,
         upper=upper,
         until=upper,
-        window_start=upper - archive.WINDOW_SECONDS,
+        window_start=upper - past_posts.WINDOW_SECONDS,
         boundary=[],
         seen=9999,
         more=True,
@@ -873,9 +877,9 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
         raw = {
             **watermark,
             "v": int(history_seen[-1]),
-            "upper": upper - archive.WINDOW_SECONDS,
-            "until": upper - archive.WINDOW_SECONDS - 10,
-            "window_start": upper - 2 * archive.WINDOW_SECONDS - 10,
+            "upper": upper - past_posts.WINDOW_SECONDS,
+            "until": upper - past_posts.WINDOW_SECONDS - 10,
+            "window_start": upper - 2 * past_posts.WINDOW_SECONDS - 10,
             "boundary": ["777"],
         }
         cp = raw
@@ -916,13 +920,13 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
 
     async def prepare(capture, provider):
         async def access(source_id, *, workspace_id):
-            return archive.ArchiveAccess(
+            return past_posts.PastPostsAccess(
                 capture.account_ref,
                 "fake-internal-test-token",
                 captured_authorization=capture,
             )
 
-        return archive.InstagramArchiveAdapter(
+        return past_posts.InstagramPastPostsAdapter(
             access_provider=access,
             admission_provider=provider,
             client=client,
@@ -933,11 +937,11 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
 
     try:
         if history_seen == "counter_behind_lane":
-            with pytest.raises(m.ArchiveCheckpointRefused):
+            with pytest.raises(m.PastPostsCheckpointRefused):
                 await m.run_sync(
                     worker,
                     job,
-                    ports=m.ArchiveSyncPorts(
+                    ports=m.PastPostsSyncPorts(
                         foundation.capability(), obs.keys(), prepare
                     ),
                 )
@@ -946,9 +950,9 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
         result = await m.run_sync(
             worker,
             job,
-            ports=m.ArchiveSyncPorts(foundation.capability(), obs.keys(), prepare),
+            ports=m.PastPostsSyncPorts(foundation.capability(), obs.keys(), prepare),
         )
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         if raw is not None:
             assert result.committed_observations == 1 and len(requests) == 1
             assert cp["scan_seen"] == 10000
@@ -973,7 +977,7 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
 
 async def quality_ports(module, capture, response):
     import httpx
-    from src.services.target import egress, instagram_archive_adapter as archive
+    from src.services.target import egress, instagram_past_posts_adapter as past_posts
     from src.services.target.unit_of_work import in_transaction
 
     requests = []
@@ -989,13 +993,13 @@ async def quality_ports(module, capture, response):
         assert captured == capture
 
         async def access(source_id, *, workspace_id):
-            from src.services.target.instagram_archive_adapter import ArchiveAccess
+            from src.services.target.instagram_past_posts_adapter import PastPostsAccess
 
-            return ArchiveAccess(
+            return PastPostsAccess(
                 capture.account_ref, "fake-test-token", captured_authorization=capture
             )
 
-        return archive.InstagramArchiveAdapter(
+        return past_posts.InstagramPastPostsAdapter(
             access_provider=access,
             admission_provider=provider,
             client=client,
@@ -1005,7 +1009,7 @@ async def quality_ports(module, capture, response):
         )
 
     return (
-        module.ArchiveSyncPorts(foundation.capability(), obs.keys(), prepare),
+        module.PastPostsSyncPorts(foundation.capability(), obs.keys(), prepare),
         client,
         requests,
     )
@@ -1038,7 +1042,7 @@ async def quality_checkpoint(
     history_done=False,
 ):
     from datetime import datetime, timezone
-    from src.services.target.instagram_archive_adapter import WINDOW_SECONDS
+    from src.services.target.instagram_past_posts_adapter import WINDOW_SECONDS
 
     upper = int(datetime.now(timezone.utc).timestamp()) + 1
     cp = module._envelope(None, capture)
@@ -1085,14 +1089,14 @@ async def quality_checkpoint(
 
 
 async def test_real_permanent_helper_failure_retires_without_partial_observation(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     await obs.observe(
-        archive_engine, origin, src, obs.bundle("111", attribution="not_detected")
+        past_posts_engine, origin, src, obs.bundle("111", attribution="not_detected")
     )
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=["111"])
 
@@ -1106,7 +1110,7 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
     injected, client, requests = await quality_ports(m, c, response)
     try:
         first = await m.run_sync(worker, job, ports=injected)
-        cp, rows, queued = await state(archive_engine, origin, src)
+        cp, rows, queued = await state(past_posts_engine, origin, src)
         assert first.outcome == "committed" and first.graph_attempts == 1
         assert (
             not cp["pending_helpers"]
@@ -1139,7 +1143,7 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
         # The empty window and its one probe (nothing older) end the history lane,
         # and with it the scan: no job follows until a baseline sync re-arms it.
         assert [path.rsplit("/", 1)[1] for _, path in requests[1:]] == ["media"] * 2
-        cp, _, queued = await state(archive_engine, origin, src)
+        cp, _, queued = await state(past_posts_engine, origin, src)
         assert cp["recent"]["complete"] and cp["history"]["complete"] and queued == 0
         async with obs.uow(worker, origin) as conn:
             await jobs.finalize_job(conn, job["id"], job["lease_token"], "succeeded")
@@ -1158,7 +1162,7 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
             job = await jobs.claim_job(
                 conn,
                 lane="bulk",
-                worker="archive-sync-test",
+                worker="past-posts-sync-test",
                 lease_seconds=60,
                 ws_lane_cap=4,
                 capability=foundation.capability(),
@@ -1167,7 +1171,7 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
         # A baseline rewalk with no parent to enrich must not resurrect the
         # terminal helper or queue a second read of its failed parent.
         assert await next_job(worker, origin, job) is None
-        cp, _, queued = await state(archive_engine, origin, src)
+        cp, _, queued = await state(past_posts_engine, origin, src)
         assert cp["pending_helpers"] == cp["deferred_helpers"] == []
         assert queued == 0
         assert [path.rsplit("/", 1)[1] for _, path in requests].count("111") == 1
@@ -1216,15 +1220,15 @@ async def batch_state(engine, origin, src):
 
 
 async def test_a_helper_turn_enriches_every_parent_its_request_budget_affords(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
-        await obs.observe(archive_engine, origin, src, obs.bundle(parent))
+        await obs.observe(past_posts_engine, origin, src, obs.bundle(parent))
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=queued)
 
     async def response(request):
@@ -1233,14 +1237,14 @@ async def test_a_helper_turn_enriches_every_parent_its_request_budget_affords(
     injected, client, requests = await quality_ports(m, c, response)
     try:
         first = await m.run_sync(worker, job, ports=injected)
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         assert first.outcome == "committed" and first.lane == "helper"
         # One request each: the 20-request turn reads twenty parents, in order,
         # and yields before a twenty-first request it cannot afford.
         assert first.graph_attempts == first.committed_observations == 20
         assert [path for _, path in requests] == [f"/v26.0/{p}" for p in queued[:20]]
         assert cp["pending_helpers"] == queued[20:] and cp["deferred_helpers"] == []
-        rows = await batch_state(archive_engine, origin, src)
+        rows = await batch_state(past_posts_engine, origin, src)
         assert {
             p for p, r in rows.items() if r["attribution"] == "not_detected"
         } == set(queued[:20])
@@ -1251,7 +1255,7 @@ async def test_a_helper_turn_enriches_every_parent_its_request_budget_affords(
 
 
 async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     """A turn commits only when it ends, and the first card waits for the first
     candidate. So while the stored summary reports none the turn reads a single
@@ -1259,10 +1263,10 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
-        await obs.observe(archive_engine, origin, src, obs.bundle(parent))
+        await obs.observe(past_posts_engine, origin, src, obs.bundle(parent))
     await quality_checkpoint(
         m,
         worker,
@@ -1284,7 +1288,7 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
         first = await m.run_sync(
             worker, {**job, "kind": "first_ingest_chunk"}, ports=injected
         )
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         assert first.outcome == "committed" and first.lane == "helper"
         assert first.graph_attempts == first.committed_observations == 1
         assert [path for _, path in requests] == [f"/v26.0/{queued[0]}"]
@@ -1293,7 +1297,7 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
         job = await next_job(worker, origin, job)
         requests.clear()
         second = await m.run_sync(worker, job, ports=injected)
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         assert second.outcome == "committed" and second.lane == "helper"
         assert second.graph_attempts == second.committed_observations == 20
         assert [path for _, path in requests] == [f"/v26.0/{p}" for p in queued[1:21]]
@@ -1304,7 +1308,7 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
 
 
 async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     """Reading small must not cost a source that never has a candidate a turn per
     parent: the batch follows the requests the helper lane has made (1, 1, 2, 4,
@@ -1312,10 +1316,10 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
-        await obs.observe(archive_engine, origin, src, obs.bundle(parent))
+        await obs.observe(past_posts_engine, origin, src, obs.bundle(parent))
     await quality_checkpoint(
         m,
         worker,
@@ -1343,14 +1347,14 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
                     worker, {**claimed, "kind": "first_ingest_chunk"}, ports=injected
                 )
             )
-            cp, _, _ = await state(archive_engine, origin, src)
+            cp, _, _ = await state(past_posts_engine, origin, src)
             assert cp["summary"]["candidates"] == 0
             claimed = await next_job(worker, origin, claimed)
         assert [t.graph_attempts for t in turns] == [1, 1, 2, 4, 8, 9]
         assert [t.committed_observations for t in turns] == [1, 1, 2, 4, 8, 9]
         assert [path for _, path in requests] == [f"/v26.0/{p}" for p in queued]
         assert cp["pending_helpers"] == [] and cp["deferred_helpers"] == []
-        rows = await batch_state(archive_engine, origin, src)
+        rows = await batch_state(past_posts_engine, origin, src)
         assert {r["attribution"] for r in rows.values()} == {"credited"}
     finally:
         await client.aclose()
@@ -1358,15 +1362,15 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
 
 
 async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     queued = ["111", "222", "333"]
     for parent in queued:
-        await obs.observe(archive_engine, origin, src, obs.bundle(parent))
+        await obs.observe(past_posts_engine, origin, src, obs.bundle(parent))
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=queued)
 
     async def response(request):
@@ -1379,11 +1383,11 @@ async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
     injected, client, requests = await quality_ports(m, c, response)
     try:
         first = await m.run_sync(worker, job, ports=injected)
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         assert first.graph_attempts == len(requests) == 3
         assert first.committed_observations == 2
         assert cp["pending_helpers"] == [] and cp["deferred_helpers"] == []
-        rows = await batch_state(archive_engine, origin, src)
+        rows = await batch_state(past_posts_engine, origin, src)
         assert (
             rows["111"]["attribution"] == rows["333"]["attribution"] == "not_detected"
         )
@@ -1398,15 +1402,15 @@ async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
 
 
 async def test_a_retryable_read_defers_its_parent_and_ends_the_batch(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     queued = ["111", "222", "333"]
     for parent in queued:
-        await obs.observe(archive_engine, origin, src, obs.bundle(parent))
+        await obs.observe(past_posts_engine, origin, src, obs.bundle(parent))
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=queued)
 
     async def response(request):
@@ -1419,12 +1423,12 @@ async def test_a_retryable_read_defers_its_parent_and_ends_the_batch(
     injected, client, requests = await quality_ports(m, c, response)
     try:
         first = await m.run_sync(worker, job, ports=injected)
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         # A throttled provider is not asked for the third parent this turn.
         assert [path for _, path in requests] == ["/v26.0/111", "/v26.0/222"]
         assert first.graph_attempts == 2 and first.committed_observations == 1
         assert cp["pending_helpers"] == ["333"] and cp["deferred_helpers"] == ["222"]
-        rows = await batch_state(archive_engine, origin, src)
+        rows = await batch_state(past_posts_engine, origin, src)
         assert rows["222"]["validation_capture"] is None, "a retry is not a failure"
     finally:
         await client.aclose()
@@ -1432,24 +1436,24 @@ async def test_a_retryable_read_defers_its_parent_and_ends_the_batch(
 
 
 async def test_malformed_child_identity_defers_proven_carousel_without_retirement(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     import httpx
     from dataclasses import replace
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     known = replace(
         obs.bundle("111"),
         assets=(
-            ArchiveAsset("101", "image", position=1),
-            ArchiveAsset("102", "image", position=2),
-            ArchiveAsset("103", "image", position=3),
+            PastPostsAsset("101", "image", position=1),
+            PastPostsAsset("102", "image", position=2),
+            PastPostsAsset("103", "image", position=3),
         ),
         slide_count=3,
     )
-    await obs.observe(archive_engine, origin, src, known)
+    await obs.observe(past_posts_engine, origin, src, known)
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=["111"])
 
     async def response(request):
@@ -1477,12 +1481,12 @@ async def test_malformed_child_identity_defers_proven_carousel_without_retiremen
     injected, client, requests = await quality_ports(m, c, response)
     try:
         result = await m.run_sync(worker, job, ports=injected)
-        cp, _, _ = await state(archive_engine, origin, src)
+        cp, _, _ = await state(past_posts_engine, origin, src)
         assert result.committed_observations == 0
         assert cp["deferred_helpers"] == ["111"]
         assert cp["pending_helpers"] == []
         assert [path for _, path in requests] == ["/v26.0/111", "/v26.0/111/children"]
-        async with obs.uow(archive_engine, origin) as conn:
+        async with obs.uow(past_posts_engine, origin) as conn:
             rows = (
                 (
                     await conn.execute(
@@ -1513,15 +1517,18 @@ async def test_malformed_child_identity_defers_proven_carousel_without_retiremen
 @pytest.mark.parametrize("kind", ["listing", "helper_fallback"])
 @pytest.mark.parametrize("landing", ["error", "source", "checkpoint", "lease"])
 async def test_real_grant_death_reports_actual_attempts(
-    world_db, archive_engine, origin, kind, landing, monkeypatch
+    world_db, past_posts_engine, origin, kind, landing, monkeypatch
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
     if kind == "helper_fallback":
         await obs.observe(
-            archive_engine, origin, src, obs.bundle("111", attribution="not_detected")
+            past_posts_engine,
+            origin,
+            src,
+            obs.bundle("111", attribution="not_detected"),
         )
         await quality_checkpoint(
             m, worker, origin, src, c, lane="helper", helpers=["111"]
@@ -1601,5 +1608,5 @@ async def test_real_grant_death_reports_actual_attempts(
         await worker.dispose()
 
 
-async def test_archive_sync_port_has_no_background_byte_validation():
-    assert "validate" not in service().ArchiveSyncPorts.__dataclass_fields__
+async def test_past_posts_sync_port_has_no_background_byte_validation():
+    assert "validate" not in service().PastPostsSyncPorts.__dataclass_fields__

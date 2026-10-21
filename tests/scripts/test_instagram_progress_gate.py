@@ -1,4 +1,4 @@
-"""Setwise archive progress through the actual ingress/worker tenant roles."""
+"""Setwise past-posts progress through the actual ingress/worker tenant roles."""
 
 import json
 from dataclasses import replace
@@ -14,7 +14,7 @@ from tests.scripts import test_source_read_admission_gate as admission
 from tests.scripts import test_source_suitability_gate as suitable
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
@@ -57,7 +57,7 @@ async def seed_10k(conn, origin, old, current):
         text("""
         INSERT INTO media_items(workspace_id,source_id,provider_file_ref,
           content_hash,media_kind,file_name,source_data_generation_id)
-        SELECT :ws,:sid,n::text,'instagram_archive:media:'||n,'image','fixture.jpg',
+        SELECT :ws,:sid,n::text,'instagram_past_posts:media:'||n,'image','fixture.jpg',
           CASE WHEN n<=2000 THEN CAST(:old AS uuid) ELSE CAST(:gid AS uuid) END
         FROM generate_series(1,10000) n WHERE n NOT BETWEEN 8001 AND 9000
     """),
@@ -111,22 +111,24 @@ async def seed_10k(conn, origin, old, current):
     return binds["recent"]
 
 
-async def test_10k_progress_is_setwise_current_and_policy_fresh(archive_engine, origin):
-    old = await admission.ready(archive_engine, origin)
-    old_capture = await admission.capture(archive_engine, origin, old)
+async def test_10k_progress_is_setwise_current_and_policy_fresh(
+    past_posts_engine, origin
+):
+    old = await admission.ready(past_posts_engine, origin)
+    old_capture = await admission.capture(past_posts_engine, origin, old)
     current = await foundation.ensure(
-        archive_engine, origin, foundation.authorization()
+        past_posts_engine, origin, foundation.authorization()
     )
-    capture = await admission.capture(archive_engine, origin, current)
-    empty, empty_calls = await read(archive_engine, origin, capture)
+    capture = await admission.capture(past_posts_engine, origin, current)
+    empty, empty_calls = await read(past_posts_engine, origin, capture)
     assert empty["observed"] == empty["represented"] == empty["eligible"] == 0
     assert empty["indexed"] == 0 and not empty["ready"]
     assert empty["connected"] and empty["enabled"] and empty["usable"]
     assert empty["indexing"] and empty["partial"] and not empty["stalled"]
     assert not empty["needs_reconnect"]
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         recent = await seed_10k(conn, origin, old, current)
-    result, calls = await read(archive_engine, origin, capture)
+    result, calls = await read(past_posts_engine, origin, capture)
     assert len(calls) == len(empty_calls) < 20, "progress must not query per parent"
     assert result["generation_id"] == current["generation_id"]
     assert result["policy_revision"] == 1
@@ -149,7 +151,7 @@ async def test_10k_progress_is_setwise_current_and_policy_fresh(archive_engine, 
     )
     assert datetime.fromisoformat(result["coverage_to"]) == recent
     assert datetime.fromisoformat(result["as_of"]).tzinfo is not None
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         identities = (
             await conn.execute(
                 text(
@@ -171,12 +173,12 @@ async def test_10k_progress_is_setwise_current_and_policy_fresh(archive_engine, 
                 include_unknown=False,
             ),
         )
-    revised, _ = await read(archive_engine, origin, old_capture)
+    revised, _ = await read(past_posts_engine, origin, old_capture)
     assert revised["generation_id"] == current["generation_id"]
     assert revised["policy_revision"] == 2 and revised["eligible"] == 2000
     assert revised["represented"] == 7000 and revised["observed"] == 8000
     assert "credited_excluded" not in revised["exclusions"]
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             identities
             == (
@@ -201,7 +203,7 @@ async def test_10k_progress_is_setwise_current_and_policy_fresh(archive_engine, 
         # -s in the bounded evidence gate preserves complete actual plans; CI
         # can capture this normally. There is no wall-time/index-choice threshold.
         print(
-            "ARCHIVE_PROGRESS_EXPLAIN="
+            "PAST_POSTS_PROGRESS_EXPLAIN="
             + json.dumps(
                 dict(
                     empty_query_count=len(empty_calls),
@@ -214,27 +216,27 @@ async def test_10k_progress_is_setwise_current_and_policy_fresh(archive_engine, 
 
 
 async def test_progress_counts_posts_items_slides_and_truncated_carousel(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    from src.services.target.instagram_catalog import ArchiveAsset
+    from src.services.target.instagram_catalog import PastPostsAsset
 
-    src = await admission.ready(archive_engine, origin)
-    capture = await admission.capture(archive_engine, origin, src)
+    src = await admission.ready(past_posts_engine, origin)
+    capture = await admission.capture(past_posts_engine, origin, src)
     await obs.observe(
-        archive_engine,
+        past_posts_engine,
         origin,
         src,
         replace(
             obs.bundle(attribution="not_detected"),
             slide_count=10,
             assets=tuple(
-                ArchiveAsset(str(1000 + position), "image", position=position)
+                PastPostsAsset(str(1000 + position), "image", position=position)
                 for position in range(1, 11)
             ),
         ),
     )
     await obs.observe(
-        archive_engine,
+        past_posts_engine,
         origin,
         src,
         replace(
@@ -242,12 +244,12 @@ async def test_progress_counts_posts_items_slides_and_truncated_carousel(
             slide_count=2,
             slides_complete=False,
             assets=(
-                ArchiveAsset("2001", "image", position=1),
-                ArchiveAsset("2002", "image", position=2),
+                PastPostsAsset("2001", "image", position=1),
+                PastPostsAsset("2002", "image", position=2),
             ),
         ),
     )
-    result, _ = await read(archive_engine, origin, capture)
+    result, _ = await read(past_posts_engine, origin, capture)
     assert result["observed"] == result["indexed"] == 2
     assert result["represented"] == 2
     assert result["items"] == result["slides"] == 12
@@ -256,11 +258,11 @@ async def test_progress_counts_posts_items_slides_and_truncated_carousel(
 
 
 async def test_status_stalled_anchor_and_off_reconnect_boundaries(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    src, _ = await suitable.ready(archive_engine, origin)
-    capture = await admission.capture(archive_engine, origin, src)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, _ = await suitable.ready(past_posts_engine, origin)
+    capture = await admission.capture(past_posts_engine, origin, src)
+    async with obs.uow(past_posts_engine, origin) as conn:
         now = (await conn.execute(text("SELECT clock_timestamp()"))).scalar_one()
         envelope = instagram_sync._envelope(None, capture)
         envelope["recent"]["complete"] = True
@@ -275,7 +277,7 @@ async def test_status_stalled_anchor_and_off_reconnect_boundaries(
             ),
             dict(cp=json.dumps(envelope), sid=src["source_id"]),
         )
-    fresh_epoch, _ = await read(archive_engine, origin, capture)
+    fresh_epoch, _ = await read(past_posts_engine, origin, capture)
     assert fresh_epoch["ready"] and fresh_epoch["usable"] and fresh_epoch["partial"]
     assert fresh_epoch["pending_helpers"] == 3
     assert (
@@ -294,11 +296,11 @@ async def test_status_stalled_anchor_and_off_reconnect_boundaries(
             (now - timedelta(days=3), src["source_id"]),
         )
     sync_conn.commit()
-    stalled, _ = await read(archive_engine, origin, capture)
+    stalled, _ = await read(past_posts_engine, origin, capture)
     assert stalled["stalled"] and stalled["enabled"] and stalled["indexing"]
-    relaxed, _ = await read(archive_engine, origin, capture, interval=2 * 86400)
+    relaxed, _ = await read(past_posts_engine, origin, capture, interval=2 * 86400)
     assert not relaxed["stalled"], "diagnostic uses two configured intervals"
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         envelope["progress"]["recent"]["last_committed_at"] = now.isoformat()
         envelope["pending_helpers"] = []
         envelope["deferred_helpers"] = []
@@ -321,24 +323,24 @@ async def test_status_stalled_anchor_and_off_reconnect_boundaries(
             ),
             dict(cp=json.dumps(envelope), sid=src["source_id"]),
         )
-    capped, _ = await read(archive_engine, origin, capture)
+    capped, _ = await read(past_posts_engine, origin, capture)
     assert capped["partial"] and capped["ready"] and not capped["stalled"]
     assert not capped["indexing"], "capped complete scan retains partial coverage"
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE category_post_case_mix SET ratio=0 WHERE source_id=:sid"),
             dict(sid=src["source_id"]),
         )
-    off, _ = await read(archive_engine, origin, capture)
+    off, _ = await read(past_posts_engine, origin, capture)
     assert off["connected"] and not off["enabled"] and not off["usable"]
     assert not off["ready"] and not off["indexing"] and not off["stalled"]
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE oauth_credentials SET state='revoked' WHERE id=:id"),
             dict(id=str(origin["credential"])),
         )
-    reconnect, _ = await read(archive_engine, origin, capture)
+    reconnect, _ = await read(past_posts_engine, origin, capture)
     assert reconnect["needs_reconnect"] and not reconnect["connected"]
     assert (
         not reconnect["usable"]

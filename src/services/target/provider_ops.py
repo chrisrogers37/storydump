@@ -139,7 +139,7 @@ async def acquire_permit(
     lease_token,
     op_kind: str,
     generation: int = 1,
-    archive_capability=None,
+    past_posts_capability=None,
 ) -> dict[str, Any]:
     """Insert the permit and re-check the lease in ONE transaction, then commit.
 
@@ -164,13 +164,13 @@ async def acquire_permit(
             ws=str(workspace_id),
             id=str(intent_id),
         )
-        archive = None
-        if provider is not None and provider["provider"] == "instagram_archive":
-            archive = await instagram_publish.authorize(
+        past_posts = None
+        if provider is not None and provider["provider"] == "instagram_past_posts":
+            past_posts = await instagram_publish.authorize(
                 conn,
                 workspace_id=workspace_id,
                 intent_id=intent_id,
-                capability=archive_capability,
+                capability=past_posts_capability,
                 staged=True,
             )
 
@@ -205,13 +205,13 @@ async def acquire_permit(
                 {"intent": str(intent_id)},
             )
 
-        if archive is not None:
+        if past_posts is not None:
             await instagram_publish.copy_permit(
                 conn,
                 operation_id=row["id"],
                 workspace_id=workspace_id,
                 intent_id=intent_id,
-                subject=archive,
+                subject=past_posts,
             )
         # The lease is the final lock and fresh wall-time check: waits on the
         # intent/operation/owned artifact cannot spend authorization's expiry.
