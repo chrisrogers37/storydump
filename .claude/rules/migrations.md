@@ -24,10 +24,13 @@ its predeploy (`railway.toml:8`), so **merged is applied**. The ledger is
   current code on one cluster; on another it builds the code at the pinned base
   (`scripts/schema_consistency_base.txt`), adopts it and replays every migration
   absent there. The catalogs must match (`scripts/schema_parity.py`) and the
-  runner must apply exactly that tail (`scripts/schema_consistency.py:185`), so
-  code alone, or a migration alone, fails. The replay runs `apply` before the
-  owed manual files (`:166`-`:168`): a new ordinary file must not need `001` or
-  `002` applied.
+  runner must apply exactly that tail (`scripts/schema_consistency.py:197`), so
+  code alone, or a migration alone, fails. The replay runs the tail in version
+  order, each manual file by `apply --manual` when its turn comes (`:166`-`:187`),
+  so **a new file runs after `001` and `002`**, as production applied them.
+  `003_instagram_past_posts.sql` needs them and refuses to run until both are in
+  the ledger, so a predeploy over a database that still owes them fails and
+  changes nothing.
 - **Its probe must be true on a fresh build.** A database built from code (the
   test worlds, `make init-db`) is entered by `adopt`, which records each file
   whose probe is true. Carry `-- runner:postcondition <SQL returning bool>`

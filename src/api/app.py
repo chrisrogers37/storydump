@@ -80,8 +80,8 @@ from src.exceptions.tenancy import (
     TokenRefused,
 )
 from src.services.target import (
-    archive_activation,
-    archive_composition,
+    past_posts_activation,
+    past_posts_composition,
     email_sender,
     oauth_states,
     source_policy,
@@ -89,7 +89,7 @@ from src.services.target import (
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.connect_choice import ConnectChoiceRefused
 from src.services.target.health_reads import StatementTimedOut
-from src.services.target.instagram_sources import ArchiveRefused
+from src.services.target.instagram_sources import PastPostsRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import (
     MixInvalid,
@@ -508,7 +508,7 @@ _SOURCE_POLICY_STATUS = {
     "invalid_source_policy": 400,
     "source_not_found": 404,
     "unsupported_source_provider": 400,
-    "archive_not_activated": 503,
+    "past_posts_not_activated": 503,
 }
 
 
@@ -521,27 +521,27 @@ def _source_policy_body(exc, status: int) -> dict:
 
 #: `ConnectChoiceRefused.reason` → status, total over `connect_choice.REASONS`.
 #: A start's stale On preview is `MixConflict`'s 409, above.
-_ARCHIVE_CHOICE_STATUS = {
-    "invalid_archive_choice": 400,
-    "archive_not_activated": 503,
+_PAST_POSTS_CHOICE_STATUS = {
+    "invalid_past_posts_choice": 400,
+    "past_posts_not_activated": 503,
 }
 
-#: `ArchiveRefused.reason` → status, for the reasons a mix write can meet: an
-#: archive row's On/Off (`versioned_mix.mutate`, and `preview`, through
-#: `source_membership.set_archive_enabled`) is where the archive's refusals
-#: reach a route. NOT total, deliberately. `archive_not_activated` is the
-#: rollback case, archive rows still present after the capability was
+#: `PastPostsRefused.reason` → status, for the reasons a mix write can meet: an
+#: past-posts row's On/Off (`versioned_mix.mutate`, and `preview`, through
+#: `source_membership.set_past_posts_enabled`) is where the past-posts source's refusals
+#: reach a route. NOT total, deliberately. `past_posts_not_activated` is the
+#: rollback case, past-posts rows still present after the capability was
 #: withdrawn: unavailable, as the source policy's is. Only a switch to On meets
 #: it: a switch to Off closes something and needs no capability. A value the
 #: client sent is 400 and a conflict with the current state is 409. Every other reason is
 #: an internal invariant (the allocation, sync and fence machinery's) and stays
 #: `_unmapped`'s logged 500, never a client status somebody chose. The
-#: Instagram callback catches `ArchiveRefused` itself, so none of its
+#: Instagram callback catches `PastPostsRefused` itself, so none of its
 #: refusals reaches this table.
-_ARCHIVE_STATUS = {
-    "archive_not_activated": 503,
-    "archive_source_unavailable": 409,
-    "invalid_archive_choice": 400,
+_PAST_POSTS_STATUS = {
+    "past_posts_not_activated": 503,
+    "past_posts_source_unavailable": 409,
+    "invalid_past_posts_choice": 400,
     "mix_conflict": 409,
 }
 
@@ -633,10 +633,12 @@ def _register_handlers(app: FastAPI) -> None:
     )
 
     app.add_exception_handler(
-        ConnectChoiceRefused, _mapped(_ARCHIVE_CHOICE_STATUS, _reason_detail)
+        ConnectChoiceRefused, _mapped(_PAST_POSTS_CHOICE_STATUS, _reason_detail)
     )
 
-    app.add_exception_handler(ArchiveRefused, _mapped(_ARCHIVE_STATUS, _reason_detail))
+    app.add_exception_handler(
+        PastPostsRefused, _mapped(_PAST_POSTS_STATUS, _reason_detail)
+    )
 
     app.add_exception_handler(
         InvitationRefused, _mapped(_INVITATION_STATUS, _invitation_detail, log=False)
@@ -810,12 +812,12 @@ def create_app(
     *,
     engine: Optional[AsyncEngine] = None,
     env: Optional[Mapping[str, str]] = None,
-    archive_client=None,
+    past_posts_client=None,
 ) -> FastAPI:
     """Assemble the app. *engine* injects the target engine (tests, or a
     composition root that owns the pool); otherwise it comes from *env*
-    (default: the process environment) and from nothing else. *archive_client*
-    is the test seam for the archive's HTTP client, used only if the archive is
+    (default: the process environment) and from nothing else. *past_posts_client*
+    is the test seam for the past-posts source's HTTP client, used only if the past-posts source is
     armed; the app owns and closes whichever client it ends up with."""
     # Resolved once: `os.environ` is a live mapping, so binding it here reads
     # exactly what a read at each call site would, and `create_app(env=…)`'s
@@ -844,9 +846,9 @@ def create_app(
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            archive_http = getattr(app_.state, "archive_client", None)
-            if archive_http is not None:
-                await archive_http.aclose()
+            past_posts_http = getattr(app_.state, "past_posts_client", None)
+            if past_posts_http is not None:
+                await past_posts_http.aclose()
 
     # The interactive docs and the schema map every route for whoever asks,
     # and nothing deployed reads them (the CLI and the web know their routes),
@@ -865,30 +867,27 @@ def create_app(
     # The deployed commit, for `/health` (Railway sets it on a Git deploy).
     from src.services.target import mix_conversion
 
-    app.state.mix_conversion_evidence = mix_conversion.load_evidence(
-        env.get(mix_conversion.RECORD_PATH),
-        service="api",
-        release_sha=env.get(COMMIT_VAR),
+    app.state.mix_conversion_evidence = mix_conversion.release_evidence(
+        env.get(COMMIT_VAR)
     )
     app.state.source_mix_capability = mix_conversion.capability(
         env, "api", app.state.mix_conversion_evidence
     )
     app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
-    # The archive. The key ring loads whatever the activation says (a deletion
-    # receipt is durable with it, and only with it); the capability and the
-    # preview port are the armed archive's and None otherwise, which is what
-    # every route reads as an inactive archive.
-    app.state.archive_keys = archive_activation.load_keys(env)
-    archive = archive_composition.build_api(
+    # The past-posts source, armed wherever the key ring loads (a deletion receipt is
+    # durable with the ring, and only with it); the capability and the preview
+    # port are None without it, which is what every route reads as an inactive
+    # past-posts source.
+    app.state.past_posts_keys = past_posts_activation.load_keys(env)
+    past_posts = past_posts_composition.build_api(
         engine=app.state.engine,
         env=env,
-        conversion=app.state.mix_conversion_evidence,
-        client=archive_client,
+        client=past_posts_client,
     )
-    app.state.archive_capability = archive.capability if archive else None
-    app.state.archive_preview = archive.preview if archive else None
-    app.state.archive_client = archive.client if archive else None
+    app.state.past_posts_capability = past_posts.capability if past_posts else None
+    app.state.past_posts_preview = past_posts.preview if past_posts else None
+    app.state.past_posts_client = past_posts.client if past_posts else None
     # The invitation email's transport: sent from here,
     # after the invitation commits, so its link never rests in a job row. None
     # when RESEND_API_KEY and EMAIL_FROM are not both set — an invitation then

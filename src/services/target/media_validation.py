@@ -7,7 +7,8 @@ FFmpeg parser interface: deployment Nixpkgs archive / FFmpeg 7.1.
 Resource limits/private cwd are NOT a filesystem sandbox. MOV external-track
 references are refused before using explicit disabled dref/path options. No
 network, transformations, captions, URLs or raw decoder diagnostics are retained.
-Video bitrate semantics/conformance remain an explicit activation evidence gate.
+Video bitrate semantics/conformance remain unproven, so a video that passes
+every probe stays `validation_pending` (`needs_spec_evidence`).
 """
 
 from __future__ import annotations

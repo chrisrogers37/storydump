@@ -636,7 +636,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
     #: strands. Listing it is a migration.
     #: `activation_nudge_sweep` (`users.activation_nudge_at`) is minted daily by the clock once it is
     #: switched on, and is kept for the same reason: a late sweep runs late.
-    #: The three archive lifecycle kinds are kept too: the sweep runs late
+    #: The three past-posts lifecycle kinds are kept too: the sweep runs late
     #: like the nudge, and its two minting doors skip a key that still holds a
     #: ready job, so ending one past its deadline would only delay the next.
     KEPT = frozenset(
@@ -648,9 +648,9 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "retention_sweep",
             "reencrypt_credentials",
             "activation_nudge_sweep",
-            "archive_lifecycle_sweep",
+            "past_posts_lifecycle_sweep",
             "meta_deletion_cleanup",
-            "reconcile_archive_accounts",
+            "reconcile_past_posts_accounts",
         }
     )
 

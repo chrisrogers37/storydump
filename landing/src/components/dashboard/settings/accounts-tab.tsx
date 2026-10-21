@@ -116,7 +116,7 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
       setChoice({ ...asked, preview: step.preview, notice: step.notice });
       return;
     }
-    if (step.error === "archive_not_activated") {
+    if (step.error === "past_posts_not_activated") {
       setChoice(null);
       setError(connectRefusalCopy(step.error, step.status));
       return;

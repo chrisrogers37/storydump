@@ -35,7 +35,7 @@ const DRIVE = "33333333-3333-4333-8333-333333333333";
 function igRow(id: string, handle: string, enabled = true) {
   return {
     source_id: id,
-    provider: "instagram_archive",
+    provider: "instagram_past_posts",
     state: "active",
     origin_account_id: id === IG_A ? A : B,
     origin_handle: handle,
@@ -107,7 +107,7 @@ function mix(rows: unknown[], destinations: unknown[], guidance: unknown) {
     mode: "equal",
     supported_actions: ["reset_equal", "set_enabled", "save_custom"],
     conversion: { state: "complete", kind: "new_equal" },
-    archive_available: true,
+    past_posts_available: true,
     rows,
     destinations,
     guidance,
@@ -121,7 +121,7 @@ function read(data: unknown): Readiness {
   return readiness;
 }
 
-/** A's archive On and ready; B's archive Off; no Drive. */
+/** A's past-posts source On and ready; B's past-posts source Off; no Drive. */
 const A_ONLY_B_OFF = mix(
   [igRow(IG_A, "example_a"), igRow(IG_B, "example_b", false)],
   [

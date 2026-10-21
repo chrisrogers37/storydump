@@ -1,5 +1,5 @@
 import { ruleLabel, type ApprovalRule } from "./approvals";
-import type { MediaProvenance } from "./archive-media";
+import type { MediaProvenance } from "./past-posts-media";
 import { notAuthenticatedCopy } from "./refusal-copy";
 import type { RepeatRule } from "./repeat";
 /**
@@ -108,7 +108,7 @@ export type Intent = {
   /** How a planned story repeats, in the rule's one shape; null for none. */
   repeat: RepeatRule | null;
   /**
-   * An archive item reads `ARCHIVE_ITEM_NAME`: it is stored under that name, and
+   * A past-posts item reads `PAST_POSTS_ITEM_NAME`: it is stored under that name, and
    * every read projects it, a row stored as `Instagram <Graph id>` included.
    */
   file_name: string;
@@ -117,12 +117,12 @@ export type Intent = {
   has_thumbnail: boolean;
   /**
    * The thumbnail URL's version. A Drive item's is the same version for the
-   * same picture; an archive item's is the generation and epoch the API will
+   * same picture; a past-posts item's is the generation and epoch the API will
    * answer for, and null while the item awaits observation again.
    */
   thumbnail_version: string | null;
   /**
-   * Where an archive item came from; null for Drive. A read that does not carry
+   * Where a past-posts item came from; null for Drive. A read that does not carry
    * it leaves it out, and the row is then drawn as a Drive item.
    */
   provenance?: MediaProvenance | null;

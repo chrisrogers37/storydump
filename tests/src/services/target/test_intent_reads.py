@@ -4,7 +4,7 @@ What PostgreSQL decides (the local day in the workspace's zone, the index, the
 tenant) is the gate's, `tests/scripts/test_intent_slot_index_gate.py`. This
 pins the statements: the range clauses, the states and their parameters. It
 also pins what every read that draws an item's picture does to its row: an
-archive item's provenance and name (#1644), the same on all of them.
+past-posts item's provenance and name (#1644), the same on all of them.
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ class TestTheMonthRead:
     async def test_each_newest_carries_a_thumbnail_flag_never_its_link(self):
         """The calendar draws a thumbnail through the route (#1634),
         from the flag and version the intents read carries, never the link:
-        a Drive item's from its stored link, an archive item's from its
+        a Drive item's from its stored link, a past-posts item's from its
         current observation (#1644), over the same joins."""
         ex = _Executor()
         await self._days(ex)
@@ -170,13 +170,13 @@ class TestTheMonthRead:
         assert "ELSE m.thumbnail_url IS NOT NULL END AS has_thumbnail" in sql
         assert "THEN mi.data_generation_id IS NOT NULL" in sql
         assert workspaces.thumbnail_joins("m.") in sql
-        assert f"THEN {workspaces.ARCHIVE_THUMBNAIL_VERSION_SQL}" in sql
+        assert f"THEN {workspaces.PAST_POSTS_THUMBNAIL_VERSION_SQL}" in sql
         assert "AS thumbnail_version" in sql
         assert "thumbnail_url" not in workspaces.INTENT_DAY_FIELDS
 
 
-#: An archive item as it is stored (`instagram_catalog._project`): named
-#: `vocabulary.ARCHIVE_ITEM_NAME`, with the Graph id for its provider reference.
+#: A past-posts item as it is stored (`instagram_catalog._project`): named
+#: `vocabulary.PAST_POSTS_ITEM_NAME`, with the Graph id for its provider reference.
 #: The id is distinctive, so a leak is found by a plain substring. A row whose
 #: stored name is `Instagram <Graph id>` (`LEGACY_NAME`) reads the same.
 GRAPH_ID = "17841400000000771"
@@ -196,15 +196,15 @@ POST_REF = "11111111-2222-4333-8444-555555555555"
 
 def _stored(provider, **over):
     """What the database answers for one item of a source of *provider*, in the
-    columns the archive projection reads."""
-    archive = provider == "instagram_archive"
+    columns the past-posts projection reads."""
+    past_posts = provider == "instagram_past_posts"
     return {
         "id": "id-1",
-        "file_name": vocabulary.ARCHIVE_ITEM_NAME if archive else "f.jpg",
-        "provider_file_ref": GRAPH_ID if archive else "drive-file-ref",
+        "file_name": vocabulary.PAST_POSTS_ITEM_NAME if past_posts else "f.jpg",
+        "provider_file_ref": GRAPH_ID if past_posts else "drive-file-ref",
         "source_provider": provider,
-        "origin_handle": ORIGIN_HANDLE if archive else None,
-        "original_at": POSTED_AT if archive else None,
+        "origin_handle": ORIGIN_HANDLE if past_posts else None,
+        "original_at": POSTED_AT if past_posts else None,
         "slide_post_ref": None,
         "slide_position": None,
         "slide_count": None,
@@ -290,22 +290,22 @@ async def _read(read, row):
     return await PICTURE_READS[read].run(_Executor(_scripted(read, row)))
 
 
-class TestAnArchiveItemOnEveryRead:
-    """An archive item is named for where it came from and carries its
+class TestAPastPostsItemOnEveryRead:
+    """A past-posts item is named for where it came from and carries its
     provenance on each read the same way, so that the page can tell its picture
     from a Drive picture and never labels a post by Instagram's id. Each read
     is proven here over a scripted row; PostgreSQL's answer to all six is
-    `tests/scripts/test_archive_preview_gate.py`."""
+    `tests/scripts/test_past_posts_preview_gate.py`."""
 
     def test_the_name_is_the_wire_spelling_the_web_says_too(self):
-        assert vocabulary.ARCHIVE_ITEM_NAME == "Instagram post"
+        assert vocabulary.PAST_POSTS_ITEM_NAME == "Instagram post"
 
     @pytest.mark.parametrize("read", PICTURE_READS)
     async def test_it_reads_under_its_own_name_with_its_provenance(self, read):
-        row = await _read(read, _stored("instagram_archive"))
+        row = await _read(read, _stored("instagram_past_posts"))
         assert row["file_name"] == "Instagram post"
         assert row["provenance"] == {
-            "provider": "instagram_archive",
+            "provider": "instagram_past_posts",
             "origin_handle": ORIGIN_HANDLE,
             "original_at": POSTED_AT,
             "slide": None,
@@ -323,16 +323,16 @@ class TestAnArchiveItemOnEveryRead:
     async def test_a_row_stored_as_instagram_graph_id_reads_under_the_neutral_name(
         self, read
     ):
-        """A row can hold an archive item stored as `Instagram <Graph id>`. The
+        """A row can hold a past-posts item stored as `Instagram <Graph id>`. The
         projection hides that name, so a row stored that way never says the id
         to the page."""
-        row = await _read(read, _stored("instagram_archive", file_name=LEGACY_NAME))
-        assert row["file_name"] == vocabulary.ARCHIVE_ITEM_NAME
+        row = await _read(read, _stored("instagram_past_posts", file_name=LEGACY_NAME))
+        assert row["file_name"] == vocabulary.PAST_POSTS_ITEM_NAME
         assert GRAPH_ID not in repr(row)
 
     @pytest.mark.parametrize("read", PICTURE_READS)
     async def test_a_drive_item_keeps_its_own_name_and_no_provenance(self, read):
-        """The positive control: the projection is the archive's alone."""
+        """The positive control: the projection is the past-posts source's alone."""
         row = await _read(read, _stored("gdrive"))
         assert row["file_name"] == "f.jpg"
         assert row["provenance"] is None, "every row carries the key"
@@ -346,9 +346,9 @@ class TestAnArchiveItemOnEveryRead:
     ):
         """After a reauthorization the current generation has no observation of
         it: no time, but the account's handle, and still no Graph id."""
-        row = await _read(read, _stored("instagram_archive", original_at=None))
+        row = await _read(read, _stored("instagram_past_posts", original_at=None))
         assert row["provenance"] == {
-            "provider": "instagram_archive",
+            "provider": "instagram_past_posts",
             "origin_handle": ORIGIN_HANDLE,
             "original_at": None,
             "slide": None,
@@ -363,7 +363,7 @@ class TestAnArchiveItemOnEveryRead:
         row = await _read(
             read,
             _stored(
-                "instagram_archive",
+                "instagram_past_posts",
                 slide_post_ref=POST_REF,
                 slide_position=2,
                 slide_count=count,
@@ -373,7 +373,7 @@ class TestAnArchiveItemOnEveryRead:
             "Instagram post, slide 2 of 4" if count == 4 else "Instagram post, slide 2"
         )
         assert row["provenance"] == {
-            "provider": "instagram_archive",
+            "provider": "instagram_past_posts",
             "origin_handle": ORIGIN_HANDLE,
             "original_at": POSTED_AT,
             "slide": {"post_ref": POST_REF, "position": 2, "count": count},
@@ -383,9 +383,9 @@ class TestAnArchiveItemOnEveryRead:
 
     @pytest.mark.parametrize("read", PICTURE_READS)
     async def test_a_row_that_lacks_the_provenance_columns_is_refused(self, read):
-        """A read that forgot to select them would otherwise read every archive
+        """A read that forgot to select them would otherwise read every past-posts
         item as a Drive item, and be drawn on the Drive path."""
-        row = _stored("instagram_archive")
+        row = _stored("instagram_past_posts")
         del row["source_provider"]
         with pytest.raises(KeyError):
             await _read(read, row)

@@ -12,7 +12,7 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.conftest import async_url, as_user
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
@@ -26,12 +26,14 @@ def command(origin, src):
     )
 
 
-async def test_demand_off_refuses_with_source_fact_and_no_job(archive_engine, origin):
+async def test_demand_off_refuses_with_source_fact_and_no_job(
+    past_posts_engine, origin
+):
     assert "capability" in inspect.signature(command_executors.sync_now).parameters, (
-        "archive sync admission missing"
+        "past-posts sync admission missing"
     )
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
+    async with obs.uow(past_posts_engine, origin) as conn:
         from tests.scripts.test_source_suitability_gate import activate
 
         await activate(conn, origin["ws"])
@@ -52,13 +54,13 @@ async def test_demand_off_refuses_with_source_fact_and_no_job(archive_engine, or
 
 
 async def test_demand_on_captures_authority_and_clock_closed_by_default(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     assert "capability" in inspect.signature(command_executors.sync_now).parameters, (
-        "archive sync admission missing"
+        "past-posts sync admission missing"
     )
-    src = await admission.ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         result = await command_executors.sync_now(
             conn, command(origin, src), capability=foundation.capability()
         )
@@ -72,12 +74,12 @@ async def test_demand_on_captures_authority_and_clock_closed_by_default(
 
 
 async def test_clock_injected_activation_mints_capture_but_off_never_mints(
-    world_db, archive_engine, origin, sync_conn
+    world_db, past_posts_engine, origin, sync_conn
 ):
     assert "capability" in inspect.signature(scheduler.tick).parameters, (
         "clock source read admission missing"
     )
-    src = await admission.ready(archive_engine, origin)
+    src = await admission.ready(past_posts_engine, origin)
     with sync_conn.cursor() as cur:
         cur.execute(
             "UPDATE media_sources SET next_sync_at=now() WHERE id=%s",
@@ -123,14 +125,14 @@ async def test_clock_injected_activation_mints_capture_but_off_never_mints(
 
 @pytest.mark.parametrize("missing_capture", [False, True])
 async def test_claim_refuses_off_or_inherited_capture_and_still_claims_drive(
-    world_db, archive_engine, origin, sync_conn, missing_capture
+    world_db, past_posts_engine, origin, sync_conn, missing_capture
 ):
     assert "capability" in inspect.signature(jobs.claim_job).parameters, (
         "outer claim admission missing"
     )
-    src = await admission.ready(archive_engine, origin)
-    c = await admission.capture(archive_engine, origin, src)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    c = await admission.capture(past_posts_engine, origin, src)
+    async with obs.uow(past_posts_engine, origin) as conn:
         payload = dict(v=1, source_id=src["source_id"])
         if not missing_capture:
             payload["source_read_capture"] = c.payload()
@@ -178,14 +180,14 @@ async def test_claim_refuses_off_or_inherited_capture_and_still_claims_drive(
         await engine.dispose()
 
 
-async def test_archive_reconnect_off_does_not_clear_checkpoint_or_removed(
-    archive_engine, origin
+async def test_past_posts_reconnect_off_does_not_clear_checkpoint_or_removed(
+    past_posts_engine, origin
 ):
     assert (
         "capability" in inspect.signature(media_sync.rearm_after_connect).parameters
-    ), "archive reconnect admission missing"
-    src = await foundation.ensure(archive_engine, origin, foundation.authorization())
-    async with obs.uow(archive_engine, origin) as conn:
+    ), "past-posts reconnect admission missing"
+    src = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
+    async with obs.uow(past_posts_engine, origin) as conn:
         from tests.scripts.test_source_suitability_gate import activate
 
         await activate(conn, origin["ws"])
@@ -213,11 +215,11 @@ async def test_archive_reconnect_off_does_not_clear_checkpoint_or_removed(
 
 
 async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     from scripts.sql_lexer import normalize_statements
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         legacy = (
             (
                 await conn.execute(
@@ -244,9 +246,9 @@ async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
         assert legacy["prosrc"].count("deadline_at") >= 5
         assert activated["prosrc"].count("deadline_at") >= 5
         assert legacy["proargnames"][-1] == "o_reauth_jobs"
-        assert activated["proargnames"][-1] == "archive_reauth_jobs"
+        assert activated["proargnames"][-1] == "past_posts_reauth_jobs"
         assert normalize_statements(
-            legacy["prosrc"].replace("p_archive_enabled boolean := false;", "")
+            legacy["prosrc"].replace("p_past_posts_enabled boolean := false;", "")
         ) == normalize_statements(activated["prosrc"])
         assert (
             await conn.execute(
@@ -266,13 +268,13 @@ async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
         (4, True, "off", "drive", True),
         (4, True, "grantless", "drive", False),
         (4, False, "on", "drive", True),
-        (4, True, "off", "archive", True),
-        (4, True, "grantless", "archive", False),
+        (4, True, "off", "past_posts", True),
+        (4, True, "grantless", "past_posts", False),
     ],
 )
-async def test_clock_limit_one_ignores_unreadable_archive(
+async def test_clock_limit_one_ignores_unreadable_past_posts(
     world_db,
-    archive_engine,
+    past_posts_engine,
     origin,
     sync_conn,
     arity,
@@ -283,9 +285,9 @@ async def test_clock_limit_one_ignores_unreadable_archive(
 ):
     from tests.scripts.conftest import seed_workspace_chain
 
-    first = await admission.ready(archive_engine, origin)
+    first = await admission.ready(past_posts_engine, origin)
     other = seed_workspace_chain(sync_conn, "clock-readable") if cross else origin
-    if healthy_kind == "archive":
+    if healthy_kind == "past_posts":
         if cross:
             with sync_conn.cursor() as cur:
                 cur.execute(
@@ -293,9 +295,9 @@ async def test_clock_limit_one_ignores_unreadable_archive(
                     (other["ws"], other["iga"]),
                 )
             sync_conn.commit()
-            healthy = await admission.ready(archive_engine, other)
+            healthy = await admission.ready(past_posts_engine, other)
         else:
-            healthy = await obs.second_origin(archive_engine, other)
+            healthy = await obs.second_origin(past_posts_engine, other)
         healthy_id = healthy["source_id"]
     else:
         healthy_id = str(other["src"])
@@ -362,12 +364,12 @@ async def test_clock_limit_one_ignores_unreadable_archive(
 
 @pytest.mark.parametrize("arity", [3, 4])
 async def test_clock_limit_one_rechecks_after_wait_and_keeps_frozen_workspaces(
-    world_db, archive_engine, origin, sync_conn, arity
+    world_db, past_posts_engine, origin, sync_conn, arity
 ):
     import asyncio
     from tests.scripts.conftest import seed_workspace_chain
 
-    src = await admission.ready(archive_engine, origin)
+    src = await admission.ready(past_posts_engine, origin)
     first = src["source_id"] if arity == 4 else str(origin["src"])
     later = seed_workspace_chain(sync_conn, "clock-after-wait")
     with sync_conn.cursor() as cur:
@@ -399,7 +401,7 @@ async def test_clock_limit_one_rechecks_after_wait_and_keeps_frozen_workspaces(
 
     task = None
     try:
-        async with obs.uow(archive_engine, origin) as blocker:
+        async with obs.uow(past_posts_engine, origin) as blocker:
             await blocker.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
                 dict(key="sources:" + str(origin["ws"])),

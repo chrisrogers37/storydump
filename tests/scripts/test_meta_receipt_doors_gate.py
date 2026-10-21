@@ -18,8 +18,8 @@ import pytest
 
 from tests.scripts.conftest import as_user, seed_workspace_chain, set_test_passwords
 from tests.scripts.test_instagram_catalog_gate import (
-    seed_archive,
-    seed_archive_evidence,
+    seed_past_posts,
+    seed_past_posts_evidence,
 )
 
 pytestmark = [pytest.mark.integration]
@@ -71,7 +71,7 @@ def owner(db, sql, params=()):
 
 
 def world(db, *, evidence=False):
-    """A workspace with an Instagram archive: source, credential, one active
+    """A workspace with an Instagram past-posts source: source, credential, one active
     generation (its authorization returned), an item and its index row. With
     ``evidence``, also a scheduled intent captured from the generation and its
     unsettled transit upload (``w["artifact"]``)."""
@@ -79,9 +79,9 @@ def world(db, *, evidence=False):
     try:
         chain = seed_workspace_chain(conn, f"rcpt-{uuid.uuid4().hex[:8]}")
         with conn.cursor() as cur:
-            w = (seed_archive_evidence if evidence else seed_archive)(cur, chain)
+            w = (seed_past_posts_evidence if evidence else seed_past_posts)(cur, chain)
             cur.execute(
-                "SELECT authorization_id FROM instagram_archive_generations WHERE id = %s",
+                "SELECT authorization_id FROM instagram_past_posts_generations WHERE id = %s",
                 (w["generation"],),
             )
             w["authorization"] = cur.fetchone()[0]
@@ -92,15 +92,15 @@ def world(db, *, evidence=False):
 
 
 def grant(db, w, *, lifecycle="superseded"):
-    """Another authorization's generation on the same archive source."""
+    """Another authorization's generation on the same past-posts source."""
     authorization = str(uuid.uuid4())
     ((generation,),) = owner(
         db,
-        "INSERT INTO instagram_archive_generations (workspace_id, source_id,"
+        "INSERT INTO instagram_past_posts_generations (workspace_id, source_id,"
         " origin_ig_account_id, credential_id, authorization_id, app_id, subject_id,"
         " authorized_at, lifecycle) VALUES (%s, %s, %s, %s, %s, 'app', 'subject',"
         " now(), %s) RETURNING id",
-        (w["ws"], w["archive"], w["iga"], w["credential"], authorization, lifecycle),
+        (w["ws"], w["past_posts"], w["iga"], w["credential"], authorization, lifecycle),
     )
     return generation, authorization
 
@@ -116,7 +116,7 @@ def map_identity(
     app=APP,
     current=True,
 ):
-    """One verified mapping on the archive's credential: an OAuth exchange,
+    """One verified mapping on the past-posts source's credential: an OAuth exchange,
     or a reconciling read when ``authorized_at`` is None."""
     owner(
         db,
@@ -197,11 +197,11 @@ def status(db, capability):
 
 
 def lifecycles(db, w):
-    """Every generation of the workspace's archives, by lifecycle."""
+    """Every generation of the workspace's past-posts sources, by lifecycle."""
     return dict(
         owner(
             db,
-            "SELECT id, lifecycle FROM instagram_archive_generations"
+            "SELECT id, lifecycle FROM instagram_past_posts_generations"
             " WHERE workspace_id = %s",
             (w["ws"],),
         )
@@ -212,7 +212,7 @@ def set_lifecycle(db, w, lifecycle):
     """What the cleanup does to the world's generation: fence it, then delete it."""
     owner(
         db,
-        "UPDATE instagram_archive_generations SET lifecycle = %s WHERE id = %s",
+        "UPDATE instagram_past_posts_generations SET lifecycle = %s WHERE id = %s",
         (lifecycle, w["generation"]),
     )
 
@@ -513,7 +513,7 @@ def test_a_frozen_scope_never_takes_a_newer_grant_or_a_deleted_generation(db):
     # The first grant's generation is superseded by a later grant (G2).
     owner(
         db,
-        "UPDATE instagram_archive_generations SET lifecycle = 'superseded' WHERE id = %s",
+        "UPDATE instagram_past_posts_generations SET lifecycle = 'superseded' WHERE id = %s",
         (w["generation"],),
     )
     g2, a2 = grant(db, w, lifecycle="active")
@@ -655,7 +655,7 @@ def test_the_scope_read_is_bound_to_the_claimed_tenant(db):
                 w["authorization"],
                 "in_scope",
                 "pending",
-                w["archive"],
+                w["past_posts"],
                 [w["generation"]],
             )
         ]

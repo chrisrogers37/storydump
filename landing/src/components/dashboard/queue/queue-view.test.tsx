@@ -397,7 +397,7 @@ describe("a row's thumbnail (#1634)", () => {
   });
 });
 
-describe("an archive item's row (#1644)", () => {
+describe("a past-posts item's row (#1644)", () => {
   const WS = "11111111-1111-4111-8111-111111111111";
   const FAKE_ID = "17900000000000001";
   const GENERATION = "5b0e1c2e-8c67-4d29-9a3f-0c1d2e3f4a5b";
@@ -408,7 +408,7 @@ describe("an archive item's row (#1644)", () => {
    * `Instagram post` and projects it on every read, so this is the guard's
    * input: the page names the item itself.
    */
-  const archive = (over: Partial<Intent> = {}) =>
+  const pastPosts = (over: Partial<Intent> = {}) =>
     intent({
       id: "row-ig",
       file_name: `Instagram ${FAKE_ID}`,
@@ -416,7 +416,7 @@ describe("an archive item's row (#1644)", () => {
       has_thumbnail: true,
       thumbnail_version: `${GENERATION}.7`,
       provenance: {
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         origin_handle: "example_handle",
         original_at: "2020-01-01T12:00:00+00:00",
       },
@@ -426,7 +426,7 @@ describe("an archive item's row (#1644)", () => {
     [...walk(tree)].filter((el) => el.type === MediaThumbnail) as ReactElement<ThumbProps>[];
 
   it("goes by its own name and says where it came from, never by the id it is stored under", () => {
-    const tree = view({ workspaceId: WS, intents: [archive()], actionsOf: () => ["reject", "cancel"] });
+    const tree = view({ workspaceId: WS, intents: [pastPosts()], actionsOf: () => ["reject", "cancel"] });
     const words = text(tree);
     expect(words).toContain("Instagram post");
     expect(words).toContain("From @example_handle · Instagram, posted Jan 1, 2020");
@@ -441,36 +441,36 @@ describe("an archive item's row (#1644)", () => {
     ]);
   });
 
-  it("asks for its picture at the route, under the archive's limits, in the row's box", () => {
-    const [thumbnail] = thumbnails(view({ workspaceId: WS, intents: [archive()] }));
+  it("asks for its picture at the route, under the past-posts source's limits, in the row's box", () => {
+    const [thumbnail] = thumbnails(view({ workspaceId: WS, intents: [pastPosts()] }));
     expect(thumbnail.props.src).toBe(
       `/api/workspaces/${WS}/media/media-ig/thumbnail?v=${GENERATION}.7`,
     );
     expect(thumbnail.props.alt).toBe("Instagram post");
-    expect(thumbnail.props.archive).toEqual({ workspaceId: WS, layout: "tile" });
+    expect(thumbnail.props.pastPosts).toEqual({ workspaceId: WS, layout: "tile" });
   });
 
-  it("takes the archive path for a row as the API serves it: already named, told by its provenance alone", () => {
-    // The API names an archive item itself (`vocabulary.ARCHIVE_ITEM_NAME`) and sends no
+  it("takes the past-posts path for a row as the API serves it: already named, told by its provenance alone", () => {
+    // The API names a past-posts item itself (`vocabulary.PAST_POSTS_ITEM_NAME`) and sends no
     // Graph id, so what tells its picture from a Drive picture is the provenance on the row.
-    const served = archive({ file_name: "Instagram post" });
+    const served = pastPosts({ file_name: "Instagram post" });
     const tree = view({ workspaceId: WS, intents: [served], actionsOf: () => [] });
     const [thumbnail] = thumbnails(tree);
-    expect(thumbnail.props.archive).toEqual({ workspaceId: WS, layout: "tile" });
+    expect(thumbnail.props.pastPosts).toEqual({ workspaceId: WS, layout: "tile" });
     expect(thumbnail.props.alt).toBe("Instagram post");
     expect(text(tree)).toContain("From @example_handle · Instagram, posted Jan 1, 2020");
     // Without the provenance the same row is drawn as a Drive row: the browser's picture.
     const [plain] = thumbnails(
       view({ workspaceId: WS, intents: [{ ...served, provenance: null }], actionsOf: () => [] }),
     );
-    expect(plain.props.archive).toBeUndefined();
+    expect(plain.props.pastPosts).toBeUndefined();
   });
 
   it("prints a server slide name in the Queue", () => {
-    const row = archive({
+    const row = pastPosts({
       file_name: "Instagram post, slide 3 of 10",
       provenance: {
-        provider: "instagram_archive", origin_handle: "example_handle",
+        provider: "instagram_past_posts", origin_handle: "example_handle",
         original_at: "2020-01-01T12:00:00+00:00",
         slide: { post_ref: "synthetic-post", position: 3, count: 10 },
       },
@@ -481,9 +481,9 @@ describe("an archive item's row (#1644)", () => {
   });
 
   it("reads the day it was posted on the workspace's clock", () => {
-    const row = archive({
+    const row = pastPosts({
       provenance: {
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         origin_handle: "example_handle",
         original_at: "2020-01-01T02:30:00+00:00",
       },
@@ -494,10 +494,10 @@ describe("an archive item's row (#1644)", () => {
 
   it("hands a tap to onAction by the row's id, the name it was drawn under aside", () => {
     const onAction = vi.fn();
-    const [approve] = levers(view({ intents: [archive()], actionsOf: () => ["approve"], onAction }));
+    const [approve] = levers(view({ intents: [pastPosts()], actionsOf: () => ["approve"], onAction }));
     approve.props.onClick!();
     expect(onAction).toHaveBeenCalledTimes(1);
-    expect(onAction.mock.calls[0][0]).toMatchObject({ id: "row-ig", entered_state_at: archive().entered_state_at });
+    expect(onAction.mock.calls[0][0]).toMatchObject({ id: "row-ig", entered_state_at: pastPosts().entered_state_at });
     expect(onAction.mock.calls[0][1]).toBe("approve");
   });
 
@@ -508,12 +508,12 @@ describe("an archive item's row (#1644)", () => {
       has_thumbnail: true,
       provenance: null,
     });
-    const tree = view({ workspaceId: WS, intents: [archive(), drive], actionsOf: () => [] });
+    const tree = view({ workspaceId: WS, intents: [pastPosts(), drive], actionsOf: () => [] });
     const [, driveRow] = [...walk(tree)].filter((el) => el.type === "li");
     expect(text(driveRow)).toContain("Instagram 12.jpg");
     expect(text(driveRow)).not.toContain("From ");
     const [, driveThumb] = thumbnails(tree);
-    expect(driveThumb.props.archive).toBeUndefined();
+    expect(driveThumb.props.pastPosts).toBeUndefined();
     expect(driveThumb.props.alt).toBe("Instagram 12.jpg");
   });
 });

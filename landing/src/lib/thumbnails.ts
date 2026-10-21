@@ -1,4 +1,4 @@
-import type { MediaProvenance } from "./archive-media";
+import type { MediaProvenance } from "./past-posts-media";
 
 /**
  * The image types a thumbnail may be: raster only, the API's
@@ -18,7 +18,7 @@ export const THUMBNAIL_TYPES: readonly string[] = [
  * (`app/api/workspaces/[id]/media/[mediaId]/thumbnail`), never a provider's
  * link. The version is the payload's `thumbnail_version`, which the route
  * forwards. A Drive item's names one picture for good, so the browser may keep
- * its answer; an archive item's names the generation and epoch the API will
+ * its answer; a past-posts item's names the generation and epoch the API will
  * answer for, and the API says in its answer that nothing may be kept.
  */
 export function thumbnailSrc(
@@ -42,11 +42,11 @@ export type ThumbnailMedia = {
   media_kind?: string;
   media_item_id?: string;
   has_thumbnail?: boolean;
-  /** Null while an archive item awaits observation again; `has_thumbnail` is false then. */
+  /** Null while a past-posts item awaits observation again; `has_thumbnail` is false then. */
   thumbnail_version?: string | null;
   /**
-   * An archive item's provenance, which is also what tells its picture from a
-   * Drive picture: it is asked for under the limits of `ArchiveThumbnail`. Null
+   * A past-posts item's provenance, which is also what tells its picture from a
+   * Drive picture: it is asked for under the limits of `PastPostsThumbnail`. Null
    * for Drive, and absent from a read that does not carry it.
    */
   provenance?: MediaProvenance | null;

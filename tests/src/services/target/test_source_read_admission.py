@@ -21,7 +21,7 @@ def test_refusal_reason_is_closed_and_never_accepts_provider_text():
             v=True,
             workspace_id="ws",
             source_id="sid",
-            provider="instagram_archive",
+            provider="instagram_past_posts",
             source_use_epoch=True,
             generation_id="g",
             credential_id="c",
@@ -39,7 +39,7 @@ def test_boolean_capture_version_is_not_version_one():
         v=True,
         workspace_id="ws",
         source_id="sid",
-        provider="instagram_archive",
+        provider="instagram_past_posts",
         source_use_epoch=1,
         generation_id="g",
         credential_id="c",
@@ -58,7 +58,7 @@ async def test_request_hooks_preserve_every_closed_read_refusal(
     capture = admission.SourceReadCapture(
         "workspace",
         "source",
-        "instagram_archive",
+        "instagram_past_posts",
         1,
         "generation",
         "credential",
@@ -124,7 +124,7 @@ async def test_a_provider_may_bound_the_lock_wait_of_each_request_check(
     """An explicit preview asks for a lock timeout and its two checks per
     request carry it; a provider built without one (the sync's) carries None."""
     capture = admission.SourceReadCapture(
-        "workspace", "source", "instagram_archive", 1, "g", "c", "account"
+        "workspace", "source", "instagram_past_posts", 1, "g", "c", "account"
     )
     asked = []
 

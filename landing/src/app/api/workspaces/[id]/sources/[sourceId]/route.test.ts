@@ -31,7 +31,7 @@ const MIX = {
   rows: [
     {
       source_id: OTHER_SRC,
-      provider: "instagram_archive",
+      provider: "instagram_past_posts",
       name: "example_handle",
       state: "active",
       origin_account_id: "55555555-5555-4555-8555-555555555555",
@@ -45,7 +45,7 @@ const MIX = {
   ],
   destinations: [],
   guidance: { active: 0, ready: 0, intentional: null, incomplete: [] },
-  archive_available: true,
+  past_posts_available: true,
   reset_explanation: null,
 };
 

@@ -73,7 +73,7 @@ def capture_from_payload(payload: object) -> SourceReadCapture:
     if not required.issubset(payload) or type(payload["source_use_epoch"]) is not int:
         raise SourceReadRefused("source_capture_missing", "")
     c = SourceReadCapture(**{k: payload[k] for k in required})
-    if c.provider != "instagram_archive" or any(
+    if c.provider != "instagram_past_posts" or any(
         not isinstance(v, str) or not v
         for v in (
             c.workspace_id,
@@ -101,7 +101,7 @@ async def _lock(executor, ws):
     )
     await readers.rows(
         executor,
-        "SELECT id FROM instagram_archive_generations WHERE workspace_id=:ws ORDER BY id FOR UPDATE",
+        "SELECT id FROM instagram_past_posts_generations WHERE workspace_id=:ws ORDER BY id FOR UPDATE",
         ws=ws,
     )
 
@@ -209,7 +209,7 @@ def admission_provider(engine, *, capability=None, job=None, lock_timeout=None):
 
     async def provide(source_id: str, *, workspace_id: str, access):
         c = access.captured_authorization
-        if not isinstance(c, SourceReadCapture) or c.provider != "instagram_archive":
+        if not isinstance(c, SourceReadCapture) or c.provider != "instagram_past_posts":
             raise MediaSourceFenceDrop(reason="source_capture_missing")
         if (
             c.workspace_id != str(workspace_id)

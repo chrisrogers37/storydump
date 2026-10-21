@@ -27,7 +27,7 @@ import { parseSourceMix, type SourceMix } from "./source-mix";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const SRC = "22222222-2222-4222-8222-222222222222";
-const ARCHIVE = "33333333-3333-4333-8333-333333333333";
+const PAST_POSTS = "33333333-3333-4333-8333-333333333333";
 
 let captured: { url: string; init?: RequestInit }[] = [];
 
@@ -168,7 +168,7 @@ describe("the folder browser", () => {
   });
 });
 
-/** The mix resource of a converted workspace, as the API answers it: Your Instagram and one folder. */
+/** The mix resource of a converted workspace, as the API answers it: Instagram past posts and one folder. */
 function mixBody(over: Record<string, unknown> = {}) {
   return {
     protocol_version: 2,
@@ -178,8 +178,8 @@ function mixBody(over: Record<string, unknown> = {}) {
     conversion: { state: "complete", kind: "new_equal" },
     rows: [
       {
-        source_id: ARCHIVE,
-        provider: "instagram_archive",
+        source_id: PAST_POSTS,
+        provider: "instagram_past_posts",
         name: "example_handle",
         state: "active",
         origin_handle: "example_handle",
@@ -201,7 +201,7 @@ function mixBody(over: Record<string, unknown> = {}) {
       },
     ],
     destinations: [],
-    archive_available: true,
+    past_posts_available: true,
     ...over,
   };
 }
@@ -282,7 +282,7 @@ describe("a converted workspace (protocol 2) is written to against its revision"
     expect(result.created).toBe(true);
     // The API's answer, parsed: the page says it as sent.
     expect(result.mix?.revision).toBe(9);
-    expect(result.mix?.rows.map((row) => row.sourceId)).toEqual([ARCHIVE, SRC]);
+    expect(result.mix?.rows.map((row) => row.sourceId)).toEqual([PAST_POSTS, SRC]);
   });
 
   it("carries revision 0, which is a revision and not the absence of one", async () => {
@@ -415,10 +415,10 @@ describe("what a pick or a removal says it did to the posting mix", () => {
   it("adds the mix the API answered, as sent: its mode and each source that is on with its share", () => {
     const mix = mixOf();
     expect(addedFolderNotice("Trips", true, mix)).toBe(
-      '"Trips" added. Its first sync starts shortly. Posting mix: Equal shares — Your Instagram @example_handle 50%, Trips (Google Drive) 50%.',
+      '"Trips" added. Its first sync starts shortly. Posting mix: Equal shares — Instagram past posts @example_handle 50%, Trips (Google Drive) 50%.',
     );
     expect(removedFolderNotice(mix)).toMatch(
-      /pick it again to resume\. Posting mix: Equal shares — Your Instagram @example_handle 50%, Trips \(Google Drive\) 50%\.$/,
+      /pick it again to resume\. Posting mix: Equal shares — Instagram past posts @example_handle 50%, Trips \(Google Drive\) 50%\.$/,
     );
     expect(
       folderPickOutcome({ ok: true, sourceId: SRC, created: true, mix }, TRIPS),
@@ -434,7 +434,7 @@ describe("what a pick or a removal says it did to the posting mix", () => {
       ],
     });
     const notice = removedFolderNotice(custom);
-    expect(notice).toContain("Posting mix: Custom percentages — Your Instagram @example_handle 70%, Trips (Google Drive) 30%.");
+    expect(notice).toContain("Posting mix: Custom percentages — Instagram past posts @example_handle 70%, Trips (Google Drive) 30%.");
     expect(notice).not.toMatch(/reset|equal/i);
   });
 
@@ -448,7 +448,7 @@ describe("what a pick or a removal says it did to the posting mix", () => {
     });
     expect(removedFolderNotice(allOff)).toMatch(/Posting mix: Custom percentages — every source is Off\.$/);
     const oneOff = mixOf(FOLDER_OFF);
-    expect(removedFolderNotice(oneOff)).toMatch(/— Your Instagram @example_handle 100%\.$/);
+    expect(removedFolderNotice(oneOff)).toMatch(/— Instagram past posts @example_handle 100%\.$/);
   });
 });
 
@@ -474,7 +474,7 @@ describe("what is said before a folder is picked or removed", () => {
   it("does not ask before a folder that is Off is removed: it holds no share, and the API changes none", () => {
     expect(removeFolderWarning(mixOf(FOLDER_OFF), SRC, "Trips")).toBeNull();
     // The same mix, for the folder that is on: the Off case is the folder's own.
-    expect(removeFolderWarning(mixOf(FOLDER_OFF), ARCHIVE, "Your Instagram")).not.toBeNull();
+    expect(removeFolderWarning(mixOf(FOLDER_OFF), PAST_POSTS, "Instagram past posts")).not.toBeNull();
   });
 
   it("asks about a folder the mix does not list, as it would for one that is on", () => {

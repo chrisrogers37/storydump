@@ -7,14 +7,14 @@ import { EmptyState } from "@/components/dashboard/empty-state";
 import { MediaCard } from "@/components/dashboard/media/media-card";
 import { ScheduleDialog, type ScheduleTargets } from "@/components/dashboard/media/schedule-dialog";
 import {
-  ARCHIVE_PAGE_SIZE,
-  archiveProvenance,
+  PAST_POSTS_PAGE_SIZE,
+  pastPostsProvenance,
   emptyLibrary,
-  isArchiveMedia,
+  isPastPostsMedia,
   pageOf,
-  withArchiveName,
+  withPastPostsName,
   type PastPosts,
-} from "@/lib/archive-media";
+} from "@/lib/past-posts-media";
 import type { MediaRow } from "@/lib/dashboard-payloads";
 import { formatInZone, instant } from "@/lib/zoned-dates";
 
@@ -44,13 +44,13 @@ import { formatInZone, instant } from "@/lib/zoned-dates";
  *
  * An item from a connected account's past posts (#1644) goes by its own
  * name and says where it came from, and never carries Instagram's id. Its
- * picture is asked for under the archive's limits (`ArchiveThumbnail`), and a
+ * picture is asked for under the past-posts source's limits (`PastPostsThumbnail`), and a
  * library that holds any is listed 24 to a page: a page is a window over the
  * rows the one bounded read returned, so no more pictures than that are drawn
  * at once. The card is `MediaCard`'s (`media-card.tsx`); this file holds the
  * grid around it.
  */
-/** The pages of a library that holds archive items: Previous, where the reader is, Next. */
+/** The pages of a library that holds past-posts items: Previous, where the reader is, Next. */
 export function GridPager({
   page,
   pages,
@@ -86,11 +86,11 @@ export function GridPager({
 }
 
 /**
- * The grid from what it is shown: the rows (an archive item already under its
+ * The grid from what it is shown: the rows (a past-posts item already under its
  * own name), the category and page chosen, and what a press does. It holds no
  * state, so a test draws any page or category as it is; `MediaGrid` holds them.
  *
- * A library with archive items is listed a page at a time, so only a page of
+ * A library with past-posts items is listed a page at a time, so only a page of
  * their pictures is ever on screen to be asked for; one without is listed whole.
  */
 export function MediaGridView({
@@ -111,7 +111,7 @@ export function MediaGridView({
   items: MediaRow[];
   limit: number;
   workspaceId: string;
-  /** The workspace's zone, which the day an archive item was posted is read on. */
+  /** The workspace's zone, which the day a past-posts item was posted is read on. */
   tz: string;
   /** Whether the workspace has past posts as a source, which an empty library says. */
   pastPosts: PastPosts | null;
@@ -138,12 +138,12 @@ export function MediaGridView({
     : items;
 
   const empty = emptyLibrary(pastPosts);
-  const paged = shown.some(isArchiveMedia);
+  const paged = shown.some(isPastPostsMedia);
   const listing = paged
     ? pageOf(shown, page)
     : { rows: shown, page: 0, pages: 1 };
-  const first = listing.page * ARCHIVE_PAGE_SIZE + 1;
-  const last = listing.page * ARCHIVE_PAGE_SIZE + listing.rows.length;
+  const first = listing.page * PAST_POSTS_PAGE_SIZE + 1;
+  const last = listing.page * PAST_POSTS_PAGE_SIZE + listing.rows.length;
 
   // The list is bounded, so it may be a prefix of the library rather than all
   // of it. A reader cannot tell those apart from the grid alone.
@@ -153,7 +153,7 @@ export function MediaGridView({
   const grouped: { key: string; slides: MediaRow[] }[] = [];
   const byPost = new Map<string, { key: string; slides: MediaRow[] }>();
   for (const item of listing.rows) {
-    const slide = archiveProvenance(item)?.slide;
+    const slide = pastPostsProvenance(item)?.slide;
     if (!slide) {
       grouped.push({ key: item.id, slides: [item] });
       continue;
@@ -220,7 +220,7 @@ export function MediaGridView({
               />
             );
             const firstItem = group.slides[0];
-            const origin = archiveProvenance(firstItem);
+            const origin = pastPostsProvenance(firstItem);
             const slide = origin?.slide;
             if (!origin || !slide) return card(firstItem);
             const day = origin.original_at && !Number.isNaN(instant(origin.original_at).getTime())
@@ -282,8 +282,8 @@ export function MediaGrid({
   const opener = useRef<HTMLButtonElement | null>(null);
   const gridTop = useRef<HTMLDivElement | null>(null);
 
-  // An archive item is drawn under its own name from here down, dialogs included.
-  const items = useMemo(() => rows.map(withArchiveName), [rows]);
+  // A past-posts item is drawn under its own name from here down, dialogs included.
+  const items = useMemo(() => rows.map(withPastPostsName), [rows]);
 
   return (
     <MediaGridView

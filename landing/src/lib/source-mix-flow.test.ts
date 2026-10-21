@@ -41,7 +41,7 @@ function mix(revision: number, over: Record<string, unknown> = {}): SourceMix {
     rows: [
       {
         source_id: IG,
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         origin_handle: "example_handle",
         enabled: true,
         ratio: "0.5",
@@ -50,7 +50,7 @@ function mix(revision: number, over: Record<string, unknown> = {}): SourceMix {
       { source_id: DRIVE, provider: "gdrive", name: "Event photos", enabled: true, ratio: "0.5", target_share: "0.5" },
     ],
     destinations: [],
-    archive_available: true,
+    past_posts_available: true,
     ...over,
   });
   if (!parsed) throw new Error("fixture did not parse");
@@ -76,7 +76,7 @@ const DRIVE_OFF = (revision: number) =>
     rows: [
       {
         source_id: IG,
-        provider: "instagram_archive",
+        provider: "instagram_past_posts",
         origin_handle: "example_handle",
         enabled: true,
         ratio: "1",
@@ -99,7 +99,7 @@ describe("a change is previewed, then made only on Confirm", () => {
     expect(flow.pending?.preview?.rows.map((r) => r.targetShare)).toEqual(["1", "0"]);
     expect(flow.local).toBeNull();
     expect(flow.announcement).toBe(
-      "Turning Event photos (Google Drive) off would make the shares: Your Instagram @example_handle 100%. Confirm or cancel.",
+      "Turning Event photos (Google Drive) off would make the shares: Instagram past posts @example_handle 100%. Confirm or cancel.",
     );
   });
 
@@ -137,7 +137,7 @@ describe("a change is previewed, then made only on Confirm", () => {
   it("says every source would be off when the last one is turned off", () => {
     const allOff = mix(8, {
       rows: [
-        { source_id: IG, provider: "instagram_archive", enabled: false, ratio: "0", target_share: "0" },
+        { source_id: IG, provider: "instagram_past_posts", enabled: false, ratio: "0", target_share: "0" },
         { source_id: DRIVE, provider: "gdrive", name: "Event photos", enabled: false, ratio: "0", target_share: "0" },
       ],
     });
@@ -154,11 +154,11 @@ describe("a change is previewed, then made only on Confirm", () => {
       {
         type: "save_answered",
         action: off,
-        result: { ok: false, error: "archive_not_activated", status: 503, currentRevision: null },
+        result: { ok: false, error: "past_posts_not_activated", status: 503, currentRevision: null },
       },
     ]);
     expect(flow.pending?.phase).toBe("ready");
-    expect(flow.error).toBe(SOURCE_REFUSAL_COPY.archive_not_activated);
+    expect(flow.error).toBe(SOURCE_REFUSAL_COPY.past_posts_not_activated);
   });
 
   it("drops the change when the preview itself is refused, and says why", () => {
@@ -276,7 +276,7 @@ describe("a custom draft survives a conflict", () => {
     // After it, the draft is behind the mix shown.
     const page9 = mix(9, {
       rows: [
-        { source_id: IG, provider: "instagram_archive", origin_handle: "example_handle", enabled: true, ratio: "0.5", target_share: "0.5" },
+        { source_id: IG, provider: "instagram_past_posts", origin_handle: "example_handle", enabled: true, ratio: "0.5", target_share: "0.5" },
         { source_id: NEW, provider: "gdrive", name: "New folder", enabled: true, ratio: "0.5", target_share: "0.5" },
       ],
     });
@@ -287,7 +287,7 @@ describe("a custom draft survives a conflict", () => {
   it("is carried over only by choice, onto the mix as it is now", () => {
     const page9 = mix(9, {
       rows: [
-        { source_id: IG, provider: "instagram_archive", origin_handle: "example_handle", enabled: true, ratio: "0.5", target_share: "0.5" },
+        { source_id: IG, provider: "instagram_past_posts", origin_handle: "example_handle", enabled: true, ratio: "0.5", target_share: "0.5" },
         { source_id: NEW, provider: "gdrive", name: "New folder", enabled: true, ratio: "0.5", target_share: "0.5" },
       ],
     });

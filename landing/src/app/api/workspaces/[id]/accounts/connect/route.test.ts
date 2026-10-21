@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const WS = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT = "55555555-5555-4555-8555-555555555555";
 const AUTHORIZE = "https://api.instagram.com/oauth/authorize?state=s";
-const CHOICE = { archive_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 } };
+const CHOICE = { past_posts_choice: { use_history: true, expected_mix_revision: 8, preview_version: 1 } };
 
 type Upstream = { status: number; body: unknown };
 
@@ -79,7 +79,7 @@ describe("the body reaches the API unchanged", () => {
   it.each([
     ["the empty start", {}],
     ["a history choice", CHOICE],
-    ["no choice, said explicitly", { archive_choice: null }],
+    ["no choice, said explicitly", { past_posts_choice: null }],
   ])("forwards %s from the header's Add", async (_label, body) => {
     const res = await add({ body });
     expect(res.status).toBe(200);
@@ -91,25 +91,25 @@ describe("the body reaches the API unchanged", () => {
   });
 
   it("forwards a row's reconnect, which carries no choice, on the row's own path", async () => {
-    const res = await row({ body: { archive_choice: null } });
+    const res = await row({ body: { past_posts_choice: null } });
     expect(res.status).toBe(200);
     expect(sent[0].url).toMatch(new RegExp(`/api/v1/workspaces/${WS}/accounts/${ACCOUNT}/connect$`));
-    expect(JSON.parse(String(sent[0].init.body))).toEqual({ archive_choice: null });
+    expect(JSON.parse(String(sent[0].init.body))).toEqual({ past_posts_choice: null });
   });
 
   it("forwards a body the API will refuse: the choice's shape is the API's to judge", async () => {
-    upstream = { status: 400, body: { detail: "archive choice refused", reason: "invalid_archive_choice" } };
-    const res = await add({ body: { archive_choice: { use_history: "yes" } } });
+    upstream = { status: 400, body: { detail: "past-posts choice refused", reason: "invalid_past_posts_choice" } };
+    const res = await add({ body: { past_posts_choice: { use_history: "yes" } } });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "invalid_archive_choice" });
-    expect(JSON.parse(String(sent[0].init.body))).toEqual({ archive_choice: { use_history: "yes" } });
+    expect(await res.json()).toEqual({ error: "invalid_past_posts_choice" });
+    expect(JSON.parse(String(sent[0].init.body))).toEqual({ past_posts_choice: { use_history: "yes" } });
   });
 });
 
 describe("the checks the routes make themselves", () => {
   it.each([
     ["JSON declared as text", { raw: JSON.stringify(CHOICE), headers: { "Content-Type": "text/plain" } }],
-    ["text that is not JSON", { raw: "{archive" }],
+    ["text that is not JSON", { raw: "{pastPosts" }],
     ["an empty body", { raw: "" }],
     ["null", { raw: "null" }],
     ["an array", { raw: JSON.stringify([CHOICE]) }],
@@ -147,10 +147,10 @@ describe("refusals and the redirect guard", () => {
   });
 
   it("relays a choice where past posts are not live by its own name", async () => {
-    upstream = { status: 503, body: { detail: "archive choice refused", reason: "archive_not_activated" } };
+    upstream = { status: 503, body: { detail: "past-posts choice refused", reason: "past_posts_not_activated" } };
     const res = await add({ body: CHOICE });
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "archive_not_activated" });
+    expect(await res.json()).toEqual({ error: "past_posts_not_activated" });
   });
 
   it("never hands the browser a URL off Instagram's authorize host", async () => {

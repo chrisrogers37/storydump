@@ -12,7 +12,7 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.conftest import seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
@@ -60,27 +60,27 @@ async def verdict(engine, origin, src, cap=True, **kw):
 
 
 async def test_own_origin_valid_asset_ignores_stale_cached_verdict(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await ready(archive_engine, origin)
-    v = await verdict(archive_engine, origin, src)
+    src, item = await ready(past_posts_engine, origin)
+    v = await verdict(past_posts_engine, origin, src)
     assert v["suitable"] and v["base_suitable"] and v["reason"] is None
     assert str(v["media_item_id"]) == item.media_item_id and v["policy_revision"] == 1
 
 
 async def test_saved_policy_versions_one_and_two_share_suitability_authority(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, _ = await ready(archive_engine, origin)
+    src, _ = await ready(past_posts_engine, origin)
     for version in (1, 2, 3):
-        async with obs.uow(archive_engine, origin) as conn:
+        async with obs.uow(past_posts_engine, origin) as conn:
             await conn.execute(
                 text(
                     "UPDATE instagram_source_policies SET schema_version=:version WHERE source_id=:sid"
                 ),
                 {"version": version, "sid": src["source_id"]},
             )
-        result = await verdict(archive_engine, origin, src)
+        result = await verdict(past_posts_engine, origin, src)
         assert result["suitable"] is (version in (1, 2))
         assert result["reason"] == (
             None if version in (1, 2) else "unsupported_source_policy"
@@ -111,12 +111,12 @@ async def test_saved_policy_versions_one_and_two_share_suitability_authority(
             "credential_unavailable",
         ),
         (
-            "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:gid",
+            "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending' WHERE id=:gid",
             "generation_unavailable",
         ),
-        # archive lifecycle cleanup: a generation held for review is unavailable, not destroyed.
+        # past-posts lifecycle cleanup: a generation held for review is unavailable, not destroyed.
         (
-            "UPDATE instagram_archive_generations SET lifecycle='review_hold' WHERE id=:gid",
+            "UPDATE instagram_past_posts_generations SET lifecycle='review_hold' WHERE id=:gid",
             "generation_unavailable",
         ),
         (
@@ -157,9 +157,11 @@ async def test_saved_policy_versions_one_and_two_share_suitability_authority(
         ),
     ],
 )
-async def test_denied_matrix_is_database_authority(archive_engine, origin, sql, reason):
-    src, item = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+async def test_denied_matrix_is_database_authority(
+    past_posts_engine, origin, sql, reason
+):
+    src, item = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(sql),
             dict(
@@ -168,18 +170,20 @@ async def test_denied_matrix_is_database_authority(archive_engine, origin, sql, 
                 credential=str(origin["credential"]),
             ),
         )
-    v = await verdict(archive_engine, origin, src)
+    v = await verdict(past_posts_engine, origin, src)
     assert not v["suitable"] and v["reason"] == reason
 
 
-async def test_index_only_post_keeps_one_explicit_exclusion_row(archive_engine, origin):
-    src, _ = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+async def test_index_only_post_keeps_one_explicit_exclusion_row(
+    past_posts_engine, origin
+):
+    src, _ = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("DELETE FROM instagram_media_assets WHERE source_id=:sid"),
             {"sid": src["source_id"]},
         )
-    v = await verdict(archive_engine, origin, src)
+    v = await verdict(past_posts_engine, origin, src)
     assert v["media_item_id"] is None
     assert not v["suitable"] and v["reason"] == "validation_pending"
 
@@ -192,11 +196,11 @@ async def test_index_only_post_keeps_one_explicit_exclusion_row(archive_engine, 
     ],
 )
 async def test_attribution_permissions_are_independent_current_policy(
-    archive_engine, origin, attribution, flag, reason
+    past_posts_engine, origin, attribution, flag, reason
 ):
-    src, item = await ready(archive_engine, origin, attribution)
-    assert (await verdict(archive_engine, origin, src))["reason"] == reason
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await ready(past_posts_engine, origin, attribution)
+    assert (await verdict(past_posts_engine, origin, src))["reason"] == reason
+    async with obs.uow(past_posts_engine, origin) as conn:
         body = dict(
             schema_version=1,
             expected_revision=1,
@@ -213,8 +217,8 @@ async def test_attribution_permissions_are_independent_current_policy(
             body=body,
             capability=foundation.capability(),
         )
-    assert (await verdict(archive_engine, origin, src))["reason"] == reason
-    async with obs.uow(archive_engine, origin) as conn:
+    assert (await verdict(past_posts_engine, origin, src))["reason"] == reason
+    async with obs.uow(past_posts_engine, origin) as conn:
         body.update(expected_revision=2)
         body[flag] = True
         await source_policy.put_policy(
@@ -229,23 +233,23 @@ async def test_attribution_permissions_are_independent_current_policy(
                 "UPDATE instagram_media_index SET cache_policy_revision=1,cached_eligible=false"
             )
         )
-    v = await verdict(archive_engine, origin, src)
+    v = await verdict(past_posts_engine, origin, src)
     assert v["suitable"] and v["policy_revision"] == 3
 
 
-async def test_g2_never_treats_retained_g1_as_current(archive_engine, origin):
-    src, item = await ready(archive_engine, origin)
-    g2 = await foundation.ensure(archive_engine, origin, foundation.authorization())
+async def test_g2_never_treats_retained_g1_as_current(past_posts_engine, origin):
+    src, item = await ready(past_posts_engine, origin)
+    g2 = await foundation.ensure(past_posts_engine, origin, foundation.authorization())
     assert g2["generation_id"] != src["generation_id"]
-    assert (await verdict(archive_engine, origin, src))[
+    assert (await verdict(past_posts_engine, origin, src))[
         "reason"
     ] == "awaiting_reobservation"
 
 
 async def test_dormant_nonorigin_binding_denies_and_drive_remains_workspacewide(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    src, item = await ready(archive_engine, origin)
+    src, item = await ready(past_posts_engine, origin)
     with sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ig_accounts(workspace_id,provider_account_ref) VALUES (%s,'other-origin') RETURNING id",
@@ -257,10 +261,10 @@ async def test_dormant_nonorigin_binding_denies_and_drive_remains_workspacewide(
             (origin["ws"], src["source_id"], other),
         )
     sync_conn.commit()
-    assert (await verdict(archive_engine, origin, src, destination=other))[
+    assert (await verdict(past_posts_engine, origin, src, destination=other))[
         "reason"
     ] == "destination_not_allowed"
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         drive = await source_policy.suitability(
             conn,
             workspace_id=str(origin["ws"]),
@@ -270,28 +274,28 @@ async def test_dormant_nonorigin_binding_denies_and_drive_remains_workspacewide(
         assert len(drive) == 1 and drive[0]["suitable"]
 
 
-async def test_archive_activation_and_conversion_fail_closed_without_changing_drive(
-    archive_engine, origin
+async def test_past_posts_activation_and_conversion_fail_closed_without_changing_drive(
+    past_posts_engine, origin
 ):
-    src, item = await ready(archive_engine, origin)
-    assert (await verdict(archive_engine, origin, src, cap=False))[
+    src, item = await ready(past_posts_engine, origin)
+    assert (await verdict(past_posts_engine, origin, src, cap=False))[
         "reason"
-    ] == "archive_not_activated"
-    async with obs.uow(archive_engine, origin) as conn:
+    ] == "past_posts_not_activated"
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE workspaces SET source_mix_converted_at=NULL WHERE id=:ws"),
             dict(ws=str(origin["ws"])),
         )
-    assert (await verdict(archive_engine, origin, src))[
+    assert (await verdict(past_posts_engine, origin, src))[
         "reason"
-    ] == "archive_not_activated"
+    ] == "past_posts_not_activated"
 
 
 async def test_self_intent_context_and_lock_facts_leave_duplicate_arbiter_intact(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         intent = (
             await conn.execute(
                 text(
@@ -312,26 +316,26 @@ async def test_self_intent_context_and_lock_facts_leave_duplicate_arbiter_intact
                 ws=str(origin["ws"]), acct=str(origin["iga"]), item=item.media_item_id
             ),
         )
-    v = await verdict(archive_engine, origin, src)
+    v = await verdict(past_posts_engine, origin, src)
     assert (
         v["live_intent_conflict"]
         and v["reason"] == "live_intent"
         and v["base_suitable"]
     )
-    v = await verdict(archive_engine, origin, src, existing_intent_id=str(intent))
+    v = await verdict(past_posts_engine, origin, src, existing_intent_id=str(intent))
     assert (
         not v["live_intent_conflict"]
         and v["warning_locks"] == ["recent"]
         and v["reason"] == "locked"
     )
     assert v["base_suitable"] and v["blocking_locks"] == []
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE post_locks SET expires_at=now()-interval '1 second'")
         )
-    assert (await verdict(archive_engine, origin, src, existing_intent_id=str(intent)))[
-        "suitable"
-    ]
+    assert (
+        await verdict(past_posts_engine, origin, src, existing_intent_id=str(intent))
+    )["suitable"]
 
 
 @pytest.mark.parametrize(
@@ -342,11 +346,11 @@ async def test_self_intent_context_and_lock_facts_leave_duplicate_arbiter_intact
     ],
 )
 async def test_invoker_grants_and_foreign_arguments_cannot_read(
-    archive_engine, origin, sync_conn, signature
+    past_posts_engine, origin, sync_conn, signature
 ):
-    src, item = await ready(archive_engine, origin)
+    src, item = await ready(past_posts_engine, origin)
     foreign = seed_workspace_chain(sync_conn, "suitability-foreign")
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         context = await source_policy.suitability_context(
             conn,
             workspace_id=str(origin["ws"]),
@@ -388,15 +392,15 @@ async def test_invoker_grants_and_foreign_arguments_cannot_read(
 
 
 async def test_context_owns_db_time_and_holds_workspace_ttl_through_decision(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     required()
-    src, item = await ready(archive_engine, origin)
+    src, item = await ready(past_posts_engine, origin)
     started = asyncio.Event()
     done = asyncio.Event()
 
     async def change():
-        async with obs.uow(archive_engine, origin) as conn:
+        async with obs.uow(past_posts_engine, origin) as conn:
             started.set()
             await conn.execute(
                 text("UPDATE workspaces SET repost_ttl_days=180 WHERE id=:ws"),
@@ -404,7 +408,7 @@ async def test_context_owns_db_time_and_holds_workspace_ttl_through_decision(
             )
         done.set()
 
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         context = await source_policy.suitability_context(
             conn,
             workspace_id=str(origin["ws"]),
@@ -437,19 +441,19 @@ async def test_context_owns_db_time_and_holds_workspace_ttl_through_decision(
         )
         assert rows[0]["effective_minimum_age_days"] == 90
     await asyncio.wait_for(task, 3)
-    assert (await verdict(archive_engine, origin, src))[
+    assert (await verdict(past_posts_engine, origin, src))[
         "effective_minimum_age_days"
     ] == 181
 
 
 @pytest.mark.parametrize("raw", [None, 0, 45, 120, -2])
 async def test_exact_age_boundary_uses_locked_workspace_ttl(
-    archive_engine, origin, raw
+    past_posts_engine, origin, raw
 ):
     from src.services.target.intent_ledger import resolve_repost_ttl_days
 
-    src, item = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE workspaces SET repost_ttl_days=:ttl WHERE id=:ws"),
             dict(ttl=raw, ws=str(origin["ws"])),
@@ -468,7 +472,7 @@ async def test_exact_age_boundary_uses_locked_workspace_ttl(
             capability=foundation.capability(),
         )
     age = max(0, resolve_repost_ttl_days(raw) + 1)
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         context = await source_policy.suitability_context(
             conn,
             workspace_id=str(origin["ws"]),
@@ -506,35 +510,35 @@ async def test_exact_age_boundary_uses_locked_workspace_ttl(
 
 
 async def test_index_only_exclusion_and_pending_observations_have_named_verdicts(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    from src.services.target.instagram_catalog import ArchiveObservation
+    from src.services.target.instagram_catalog import PastPostsObservation
 
-    src = await obs.enabled(archive_engine, origin)
+    src = await obs.enabled(past_posts_engine, origin)
     await obs.observe(
-        archive_engine,
+        past_posts_engine,
         origin,
         src,
-        ArchiveObservation(
+        PastPostsObservation(
             "888",
             obs.bundle().original_at,
             availability="excluded",
             exclusion_reason="unsupported_media",
         ),
     )
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         await activate(conn, origin["ws"])
-    v = await verdict(archive_engine, origin, src)
+    v = await verdict(past_posts_engine, origin, src)
     assert v["media_item_id"] is None and v["reason"] == "unsupported"
 
 
 async def test_unknown_scope_denies_even_if_schema_is_extended_without_authority(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    src, item = await ready(archive_engine, origin)
+    src, item = await ready(past_posts_engine, origin)
     with sync_conn.cursor() as cur:
         cur.execute(
-            "ALTER TABLE instagram_source_policies DROP CONSTRAINT ck_archive_policy_modes"
+            "ALTER TABLE instagram_source_policies DROP CONSTRAINT ck_past_posts_policy_modes"
         )
         cur.execute(
             "UPDATE instagram_source_policies SET destination_scope='future' WHERE source_id=%s",
@@ -542,7 +546,7 @@ async def test_unknown_scope_denies_even_if_schema_is_extended_without_authority
         )
     sync_conn.commit()
     try:
-        assert (await verdict(archive_engine, origin, src))[
+        assert (await verdict(past_posts_engine, origin, src))[
             "reason"
         ] == "unsupported_source_policy"
     finally:
@@ -552,7 +556,7 @@ async def test_unknown_scope_denies_even_if_schema_is_extended_without_authority
                 (src["source_id"],),
             )
             cur.execute(
-                "ALTER TABLE instagram_source_policies ADD CONSTRAINT ck_archive_policy_modes CHECK(eligibility='supported' AND ranking='none' AND destination_scope='origin_only')"
+                "ALTER TABLE instagram_source_policies ADD CONSTRAINT ck_past_posts_policy_modes CHECK(eligibility='supported' AND ranking='none' AND destination_scope='origin_only')"
             )
         sync_conn.commit()
 
@@ -561,11 +565,11 @@ async def test_unknown_scope_denies_even_if_schema_is_extended_without_authority
     "field", ["source_mix_policy_version", "source_mix_conversion_version"]
 )
 @pytest.mark.parametrize("future", [2, 999])
-async def test_unknown_mix_versions_deny_archive_and_preserve_drive(
-    archive_engine, origin, field, future
+async def test_unknown_mix_versions_deny_past_posts_and_preserve_drive(
+    past_posts_engine, origin, field, future
 ):
-    src, item = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         # Columns are a closed test parameter set, never caller input.
         await conn.execute(
             text(f"UPDATE workspaces SET {field}=:version WHERE id=:ws"),
@@ -577,10 +581,10 @@ async def test_unknown_mix_versions_deny_archive_and_preserve_drive(
             ig_account_ids=[origin["iga"]],
             capability=foundation.capability(),
         )
-        assert not context.archive_enabled, (
+        assert not context.past_posts_enabled, (
             "future versions are schema-valid but not understood by this reader"
         )
-        archive = await source_policy.suitability(
+        past_posts = await source_policy.suitability(
             conn,
             workspace_id=str(origin["ws"]),
             ig_account_id=str(origin["iga"]),
@@ -588,8 +592,8 @@ async def test_unknown_mix_versions_deny_archive_and_preserve_drive(
             capability=foundation.capability(),
         )
         assert (
-            archive[0]["reason"] == "archive_not_activated"
-            and not archive[0]["suitable"]
+            past_posts[0]["reason"] == "past_posts_not_activated"
+            and not past_posts[0]["suitable"]
         )
         drive = await source_policy.suitability(
             conn,
@@ -602,10 +606,10 @@ async def test_unknown_mix_versions_deny_archive_and_preserve_drive(
 
 
 async def test_partial_conversion_without_revision_is_not_activated(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item = await ready(archive_engine, origin)
-    async with obs.uow(archive_engine, origin) as conn:
+    src, item = await ready(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE workspaces SET source_mix_revision=NULL WHERE id=:ws"),
             dict(ws=str(origin["ws"])),
@@ -616,4 +620,4 @@ async def test_partial_conversion_without_revision_is_not_activated(
             ig_account_ids=[origin["iga"]],
             capability=foundation.capability(),
         )
-        assert not context.archive_enabled
+        assert not context.past_posts_enabled

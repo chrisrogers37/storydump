@@ -50,7 +50,7 @@ const THIRD_AND_RESIDUAL = "0.33333333333333333333333333333333333333333333333334
 function igRow(over: Record<string, unknown> = {}) {
   return {
     source_id: IG,
-    provider: "instagram_archive",
+    provider: "instagram_past_posts",
     name: "example_handle",
     state: "active",
     origin_account_id: ACCOUNT_A,
@@ -106,7 +106,7 @@ function wire(over: Record<string, unknown> = {}) {
       },
     ],
     guidance: { active: 1, ready: 1, intentional: null, incomplete: [] },
-    archive_available: true,
+    past_posts_available: true,
     reset_explanation: null,
     ...over,
   };
@@ -133,11 +133,11 @@ describe("reading a protocol-2 mix", () => {
     expect(read.revision).toBe(8);
     expect(read.mode).toBe("equal");
     expect(read.conversionKind).toBe("automatic_to_equal");
-    expect(read.archiveAvailable).toBe(true);
+    expect(read.pastPostsAvailable).toBe(true);
     expect(read.supportedActions).toEqual(["reset_equal", "set_enabled", "save_custom"]);
     expect(read.rows[0]).toEqual({
       sourceId: IG,
-      provider: "instagram_archive",
+      provider: "instagram_past_posts",
       name: "example_handle",
       state: "active",
       enabled: true,
@@ -161,7 +161,7 @@ describe("reading a protocol-2 mix", () => {
     ]);
   });
 
-  it("reads an archive's progress for each destination as the API sent it, and nothing it did not", () => {
+  it("reads a past-posts source's progress for each destination as the API sent it, and nothing it did not", () => {
     const read = mix({
       destinations: [
         {
@@ -277,7 +277,7 @@ describe("reading a protocol-2 mix", () => {
     expect(read!.rows[0].mediaCount).toBeNull();
     expect(read!.rows[0].indexed).toBeNull();
     expect(read!.destinations).toEqual([]);
-    expect(read!.archiveAvailable).toBe(false);
+    expect(read!.pastPostsAvailable).toBe(false);
     expect(read!.supportedActions).toEqual([]);
     expect(read!.conversionKind).toBeNull();
   });
@@ -351,10 +351,10 @@ describe("what a row says", () => {
   const [ig, drive] = read.rows;
   const [account] = read.destinations;
 
-  it("titles Instagram as Your Instagram with its handle, and Drive by its folder", () => {
-    expect(sourceTitle(ig)).toBe("Your Instagram");
+  it("titles Instagram as Instagram past posts with its handle, and Drive by its folder", () => {
+    expect(sourceTitle(ig)).toBe("Instagram past posts");
     expect(sourceSubtitle(ig)).toBe("@example_handle · Instagram");
-    expect(sourceAccessibleName(ig)).toBe("Your Instagram @example_handle");
+    expect(sourceAccessibleName(ig)).toBe("Instagram past posts @example_handle");
     expect(sourceTitle(drive)).toBe("Event photos");
     expect(sourceSubtitle(drive)).toBe("Google Drive");
     expect(sourceAccessibleName(drive)).toBe("Event photos (Google Drive)");
@@ -398,11 +398,11 @@ describe("what a row says", () => {
   });
 
   it("says what Off does, per provider, and never that it deletes", () => {
-    expect(offCopy("instagram_archive")).toBe(
+    expect(offCopy("instagram_past_posts")).toBe(
       "Stops indexing and selecting past posts; indexed metadata stays until deletion.",
     );
     expect(offCopy("gdrive")).toBe("Stops selecting this folder; syncing continues.");
-    for (const provider of ["instagram_archive", "gdrive", "other"]) {
+    for (const provider of ["instagram_past_posts", "gdrive", "other"]) {
       expect(offCopy(provider).toLowerCase()).not.toContain("delete history");
     }
   });
@@ -466,7 +466,7 @@ describe("whether the accounts are told apart", () => {
     ).toBe(false);
   });
 
-  it("is true where an archive serves one account and not the other", () => {
+  it("is true where a past-posts source serves one account and not the other", () => {
     expect(
       destinationsDiffer(
         destinations(account(ACCOUNT_A, [[IG, true], [DRIVE, true]]), account(ACCOUNT_B, [[IG, false], [DRIVE, true]])),
@@ -544,14 +544,14 @@ describe("whether the accounts are told apart", () => {
 describe("the sources that are on, said as one line", () => {
   it("names each source that is on with its share, exactly as the mix sends it", () => {
     expect(enabledSharesLine(mix())).toBe(
-      "Your Instagram @example_handle 50%, Event photos (Google Drive) 50%",
+      "Instagram past posts @example_handle 50%, Event photos (Google Drive) 50%",
     );
     const skewed = mix({
       mode: "custom",
       rows: [igRow({ ratio: "0.7", target_share: "0.7" }), driveRow({ ratio: "0.3", target_share: "0.3" })],
     });
     expect(enabledSharesLine(skewed)).toBe(
-      "Your Instagram @example_handle 70%, Event photos (Google Drive) 30%",
+      "Instagram past posts @example_handle 70%, Event photos (Google Drive) 30%",
     );
   });
 
@@ -559,7 +559,7 @@ describe("the sources that are on, said as one line", () => {
     const oneOff = mix({
       rows: [igRow({ ratio: "1", target_share: "1" }), driveRow({ enabled: false, ratio: "0", target_share: "0" })],
     });
-    expect(enabledSharesLine(oneOff)).toBe("Your Instagram @example_handle 100%");
+    expect(enabledSharesLine(oneOff)).toBe("Instagram past posts @example_handle 100%");
     const allOff = mix({
       rows: [
         igRow({ enabled: false, ratio: "0", target_share: "0" }),

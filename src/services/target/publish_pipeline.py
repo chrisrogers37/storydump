@@ -224,7 +224,7 @@ class _Ctx:
         self.poll_error: Optional[BaseException] = None
         #: The job payload's dry-run snapshot (see `_load`).
         self.dry_run: bool = False
-        self.archive = job.get("_archive_pipeline")
+        self.past_posts = job.get("_past_posts_pipeline")
 
     @property
     def intent_id(self) -> str:
@@ -284,7 +284,7 @@ async def _leased_tx(uow, job: dict):
                 session,
                 workspace_id=str(job["workspace_id"]),
                 intent_id=str(payload["intent_id"]),
-                capability=getattr(job.get("_archive_pipeline"), "capability", None),
+                capability=getattr(job.get("_past_posts_pipeline"), "capability", None),
             )
         await assert_lease(session, job["id"], job["lease_token"])
         yield session
@@ -302,7 +302,7 @@ async def run_publish_pipeline(
     transit,
     media_fetch: Callable[[dict], Any],
     precheck=None,
-    archive=None,
+    past_posts=None,
     backoff_seconds: tuple = DEFAULT_BACKOFF_SECONDS,
     now_fn: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Any] = asyncio.sleep,
@@ -315,8 +315,8 @@ async def run_publish_pipeline(
     unexpected — a crashed run must look crashed.
     """
     job = dict(job)
-    job["_archive_pipeline"] = archive
-    job["_archive_engine"] = engine
+    job["_past_posts_pipeline"] = past_posts
+    job["_past_posts_engine"] = engine
     uow = unit_of_work(engine, str(job["workspace_id"]), actor_kind="system")
     ctx = await _load(uow, job)
     if ctx is None:
@@ -351,32 +351,32 @@ async def run_publish_pipeline(
     if state == "approved":
         if ctx.intent["cancel_requested"]:
             return await _honour_cancel(uow, ctx, transit)
-        if ctx.intent.get("provider") == "instagram_archive":
+        if ctx.intent.get("provider") == "instagram_past_posts":
             from src.services.target import instagram_publish
 
-            if archive is None:
-                return await _archive_refusal(
+            if past_posts is None:
+                return await _past_posts_refusal(
                     uow,
                     ctx,
-                    "archive_pipeline_not_configured",
+                    "past_posts_pipeline_not_configured",
                     backoff_seconds,
                     now_fn,
                     transit=transit,
                 )
             try:
-                await archive.prepare_capture(
+                await past_posts.prepare_capture(
                     engine=engine,
                     job=job,
                     intent_id=ctx.intent_id,
                     allow_fetch=not ctx.dry_run,
                 )
             except (
-                instagram_publish.ArchiveEffectRefused,
+                instagram_publish.PastPostsEffectRefused,
                 media_adapters.MediaSourceFenceDrop,
                 source_policy.MediaAdmissionPending,
                 SourceReadRefused,
             ) as exc:
-                return await _archive_refusal(
+                return await _past_posts_refusal(
                     uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
                 )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
@@ -442,10 +442,10 @@ async def run_publish_pipeline(
     from src.services.target import instagram_publish
 
     try:
-        if ctx.intent.get("provider") == "instagram_archive":
-            if archive is None:
-                raise instagram_publish.ArchiveEffectRefused(
-                    "archive_pipeline_not_configured"
+        if ctx.intent.get("provider") == "instagram_past_posts":
+            if past_posts is None:
+                raise instagram_publish.PastPostsEffectRefused(
+                    "past_posts_pipeline_not_configured"
                 )
             completed_publish = ctx.latest("publish")
             if not (
@@ -453,7 +453,7 @@ async def run_publish_pipeline(
                 and completed_publish is not None
                 and completed_publish["state"] == "succeeded"
             ):
-                await archive.prepare_resume(
+                await past_posts.prepare_resume(
                     engine=engine, job=job, intent_id=ctx.intent_id, transit=transit
                 )
                 ctx = await _load(uow, job)
@@ -469,12 +469,12 @@ async def run_publish_pipeline(
             sleep=sleep,
         )
     except (
-        instagram_publish.ArchiveEffectRefused,
+        instagram_publish.PastPostsEffectRefused,
         media_adapters.MediaSourceFenceDrop,
         source_policy.MediaAdmissionPending,
         SourceReadRefused,
     ) as exc:
-        return await _archive_refusal(
+        return await _past_posts_refusal(
             uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
         )
 
@@ -812,10 +812,10 @@ async def _destroy_transit_best_effort(ctx: _Ctx, transit) -> None:
     The ref stays on the row: every caller runs after a terminal commit, and
     the terminal freeze makes the row immutable."""
     ref = ctx.intent.get("transit_asset_ref")
-    if ctx.intent.get("provider") == "instagram_archive":
-        if ctx.archive is not None:
-            await ctx.archive.cleanup_owned(
-                engine=ctx.job["_archive_engine"],
+    if ctx.intent.get("provider") == "instagram_past_posts":
+        if ctx.past_posts is not None:
+            await ctx.past_posts.cleanup_owned(
+                engine=ctx.job["_past_posts_engine"],
                 workspace_id=ctx.workspace_id,
                 intent_id=ctx.intent_id,
                 transit=transit,
@@ -1145,7 +1145,7 @@ async def _permit(engine, ctx: _Ctx, *, op_kind: str, generation: int) -> dict:
             lease_token=ctx.job["lease_token"],
             op_kind=op_kind,
             generation=generation,
-            archive_capability=getattr(ctx.archive, "capability", None),
+            past_posts_capability=getattr(ctx.past_posts, "capability", None),
         )
 
 
@@ -2348,28 +2348,34 @@ async def _confirm(
     return POSTED
 
 
-async def _archive_refusal(uow, ctx, reason, backoff_seconds, now_fn, *, transit=None):
+async def _past_posts_refusal(
+    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None
+):
     if reason == "selected_asset_changed":
-        reason = "archive_content_changed"
+        reason = "past_posts_content_changed"
     if reason == "asset_unavailable":
-        reason = "archive_content_unavailable"
+        reason = "past_posts_content_unavailable"
     if reason in (
         "source_generation_changed",
         "source_epoch_changed",
         "source_credential_changed",
     ):
-        reason = "archive_revalidation_required"
+        reason = "past_posts_revalidation_required"
     immediate = reason in (
-        "archive_upload_uncertain",
-        "archive_operation_unresolved",
-        "archive_content_changed",
-        "archive_content_unavailable",
-        "archive_pipeline_not_configured",
+        "past_posts_upload_uncertain",
+        "past_posts_operation_unresolved",
+        "past_posts_content_changed",
+        "past_posts_content_unavailable",
+        "past_posts_pipeline_not_configured",
     )
-    count = ctx.count("archive_waits") + 1
+    count = ctx.count("past_posts_waits") + 1
     error = {
         "v": 1,
-        "error": {"type": "ArchiveEffectRefused", "reason": reason, "message": reason},
+        "error": {
+            "type": "PastPostsEffectRefused",
+            "reason": reason,
+            "message": reason,
+        },
     }
     now = now_fn()
     cancelled = False
@@ -2405,7 +2411,7 @@ async def _archive_refusal(uow, ctx, reason, backoff_seconds, now_fn, *, transit
                 ),
                 dict(id=ctx.intent_id, error=json.dumps(error)),
             )
-            await _bump(session, ctx, archive_waits=count)
+            await _bump(session, ctx, past_posts_waits=count)
             await audit.record(
                 session,
                 workspace_id=ctx.workspace_id,
@@ -2423,7 +2429,7 @@ async def _archive_refusal(uow, ctx, reason, backoff_seconds, now_fn, *, transit
                     intent_id=ctx.intent_id,
                     from_state=current,
                     tz=ctx.tz,
-                    notice="This archive story needs review before another attempt. Open the Queue to choose.",
+                    notice="This story from your Instagram past posts needs review before another attempt. Open the Queue to choose.",
                 )
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "review_required"

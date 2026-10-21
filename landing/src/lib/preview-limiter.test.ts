@@ -1,5 +1,5 @@
 /**
- * The lane an archive preview waits in (#1644): at most two in flight
+ * The lane a past-posts preview waits in (#1644): at most two in flight
  * for a workspace, first come first served, and a place is given back by
  * whatever ends the wait. The lanes are the module's, shared by every test, so
  * each test names a workspace of its own and gives every place back.

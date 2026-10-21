@@ -43,7 +43,7 @@ sends it with the code (RFC 7636 §4.5). The verifier never reaches the browser.
 
 ## The history choice rides it too
 
-OAuth archive choice: an Instagram connect start records the history choice it
+OAuth past-posts choice: an Instagram connect start records the history choice it
 previewed in its state — the entry, whether past posts are used, the mix
 revision shown and the preview version — and the one-shot consume returns
 them to the callback, so nothing the browser sends back can stand in for
@@ -151,10 +151,10 @@ async def issue_state(
     cookie_nonce: Optional[str] = None,
     provider: str = vocabulary.PROVIDER_IG_LOGIN,
     code_verifier: Optional[str] = None,
-    archive_entry: Optional[str] = None,
-    archive_use_history: Optional[bool] = None,
-    archive_expected_mix_revision: Optional[int] = None,
-    archive_preview_version: Optional[int] = None,
+    past_posts_entry: Optional[str] = None,
+    past_posts_use_history: Optional[bool] = None,
+    past_posts_expected_mix_revision: Optional[int] = None,
+    past_posts_preview_version: Optional[int] = None,
 ) -> str:
     """Mint one state row and return the state value.
 
@@ -168,7 +168,7 @@ async def issue_state(
     read back by :func:`code_verifier_of`; a state minted without
     one needs no ring.
 
-    The ``archive_*`` fields are an Instagram start's history choice,
+    The ``past_posts_*`` fields are an Instagram start's history choice,
     stored as given: the table's CHECKs refuse an incoherent record.
     """
     if purpose not in PURPOSES:
@@ -194,12 +194,12 @@ async def issue_state(
             "INSERT INTO oauth_states"
             " (state, user_id, workspace_id, provider, purpose, reconnect_target,"
             "  cookie_nonce_hash, encrypted_code_verifier, expires_at,"
-            "  archive_entry, archive_use_history, archive_expected_mix_revision,"
-            "  archive_preview_version)"
+            "  past_posts_entry, past_posts_use_history, past_posts_expected_mix_revision,"
+            "  past_posts_preview_version)"
             " VALUES (:state, :uid, :ws, :provider, :purpose, :target, :nonce,"
             "         :verifier, now() + make_interval(secs => :ttl),"
-            "         :archive_entry, :archive_use_history, :archive_revision,"
-            "         :archive_preview)"
+            "         :past_posts_entry, :past_posts_use_history, :past_posts_revision,"
+            "         :past_posts_preview)"
         ),
         {
             "state": state,
@@ -211,10 +211,10 @@ async def issue_state(
             "nonce": None if cookie_nonce is None else hash_nonce(cookie_nonce),
             "verifier": sealed,
             "ttl": STATE_TTL_SECONDS,
-            "archive_entry": archive_entry,
-            "archive_use_history": archive_use_history,
-            "archive_revision": archive_expected_mix_revision,
-            "archive_preview": archive_preview_version,
+            "past_posts_entry": past_posts_entry,
+            "past_posts_use_history": past_posts_use_history,
+            "past_posts_revision": past_posts_expected_mix_revision,
+            "past_posts_preview": past_posts_preview_version,
         },
     )
     return state
@@ -250,8 +250,8 @@ async def consume_state(
             " WHERE state = :state AND consumed_at IS NULL AND expires_at > now()"
             " RETURNING state, user_id, workspace_id, provider, purpose,"
             "           reconnect_target, cookie_nonce_hash, encrypted_code_verifier,"
-            "           archive_entry, archive_use_history,"
-            "           archive_expected_mix_revision, archive_preview_version"
+            "           past_posts_entry, past_posts_use_history,"
+            "           past_posts_expected_mix_revision, past_posts_preview_version"
         ),
         {"state": state},
     )

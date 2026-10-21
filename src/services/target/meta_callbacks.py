@@ -345,7 +345,7 @@ def confirmation_code(subject: str, app_secret: str) -> str:
     Truncated to 16 hex characters: long enough that guessing is hopeless,
     short enough to paste into Meta's form.
 
-    **This is the receipt of a deployment without the archive's key ring**:
+    **This is the receipt of a deployment without the past-posts source's key ring**:
     logged, never stored. With the ring the receipt is a durable row
     (`receive_deletion`) and its code a random capability, not a derivation.
     """
@@ -453,7 +453,7 @@ async def revoke_for_accounts(conn, accounts: list[AccountRef]) -> int:
 
 #: The two shapes of confirmation code. A durable receipt's is a random 128-bit
 #: capability, hex; the 16 hex characters before it are the logged-only receipt
-#: a deployment without `ARCHIVE_HMAC_KEYS` still hands out (`confirmation_code`).
+#: a deployment without `PAST_POSTS_HMAC_KEYS` still hands out (`confirmation_code`).
 CAPABILITY_CODE = re.compile("[0-9a-f]{32}")
 LEGACY_CODE = re.compile("[0-9a-f]{16}")
 

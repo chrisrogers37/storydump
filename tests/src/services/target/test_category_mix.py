@@ -247,7 +247,10 @@ class TestSetMixIsOneSupersedeThenInserts:
         # One connected folder not named → it is automatic → the mix is legal.
         ex = _Exec(
             rows=[
-                [{"id": S1, "label": "announcements"}, {"id": S2, "label": "archive"}]
+                [
+                    {"id": S1, "label": "announcements"},
+                    {"id": S2, "label": "past_posts"},
+                ]
             ]
         )
         stored = await category_mix.set_mix(
@@ -257,7 +260,10 @@ class TestSetMixIsOneSupersedeThenInserts:
         # Every connected folder named at 0 → nothing would post → refused.
         ex = _Exec(
             rows=[
-                [{"id": S1, "label": "announcements"}, {"id": S2, "label": "archive"}]
+                [
+                    {"id": S1, "label": "announcements"},
+                    {"id": S2, "label": "past_posts"},
+                ]
             ]
         )
         with pytest.raises(category_mix.MixInvalid) as exc:
@@ -331,14 +337,16 @@ class TestReads:
         assert "removed" in ex.calls[0][0] and "workspace_id = :ws" in ex.calls[0][0]
 
 
-def test_conversion_capability_default_is_closed_and_never_archive_activation():
+def test_conversion_is_on_by_default_and_never_arms_the_past_posts_on_its_own():
     from src.api.app import create_app
+    from src.services.target import mix_conversion
 
     app = create_app(env={})
     assert app.state.source_mix_capability["source_mix_protocol_max"] == 2
-    assert app.state.source_mix_capability["conversion_enabled"] is False
-    assert app.state.mix_conversion_evidence is None
-    assert getattr(app.state, "archive_capability", None) is None
+    assert app.state.source_mix_capability["conversion_enabled"] is True
+    assert app.state.mix_conversion_evidence == mix_conversion.release_evidence(None)
+    # The past-posts source needs its key ring, which an empty environment does not hold.
+    assert getattr(app.state, "past_posts_capability", None) is None
 
 
 def test_decimal_custom_target_conserves_sum_and_off():

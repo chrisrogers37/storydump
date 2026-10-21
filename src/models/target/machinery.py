@@ -64,8 +64,8 @@ class Job(TargetBase):
             "'reconcile_ambiguous','reap_expired','reap_transit_assets',"
             "'retention_sweep','reencrypt_credentials','send_email',"
             "'alert_stranded_sources','activation_nudge_sweep','convert_source_mix',"
-            "'archive_lifecycle_sweep','meta_deletion_cleanup',"
-            "'reconcile_archive_accounts')",
+            "'past_posts_lifecycle_sweep','meta_deletion_cleanup',"
+            "'reconcile_past_posts_accounts')",
             name="ck_jobs_kind",
         ),
         CheckConstraint("lane IN ('interactive','bulk')", name="ck_jobs_lane"),
@@ -82,7 +82,7 @@ class Job(TargetBase):
             " ('reconcile_ambiguous','reap_expired','reap_transit_assets',"
             "'retention_sweep','reencrypt_credentials','send_email',"
             "'alert_stranded_sources','activation_nudge_sweep',"
-            "'archive_lifecycle_sweep'))",
+            "'past_posts_lifecycle_sweep'))",
             name="ck_jobs_system_kinds",
         ),
         Index(

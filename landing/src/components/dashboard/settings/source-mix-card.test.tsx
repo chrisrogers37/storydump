@@ -38,7 +38,7 @@ const ACCOUNT_B = "66666666-6666-4666-8666-666666666666";
 function igRow(over: Record<string, unknown> = {}) {
   return {
     source_id: IG,
-    provider: "instagram_archive",
+    provider: "instagram_past_posts",
     name: "example_handle",
     state: "active",
     origin_handle: "example_handle",
@@ -77,7 +77,7 @@ const ONE_ACCOUNT = [
   },
 ];
 
-/** A second account the archive cannot serve: its whole share is Drive's. */
+/** A second account the past-posts source cannot serve: its whole share is Drive's. */
 const TWO_ACCOUNTS = [
   ...ONE_ACCOUNT,
   {
@@ -100,7 +100,7 @@ function mix(over: Record<string, unknown> = {}): SourceMix {
     conversion: { state: "complete", kind: "new_equal" },
     rows: [igRow(), driveRow()],
     destinations: ONE_ACCOUNT,
-    archive_available: true,
+    past_posts_available: true,
     ...over,
   });
   if (!parsed) throw new Error("fixture did not parse");
@@ -192,9 +192,9 @@ function textAt(html: string, id: string): string {
 }
 
 describe("a row says what a source is and what it holds", () => {
-  it("titles Instagram as Your Instagram with its handle, and Drive by its folder", () => {
+  it("titles Instagram as Instagram past posts with its handle, and Drive by its folder", () => {
     const text = textOf(draw(mix()));
-    expect(text).toContain("Your Instagram");
+    expect(text).toContain("Instagram past posts");
     expect(text).toContain("@example_handle · Instagram");
     expect(text).toContain("Event photos");
     expect(text).toContain("Google Drive");
@@ -283,7 +283,7 @@ describe("one account keeps the simple list; several are told apart", () => {
   });
 });
 
-describe("Your Instagram row says its own status, for the account being viewed", () => {
+describe("Instagram past posts row says its own status, for the account being viewed", () => {
   /** What the API sends for one source in one destination's entry: its progress facts, as `instagram_sync.status` has them. */
   const progress = (over: Record<string, unknown> = {}) => ({
     indexing: false,
@@ -342,7 +342,7 @@ describe("Your Instagram row says its own status, for the account being viewed",
 
   it("is on the Instagram row, and under its counts", () => {
     const html = draw(mix({ destinations: [entry(ACCOUNT_A, "example_handle", INDEXING)] }));
-    const igRowHtml = html.slice(html.indexOf("Your Instagram"), html.indexOf("Event photos"));
+    const igRowHtml = html.slice(html.indexOf("Instagram past posts"), html.indexOf("Event photos"));
     expect(igRowHtml).toContain("Indexing");
     expect(igRowHtml).toContain("Indexed back to");
     // The Drive folder's row has no status of its own to say.
@@ -352,7 +352,7 @@ describe("Your Instagram row says its own status, for the account being viewed",
   });
 
   it("says the viewed account's status, not another's", () => {
-    // A's entry for the archive says it is indexing; B's says nothing is.
+    // A's entry for the past-posts source says it is indexing; B's says nothing is.
     const destinations = [
       entry(ACCOUNT_A, "example_handle", INDEXING),
       entry(ACCOUNT_B, "other_handle", progress(), false),
@@ -503,7 +503,7 @@ describe("Off is explained, per provider, and never as deleting", () => {
   it("describes each switch with what Off does for that provider", () => {
     const html = draw(mix());
     const expected: Array<[string, string]> = [
-      ["Your Instagram @example_handle", "instagram_archive"],
+      ["Instagram past posts @example_handle", "instagram_past_posts"],
       ["Event photos (Google Drive)", "gdrive"],
     ];
     expect(switches(html)).toHaveLength(2);
@@ -522,7 +522,7 @@ describe("Off is explained, per provider, and never as deleting", () => {
   it("names each switch by its source and its handle or provider", () => {
     const html = draw(mix());
     expect(switches(html).map((tag) => attr(tag, "aria-label"))).toEqual([
-      "Your Instagram @example_handle",
+      "Instagram past posts @example_handle",
       "Event photos (Google Drive)",
     ]);
     // Each is a real switch: a native, focusable button that says whether it is on.
@@ -572,10 +572,10 @@ describe("who may change the mix", () => {
     expect(button(draw(mix({ mode: "equal" })), "Reset to equal")).toBe("");
   });
 
-  it("will not switch Your Instagram On when past posts are not available, and says why on the switch", () => {
+  it("will not switch Instagram past posts On when they are not available, and says why on the switch", () => {
     const off = { rows: [igRow({ enabled: false, ratio: "0", target_share: "0" }), driveRow({ ratio: "1", target_share: "1" })] };
-    const html = draw(mix({ archive_available: false, ...off }));
-    const instagram = switchNamed(html, "Your Instagram @example_handle");
+    const html = draw(mix({ past_posts_available: false, ...off }));
+    const instagram = switchNamed(html, "Instagram past posts @example_handle");
     expect(isDisabled(instagram)).toBe(true);
     const described = attr(instagram, "aria-describedby")!.split(" ");
     expect(described).toHaveLength(2);
@@ -585,12 +585,12 @@ describe("who may change the mix", () => {
     expect(textOf(html)).not.toContain("Past posts settings");
     expect(textOf(draw(mix()))).toContain("Past posts settings");
     // Positive control: available, the same Off switch is free to turn On.
-    expect(isDisabled(switchNamed(draw(mix(off)), "Your Instagram @example_handle"))).toBe(false);
+    expect(isDisabled(switchNamed(draw(mix(off)), "Instagram past posts @example_handle"))).toBe(false);
   });
 
-  it("still lets an admin switch an archive that is On Off when past posts are no longer available, and says it cannot come back yet", () => {
-    const html = draw(mix({ archive_available: false }));
-    const instagram = switchNamed(html, "Your Instagram @example_handle");
+  it("still lets an admin switch a past-posts source that is On Off when past posts are no longer available, and says it cannot come back yet", () => {
+    const html = draw(mix({ past_posts_available: false }));
+    const instagram = switchNamed(html, "Instagram past posts @example_handle");
     expect(attr(instagram, "aria-checked")).toBe("true");
     expect(isDisabled(instagram)).toBe(false);
     const described = attr(instagram, "aria-describedby")!.split(" ");
@@ -600,7 +600,7 @@ describe("who may change the mix", () => {
     );
     expect(textOf(html)).not.toContain("Past posts settings");
     // A person who may not edit still gets no switch and no note.
-    const readOnly = draw(mix({ archive_available: false }), { editable: false });
+    const readOnly = draw(mix({ past_posts_available: false }), { editable: false });
     expect(textOf(readOnly)).not.toContain("paused for this workspace");
   });
 });
@@ -766,13 +766,13 @@ describe("a change is previewed in place, then confirmed", () => {
   it("shows the resulting equal shares, and is confirmed only now", () => {
     const html = draw(mix(), { flow: ready });
     const text = textOf(html);
-    expect(text).toContain("Your Instagram (@example_handle · Instagram): 100%");
+    expect(text).toContain("Instagram past posts (@example_handle · Instagram): 100%");
     expect(text).toContain("Event photos (Google Drive): Off");
     expect(isDisabled(button(html, "Confirm"))).toBe(false);
     // The shares on the rows are still the saved ones: nothing was written.
     expect(text.match(/\b50%/g)?.length).toBeGreaterThanOrEqual(2);
     // And the live region says it, for anyone not looking at the panel.
-    expect(text).toMatch(/would make the shares: Your Instagram @example_handle 100%\. Confirm or cancel\./);
+    expect(text).toMatch(/would make the shares: Instagram past posts @example_handle 100%\. Confirm or cancel\./);
   });
 
   it("says Reset to equal replaces custom percentages, and keeps what is Off off", () => {
@@ -816,7 +816,7 @@ describe("a custom draft", () => {
     const html = draw(custom, { flow: typed });
     const inputs = html.match(/<input[^>]*aria-label="[^"]*percentage"[^>]*>/g) ?? [];
     expect(inputs.map((tag) => attr(tag, "aria-label"))).toEqual([
-      "Your Instagram @example_handle percentage",
+      "Instagram past posts @example_handle percentage",
       "Event photos (Google Drive) percentage",
     ]);
     expect(inputs.map((tag) => attr(tag, "value"))).toEqual(["70", "20"]);
@@ -841,7 +841,7 @@ describe("a custom draft", () => {
     });
     const offHtml = draw(oneOff, { flow: flowOf([{ type: "draft_opened", mix: oneOff }]) });
     const offInputs = offHtml.match(/<input[^>]*aria-label="[^"]*percentage"[^>]*>/g) ?? [];
-    expect(offInputs.map((tag) => attr(tag, "aria-label"))).toEqual(["Your Instagram @example_handle percentage"]);
+    expect(offInputs.map((tag) => attr(tag, "aria-label"))).toEqual(["Instagram past posts @example_handle percentage"]);
   });
 
   it("names the source and the problem for a percentage that cannot be saved", () => {
@@ -895,7 +895,7 @@ describe("a custom draft", () => {
       const html = draw(now, { flow: conflicted });
       const text = textOf(html);
       expect(text).toContain("Your unsaved percentages, beside the mix as it is now");
-      expect(text).toContain("Your Instagram @example_handle: yours 70% · now Off · turned off since you started");
+      expect(text).toContain("Instagram past posts @example_handle: yours 70% · now Off · turned off since you started");
       expect(text).toContain("Event photos (Google Drive): yours 20% · now 100% · unchanged");
       expect(text).toContain("Events (Google Drive): yours — · now Off · new since you started");
       expect(text).toContain("Nothing was saved.");
@@ -907,7 +907,7 @@ describe("a custom draft", () => {
     it("lists a source that is gone as removed, last, instead of dropping it unseen", () => {
       const now = mix({ revision: 9, rows: [driveRow({ ratio: "1", target_share: "1" })] });
       const text = textOf(draw(now, { flow: conflicted }));
-      expect(text).toContain("Your Instagram @example_handle: yours 70% · now — · removed since you started");
+      expect(text).toContain("Instagram past posts @example_handle: yours 70% · now — · removed since you started");
       expect(text.indexOf("Event photos")).toBeLessThan(text.indexOf("removed since you started"));
     });
   });

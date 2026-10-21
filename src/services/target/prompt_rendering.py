@@ -424,7 +424,7 @@ def render_card(
         # Bounded: Telegram captions stop at 1024 characters, and a Drive
         # file name has no bound of its own.
         who = f"@{handle}" if handle else file_name[:FILE_NAME_BOUND]
-        if handle and intent.get("source_provider") == "instagram_archive":
+        if handle and intent.get("source_provider") == "instagram_past_posts":
             # The picture hides the text fallback, so its caption must still
             # identify the selected slide when an account handle is present.
             who += f"\n{file_name[:FILE_NAME_BOUND]}"

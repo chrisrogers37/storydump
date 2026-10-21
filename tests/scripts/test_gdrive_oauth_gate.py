@@ -32,6 +32,7 @@ from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.media_sync import DriveCredentialDead
 from tests.scripts.conftest import (
     _scratch,
+    as_made_before_conversion,
     as_user,
     fetch_all,
     fetch_one,
@@ -485,6 +486,10 @@ class TestTheRoutePairAsSvcIngress:
                 )
                 assert made.status_code == 201, made.text
                 ws = made.json()["workspace_id"]
+                # This walk is the folder-keyed mix's. A workspace made today
+                # starts converted, so this one goes back to the mix one made
+                # earlier keeps until its conversion job runs.
+                as_made_before_conversion(world["stream"], ws)
 
                 # 0. No grant yet: a folder cannot be picked, and the status says why.
                 early = await client.post(

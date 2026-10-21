@@ -30,11 +30,11 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
   running them against a fake: no `TARGET_TELEGRAM_BOT_TOKEN` (or a dead or
   wrong-bot token at the startup probe, `apply_transport_probe`, `:509`) parks `deliver_outbox`; no
   `CLOUDINARY_*` trio parks `publish_pipeline` and `reap_transit_assets`; no
-  email provider parks `send_email`; no `ARCHIVE_HMAC_KEYS` ring parks
+  email provider parks `send_email`; no `PAST_POSTS_HMAC_KEYS` ring parks
   `meta_deletion_cleanup` (without a transit store it runs, and counts an
   upload still owed as unresolved); no mix conversion evidence parks
-  `convert_source_mix`; an archive that is not armed (no
-  capability, or no archive client) parks `reconcile_archive_accounts`;
+  `convert_source_mix`; a past-posts source that is not armed (no
+  capability, or no past-posts client) parks `reconcile_past_posts_accounts`;
   `reencrypt_credentials` has no executor at all
   (`work_loop.UNBUILT_KINDS`), and `retention_sweep` runs one
   retention class only, `rate_counters` (7 d,
@@ -75,10 +75,10 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
 - Every scheduling decision reads the DATABASE clock (`now()` inside the door);
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
 - The recurring kinds this worker asks for are `compose`'s (`worker.py:414`):
-  `reap_expired`, `reconcile_ambiguous` and `archive_lifecycle_sweep` (it mints
+  `reap_expired`, `reconcile_ambiguous` and `past_posts_lifecycle_sweep` (it mints
   the deletion-cleanup jobs a Meta deletion receipt is owed, which needs no
-  activation, and, only with the activation evidence and an armed archive, at
-  most 5 `reconcile_archive_accounts` jobs, one per workspace per run digest)
+  activation, and, only with the activation evidence and an armed past-posts source, at
+  most 5 `reconcile_past_posts_accounts` jobs, one per workspace per run digest)
   every 60 s, `alert_stranded_sources`
   every 6 h, `retention_sweep` every hour (5,000-row batches until one comes
   back short or 5 s is spent), `reap_transit_assets` every 6 h when a transit

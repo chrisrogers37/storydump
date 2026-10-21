@@ -351,10 +351,10 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
     if not accounts:
         return {"below_days": below_days, "accounts": []}
     # The Overview loads this for every workspace. One that has not converted
-    # draws from the legacy pool, which reads no archive fact and none of the
+    # draws from the legacy pool, which reads no past-posts fact and none of the
     # context's binds, so its context is read with no lock and the page does not
     # row-lock what the worker writes. A converted one takes the prefix, as every
-    # archive read does.
+    # past-posts read does.
     if versioned_mix.converted(await versioned_mix.state(executor, str(workspace_id))):
         context = await source_policy.suitability_context(
             executor, workspace_id=workspace_id

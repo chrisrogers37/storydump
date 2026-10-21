@@ -21,7 +21,7 @@ import { isInstagramAuthorizationUrl } from "@/lib/destination";
  * unchanged.
  *
  * The body is forwarded unchanged, as on the sibling: a first connect may
- * carry its history choice, and a reconnect sends `{"archive_choice": null}`
+ * carry its history choice, and a reconnect sends `{"past_posts_choice": null}`
  * (#1644).
  */
 export async function POST(

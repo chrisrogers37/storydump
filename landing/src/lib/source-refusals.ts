@@ -44,10 +44,10 @@ export const SOURCE_REFUSAL_COPY = {
   unsupported_source_provider:
     "Only an Instagram past-posts source has these settings. Nothing changed.",
   // ── Past posts, wherever they are switched or chosen ─────────────────────
-  archive_not_activated:
+  past_posts_not_activated:
     "Using past posts is not switched on for this workspace yet. Nothing changed.",
-  archive_source_unavailable: `This Instagram source is no longer available here. ${RELOAD}. Nothing changed.`,
-  invalid_archive_choice: `The past-posts choice could not be read. ${RELOAD} and choose again. Nothing changed.`,
+  past_posts_source_unavailable: `This Instagram source is no longer available here. ${RELOAD}. Nothing changed.`,
+  invalid_past_posts_choice: `The past-posts choice could not be read. ${RELOAD} and choose again. Nothing changed.`,
   history_setup_failed:
     "Instagram was not connected: setting up your past posts failed, so nothing from this connection was kept. Try connecting again; if it fails again, this one is on us and worth reporting.",
   // ── Refused by this tier's own route, before the API was asked ───────────

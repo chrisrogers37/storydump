@@ -72,7 +72,7 @@ from src.services.target import (
     identity,
     identity_link,
     ig_login_oauth,
-    instagram_archive_adapter,
+    instagram_past_posts_adapter,
     invitations,
     media_sync,
     provisioning,
@@ -522,7 +522,7 @@ async def get_source_policy(
             session,
             workspace_id=str(ws),
             source_id=str(source),
-            capability=getattr(request.app.state, "archive_capability", None),
+            capability=getattr(request.app.state, "past_posts_capability", None),
         )
 
 
@@ -547,7 +547,7 @@ async def put_source_policy(
             workspace_id=str(ws),
             source_id=str(source),
             body=body,
-            capability=getattr(request.app.state, "archive_capability", None),
+            capability=getattr(request.app.state, "past_posts_capability", None),
         )
 
 
@@ -743,11 +743,11 @@ async def get_media(
 #: may be kept long; `private` keeps it out of every shared cache.
 THUMBNAIL_CACHE_CONTROL = "private, max-age=2592000"
 
-#: An archive item's picture is looked up fresh under the source's admission
+#: A past-posts item's picture is looked up fresh under the source's admission
 #: for every request, so nothing keeps it: no shared cache, not the browser,
 #: and no revalidation, so never a 304 — not even for its 404, which a later
 #: explicit retry must be able to replace.
-ARCHIVE_THUMBNAIL_CACHE_CONTROL = "private, no-store, max-age=0"
+PAST_POSTS_THUMBNAIL_CACHE_CONTROL = "private, no-store, max-age=0"
 
 
 @router.get("/workspaces/{ws}/media/{media_id}/thumbnail")
@@ -766,16 +766,16 @@ async def get_media_thumbnail(
     By the item's provider: a Drive item's is fetched here under the
     workspace's grant, through the row's stored link
     (`GoogleDriveAdapter.fetch_thumbnail`), and ``v`` plays no part. An
-    archive item's is an explicit preview (`archive_preview`), through the
-    port a trusted composition root injects (`app.state.archive_preview`;
+    past-posts item's is an explicit preview (`past_posts_preview`), through the
+    port a trusted composition root injects (`app.state.past_posts_preview`;
     absent by default), and only for ``v``, the row's `thumbnail_version`,
     while it is the current pair."""
     async with principal_mod.member_session(request, str(ws), principal) as session:
         row = await workspaces.thumbnail_link(
             session, workspace_id=str(ws), media_id=str(media_id)
         )
-    if row is not None and row["provider"] == instagram_archive_adapter.PROVIDER:
-        return await _archive_thumbnail(request, str(ws), str(media_id), v)
+    if row is not None and row["provider"] == instagram_past_posts_adapter.PROVIDER:
+        return await _past_posts_thumbnail(request, str(ws), str(media_id), v)
     if row is None or not row["thumbnail_url"]:
         raise principal_mod.not_found()
     async with _drive_read():
@@ -794,15 +794,15 @@ async def get_media_thumbnail(
     )
 
 
-async def _archive_thumbnail(
+async def _past_posts_thumbnail(
     request: Request, ws: str, media_id: str, version: Optional[str]
 ) -> Response:
-    """An archive item's preview, or the placeholder's 404: without the
+    """A past-posts item's preview, or the placeholder's 404: without the
     injected port or a version, before any provider is asked. Either answer
     is no-store and carries no validator, so it is never a 304, and nothing
     upstream — a URL, a host — reaches the body or a header."""
-    headers = {"Cache-Control": ARCHIVE_THUMBNAIL_CACHE_CONTROL}
-    preview = getattr(request.app.state, "archive_preview", None)
+    headers = {"Cache-Control": PAST_POSTS_THUMBNAIL_CACHE_CONTROL}
+    preview = getattr(request.app.state, "past_posts_preview", None)
     content = None
     if preview is not None and version:
         content = await preview.preview(
@@ -962,7 +962,7 @@ async def create_source(
 ):
     """Pick a Drive folder UNDER the workspace's grant.
 
-    `ck_sources_provider` allows `gdrive` and `instagram_archive`, and
+    `ck_sources_provider` allows `gdrive` and `instagram_past_posts`, and
     `media_items.source_id` is NOT NULL, so every media item hangs off a
     source; this route writes a Drive source. The folder
     is a resource, idempotent under an advisory lock — see
@@ -1052,8 +1052,8 @@ async def remove_source(
 ):
     """Remove a source from the workspace's mix. A Drive folder is PAUSED, never
     deleted (`provisioning.pause_media_source`): the media and its history stay,
-    and picking the folder again revives it. An Instagram archive is retired
-    (`source_membership.retire_archive`): every use stops and its origin
+    and picking the folder again revives it. An Instagram past-posts source is retired
+    (`source_membership.retire_past_posts`): every use stops and its origin
     assignment retires, while the origin account, its credential and the
     source's history stay. Admin floor, like adding one."""
     body = (
@@ -1117,7 +1117,7 @@ async def put_category_mix(
                 workspace_id=str(ws),
                 body=body,
                 by_user_id=principal.user_id,
-                capability=getattr(request.app.state, "archive_capability", None),
+                capability=getattr(request.app.state, "past_posts_capability", None),
                 destination_projection=getattr(
                     request.app.state, "mix_destination_projection", None
                 ),
@@ -1312,11 +1312,11 @@ async def connect_workspace_account(
     (`commands.connect_floor`).
 
     The optional body carries the history choice (`connect_choice.start_fields`); without one no choice is recorded. It is
-    read and parsed before the session opens (`_archive_choice`).
+    read and parsed before the session opens (`_past_posts_choice`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
     purpose = "connect"
-    choice = await _archive_choice(request)
+    choice = await _past_posts_choice(request)
     async with principal_mod.floor_session(
         request, str(ws), principal, commands.connect_floor(purpose)
     ) as session:
@@ -1333,7 +1333,7 @@ async def connect_workspace_account(
         )
 
 
-async def _archive_choice(request: Request):
+async def _past_posts_choice(request: Request):
     """The history choice a connect start's body carries, or None for none: the
     body read and `connect_choice.parse_choice`d, refused by name, BEFORE the
     start opens its unit of work. A client that is slow to send its body then
@@ -1344,7 +1344,7 @@ async def _archive_choice(request: Request):
     except HTTPException as exc:
         if exc.status_code != 400:
             raise
-        raise connect_choice.ConnectChoiceRefused("invalid_archive_choice") from exc
+        raise connect_choice.ConnectChoiceRefused("invalid_past_posts_choice") from exc
     return connect_choice.parse_choice(body)
 
 
@@ -1366,13 +1366,13 @@ async def _instagram_grant(
     caller parsed from the body, checked against the mix and refused by name
     before it is issued (`connect_choice.start_fields`); this never reads the
     request's body, which a session must not wait on."""
-    archive = await connect_choice.start_fields(
+    past_posts = await connect_choice.start_fields(
         session,
         workspace_id=str(ws),
         choice=choice,
         account_id=reconnect_target,
         purpose=purpose,
-        capability=getattr(request.app.state, "archive_capability", None),
+        capability=getattr(request.app.state, "past_posts_capability", None),
     )
     state = await issue_state(
         session,
@@ -1381,7 +1381,7 @@ async def _instagram_grant(
         user_id=principal.user_id,
         workspace_id=str(ws),
         reconnect_target=reconnect_target,
-        **archive,
+        **past_posts,
     )
     return {
         "authorization_url": ig_login_oauth.authorization_url(
@@ -1421,7 +1421,7 @@ async def connect_preview(
             workspace_id=str(ws),
             account_id=None if account_id is None else str(account_id),
             purpose=purpose,
-            capability=getattr(request.app.state, "archive_capability", None),
+            capability=getattr(request.app.state, "past_posts_capability", None),
         )
 
 
@@ -1448,10 +1448,10 @@ async def connect_account(
     The optional body carries the history choice of a first connect; a
     reconnect keeps its saved setting and carries none
     (`connect_choice.start_fields`). It is read and parsed before the session
-    opens (`_archive_choice`).
+    opens (`_past_posts_choice`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    choice = await _archive_choice(request)
+    choice = await _past_posts_choice(request)
     async with principal_mod.connect_session(request, str(ws), principal) as session:
         purpose = await ig_login_oauth.connect_purpose(
             session, workspace_id=str(ws), ig_account_id=str(account_id)

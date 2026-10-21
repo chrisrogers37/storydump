@@ -27,6 +27,10 @@ RETIRED_ROWS = (
     (149, "82056a5dc500da085ff1ddbe33f0cff219a5d08b463bf8205fcca20159c0593c"),
 )
 MANIFEST = runner.MIGRATIONS_DIR / "adoption_manifest.json"
+#: A version above every file in the tree: a ledger row no file stands for.
+FUTURE_VERSION = (
+    max(m.version for m in runner.discover_migrations(runner.MIGRATIONS_DIR)) + 1
+)
 
 
 def ledger_rows(dsn, table="schema_migrations"):
@@ -67,7 +71,8 @@ def test_current_future_history_keeps_the_missing_file_diagnostic(
     with psycopg2.connect(world_db) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO runner.schema_migrations (version, checksum, applied_by, status)"
-            " VALUES (3, 'future-current-migration', current_user, 'applied')"
+            " VALUES (%s, 'future-current-migration', current_user, 'applied')",
+            (FUTURE_VERSION,),
         )
     before = ledger_rows(world_db)
     kwargs = {"max_version": 0} if bounded else {}
@@ -141,13 +146,19 @@ def test_conversion_preserves_every_old_field_and_adopts_the_current_base(
         == identity
     )
     assert [migration.version for migration in report.adopted] == [0]
-    assert [migration.version for migration in report.pending] == [1, 2]
+    assert [migration.version for migration in report.pending] == [1, 2, 3]
     assert [(row["version"], row["status"]) for row in ledger_rows(retired_ledger)] == [
         (0, "adopted")
     ]
-    pending = runner.apply_pending(retired_ledger, runner.MIGRATIONS_DIR)
+    pending = runner.apply_pending(retired_ledger, runner.MIGRATIONS_DIR, max_version=2)
     assert pending.applied == []
     assert [migration.version for migration in pending.owed] == [1, 2]
+    # 003 runs after 001 and 002: the predeploy refuses it while they are owed.
+    with pytest.raises(runner.MigrationRunnerError, match="003 runs after 001 and 002"):
+        runner.apply_pending(retired_ledger, runner.MIGRATIONS_DIR)
+    assert [(row["version"], row["status"]) for row in ledger_rows(retired_ledger)] == [
+        (0, "adopted")
+    ]
     assert [
         migration.version
         for migration in runner.adopt(

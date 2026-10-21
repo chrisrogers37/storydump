@@ -109,10 +109,10 @@ ALTER FUNCTION fn_meta_receipt_scope(uuid) OWNER TO svc_maintenance;
 
 ALTER FUNCTION fn_meta_receipt_progress(uuid, uuid, uuid, text, jsonb, text, integer) OWNER TO svc_maintenance;
 
-ALTER FUNCTION fn_archive_redact_generation_records(uuid, uuid[]) OWNER TO svc_maintenance;
+ALTER FUNCTION fn_past_posts_redact_generation_records(uuid, uuid[]) OWNER TO svc_maintenance;
 
 ALTER FUNCTION fn_meta_receipt_cleanup_jobs(integer) OWNER TO svc_clock;
 
-ALTER FUNCTION fn_archive_reconcile_jobs(integer, text, text) OWNER TO svc_clock;
+ALTER FUNCTION fn_past_posts_reconcile_jobs(integer, text, text) OWNER TO svc_clock;
 
 REVOKE CREATE ON SCHEMA public FROM svc_claim, svc_clock, svc_maintenance, svc_membership;

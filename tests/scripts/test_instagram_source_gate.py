@@ -1,11 +1,11 @@
 """The Instagram source, end to end through the real composition, over fakes
 (#1644).
 
-Every other archive gate drives one service under its database role, with the
-archive capability handed in by the test. This one drives the whole thing the
+Every other past-posts gate drives one service under its database role, with the
+past-posts capability handed in by the test. This one drives the whole thing the
 way the deployment assembles it:
 
-* The ARMED composition. `archive_composition.build_worker` and
+* The ARMED composition. `past_posts_composition.build_worker` and
   `create_app(env=...)` (which calls `build_api`) are given an activation
   record, a conversion record and an HMAC key ring that this module writes
   into a temporary directory. Nothing is read from the process environment,
@@ -24,15 +24,15 @@ way the deployment assembles it:
   first read is not one of those places: connecting, switching On or
   reconnecting arms it, and a tick of the clock mints it.
 * Fake providers at their seams (`tests/fixtures/fake_providers.py`): the
-  OAuth exchange, Instagram's Graph and CDN (the generated onboarding archives,
+  OAuth exchange, Instagram's Graph and CDN (the generated onboarding past-posts sources,
   paged the way Meta pages them), the transit store, the Telegram Bot API and
   the Meta publish stub. Every client is in-process; the worker's Graph and
   Telegram clients carry an egress policy that resolves no name (the API's
-  archive client serves only the thumbnail route, which no scene calls).
+  past-posts client serves only the thumbnail route, which no scene calls).
 
-The archive each scene indexes is `onboarding.useful(10, ...)` trimmed to the
+The past-posts source each scene indexes is `onboarding.useful(10, ...)` trimmed to the
 posts that give a scene one candidate: the recent, credited and unknown posts
-(each an exclusion with its own reason) and the archive's single 2022 image,
+(each an exclusion with its own reason) and the past-posts source's single 2022 image,
 the one post that qualifies, so what is selected is known in advance. Only the
 first scene walks the history to its end (a window that lands nothing is
 skipped by one probe, and the walk ends when a probe finds nothing older, or at
@@ -50,7 +50,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
-import hashlib
 import json
 import sys
 import time
@@ -73,25 +72,23 @@ from src import worker
 from src.api.app import create_app
 from src.config.settings import settings
 from src.services.target import (
-    archive_activation,
-    archive_composition,
+    past_posts_activation,
+    past_posts_composition,
     ig_login_oauth,
     jobs,
     media_validation,
-    mix_conversion,
     unit_of_work,
     versioned_mix,
     work_loop,
 )
-from src.services.target.instagram_sources import ArchiveCapability
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.meta_adapter import StubMetaAdapter
 from src.services.target.unit_of_work import asyncpg_url
 from src.services.target.work_loop import WorkerConfig
 from tests.fixtures import fake_providers as fakes
 from tests.fixtures import instagram_onboarding as onboarding
 from tests.scripts import test_meta_deletion_receipts_gate as receipts
-from tests.scripts import test_oauth_archive_choice_gate as oauth
-from tests.scripts import test_versioned_mix_gate as mix_gate
+from tests.scripts import test_oauth_past_posts_choice_gate as oauth
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -102,7 +99,7 @@ from tests.scripts.conftest import (
     set_test_passwords,
 )
 from tests.src.api.conftest import API, owned_workspace
-from tests.src.services.target import test_archive_activation as activation_gate
+from tests.src.services.target import test_past_posts_activation as activation_gate
 
 #: The OAuth gate's configured sign-in and Instagram world, by assignment.
 google_configured = oauth.google_configured
@@ -115,7 +112,7 @@ UTC = timezone.utc
 REF_A, REF_B = "17841400000000301", "17841400000000302"
 #: A synthetic Telegram group, and the app secret a deletion request is signed with.
 CHAT = "-1001234567890"
-SECRET = "fixture-archive-" + "a" * 32
+SECRET = "fixture-past-posts-" + "a" * 32
 APP = "instagram:4242"
 
 
@@ -141,29 +138,19 @@ def world(admin_conn, owner_actor):
 
 
 def armed_environments(tmp_path):
-    """The API's and the worker's environments, each binding its own release as
-    production's do: an activation record that names both releases and the
-    conversion run, the conversion record itself, and a whole key ring."""
-    conversion = json.dumps(mix_gate.record()).encode()
-    conversion_path = tmp_path / "conversion.json"
-    conversion_path.write_bytes(conversion)
-    activation = activation_gate.record()
-    activation["conversion_run_digest"] = hashlib.sha256(conversion).hexdigest()
-    shared = {
-        mix_conversion.RECORD_PATH: str(conversion_path),
-        archive_activation.RECORD_PATH: activation_gate.write(tmp_path, activation),
-        archive_activation.KEYS_VAR: activation_gate.RING,
-    }
+    """The API's and the worker's environments as production's are: each on its
+    own release, with the whole key ring and nothing else the past-posts source needs."""
+    shared = {past_posts_activation.KEYS_VAR: activation_gate.RING}
     return (
-        {**shared, archive_composition.RELEASE_VAR: activation_gate.API_SHA},
-        {**shared, archive_composition.RELEASE_VAR: activation_gate.WORKER_SHA},
+        {**shared, past_posts_composition.RELEASE_VAR: activation_gate.API_SHA},
+        {**shared, past_posts_composition.RELEASE_VAR: activation_gate.WORKER_SHA},
     )
 
 
-# --- the archives ---------------------------------------------------------------
+# --- the past-posts sources ---------------------------------------------------------------
 
 
-def archive_of(ref, *, offset=0):
+def past_posts_of(ref, *, offset=0):
     """`useful(10)` as account *ref* serves it, trimmed to one candidate: the
     posts that are each excluded for a reason of their own, and the 2022 image."""
     full = onboarding.useful(10, int(time.time()), owner_id=ref)
@@ -176,24 +163,26 @@ def archive_of(ref, *, offset=0):
     return fakes.retarget(replace(full, posts=kept), owner=ref, offset=offset)
 
 
-def groups_of(archive):
-    return Counter(p.group for p in archive.posts for _ in range(len(p.children) or 1))
+def groups_of(past_posts):
+    return Counter(
+        p.group for p in past_posts.posts for _ in range(len(p.children) or 1)
+    )
 
 
-def candidate_of(archive):
-    """The 2022 image: the one post of the archive that qualifies."""
-    return next(p for p in archive.posts if p.at == onboarding.IMAGE_2022_AT)
+def candidate_of(past_posts):
+    """The 2022 image: the one post of the past-posts source that qualifies."""
+    return next(p for p in past_posts.posts if p.at == onboarding.IMAGE_2022_AT)
 
 
 # --- the composed world ---------------------------------------------------------
 
 
 class DriveForbidden:
-    """The Drive adapter the worker composes with: an archive item is never
+    """The Drive adapter the worker composes with: a past-posts item is never
     read through it, and no test syncs a Drive folder."""
 
     async def fetch_bytes(self, *args, **kwargs):
-        raise AssertionError("an archive item was read through Drive")
+        raise AssertionError("a past-posts item was read through Drive")
 
 
 class GateMeta(StubMetaAdapter):
@@ -283,7 +272,7 @@ class Gate:
 
     async def tick(self):
         """One clock tick of the composed worker: its election, its recurring
-        set, and the archive's activation handed to every leg."""
+        set, and the past-posts source's activation handed to every leg."""
         async with self.engine.connect() as election:
             clock = worker._clock_for(self.app, election)
             try:
@@ -356,19 +345,19 @@ class Gate:
 
     # -- the story's steps ------------------------------------------------------
 
-    async def connect(self, ref, handle, archive, *, history=True):
+    async def connect(self, ref, handle, past_posts, *, history=True):
         """The real connect, as the web does it: preview, start, callback, result."""
-        self.ig.add(archive)
+        self.ig.add(past_posts)
         return await self.scene.add(ref, handle, history=history)
 
-    def indexed(self, source, archive):
-        """Every post is indexed and the archive's candidates are known as such
+    def indexed(self, source, past_posts):
+        """Every post is indexed and the past-posts source's candidates are known as such
         (the walk still owes the recent post's caption read: it can never be
         one, so the card does not wait for it)."""
         summary = self.summary(source)
         return (
-            summary.get("observed") == len(archive.posts)
-            and summary.get("candidates") == groups_of(archive)["not_detected"]
+            summary.get("observed") == len(past_posts.posts)
+            and summary.get("candidates") == groups_of(past_posts)["not_detected"]
         )
 
     def summary(self, source):
@@ -391,7 +380,7 @@ class Gate:
             source,
         )[0]["due"]
 
-    async def index(self, source, archive, *, whole=False, ready=None, tick=True):
+    async def index(self, source, past_posts, *, whole=False, ready=None, tick=True):
         """The first read, as the deployment starts it: connecting (or switching
         On, or reconnecting) armed the source, so one tick of the worker's clock
         mints its sync, nobody demands it, and the worker's loops run it. *tick*
@@ -409,7 +398,7 @@ class Gate:
         if whole:
             return await self.drain()
         await self.run_until(
-            ready or (lambda: self.indexed(source, archive)), limit=150
+            ready or (lambda: self.indexed(source, past_posts)), limit=150
         )
         self.owner(
             "UPDATE jobs SET state = 'cancelled' WHERE workspace_id = %s"
@@ -459,7 +448,7 @@ class Gate:
         """The lifecycle sweep's beat: the clock mints it, a minute passes (every
         waiting job and every scope's next attempt falls due), and the worker
         runs it and the cleanup jobs it finds."""
-        self.app.recurring["archive_lifecycle_sweep"] = 60.0
+        self.app.recurring["past_posts_lifecycle_sweep"] = 60.0
         await self.tick()
         self.owner(
             "UPDATE jobs SET run_at = now() WHERE state = 'ready' AND run_at > now()"
@@ -471,7 +460,7 @@ class Gate:
         return await self.drain()
 
     def residue(self, source):
-        """What the archive still holds of *source*: its per-generation records,
+        """What the past-posts source still holds of *source*: its per-generation records,
         the items not yet redacted, and the tombstones that keep item identity."""
         return self.rows(
             "WITH p AS (SELECT CAST(%s AS uuid) AS s, CAST(%s AS uuid) AS w)"
@@ -527,9 +516,9 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
 
     monkeypatch.setattr(media_validation, "validate_media", spy)
     try:
-        app = create_app(engine=ingress, env=api_env, archive_client=clients[0])
+        app = create_app(engine=ingress, env=api_env, past_posts_client=clients[0])
         app.state.email = None
-        assert app.state.archive_capability == ArchiveCapability(enabled=True)
+        assert app.state.past_posts_capability == PastPostsCapability(enabled=True)
         provider = oauth.Provider()
         monkeypatch.setattr(ig_login_oauth, "exchange_code", provider.exchange_code)
         asgi = httpx.ASGITransport(app=app)
@@ -546,19 +535,13 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
             scene.owner, scene.user_id, scene.ws = await owned_workspace(
                 client, monkeypatch, tag=scene.tag
             )
-            conversion = mix_conversion.load_evidence(
-                worker_env[mix_conversion.RECORD_PATH],
-                service="worker",
-                release_sha=worker_env[archive_composition.RELEASE_VAR],
-            )
-            armed = archive_composition.build_worker(
+            armed = past_posts_composition.build_worker(
                 engine=engine,
                 env=worker_env,
-                conversion=conversion,
                 client=clients[1],
                 policy=fakes.OFFLINE,
             )
-            assert armed is not None, "the worker's activation record did not arm it"
+            assert armed is not None, "the worker's key ring did not arm it"
             adapters = {"gdrive": DriveForbidden()}
             transport = telegram.transport(
                 media_fetch=worker._card_media_fetch(
@@ -574,7 +557,7 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
                 env=worker_env,
                 transport=transport,
                 adapters=adapters,
-                archive=armed,
+                past_posts=armed,
                 meta=meta,
                 transit=transit,
             )
@@ -645,26 +628,28 @@ def refusal(response, status=409):
     return response.json()
 
 
-async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
+async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = archive_of(REF_A)
-        post, groups = candidate_of(archive), groups_of(archive)
+        past_posts = past_posts_of(REF_A)
+        post, groups = candidate_of(past_posts), groups_of(past_posts)
         g.publishing()
         g.bind()
 
-        # Armed by the record and the key ring, not by anything the test hands over.
-        assert g.app.deps.archive_capability == ArchiveCapability(enabled=True)
-        assert g.armed.evidence.run_id == activation_gate.RUN_ID
-        assert g.app.deps.archive is g.armed.coordinator
+        # Armed by the key ring alone, not by anything the test hands over.
+        assert g.app.deps.past_posts_capability == PastPostsCapability(enabled=True)
+        assert g.armed.evidence == past_posts_activation.release_evidence(
+            activation_gate.WORKER_SHA
+        )
+        assert g.app.deps.past_posts is g.armed.coordinator
         assert not isinstance(g.app.registry["sync_media_source"], work_loop.Parked)
 
         # Connect with history On: one source, its origin assignment, one
         # generation, one verified mapping, and not a single provider read, job
         # or byte. The connect armed the first read, though: it is due, and
         # nobody has asked for it.
-        landed = await g.connect(REF_A, "example_handle_a", archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
         assert landed.result["outcome"] == "connected_history_on"
         assert landed.result["history_enabled"] is True
         assert g.ig.requests == [] and g.job_counts() == {}
@@ -680,7 +665,7 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
             landed.source,
         ) == [{"origin": REF_A, "account": landed.account, "state": "active"}]
         (generation,) = g.rows(
-            "SELECT app_id, subject_id, lifecycle FROM instagram_archive_generations"
+            "SELECT app_id, subject_id, lifecycle FROM instagram_past_posts_generations"
             " WHERE workspace_id = %s",
             g.ws,
         )
@@ -715,7 +700,7 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
         # Indexing is metadata only: the whole history walk, the exclusions each
         # with their own reason, the 2022 post parsed from Graph's own time
         # format, and no byte, decode or durable URL.
-        walked = await g.index(landed.source, archive, whole=True, tick=False)
+        walked = await g.index(landed.source, past_posts, whole=True, tick=False)
         # The walk is bounded by the posts it finds, not by the account's age: a
         # gap is one probe, never a job for each empty window.
         assert walked < 60, walked
@@ -754,7 +739,7 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
             p.parent["id"]: p.group
             if p.group in ("credited", "unknown")
             else "not_detected"
-            for p in archive.posts
+            for p in past_posts.posts
         }
         assert {r["validation_state"] for r in indexed} == {"pending"}
         assert rows_holding(g.world["stream"], onboarding.URL_MARKER) == {}
@@ -824,7 +809,7 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
         }
         assert g.meta.create_calls == [] and g.transit.uploads == []
 
-        # The worker publishes it through the archive coordinator: the bytes are
+        # The worker publishes it through the past-posts coordinator: the bytes are
         # staged to transit once, the container is made over that copy, the
         # post is published, and the staged copy is destroyed.
         await g.drain()
@@ -915,14 +900,14 @@ async def test_a_connected_archive_runs_from_connect_to_a_posted_audit(
         assert len(g.ig.cdn) == 3
 
 
-async def test_posted_myself_closes_an_archive_card_without_a_provider_call(
+async def test_posted_myself_closes_a_past_posts_card_without_a_provider_call(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = archive_of(REF_A)
+        past_posts = past_posts_of(REF_A)
         g.bind()  # the workspace publishes by hand: api publishing stays off
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
         story = await g.card(landed.account)
         reads = (len(g.ig.graph), len(g.ig.cdn))
         assert reads[1] == 2, (
@@ -977,11 +962,11 @@ async def test_off_then_on_holds_a_waiting_card_without_reading_and_resumes_it(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = archive_of(REF_A)
+        past_posts = past_posts_of(REF_A)
         g.publishing()
         g.bind()
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
         story = await g.card(landed.account)
         reads = (len(g.ig.graph), len(g.ig.cdn), len(g.validated))
         epoch = g.rows(
@@ -1043,12 +1028,12 @@ async def test_off_then_on_holds_a_waiting_card_without_reading_and_resumes_it(
         assert len(g.transit.uploads) == 1
         assert g.rows(
             "SELECT detail FROM audit_events WHERE entity_id = %s"
-            " AND detail->>'reason' = 'archive_authorization_renewed'",
+            " AND detail->>'reason' = 'past_posts_authorization_renewed'",
             story,
         ) == [
             {
                 "detail": {
-                    "reason": "archive_authorization_renewed",
+                    "reason": "past_posts_authorization_renewed",
                     "capture_epoch": epoch + 2,
                     "policy_revision": 1,
                 }
@@ -1065,11 +1050,11 @@ async def test_a_source_policy_revision_withdraws_a_waiting_cards_approval_until
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = archive_of(REF_A)
+        past_posts = past_posts_of(REF_A)
         g.publishing()
         g.bind()
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
         story = await g.card(landed.account)
         url = g.scene.url(f"sources/{landed.source}/policy")
 
@@ -1134,12 +1119,12 @@ async def test_a_source_policy_revision_withdraws_a_waiting_cards_approval_until
         ) == [{"last_authorized_policy_revision": 3, "capture_epoch": 1}]
         assert g.rows(
             "SELECT detail FROM audit_events WHERE entity_id = %s"
-            " AND detail->>'reason' = 'archive_authorization_renewed'",
+            " AND detail->>'reason' = 'past_posts_authorization_renewed'",
             story,
         ) == [
             {
                 "detail": {
-                    "reason": "archive_authorization_renewed",
+                    "reason": "past_posts_authorization_renewed",
                     "capture_epoch": 1,
                     "policy_revision": 3,
                 }
@@ -1152,11 +1137,11 @@ async def test_a_permit_refused_at_the_boundary_keeps_the_staged_copy_and_resume
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = archive_of(REF_A)
+        past_posts = past_posts_of(REF_A)
         g.publishing()
         g.bind()
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
         story = await g.card(landed.account)
         epoch = g.rows(
             "SELECT source_use_epoch FROM media_sources WHERE id = %s", landed.source
@@ -1234,12 +1219,12 @@ async def test_a_permit_refused_at_the_boundary_keeps_the_staged_copy_and_resume
         ) == [{"capture_epoch": epoch + 2}]
         assert g.rows(
             "SELECT detail FROM audit_events WHERE entity_id = %s"
-            " AND detail->>'reason' = 'archive_authorization_renewed'",
+            " AND detail->>'reason' = 'past_posts_authorization_renewed'",
             story,
         ) == [
             {
                 "detail": {
-                    "reason": "archive_authorization_renewed",
+                    "reason": "past_posts_authorization_renewed",
                     "capture_epoch": epoch + 2,
                     "policy_revision": 1,
                 }
@@ -1275,11 +1260,11 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
     async with armed_gate(
         world, monkeypatch, tmp_path, drive=(("Folder", False),)
     ) as g:
-        archive = archive_of(REF_A)
+        past_posts = past_posts_of(REF_A)
         g.publishing()
         g.bind()
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
         story = await g.card(landed.account)
         assert (await g.command("approve", intent_id=story)).status_code == 202
         await g.run_until(lambda: g.state_of(story) == "posted")
@@ -1315,7 +1300,7 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
         reads = len(g.ig.graph)
         await g.sweep()
         assert g.rows(
-            "SELECT lifecycle FROM instagram_archive_generations WHERE id = %s", g1
+            "SELECT lifecycle FROM instagram_past_posts_generations WHERE id = %s", g1
         ) == [{"lifecycle": "deletion_pending"}]
         sync = await g.command("sync_now", source_id=landed.source)
         assert refusal(sync)["facts"]["source_read_reason"] == "generation_unavailable"
@@ -1338,11 +1323,11 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
         ]
         assert g.residue(landed.source) == CLEANED
         assert g.rows(
-            "SELECT lifecycle FROM instagram_archive_generations WHERE id = %s", g1
+            "SELECT lifecycle FROM instagram_past_posts_generations WHERE id = %s", g1
         ) == [{"lifecycle": "deleted"}]
         assert g.transit.assets == {} and len(g.transit.lookups) == 1
         assert len(g.ig.graph) == reads, "nothing was read from Instagram to delete"
-        # What is not the archive's survives: the posted story and its lock, the
+        # What is not the past-posts source's survives: the posted story and its lock, the
         # item's identity (as a tombstone), Drive, and the account's grant.
         assert g.state_of(story) == "posted"
         assert [r["kind"] for r in g.rows("SELECT kind FROM post_locks")] == ["recent"]
@@ -1381,9 +1366,9 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
         monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", SECRET, raising=False)
         await g.index(
             landed.source,
-            archive,
+            past_posts,
             ready=lambda: (
-                g.summary(landed.source).get("observed") == len(archive.posts)
+                g.summary(landed.source).get("observed") == len(past_posts.posts)
                 and "locked" in g.summary(landed.source).get("candidate_exclusions", {})
             ),
         )
@@ -1435,7 +1420,7 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
         assert {
             x["id"]: x["lifecycle"]
             for x in g.rows(
-                "SELECT id::text AS id, lifecycle FROM instagram_archive_generations"
+                "SELECT id::text AS id, lifecycle FROM instagram_past_posts_generations"
                 " WHERE workspace_id = %s",
                 g.ws,
             )
@@ -1451,26 +1436,26 @@ async def test_a_repeated_deletion_episode_cleans_each_generation_once_and_spare
         )
 
 
-async def test_two_accounts_and_two_workspaces_never_see_each_others_archives(
+async def test_two_accounts_and_two_workspaces_never_see_each_others_past_posts(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(
         world, monkeypatch, tmp_path, drive=(("Folder", False),)
     ) as g:
-        arch_a, arch_b = archive_of(REF_A), archive_of(REF_B, offset=500_000)
+        arch_a, arch_b = past_posts_of(REF_A), past_posts_of(REF_B, offset=500_000)
         parents_a = {p.parent["id"] for p in arch_a.posts}
         parents_b = {p.parent["id"] for p in arch_b.posts}
         ids_a, ids_b = (
             {
                 asset["id"]
-                for post in archive.posts
+                for post in past_posts.posts
                 for asset in (
                     post.children
                     if post.parent["media_type"] == "CAROUSEL_ALBUM"
                     else (post.parent,)
                 )
             }
-            for archive in (arch_a, arch_b)
+            for past_posts in (arch_a, arch_b)
         )
         assert not (parents_a | ids_a) & (parents_b | ids_b)
         g.publishing()
@@ -1512,7 +1497,7 @@ async def test_two_accounts_and_two_workspaces_never_see_each_others_archives(
         assert g.ig.cdn == []
 
         # Both slots arrive: each account is given a story out of its own
-        # archive, and the Off Drive folder is drawn by neither.
+        # past-posts source, and the Off Drive folder is drawn by neither.
         story_a, story_b = await g.plan(a.account, b.account)
         for story, mine, post, ref in (
             (story_a, a.source, candidate_of(arch_a), REF_A),
@@ -1555,7 +1540,7 @@ async def test_two_accounts_and_two_workspaces_never_see_each_others_archives(
             r["id"]: r["source_use_epoch"]
             for r in g.rows(
                 "SELECT id::text AS id, source_use_epoch FROM media_sources"
-                " WHERE provider = 'instagram_archive'"
+                " WHERE provider = 'instagram_past_posts'"
             )
         }
         before = epochs()
@@ -1626,8 +1611,8 @@ async def test_oauth_callback_interleaved_with_mix_save(
         world, monkeypatch, tmp_path, drive=(("Folder A", True), ("Folder B", True))
     ) as g:
         scene = g.scene
-        archive = archive_of(REF_A)
-        g.ig.add(archive)
+        past_posts = past_posts_of(REF_A)
+        g.ig.add(past_posts)
         drive_a, drive_b = scene.drive["Folder A"], scene.drive["Folder B"]
         admin = await scene.member("admin", "admin")
 
@@ -1754,7 +1739,7 @@ def test_the_gate_enters_no_worker_or_api_entrypoint():
     assert named == []
 
 
-def ten_slide_archive():
+def ten_slide_past_posts():
     """One old post, ten independently addressable files; its last is a video."""
     base = onboarding.useful(10, int(time.time()), owner_id=REF_A)
     post = candidate_of(base)
@@ -1781,11 +1766,11 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
     async with armed_gate(world, monkeypatch, tmp_path) as g:
-        archive = ten_slide_archive()
+        past_posts = ten_slide_past_posts()
         g.publishing()
         g.bind()
-        landed = await g.connect(REF_A, "example_handle_a", archive)
-        await g.index(landed.source, archive, whole=True)
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts, whole=True)
         summary = g.summary(landed.source)
         assert (summary["observed"], summary["represented"], summary["candidates"]) == (
             1,
@@ -1795,12 +1780,12 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
         assert (summary["items"], summary["slides"]) == (10, 10)
         assert g.ig.cdn == [] and g.validated == []
         identities = g.identities(landed.source)
-        assert set(identities) == {c["id"] for c in archive.posts[0].children}
+        assert set(identities) == {c["id"] for c in past_posts.posts[0].children}
         assert len(set(identities.values())) == 10
         # Mixed-video evidence remains an activation prerequisite. This scene
         # exercises real image validation; hold that one video explicitly so
         # the clock's UUID ordering can select any of the nine image slides.
-        video = identities[archive.posts[0].children[-1]["id"]]
+        video = identities[past_posts.posts[0].children[-1]["id"]]
         g.owner(
             "INSERT INTO post_locks (workspace_id,media_item_id,kind) VALUES (%s,%s,'hold')",
             g.ws,
@@ -1856,9 +1841,9 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
         dropped = next(
             key for key, item in identities.items() if item == second["item"]
         )
-        post = archive.posts[0]
+        post = past_posts.posts[0]
         smaller = replace(
-            archive,
+            past_posts,
             posts=(
                 replace(
                     post, children=tuple(c for c in post.children if c["id"] != dropped)
@@ -1884,7 +1869,7 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
         assert g.rows(
             "SELECT last_error#>>'{error,reason}' AS reason FROM post_intents WHERE id=%s",
             second["id"],
-        ) == [{"reason": "archive_content_unavailable"}]
+        ) == [{"reason": "past_posts_content_unavailable"}]
         assert len(g.meta.publish_calls) == 1
         await g.deliver()
         # The synthetic owner's explicit give-up resolves the parked story;

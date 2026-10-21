@@ -27,12 +27,12 @@ from src.services.target.content_runway import (
 from tests.src.services.target.schema_code import function_body, function_definitions
 
 #: The overload of `fn_clock_tick` the pins read: the one that takes
-#: `p_archive_enabled`. `_tick_body` holds the other to the same body.
+#: `p_past_posts_enabled`. `_tick_body` holds the other to the same body.
 CLOCK_TICK_ARITY = 4
 
-#: The one line the 3-parameter tick has of its own: it declares the archive
+#: The one line the 3-parameter tick has of its own: it declares the past-posts source
 #: flag off, where the other overload takes the flag as its last argument.
-ARCHIVE_OFF = "p_archive_enabled boolean := false; "
+PAST_POSTS_OFF = "p_past_posts_enabled boolean := false; "
 
 #: The `plan_slot` leg's one conjunct the runway leaves out: an account is
 #: posting whether or not its next slot is due this tick.
@@ -46,13 +46,13 @@ CLOCK_SCOPE = "a.workspace_id=ANY(locked_workspaces)"
 
 def _tick_body() -> str:
     """The body of the tick the pins read, the overload `CLOCK_TICK_ARITY`
-    names. The schema code defines one more, without `p_archive_enabled`,
+    names. The schema code defines one more, without `p_past_posts_enabled`,
     which declares the flag off and is otherwise the same text. This holds the
     two to that, so a pin on the tick holds for both overloads."""
     bodies = function_definitions("fn_clock_tick")
     assert sorted(bodies) == [3, CLOCK_TICK_ARITY], sorted(bodies)
-    assert bodies[3].count(ARCHIVE_OFF) == 1, "the 3-parameter tick's own line"
-    assert bodies[3].replace(ARCHIVE_OFF, "", 1) == bodies[CLOCK_TICK_ARITY], (
+    assert bodies[3].count(PAST_POSTS_OFF) == 1, "the 3-parameter tick's own line"
+    assert bodies[3].replace(PAST_POSTS_OFF, "", 1) == bodies[CLOCK_TICK_ARITY], (
         "the two fn_clock_tick overloads run different bodies"
     )
     return function_body("fn_clock_tick", arity=CLOCK_TICK_ARITY)
@@ -377,7 +377,7 @@ class TestTheRunwaysLocks:
         )
         source_policy.suitability_context.assert_not_awaited()
 
-    async def test_a_converted_workspace_takes_the_prefix_as_every_archive_read_does(
+    async def test_a_converted_workspace_takes_the_prefix_as_every_past_posts_read_does(
         self, monkeypatch
     ):
         from unittest.mock import AsyncMock
@@ -450,7 +450,7 @@ class TestThePostingPredicate:
 
     def test_both_overloads_of_the_tick_run_the_leg_the_pins_read(self):
         """The schema code defines the tick with and without the
-        `p_archive_enabled` parameter. Every pin here reads the leg through
+        `p_past_posts_enabled` parameter. Every pin here reads the leg through
         `_tick_body`, which holds the two to one body, so the leg the pins read
         is the leg either overload runs."""
         assert "'plan_slot'" in _tick_body(), "positive control: the leg is there"

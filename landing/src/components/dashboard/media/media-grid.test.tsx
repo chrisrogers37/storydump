@@ -1,7 +1,7 @@
 /**
  * The media library (#1644): an item from a connected account's past
  * posts goes by its own name and says where it came from, its picture is asked
- * for under the archive's limits, and a library that holds any is listed 24 to a
+ * for under the past-posts source's limits, and a library that holds any is listed 24 to a
  * page. A Drive library is listed whole
  * (`environment: "node"`: markup, not a browser). Every fixture is synthetic:
  * `example_handle` is no one's account and `FAKE_ID` is no post's.
@@ -35,7 +35,7 @@ vi.mock("react", async (importOriginal) => {
 
 import { Button } from "@/components/ui/button";
 import type { MediaRow } from "@/lib/dashboard-payloads";
-import { ARCHIVE_PROVIDER, withArchiveName } from "@/lib/archive-media";
+import { PAST_POSTS_PROVIDER, withPastPostsName } from "@/lib/past-posts-media";
 import { MediaCard } from "./media-card";
 import { GridPager, MediaGrid, MediaGridView } from "./media-grid";
 
@@ -72,18 +72,18 @@ function drive(n: number, over: Partial<MediaRow> = {}): MediaRow {
  * An item as a row that still carries Instagram's id would arrive: named
  * `Instagram <id>`, with the id as its file reference. The API stores
  * `Instagram post` and projects that name and a null `provider_file_ref` on every
- * read, so this is the guard's input (`withArchiveName`), not what a read sends.
+ * read, so this is the guard's input (`withPastPostsName`), not what a read sends.
  */
-function archive(n: number, over: Partial<MediaRow> = {}): MediaRow {
+function pastPosts(n: number, over: Partial<MediaRow> = {}): MediaRow {
   return {
     ...drive(n),
-    id: `archive-${n}`,
-    source_id: "src-archive",
+    id: `media-${n}`,
+    source_id: "src-past-posts",
     provider_file_ref: FAKE_ID,
     file_name: `Instagram ${FAKE_ID}`,
     thumbnail_version: `${GENERATION}.7`,
     provenance: {
-      provider: ARCHIVE_PROVIDER,
+      provider: PAST_POSTS_PROVIDER,
       origin_handle: "example_handle",
       original_at: "2020-01-01T12:00:00+00:00",
     },
@@ -91,9 +91,9 @@ function archive(n: number, over: Partial<MediaRow> = {}): MediaRow {
   };
 }
 
-/** Archive items at even places and Drive items at odd ones, `count` in all. */
+/** Past-posts items at even places and Drive items at odd ones, `count` in all. */
 function library(count: number): MediaRow[] {
-  return Array.from({ length: count }, (_, i) => (i % 2 === 0 ? archive(i) : drive(i)));
+  return Array.from({ length: count }, (_, i) => (i % 2 === 0 ? pastPosts(i) : drive(i)));
 }
 
 const TARGETS = { accounts: [], workspaceTz: "UTC" };
@@ -105,7 +105,7 @@ type ViewProps = Parameters<typeof MediaGridView>[0];
 const view = (items: MediaRow[], over: Partial<ViewProps> = {}) =>
   renderToStaticMarkup(
     createElement(MediaGridView, {
-      items: items.map(withArchiveName),
+      items: items.map(withPastPostsName),
       limit: 100,
       workspaceId: WS,
       tz: "UTC",
@@ -143,7 +143,7 @@ const textOf = (html: string) =>
 
 const cards = (html: string) => html.match(/data-slot="card"/g)?.length ?? 0;
 
-/** The names Drive's cards carry, in order; an archive card has its own. */
+/** The names Drive's cards carry, in order; a past-posts card has its own. */
 const driveNames = (html: string) =>
   [...html.matchAll(/title="(drive-\d+\.jpg)"/g)].map((m) => m[1]);
 
@@ -236,11 +236,11 @@ describe("an empty library", () => {
     expect(wrapped("off")).toContain("Your past posts are Off");
     // The positive control: a library with items shows them, whatever the flag.
     expect(wrapped("on", [drive(0)])).not.toContain("No media items found");
-    expect(wrapped("off", [archive(0)])).not.toContain("Your past posts are Off");
+    expect(wrapped("off", [pastPosts(0)])).not.toContain("Your past posts are Off");
   });
 });
 
-describe("a library with archive items", () => {
+describe("a library with past-posts items", () => {
   const items = library(60);
 
   it("is listed 24 to a page, whichever kind each item is, and says which page it is", () => {
@@ -268,17 +268,17 @@ describe("a library with archive items", () => {
     expect(textOf(view(items, { page: -4 }))).toContain("Showing 1–24 of 60 loaded items.");
   });
 
-  it("draws only a page's archive pictures, each asking for nothing until it is near", () => {
+  it("draws only a page's past-posts pictures, each asking for nothing until it is near", () => {
     const html = view(items);
     expect(html.match(/data-preview-phase="idle"/g)).toHaveLength(12);
-    // Not one archive picture is on the page yet; the 12 Drive ones are the browser's.
+    // Not one past-posts picture is on the page yet; the 12 Drive ones are the browser's.
     expect(html.match(/<img/g)).toHaveLength(12);
     expect(html.match(/<img[^>]*loading="lazy"/g)).toHaveLength(12);
   });
 
-  it("is listed whole again when a category leaves no archive item in it, and a page when one does", () => {
+  it("is listed whole again when a category leaves no past-posts item in it, and a page when one does", () => {
     const tagged = items.map((item, i) => ({ ...item, category: i < 10 ? "events" : "shots" }));
-    // "events" holds archive items 0, 2, 4, 6, 8: five of ten, one page, but still a paged list.
+    // "events" holds past-posts items 0, 2, 4, 6, 8: five of ten, one page, but still a paged list.
     const events = view(tagged, { category: "events" });
     expect(cards(events)).toBe(10);
     expect(textOf(events)).toContain('Showing 1–10 of 10 loaded items in "events".');
@@ -294,8 +294,8 @@ describe("a library with archive items", () => {
   });
 });
 
-describe("an archive item's card", () => {
-  const html = view([archive(0)]);
+describe("a past-posts item's card", () => {
+  const html = view([pastPosts(0)]);
 
   it("goes by its own name and says where it came from, and that its media is checked when used", () => {
     const text = textOf(html);
@@ -308,11 +308,11 @@ describe("an archive item's card", () => {
     // Too recent, credited and unknown-attribution items are listed too, so a
     // card that said "matching" would claim what the list does not establish.
     expect(textOf(html)).not.toMatch(/match/i);
-    expect(textOf(grid([archive(0), archive(1)]))).not.toMatch(/match/i);
+    expect(textOf(grid([pastPosts(0), pastPosts(1)]))).not.toMatch(/match/i);
   });
 
   it("never shows the id it is stored under, in its text, its labels or its markup, even through the page's own draw", () => {
-    for (const drawn of [html, grid([archive(0)])]) {
+    for (const drawn of [html, grid([pastPosts(0)])]) {
       expect(drawn).not.toContain(FAKE_ID);
       expect(drawn).not.toContain("Instagram 179");
       expect(drawn).toContain('aria-label="Schedule Instagram post"');
@@ -326,9 +326,9 @@ describe("an archive item's card", () => {
   });
 
   it("reads the day it was posted on the workspace's clock", () => {
-    const late = archive(0, {
+    const late = pastPosts(0, {
       provenance: {
-        provider: ARCHIVE_PROVIDER,
+        provider: PAST_POSTS_PROVIDER,
         origin_handle: "example_handle",
         original_at: "2020-01-01T02:30:00+00:00",
       },
@@ -351,28 +351,28 @@ describe("an archive item's card", () => {
   });
 
   it("asks for its picture at the route by the version the API named, and a video's is still its thumbnail", () => {
-    const clip = view([archive(0, { media_kind: "video", mime_type: "video/mp4" })]);
+    const clip = view([pastPosts(0, { media_kind: "video", mime_type: "video/mp4" })]);
     expect(clip).not.toMatch(/<video|<source|\.mp4/i);
     expect(clip).toContain('data-preview-phase="idle"');
   });
 
   it("waits for its picture without a place for one while it awaits observation again", () => {
-    const waiting = view([archive(0, { has_thumbnail: false, thumbnail_version: null })]);
+    const waiting = view([pastPosts(0, { has_thumbnail: false, thumbnail_version: null })]);
     expect(waiting).not.toContain("data-preview-phase");
     expect(waiting).not.toContain("<img");
     expect(textOf(waiting)).toContain("From @example_handle · Instagram, posted Jan 1, 2020");
   });
 
   it("leaves out what the read does not have, as the label does", () => {
-    const bare = archive(0, {
-      provenance: { provider: ARCHIVE_PROVIDER, origin_handle: null, original_at: null },
+    const bare = pastPosts(0, {
+      provenance: { provider: PAST_POSTS_PROVIDER, origin_handle: null, original_at: null },
     });
     expect(textOf(view([bare]))).toContain("From Instagram Media is checked when used.");
   });
 });
 
 describe("a Drive item's card beside it", () => {
-  const html = view([archive(0), drive(1, { file_name: "Instagram 12.jpg" })]);
+  const html = view([pastPosts(0), drive(1, { file_name: "Instagram 12.jpg" })]);
 
   it("keeps its file name, whatever it says, and says nothing of matching, provenance or media being checked", () => {
     const [, driveCard] = html.split('data-slot="card"').slice(1);
@@ -393,7 +393,7 @@ describe("MediaCard", () => {
 
   it("hands the item and the button that was pressed to Schedule…, so focus can return to it", () => {
     const onSchedule = vi.fn();
-    const item = withArchiveName(archive(0));
+    const item = withPastPostsName(pastPosts(0));
     hoisted.direct = true;
     let card: ReactElement;
     try {
@@ -445,11 +445,11 @@ describe("GridPager", () => {
 });
 
 describe("an Instagram post's slides (#1644)", () => {
-  const slide = (n: number, postRef: string, source = "src-archive") =>
-    archive(n, {
+  const slide = (n: number, postRef: string, source = "src-past-posts") =>
+    pastPosts(n, {
       source_id: source,
       provenance: {
-        provider: ARCHIVE_PROVIDER,
+        provider: PAST_POSTS_PROVIDER,
         origin_handle: "@example_handle",
         original_at: "2020-01-01T12:00:00+00:00",
         slide: { post_ref: postRef, position: n, count: 3 },
@@ -462,7 +462,7 @@ describe("an Instagram post's slides (#1644)", () => {
       drive(1),
       slide(3, "post-a"),
       slide(2, "post-a", "another-source"),
-      archive(9),
+      pastPosts(9),
     ]);
     expect(html.match(/aria-label="Instagram post slides"/g)).toHaveLength(2);
     expect(html).toContain("Instagram post · @example_handle · Jan 1, 2020 · 3 slides");

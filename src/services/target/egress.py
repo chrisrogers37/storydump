@@ -332,7 +332,7 @@ async def _read_capped(response: httpx.Response, policy: EgressPolicy) -> bytes:
 
 
 class RequestAdmission(Protocol):
-    """Optional generic dispatch authority; required by the archive adapter.
+    """Optional generic dispatch authority; required by the past-posts adapter.
 
     before_dispatch returns a captured authorization ticket after closing its
     short transaction. after_return fences each response OR failed attempt.

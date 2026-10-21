@@ -431,13 +431,13 @@ LISTED_ACCOUNT_SQL = "a.state <> 'disabled'"
 #: The order the destinations are listed in: oldest first, the id breaking ties.
 LISTED_ACCOUNT_ORDER_SQL = "ORDER BY a.created_at, a.id"
 
-#: An archive source's coverage, one row per source with observations, binding
+#: A past-posts source's coverage, one row per source with observations, binding
 #: `:ws`: what the CURRENT authorization generation observed (`observed`, of
 #: which `represented` have a media item; `oldest` and `refreshed` bound it),
 #: and what an older generation left `stale`, awaiting reobservation.
 #:func:`list_sources` and the mix rows' `indexed` (`versioned_mix.resource`)
 #: both count it, so the two cannot disagree.
-ARCHIVE_COVERAGE_SQL = (
+PAST_POSTS_COVERAGE_SQL = (
     "SELECT i.workspace_id,i.source_id,"
     "count(*) FILTER (WHERE i.data_generation_id=s.current_authorization_generation_id) AS observed,"
     "count(*) FILTER (WHERE i.data_generation_id=s.current_authorization_generation_id "
@@ -464,7 +464,7 @@ ARCHIVE_COVERAGE_SQL = (
 
 def observed_count(observed: Optional[int]) -> Optional[int]:
     """A coverage count, or None without any observation evidence: an
-    archive nothing has been observed in has an unknown count, not zero."""
+    past-posts source nothing has been observed in has an unknown count, not zero."""
     return int(observed) if observed else None
 
 
@@ -477,7 +477,7 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
     """
     rows = await readers.rows(
         executor,
-        "WITH coverage AS (" + ARCHIVE_COVERAGE_SQL + ") "
+        "WITH coverage AS (" + PAST_POSTS_COVERAGE_SQL + ") "
         "SELECT s.id,s.provider,s.state,s.next_sync_at,s.last_sync_success_at,s.alerted_at,s.created_at,"
         # The folder's own approval position, NULL for the workspace's.
         "       s.approval_mode,"
@@ -486,7 +486,7 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
         + CONNECTED_FLAG_SQL
         + " AS removed,"
         "CASE WHEN s.provider='gdrive' THEN coalesce(s.config->>'folder_name',s.config->>'folder_ref','folder') "
-        "ELSE coalesce(a.display_name,a.handle,'Instagram archive') END AS display_name,"
+        "ELSE coalesce(a.display_name,a.handle,'Instagram past posts') END AS display_name,"
         "s.origin_ig_account_id,a.handle AS origin_handle,a.display_name AS origin_display_name,"
         "s.current_authorization_generation_id,g.lifecycle AS generation_lifecycle,"
         "p.schema_version,p.revision,p.minimum_age_days,p.include_credited,p.include_unknown,p.carousel_slides,"
@@ -494,7 +494,7 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
         "c.observed,c.represented,c.items,c.slides,c.carousel_children_truncated,c.stale,c.oldest,c.refreshed "
         "FROM media_sources s JOIN workspaces w ON w.id=s.workspace_id "
         "LEFT JOIN ig_accounts a ON a.workspace_id=s.workspace_id AND a.id=s.origin_ig_account_id "
-        "LEFT JOIN instagram_archive_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id "
+        "LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.source_id=s.id AND g.id=s.current_authorization_generation_id "
         "LEFT JOIN instagram_source_policies p ON p.workspace_id=s.workspace_id AND p.source_id=s.id "
         "LEFT JOIN coverage c ON c.workspace_id=s.workspace_id AND c.source_id=s.id "
         "WHERE s.workspace_id=:ws ORDER BY s.created_at,s.id",
@@ -517,10 +517,10 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
     )
     for row in rows:
         out = {k: row[k] for k in base}
-        archive = row["provider"] == "instagram_archive"
+        past_posts = row["provider"] == "instagram_past_posts"
         out["origin"] = (
             None
-            if not archive
+            if not past_posts
             else {
                 "id": row["origin_ig_account_id"],
                 "handle": row["origin_handle"],
@@ -528,12 +528,12 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
             }
         )
         out["destination_scope"] = (
-            "workspace_wide" if not archive else row["destination_scope"]
+            "workspace_wide" if not past_posts else row["destination_scope"]
         )
         out["policy_capabilities"] = {"editable": []}
         out["policy"] = None
         out["coverage"] = None
-        if archive:
+        if past_posts:
             try:
                 out["policy"] = source_policy.project_policy(
                     row, row["repost_ttl_days"]
@@ -614,13 +614,13 @@ MEDIA_STATES: tuple[str, ...] = vocabulary.MEDIA_STATES
 #: The characters of a media row's content hash its `thumbnail_version` carries.
 THUMBNAIL_VERSION_CHARS = 16
 
-#: An archive item's `thumbnail_version`, `<generation_id>.<source_use_epoch>`
+#: A past-posts item's `thumbnail_version`, `<generation_id>.<source_use_epoch>`
 #: over :func:`thumbnail_joins`: the generation of its observation, which the
 #: joins hold to the source's current one, and the source's use epoch. A
 #: reauthorization or an Off and On again names a new URL, so a picture answered
 #: under one pair never stands for another. NULL without a current observation.
-#: The thumbnail route admits only the current pair (`archive_preview`).
-ARCHIVE_THUMBNAIL_VERSION_SQL = (
+#: The thumbnail route admits only the current pair (`past_posts_preview`).
+PAST_POSTS_THUMBNAIL_VERSION_SQL = (
     "mi.data_generation_id::text || '.' || ms.source_use_epoch::text"
 )
 
@@ -629,8 +629,8 @@ def thumbnail_joins(m: str) -> str:
     """The joins a media row's thumbnail is read through, the row's columns
     prefixed by *m*: its source (`ms`), and its observation in the source's
     current authorization generation (`mi`) — none for a Drive row, nor for
-    an archive item awaiting reobservation. An item has at most one
-    asset (`uq_archive_asset_item`), so no row repeats."""
+    a past-posts item awaiting reobservation. An item has at most one
+    asset (`uq_past_posts_asset_item`), so no row repeats."""
     return (
         f" JOIN media_sources ms ON ms.workspace_id = {m}workspace_id"
         f" AND ms.id = {m}source_id"
@@ -650,29 +650,29 @@ def _thumbnail_sql(m: str) -> str:
     version the page puts in the image URL, never a link. A Drive row has one
     while its listing left a link, and its version is a prefix of the content
     hash, which a row keeps for life, so one URL always names one picture. An
-    archive item's picture is looked up fresh for each request, so it has one
+    past-posts item's picture is looked up fresh for each request, so it has one
     exactly when it has a current observation, versioned by
-    :data:`ARCHIVE_THUMBNAIL_VERSION_SQL`."""
+    :data:`PAST_POSTS_THUMBNAIL_VERSION_SQL`."""
     return (
-        "CASE WHEN ms.provider = 'instagram_archive'"
+        "CASE WHEN ms.provider = 'instagram_past_posts'"
         " THEN mi.data_generation_id IS NOT NULL"
         f" ELSE {m}thumbnail_url IS NOT NULL END AS has_thumbnail,"
-        " CASE WHEN ms.provider = 'instagram_archive'"
-        f" THEN {ARCHIVE_THUMBNAIL_VERSION_SQL}"
+        " CASE WHEN ms.provider = 'instagram_past_posts'"
+        f" THEN {PAST_POSTS_THUMBNAIL_VERSION_SQL}"
         f" ELSE left({m}content_hash, {THUMBNAIL_VERSION_CHARS})"
         " END AS thumbnail_version"
     )
 
 
 #: The account an item's source belongs to (`mo`), whose handle says where an
-#: archive item came from, joined after :func:`thumbnail_joins`, which defines
+#: past-posts item came from, joined after :func:`thumbnail_joins`, which defines
 #: the source (`ms`) it hangs from. A Drive source has no such account.
 _ORIGIN_JOIN = (
     " LEFT JOIN ig_accounts mo ON mo.workspace_id = ms.workspace_id"
     " AND mo.id = ms.origin_ig_account_id"
 )
 
-#: The three facts :func:`_archive_row` nests as an item's provenance, by the
+#: The three facts :func:`_past_posts_row` nests as an item's provenance, by the
 #: column each read selects them as: the source's provider, the origin
 #: account's handle and the current observation's original time.
 _PROVENANCE_COLUMNS = {
@@ -688,7 +688,7 @@ _PROVENANCE_COLUMNS = {
 def picture_joins(m: str) -> str:
     """The joins every read that draws an item's picture is made over, the
     row's columns prefixed by *m*: :func:`thumbnail_joins` and the origin
-    account. One definition, so no read can tell Drive from an archive in
+    account. One definition, so no read can tell Drive from a past-posts source in
     another way than the picture it draws does."""
     return thumbnail_joins(m) + _ORIGIN_JOIN
 
@@ -697,20 +697,20 @@ def _picture_sql(m: str) -> str:
     """What every read that draws an item's picture selects of it, the row's
     columns prefixed by *m*, over :func:`picture_joins`: the thumbnail's flag
     and version (:func:`_thumbnail_sql`), and the three facts
-    :func:`_archive_row` nests as its provenance."""
+    :func:`_past_posts_row` nests as its provenance."""
     provenance = ", ".join(
         f"{sql} AS {name}" for name, sql in _PROVENANCE_COLUMNS.items()
     )
     return f"{_thumbnail_sql(m)}, {provenance}"
 
 
-def _archive_row(row: dict) -> dict:
+def _past_posts_row(row: dict) -> dict:
     """A picture read's row as the browser may have it (:func:`_picture_sql`).
 
-    An archive item's provenance goes under one key — the provider, the handle
+    A past-posts item's provenance goes under one key — the provider, the handle
     of the account that posted it and when — and a Drive row's is NULL, so
     every row carries the key. A slide is named from its current position and
-    complete count; a single post uses :data:`vocabulary.ARCHIVE_ITEM_NAME`.
+    complete count; a single post uses :data:`vocabulary.PAST_POSTS_ITEM_NAME`.
     The row has no `provider_file_ref`, where the read selects one: stored,
     the reference is the Graph id itself, and a row whose stored name is
     `Instagram <Graph id>` must not show it either, the web labelling a post
@@ -720,7 +720,7 @@ def _archive_row(row: dict) -> dict:
     handle, original_at = row.pop("origin_handle"), row.pop("original_at")
     post_ref = row.pop("slide_post_ref")
     position, count = row.pop("slide_position"), row.pop("slide_count")
-    if provider != "instagram_archive":
+    if provider != "instagram_past_posts":
         row["provenance"] = None
         return row
     row["provenance"] = {
@@ -735,12 +735,12 @@ def _archive_row(row: dict) -> dict:
     }
     if position is not None:
         row["file_name"] = (
-            vocabulary.ARCHIVE_SLIDE_NAME.format(position=position, count=count)
+            vocabulary.PAST_POSTS_SLIDE_NAME.format(position=position, count=count)
             if count is not None
-            else vocabulary.ARCHIVE_SLIDE_NAME_UNKNOWN.format(position=position)
+            else vocabulary.PAST_POSTS_SLIDE_NAME_UNKNOWN.format(position=position)
         )
     elif not str(row.get("file_name", "")).startswith("Instagram post, slide "):
-        row["file_name"] = vocabulary.ARCHIVE_ITEM_NAME
+        row["file_name"] = vocabulary.PAST_POSTS_ITEM_NAME
     if "provider_file_ref" in row:
         row["provider_file_ref"] = None
     if "caption" in row:
@@ -768,7 +768,7 @@ LOCAL_DAY_SQL = "to_char({slot} AT TIME ZONE {tz}, 'YYYY-MM-DD') AS day"
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (the handle is how a person
 #: recognises the row; NULL when the account carries none, never absent). A
-#: picture read like the media's: every row is read through :func:`_archive_row`.
+#: picture read like the media's: every row is read through :func:`_past_posts_row`.
 _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
@@ -798,7 +798,7 @@ _INTENT_FROM = (
     "  JOIN workspaces w ON w.id = i.workspace_id" + picture_joins("m.")
 )
 
-#: A media read's columns: every row is read through :func:`_archive_row`.
+#: A media read's columns: every row is read through :func:`_past_posts_row`.
 _MEDIA_COLUMNS = (
     "m.id, m.source_id, m.provider_file_ref, m.file_name, m.media_kind,"
     " m.mime_type, m.file_size, m.category, m.title, m.caption, m.tags,"
@@ -861,7 +861,7 @@ async def list_intents(
         f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",
         **params,
     )
-    return [_archive_row(row) for row in rows]
+    return [_past_posts_row(row) for row in rows]
 
 
 #: What the month read selects of each of a day's newest, bar the provenance.
@@ -880,7 +880,7 @@ _INTENT_DAY_COLUMNS = (
 #: What each of a month day's newest carries: enough to name it and to draw its
 #: thumbnail through the route (`has_thumbnail` and its version, never the
 #: link), as the intents read does, and its provenance, which is also
-#: how the page tells an archive item's picture from a Drive picture.
+#: how the page tells a past-posts item's picture from a Drive picture.
 INTENT_DAY_FIELDS = (*_INTENT_DAY_COLUMNS, "provenance")
 
 
@@ -936,7 +936,7 @@ async def intent_days(
         **params,
     )
     days: dict[str, dict] = {}
-    for row in map(_archive_row, rows):
+    for row in map(_past_posts_row, rows):
         day = days.setdefault(
             row["day"], {"date": row["day"], "count": int(row["total"]), "newest": []}
         )
@@ -976,7 +976,7 @@ async def list_media(
         " ORDER BY m.created_at DESC, m.id",
         **params,
     )
-    return [_archive_row(row) for row in rows]
+    return [_past_posts_row(row) for row in rows]
 
 
 async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[dict]:
@@ -986,7 +986,7 @@ async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[d
         ws=str(workspace_id),
         id=str(media_id),
     )
-    return _archive_row(row) if row is not None else None
+    return _past_posts_row(row) if row is not None else None
 
 
 async def thumbnail_link(
@@ -1105,7 +1105,7 @@ async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional
         ws=str(workspace_id),
         id=str(intent_id),
     )
-    return _archive_row(row) if row is not None else None
+    return _past_posts_row(row) if row is not None else None
 
 
 async def rename(executor, *, workspace_id: str, name: str) -> str:

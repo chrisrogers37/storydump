@@ -11,19 +11,21 @@ from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.conftest import async_url, as_user, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 
 
 async def test_old_generation_deletion_and_policy_exclusions_do_not_block_read(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src = await admission.ready(archive_engine, origin)
-    fresh = await foundation.ensure(archive_engine, origin, foundation.authorization())
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    fresh = await foundation.ensure(
+        past_posts_engine, origin, foundation.authorization()
+    )
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
-                "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:gid"
+                "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending' WHERE id=:gid"
             ),
             dict(gid=src["generation_id"]),
         )
@@ -33,16 +35,16 @@ async def test_old_generation_deletion_and_policy_exclusions_do_not_block_read(
             ),
             dict(sid=src["source_id"]),
         )
-    c = await admission.capture(archive_engine, origin, src)
+    c = await admission.capture(past_posts_engine, origin, src)
     assert c.generation_id == fresh["generation_id"]
 
 
 async def test_expiry_uses_wall_time_even_in_existing_transaction(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src = await admission.ready(archive_engine, origin)
-    c = await admission.capture(archive_engine, origin, src)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    c = await admission.capture(past_posts_engine, origin, src)
+    async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE oauth_credentials SET expires_at=clock_timestamp()+interval '0.05 seconds' WHERE id=:id"
@@ -59,11 +61,11 @@ async def test_expiry_uses_wall_time_even_in_existing_transaction(
 
 
 async def test_invoker_is_tenant_bound_and_door_metadata_grants_are_minimal(
-    archive_engine, origin, sync_conn
+    past_posts_engine, origin, sync_conn
 ):
-    src = await admission.ready(archive_engine, origin)
+    src = await admission.ready(past_posts_engine, origin)
     other = seed_workspace_chain(sync_conn, "read-foreign")
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         own = (
             (
                 await conn.execute(
@@ -91,7 +93,7 @@ async def test_invoker_is_tenant_bound_and_door_metadata_grants_are_minimal(
                 (
                     await conn.execute(
                         text(
-                            "SELECT has_column_privilege(:role,'oauth_credentials','encrypted_payload','SELECT') AS secret,has_column_privilege(:role,'oauth_credentials','encrypted_payload','UPDATE') AS token_write,has_column_privilege(:role,'instagram_archive_generations','lifecycle','UPDATE') AS lifecycle_write"
+                            "SELECT has_column_privilege(:role,'oauth_credentials','encrypted_payload','SELECT') AS secret,has_column_privilege(:role,'oauth_credentials','encrypted_payload','UPDATE') AS token_write,has_column_privilege(:role,'instagram_past_posts_generations','lifecycle','UPDATE') AS lifecycle_write"
                         ),
                         dict(role=role),
                     )
@@ -110,10 +112,10 @@ async def test_invoker_is_tenant_bound_and_door_metadata_grants_are_minimal(
 
 
 async def test_claim_waits_for_workspace_before_holding_job_row(
-    world_db, archive_engine, origin
+    world_db, past_posts_engine, origin
 ):
     assert "capability" in __import__("inspect").signature(jobs.claim_job).parameters
-    async with obs.uow(archive_engine, origin) as conn:
+    async with obs.uow(past_posts_engine, origin) as conn:
         jid = await jobs.enqueue(
             conn,
             kind="sync_media_source",
@@ -133,7 +135,7 @@ async def test_claim_waits_for_workspace_before_holding_job_row(
 
     task = None
     try:
-        async with obs.uow(archive_engine, origin) as blocker:
+        async with obs.uow(past_posts_engine, origin) as blocker:
             await blocker.execute(
                 text("SELECT id FROM workspaces WHERE id=:ws FOR UPDATE"),
                 dict(ws=str(origin["ws"])),
@@ -142,7 +144,7 @@ async def test_claim_waits_for_workspace_before_holding_job_row(
             await started.wait()
             await asyncio.sleep(0.1)
             assert not task.done()
-            async with obs.uow(archive_engine, origin) as checker:
+            async with obs.uow(past_posts_engine, origin) as checker:
                 # This would fail if the outer claim took the job first.
                 assert (
                     await checker.execute(
@@ -161,16 +163,16 @@ async def test_claim_waits_for_workspace_before_holding_job_row(
 
 @pytest.mark.parametrize("off", [False, True])
 async def test_reaper_refuses_off_capture_and_never_rearms_it(
-    world_db, archive_engine, origin, sync_conn, off
+    world_db, past_posts_engine, origin, sync_conn, off
 ):
     with sync_conn.cursor() as cur:
         cur.execute(
             "SELECT to_regprocedure('fn_reaper_sweep(integer,interval,interval,boolean)') IS NOT NULL"
         )
         assert cur.fetchone()[0], "source-aware reaper missing"
-    src = await admission.ready(archive_engine, origin)
-    c = await admission.capture(archive_engine, origin, src)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    c = await admission.capture(past_posts_engine, origin, src)
+    async with obs.uow(past_posts_engine, origin) as conn:
         jid = await jobs.enqueue(
             conn,
             kind="sync_media_source",
@@ -214,14 +216,16 @@ async def test_reaper_refuses_off_capture_and_never_rearms_it(
         await engine.dispose()
 
 
-async def test_exhausted_rearm_requires_capture_and_current_on(archive_engine, origin):
+async def test_exhausted_rearm_requires_capture_and_current_on(
+    past_posts_engine, origin
+):
     assert (
         "capability"
         in __import__("inspect").signature(work_loop._rearm_source).parameters
     ), "source-aware exhausted rearm missing"
-    src = await admission.ready(archive_engine, origin)
-    c = await admission.capture(archive_engine, origin, src)
-    async with obs.uow(archive_engine, origin) as conn:
+    src = await admission.ready(past_posts_engine, origin)
+    c = await admission.capture(past_posts_engine, origin, src)
+    async with obs.uow(past_posts_engine, origin) as conn:
         jid = await jobs.enqueue(
             conn,
             kind="sync_media_source",
@@ -257,7 +261,7 @@ async def test_exhausted_rearm_requires_capture_and_current_on(archive_engine, o
 
 @pytest.mark.parametrize("door", ["clock", "reaper"])
 async def test_outer_discovery_scope_stays_frozen_across_lock_wait(
-    world_db, archive_engine, origin, sync_conn, door
+    world_db, past_posts_engine, origin, sync_conn, door
 ):
     """A newly due tenant waits for the next turn; no prefix is acquired late."""
     from src.services.target.unit_of_work import unit_of_work
@@ -314,7 +318,7 @@ async def test_outer_discovery_scope_stays_frozen_across_lock_wait(
     task = None
     try:
         async with unit_of_work(
-            archive_engine, str(second["ws"]), actor_kind="system"
+            past_posts_engine, str(second["ws"]), actor_kind="system"
         ).begin() as blocker:
             await blocker.execute(
                 text("SELECT id FROM workspaces WHERE id=:ws FOR UPDATE"),

@@ -252,17 +252,14 @@ def env_names_the_tree_reads() -> set[str]:
     """Every environment variable the code reads OUTSIDE `Settings`: the
     `environ.get("X")` / `env.get("X")` / `getenv("X")` / `environ["X"]`
     calls, the `*_VAR = "X"` / `*_ENV = "X"` constants the Telegram
-    registration, the worker and the vocabulary read through, the conversion
-    record's RECORD_PATH constant consumed by both composition roots, and every
-    `TARGET_*` name spelled as a literal (the worker's lane knobs live in a
-    dict of names)."""
+    registration, the worker, the past-posts source and the vocabulary read through, and
+    every `TARGET_*` name spelled as a literal (the worker's lane knobs live in
+    a dict of names)."""
     text = _code_text()
     names = set(re.findall(r"(?:environ|env)\.get\(\s*\"([A-Z][A-Z0-9_]*)\"", text))
     names |= set(re.findall(r"getenv\(\s*\"([A-Z][A-Z0-9_]*)\"", text))
     names |= set(re.findall(r"environ\[\s*\"([A-Z][A-Z0-9_]*)\"\s*\]", text))
-    names |= set(
-        re.findall(r"(?:_(?:VAR|ENV)|\bRECORD_PATH)\s*=\s*\"([A-Z][A-Z0-9_]*)\"", text)
-    )
+    names |= set(re.findall(r"_(?:VAR|ENV)\s*=\s*\"([A-Z][A-Z0-9_]*)\"", text))
     names |= set(re.findall(r"\"(TARGET_[A-Z0-9_]+)\"", text))
     return names
 
@@ -460,11 +457,9 @@ def _assignments(text: str) -> set[str]:
 #: run-time read is a visible line in a diff, and a name that stops being read
 #: is one too.
 ENV_READ_OUTSIDE_SETTINGS = {
-    "SOURCE_MIX_CONVERSION_RECORD",
-    # the Instagram archive's activation record and key ring (both default off;
-    # `src/services/target/archive_activation.py`)
-    "INSTAGRAM_ARCHIVE_ACTIVATION_RECORD",
-    "ARCHIVE_HMAC_KEYS",
+    # the Instagram past-posts source's key ring, which arms it wherever it loads
+    # (`src/services/target/past_posts_activation.py`)
+    "PAST_POSTS_HMAC_KEYS",
     # the deployed roots' database, and the runner's and the schema builder's
     "TARGET_DATABASE_URL",
     "DATABASE_URL",

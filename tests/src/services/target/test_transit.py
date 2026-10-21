@@ -24,15 +24,15 @@ import cloudinary.exceptions
 import pytest
 
 from src.services.target.transit import (
-    ArchiveUploadEvidence,
-    ArchiveUploadUncertain,
+    PastPostsUploadEvidence,
+    PastPostsUploadUncertain,
     TransitDestroyRefused,
     TransitStore,
 )
 
 WS = "0b6ad24e-6b3e-4a86-9e6b-1a2b3c4d5e6f"  # a real UUID — folder scoping is validated
 NOW = datetime(2026, 8, 19, 22, 0, 0, tzinfo=timezone.utc)
-#: An archive reference — the one canonical shape the upload sends and the
+#: A past-posts reference — the one canonical shape the upload sends and the
 #: database admits — and the version the provider gave its asset.
 REF = f"ws/{WS}/" + "a" * 32
 VERSION = 1719304173
@@ -160,7 +160,7 @@ class TestConstruction:
         self,
     ):
         """Each default binds on its own: a store whose other four SDK
-        callables are injected (as the archive upload's tests build one) still
+        callables are injected (as the past-posts upload's tests build one) still
         holds the real `cloudinary.api.resource`, not None.
         Mutation that reddens: leave `resource_fn` out of the condition that
         binds the defaults."""
@@ -365,7 +365,7 @@ class TestDestroy:
         )
 
 
-# -- the archive reference's typed cleanup doors (#1644) -------------------------
+# -- the past-posts reference's typed cleanup doors (#1644) -------------------------
 
 
 @pytest.fixture
@@ -426,7 +426,7 @@ def _v1_signature(public_id: str, version: int, secret: str) -> str:
     ).hexdigest()
 
 
-#: References no archive upload can have created: path syntax, another shape, a
+#: References no past-posts upload can have created: path syntax, another shape, a
 #: spelling the upload would not send, not a string at all.
 _HOSTILE_REFS = [
     f"ws/{WS}/../ws/{WS}/" + "a" * 32,
@@ -470,7 +470,7 @@ def _is_the_same_error(raised: Exception, scripted: Exception) -> bool:
 
 
 @pytest.mark.usefixtures("no_network")
-class TestDestroyArchive:
+class TestDestroyPastPosts:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("kind", ["image", "video"])
     async def test_ok_is_destroyed_through_the_one_authenticated_invalidating_call(
@@ -485,7 +485,7 @@ class TestDestroyArchive:
         credentials from the call; map `ok` to 'not_found'; read the asset's
         details as well."""
         sdk = RecordingSdk()
-        answer = await _store(sdk).destroy_archive(REF, resource_type=kind)
+        answer = await _store(sdk).destroy_past_posts(REF, resource_type=kind)
         assert answer == "destroyed"
         assert sdk.destroy_calls == [
             {
@@ -513,7 +513,7 @@ class TestDestroyArchive:
         Mutations that redden: map `not found` to 'destroyed'; call again on
         `not found`."""
         sdk = RecordingSdk(destroy_result={"result": "not found"})
-        answer = await _store(sdk).destroy_archive(REF, resource_type="image")
+        answer = await _store(sdk).destroy_past_posts(REF, resource_type="image")
         assert answer == "not_found"
         assert len(sdk.destroy_calls) == 1
 
@@ -545,7 +545,7 @@ class TestDestroyArchive:
         mapping guard; raise a different type."""
         store = _store(RecordingSdk(), destroy_fn=lambda *args, **kwargs: answer)
         with pytest.raises(TransitDestroyRefused) as caught:
-            await store.destroy_archive(REF, resource_type="image")
+            await store.destroy_past_posts(REF, resource_type="image")
         assert REF in str(caught.value)
 
     @pytest.mark.asyncio
@@ -557,7 +557,7 @@ class TestDestroyArchive:
             RecordingSdk(), destroy_fn=lambda *a, **k: {"result": "private words"}
         )
         with pytest.raises(TransitDestroyRefused) as caught:
-            await store.destroy_archive(REF, resource_type="image")
+            await store.destroy_past_posts(REF, resource_type="image")
         assert "private words" not in str(caught.value)
 
     @pytest.mark.asyncio
@@ -576,19 +576,19 @@ class TestDestroyArchive:
 
         store = _store(RecordingSdk(), destroy_fn=boom)
         with pytest.raises(type(error)) as caught:
-            await store.destroy_archive(REF, resource_type="image")
+            await store.destroy_past_posts(REF, resource_type="image")
         assert _is_the_same_error(caught.value, error)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("public_id", _HOSTILE_REFS, ids=repr)
-    async def test_a_reference_no_archive_upload_made_is_refused_before_any_call(
+    async def test_a_reference_no_past_posts_upload_made_is_refused_before_any_call(
         self, public_id
     ):
         """A reference outside `ws/{uuid}/{hex}` never reaches the provider.
         Mutation that reddens: drop the reference guard."""
         sdk = RecordingSdk()
-        with pytest.raises(ValueError, match="archive reference"):
-            await _store(sdk).destroy_archive(public_id, resource_type="image")
+        with pytest.raises(ValueError, match="past-posts reference"):
+            await _store(sdk).destroy_past_posts(public_id, resource_type="image")
         assert sdk.destroy_calls == []
 
     @pytest.mark.asyncio
@@ -601,12 +601,12 @@ class TestDestroyArchive:
         Mutation that reddens: drop the resource_type guard."""
         sdk = RecordingSdk()
         with pytest.raises(ValueError, match="resource_type"):
-            await _store(sdk).destroy_archive(REF, resource_type=resource_type)
+            await _store(sdk).destroy_past_posts(REF, resource_type=resource_type)
         assert sdk.destroy_calls == []
 
 
 @pytest.mark.usefixtures("no_network")
-class TestArchiveLookup:
+class TestPastPostsLookup:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("secret", ["test-secret", "another-secret"])
     @pytest.mark.parametrize("kind", ["image", "video"])
@@ -622,11 +622,11 @@ class TestArchiveLookup:
         another version; build the version or the asset id from another
         field; hard-code the resource_type; change the delivery type."""
         sdk = RecordingSdk(resource_result=_admin_resource(kind))
-        evidence = await _store(sdk, api_secret=secret).archive_lookup(
+        evidence = await _store(sdk, api_secret=secret).past_posts_lookup(
             REF, resource_type=kind
         )
-        assert type(evidence) is ArchiveUploadEvidence
-        assert evidence == ArchiveUploadEvidence(
+        assert type(evidence) is PastPostsUploadEvidence
+        assert evidence == PastPostsUploadEvidence(
             public_id=REF,
             asset_id="b" * 32,
             version=VERSION,
@@ -644,7 +644,7 @@ class TestArchiveLookup:
         Mutations that redden: drop type, the bound or the credentials; read
         through the listing door; destroy what it found."""
         sdk = RecordingSdk(resource_result=_admin_resource("video"))
-        await _store(sdk).archive_lookup(REF, resource_type="video")
+        await _store(sdk).past_posts_lookup(REF, resource_type="video")
         assert sdk.resource_calls == [
             {
                 "public_id": REF,
@@ -673,10 +673,12 @@ class TestArchiveLookup:
                 f"Error 404 - Resource not found - {REF}"
             )
         )
-        assert await _store(gone).archive_lookup(REF, resource_type="image") is None
+        assert await _store(gone).past_posts_lookup(REF, resource_type="image") is None
         assert len(gone.resource_calls) == 1
         here = RecordingSdk(resource_result=_admin_resource("image"))
-        assert await _store(here).archive_lookup(REF, resource_type="image") is not None
+        assert (
+            await _store(here).past_posts_lookup(REF, resource_type="image") is not None
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -700,7 +702,7 @@ class TestArchiveLookup:
 
         store = _store(RecordingSdk(), resource_fn=boom)
         with pytest.raises(type(error)) as caught:
-            await store.archive_lookup(REF, resource_type="image")
+            await store.past_posts_lookup(REF, resource_type="image")
         assert _is_the_same_error(caught.value, error)
 
     @pytest.mark.asyncio
@@ -741,21 +743,21 @@ class TestArchiveLookup:
     ):
         """A 200 that is not the asked asset, not authenticated, or carries no
         usable asset id or version is neither absence nor evidence: it raises
-        ArchiveUploadUncertain, never None and never evidence built from it.
+        PastPostsUploadUncertain, never None and never evidence built from it.
         Mutations that redden: drop any one of the identity checks (public id,
         resource_type, delivery type, asset id shape, version type, version
         range)."""
         sdk = RecordingSdk(resource_result=_admin_resource("image", **change))
-        with pytest.raises(ArchiveUploadUncertain):
-            await _store(sdk).archive_lookup(REF, resource_type="image")
+        with pytest.raises(PastPostsUploadUncertain):
+            await _store(sdk).past_posts_lookup(REF, resource_type="image")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("answer", [None, [], "found", 7], ids=repr)
     async def test_an_answer_that_is_not_a_mapping_is_uncertain(self, answer):
         """Mutation that reddens: read the answer without the mapping guard."""
         store = _store(RecordingSdk(), resource_fn=lambda *args, **kwargs: answer)
-        with pytest.raises(ArchiveUploadUncertain):
-            await store.archive_lookup(REF, resource_type="image")
+        with pytest.raises(PastPostsUploadUncertain):
+            await store.past_posts_lookup(REF, resource_type="image")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -774,7 +776,7 @@ class TestArchiveLookup:
         Mutation that reddens: tighten the version range or the asset id
         length."""
         sdk = RecordingSdk(resource_result=_admin_resource("image", **changes))
-        evidence = await _store(sdk).archive_lookup(REF, resource_type="image")
+        evidence = await _store(sdk).past_posts_lookup(REF, resource_type="image")
         assert evidence is not None
         assert (evidence.version, evidence.asset_id) == (
             changes.get("version", VERSION),
@@ -783,15 +785,15 @@ class TestArchiveLookup:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("public_id", _HOSTILE_REFS, ids=repr)
-    async def test_a_reference_no_archive_upload_made_is_refused_before_any_call(
+    async def test_a_reference_no_past_posts_upload_made_is_refused_before_any_call(
         self, public_id
     ):
         """The Admin API puts the public id in the request path, so a
         reference carrying path syntax would name another endpoint.
         Mutation that reddens: drop the reference guard."""
         sdk = RecordingSdk(resource_result=_admin_resource("image"))
-        with pytest.raises(ValueError, match="archive reference"):
-            await _store(sdk).archive_lookup(public_id, resource_type="image")
+        with pytest.raises(ValueError, match="past-posts reference"):
+            await _store(sdk).past_posts_lookup(public_id, resource_type="image")
         assert sdk.resource_calls == []
 
     @pytest.mark.asyncio
@@ -802,7 +804,7 @@ class TestArchiveLookup:
         """Mutation that reddens: drop the resource_type guard."""
         sdk = RecordingSdk(resource_result=_admin_resource("image"))
         with pytest.raises(ValueError, match="resource_type"):
-            await _store(sdk).archive_lookup(REF, resource_type=resource_type)
+            await _store(sdk).past_posts_lookup(REF, resource_type=resource_type)
         assert sdk.resource_calls == []
 
 
@@ -846,7 +848,7 @@ def wire(monkeypatch):
 
 
 @pytest.mark.usefixtures("no_network")
-class TestArchiveLookupOnTheRealSdk:
+class TestPastPostsLookupOnTheRealSdk:
     """The DEFAULT `resource_fn` is the real `cloudinary.api.resource`; only its
     wire is scripted. What the SDK raises for a 404, what it sends and how it
     parses a found asset are the SDK's contract, pinned here against the
@@ -869,7 +871,7 @@ class TestArchiveLookupOnTheRealSdk:
         Mutations that redden: drop type; drop the bound; stop mapping NotFound
         to None."""
         wire.answer(404, {"error": {"message": f"Resource not found - {REF}"}})
-        assert await self._store().archive_lookup(REF, resource_type="image") is None
+        assert await self._store().past_posts_lookup(REF, resource_type="image") is None
         [sent] = wire.requests
         assert sent["method"] == "GET"
         assert sent["url"] == (
@@ -886,8 +888,8 @@ class TestArchiveLookupOnTheRealSdk:
         fields is evidence for the asked kind.
         Mutation that reddens: read the evidence from another answer field."""
         wire.answer(200, _admin_resource("video"))
-        evidence = await self._store().archive_lookup(REF, resource_type="video")
-        assert evidence == ArchiveUploadEvidence(
+        evidence = await self._store().past_posts_lookup(REF, resource_type="video")
+        assert evidence == PastPostsUploadEvidence(
             public_id=REF,
             asset_id="b" * 32,
             version=VERSION,
@@ -905,7 +907,7 @@ class TestArchiveLookupOnTheRealSdk:
         Mutation that reddens: catch Exception and answer None."""
         wire.answer(status, {"error": {"message": "provider words"}})
         with pytest.raises(Exception) as caught:
-            await self._store().archive_lookup(REF, resource_type="image")
+            await self._store().past_posts_lookup(REF, resource_type="image")
         assert not isinstance(caught.value, cloudinary.exceptions.NotFound)
 
     @pytest.mark.asyncio
@@ -914,7 +916,7 @@ class TestArchiveLookupOnTheRealSdk:
         Mutation that reddens: catch Exception and answer None."""
         wire.answer(200, b"<html>maintenance</html>")
         with pytest.raises(cloudinary.exceptions.GeneralError):
-            await self._store().archive_lookup(REF, resource_type="image")
+            await self._store().past_posts_lookup(REF, resource_type="image")
 
 
 def _aged(public_id: str, hours_old: float, now: datetime) -> dict:

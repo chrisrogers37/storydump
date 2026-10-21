@@ -10,7 +10,7 @@ import { isInstagramAuthorizationUrl } from "@/lib/destination";
  * here or on a new one. The per-destination sibling connects an existing row.
  *
  * The body is forwarded unchanged: `{}` is the empty start, and
- * `{"archive_choice": …}` carries the history choice the connect dialog made
+ * `{"past_posts_choice": …}` carries the history choice the connect dialog made
  * (#1644). The API refuses a choice by name; a stale one's 409 keeps
  * its revision on the way back.
  */

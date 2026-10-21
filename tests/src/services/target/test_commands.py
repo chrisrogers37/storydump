@@ -416,16 +416,16 @@ class TestDisableAccountIsInThePort:
     like every other destination act, with an executor."""
 
     @pytest.fixture(autouse=True)
-    def no_archive(self, monkeypatch):
-        """The archive half takes the source prefix on a real transaction; its
+    def no_past_posts(self, monkeypatch):
+        """The past-posts half takes the source prefix on a real transaction; its
         truth is the lifecycle gate's. Here the destination's half is pinned."""
-        from src.services.target import archive_lifecycle
+        from src.services.target import past_posts_lifecycle
 
-        async def remove_account_archive(session, *, workspace_id, ig_account_id):
+        async def remove_account_past_posts(session, *, workspace_id, ig_account_id):
             return None
 
         monkeypatch.setattr(
-            archive_lifecycle, "remove_account_archive", remove_account_archive
+            past_posts_lifecycle, "remove_account_past_posts", remove_account_past_posts
         )
 
     def test_named_at_the_admin_floor_with_an_executor(self):

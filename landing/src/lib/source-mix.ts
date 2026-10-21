@@ -24,9 +24,9 @@ export type MixMode = "equal" | "custom";
 
 export type SourceMixRow = {
   sourceId: string;
-  /** `instagram_archive`, `gdrive`, or a provider this page has no words for. */
+  /** `instagram_past_posts`, `gdrive`, or a provider this page has no words for. */
   provider: string;
-  /** The folder name for Drive. An Instagram row is titled "Your Instagram". */
+  /** The folder name for Drive. An Instagram row is titled "Instagram past posts". */
   name: string;
   state: string;
   enabled: boolean;
@@ -45,7 +45,7 @@ export type SourceMixRow = {
 /**
  * One source as one destination sees it: read-only.
  *
- * The four progress flags and `oldestObservedAt` are an archive's own facts
+ * The four progress flags and `oldestObservedAt` are a past-posts source's own facts
  * (`instagram_sync.status`), sent beside every destination's entry for it, and
  * stay what the API sent: a flag it did not send, or sent as anything but a
  * boolean, is null and says nothing, never false. A Drive folder has none.
@@ -58,7 +58,7 @@ export type DestinationSourceView = {
   candidates: number | null;
   /** This account's effective share, as sent. */
   effectiveShare: string | null;
-  /** The archive is still working through its history. */
+  /** The past-posts source is still working through its history. */
   indexing: boolean | null;
   /** Not every past post is indexed yet. */
   partialCoverage: boolean | null;
@@ -88,8 +88,8 @@ export type SourceMix = {
   destinations: MixDestination[];
   /** `reset_explanation` on a mutation's answer; null on a read. */
   resetExplanation: string | null;
-  /** Whether past posts can be used here at all (`archive_available`). */
-  archiveAvailable: boolean;
+  /** Whether past posts can be used here at all (`past_posts_available`). */
+  pastPostsAvailable: boolean;
 };
 
 // ── Reading the resource ────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ export function parseSourceMix(data: unknown): SourceMix | null {
     }),
     resetExplanation:
       typeof data.reset_explanation === "string" ? data.reset_explanation : null,
-    archiveAvailable: data.archive_available === true,
+    pastPostsAvailable: data.past_posts_available === true,
   };
 }
 
@@ -305,17 +305,17 @@ export function targetLabel(row: Pick<SourceMixRow, "enabled">, percent: number)
 // ── Labels and copy ─────────────────────────────────────────────────────────
 
 const PROVIDER_LABEL: Record<string, string> = {
-  instagram_archive: "Instagram",
+  instagram_past_posts: "Instagram",
   gdrive: "Google Drive",
 };
 
 export function isInstagram(row: Pick<SourceMixRow, "provider">): boolean {
-  return row.provider === "instagram_archive";
+  return row.provider === "instagram_past_posts";
 }
 
-/** The row's title: "Your Instagram", or the folder's name. */
+/** The row's title: "Instagram past posts", or the folder's name. */
 export function sourceTitle(row: SourceMixRow): string {
-  if (isInstagram(row)) return "Your Instagram";
+  if (isInstagram(row)) return "Instagram past posts";
   return row.name.trim() || "Unnamed source";
 }
 
@@ -329,13 +329,13 @@ export function sourceSubtitle(row: SourceMixRow): string {
 /** What a control on this row is called: the title AND the handle or provider. */
 export function sourceAccessibleName(row: SourceMixRow): string {
   if (isInstagram(row)) {
-    return row.originHandle ? `Your Instagram @${row.originHandle}` : "Your Instagram";
+    return row.originHandle ? `Instagram past posts @${row.originHandle}` : "Instagram past posts";
   }
   return `${sourceTitle(row)} (${PROVIDER_LABEL[row.provider] ?? row.provider})`;
 }
 
 /**
- * The sources that are on, each with its share, as one line: "Your Instagram
+ * The sources that are on, each with its share, as one line: "Instagram past posts
  * @handle 50%, Trips (Google Drive) 50%". Null when none is on. The shares are
  * the mix's own, as sent, so this says an applied mix and a previewed one alike.
  */
@@ -356,7 +356,7 @@ export function enabledSharesLine(mix: Pick<SourceMix, "rows">): string | null {
  */
 export function offCopy(provider: string): string {
   switch (provider) {
-    case "instagram_archive":
+    case "instagram_past_posts":
       return "Stops indexing and selecting past posts; indexed metadata stays until deletion.";
     case "gdrive":
       return "Stops selecting this folder; syncing continues.";
@@ -442,9 +442,9 @@ function trimmedShare(share: string): string {
  * shares.
  *
  * An account's scope is the sources the API says can serve it (`assignable`).
- * A Drive folder serves every account and an archive only its own, so a
+ * A Drive folder serves every account and a past-posts source only its own, so a
  * workspace of Drive folders alone has one mix whoever is looking, and needs no
- * selector; one whose archive serves one account and not another does. A source
+ * selector; one whose past-posts source serves one account and not another does. A source
  * the API did not say is assignable is not counted as serving.
  *
  * The same scope can still draw differently. Each account's shares renormalize

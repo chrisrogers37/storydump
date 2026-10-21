@@ -15,7 +15,7 @@ const DRIVE = "33333333-3333-4333-8333-333333333333";
 
 /** `connect_choice.preview`, whole: the route must not drop or reshape a key. */
 const PREVIEW = {
-  archive_available: true,
+  past_posts_available: true,
   entry: "first_connect",
   account_id: ACCOUNT,
   handle: "example_handle",
@@ -26,7 +26,7 @@ const PREVIEW = {
     applies: true,
     mode_after: "equal",
     rows_after: [
-      { source_id: null, provider: "instagram_archive", name: "example_handle", target_share: "0.5" },
+      { source_id: null, provider: "instagram_past_posts", name: "example_handle", target_share: "0.5" },
       { source_id: DRIVE, provider: "gdrive", name: "Event photos", target_share: "0.5" },
     ],
   },

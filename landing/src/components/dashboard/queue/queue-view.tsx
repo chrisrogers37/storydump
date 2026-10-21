@@ -18,7 +18,7 @@ import { ItemLink } from "@/components/dashboard/item-link";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
 import { RescheduleDialog } from "@/components/dashboard/queue/reschedule-dialog";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
-import { archiveProvenance, provenanceLabel, withArchiveName } from "@/lib/archive-media";
+import { pastPostsProvenance, provenanceLabel, withPastPostsName } from "@/lib/past-posts-media";
 import type { RescheduleChange } from "@/lib/command-client";
 import {
   ACTION_LABELS,
@@ -233,15 +233,15 @@ export function QueueView({
   return (
     <div className="space-y-3">
       <ul className="divide-y rounded-lg border bg-card">
-        {/* An archive item goes by its own name; the API sends it, and this is the
+        {/* A past-posts item goes by its own name; the API sends it, and this is the
             guard for a row that arrives without it. */}
-        {intents.map(withArchiveName).map((intent) => {
+        {intents.map(withPastPostsName).map((intent) => {
           const actions = actionsOf(intent);
           const note = noteFor(intent);
           const byline = approvedBy(intent);
           // The rule's words, once for the row: its badge and its questions.
           const repeats = intent.repeat ? describeRepeat(intent.repeat) : null;
-          const origin = archiveProvenance(intent);
+          const origin = pastPostsProvenance(intent);
           return (
             <li
               key={intent.id}

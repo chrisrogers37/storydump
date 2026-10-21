@@ -74,7 +74,7 @@ def test_build_targets_public_and_restores_the_callers_search_path(
                 == 0
             )
         report = adopt(owner, MIGRATIONS_DIR, MIGRATIONS_DIR / "adoption_manifest.json")
-        assert [migration.version for migration in report.adopted] == [0, 1, 2]
+        assert [migration.version for migration in report.adopted] == [0, 1, 2, 3]
         assert apply_pending(owner, MIGRATIONS_DIR).applied == []
         assert main(["init", "--database-url", owner]) == 0
     finally:

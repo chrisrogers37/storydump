@@ -5,7 +5,7 @@ The mix resource lists every destination with its readiness
 and remedy it answers instead of deriving its own. The facts all come
 from the database: the
 destination's account and its own `ig_login` grant, each source's enablement
-and whether its scope admits this destination, each archive's progress
+and whether its scope admits this destination, each past-posts source's progress
 facts (`instagram_sync.status`), and the candidates and exclusions
 `category_mix.pool` counts for this destination. This module only orders those
 facts. Nothing here reads, writes or judges suitability, which stays
@@ -40,15 +40,15 @@ class SourceFacts:
     #: Its ratio is above 0. Off is an explicit 0.
     enabled: bool
     #: Its scope admits this destination: a Drive folder is workspace-wide;
-    #: an archive serves only its origin, through an active self-assignment.
+    #: a past-posts source serves only its origin, through an active self-assignment.
     assignable: bool
     #: `media_sources.state`: `active`, `paused` or `error`.
     state: str = "active"
-    #: An archive whose origin is this destination.
+    #: A past-posts source whose origin is this destination.
     origin_here: bool = False
     #: This destination's candidate exclusions in the source, `{reason: count}`.
     exclusions: Mapping[str, int] = field(default_factory=dict)
-    #: An archive's progress facts (`instagram_sync.status`), never a Drive's.
+    #: A past-posts source's progress facts (`instagram_sync.status`), never a Drive's.
     indexing: bool = False
     partial: bool = False
     stalled: bool = False
@@ -107,12 +107,12 @@ def leading_exclusion(facts: DestinationFacts) -> Optional[dict]:
 
 
 def partial_coverage(facts: DestinationFacts) -> bool:
-    """An archive this destination draws on has partial coverage. A separate
+    """A past-posts source this destination draws on has partial coverage. A separate
     fact from the state, and compatible with `ready`."""
     return any(
         source.partial
         for source in facts.sources
-        if source.drawing and source.provider == "instagram_archive"
+        if source.drawing and source.provider == "instagram_past_posts"
     )
 
 
@@ -137,20 +137,20 @@ def _state(facts: DestinationFacts) -> str:
         return "no_assignable_source"
     if facts.candidates > 0:
         return "ready"
-    archives = [s for s in drawing if s.provider == "instagram_archive"]
-    # Only an archive's origin grant can be the block here: a usable Drive
+    past_posts_sources = [s for s in drawing if s.provider == "instagram_past_posts"]
+    # Only a past-posts source's origin grant can be the block here: a usable Drive
     # folder (not in `error`) means the destination is waiting on content.
     if (
-        archives
-        and all(archive.needs_reconnect for archive in archives)
+        past_posts_sources
+        and all(past_posts.needs_reconnect for past_posts in past_posts_sources)
         and not any(s.provider == "gdrive" and s.state != "error" for s in drawing)
     ):
         return "needs_reconnect"
-    if any(archive.stalled for archive in archives):
+    if any(past_posts.stalled for past_posts in past_posts_sources):
         return "stalled"
     if any(source.state == "error" for source in drawing):
         return "error"
-    if any(archive.indexing for archive in archives):
+    if any(past_posts.indexing for past_posts in past_posts_sources):
         return "indexing"
     return "zero_eligible"
 
@@ -162,7 +162,7 @@ def _remedy(state: str, facts: DestinationFacts) -> Optional[str]:
         return "reconnect"
     if state == "no_assignable_source":
         history_off = any(
-            source.provider == "instagram_archive"
+            source.provider == "instagram_past_posts"
             and source.origin_here
             and not source.enabled
             for source in facts.sources

@@ -23,12 +23,12 @@ def drive(**kw):
     return dr.SourceFacts(provider="gdrive", assignable=True, **kw)
 
 
-def archive(**kw):
-    """An archive whose origin is this destination unless told otherwise."""
+def past_posts(**kw):
+    """A past-posts source whose origin is this destination unless told otherwise."""
     kw.setdefault("enabled", True)
     kw.setdefault("assignable", True)
     kw.setdefault("origin_here", kw["assignable"])
-    return dr.SourceFacts(provider="instagram_archive", **kw)
+    return dr.SourceFacts(provider="instagram_past_posts", **kw)
 
 
 def destination(*sources, candidates=0, **kw):
@@ -70,7 +70,7 @@ class TestTheStateTableInOrder:
         ],
     )
     def test_3_an_unusable_own_grant_needs_reconnect_before_sources(self, kw):
-        for sources in ([drive(), archive()], [drive(enabled=False)]):
+        for sources in ([drive(), past_posts()], [drive(enabled=False)]):
             facts = destination(*sources, **READY, **kw)
             assert dr.readiness(facts) == ("needs_reconnect", "attention", "reconnect")
 
@@ -79,13 +79,13 @@ class TestTheStateTableInOrder:
         assert dr.readiness(destination(drive(), **READY))[0] == "ready"
 
     def test_4_every_source_off_is_sources_off_even_if_this_one_owns_one(self):
-        facts = destination(drive(enabled=False), archive(enabled=False), **READY)
+        facts = destination(drive(enabled=False), past_posts(enabled=False), **READY)
         assert dr.readiness(facts) == ("sources_off", "inert", None)
 
     def test_5_one_source_on_elsewhere_is_not_sources_off(self):
-        # Another origin's archive is on: the mix is not all Off, but nothing
+        # Another origin's past-posts source is on: the mix is not all Off, but nothing
         # this destination may draw on is.
-        other = archive(assignable=False, enabled=True)
+        other = past_posts(assignable=False, enabled=True)
         facts = destination(other, drive(enabled=False))
         assert dr.readiness(facts) == (
             "no_assignable_source",
@@ -101,7 +101,7 @@ class TestTheStateTableInOrder:
         )
 
     def test_5_its_own_history_off_is_the_remedy_when_it_has_one(self):
-        facts = destination(archive(assignable=False), archive(enabled=False))
+        facts = destination(past_posts(assignable=False), past_posts(enabled=False))
         assert dr.readiness(facts) == (
             "no_assignable_source",
             "attention",
@@ -111,7 +111,7 @@ class TestTheStateTableInOrder:
     def test_5_its_own_history_already_on_is_not_the_remedy(self):
         # Its origin is here and it is On, yet it does not serve this
         # destination: enabling it is no remedy, since it is enabled already.
-        already_on = archive(assignable=False, origin_here=True, enabled=True)
+        already_on = past_posts(assignable=False, origin_here=True, enabled=True)
         assert dr.readiness(destination(already_on)) == (
             "no_assignable_source",
             "attention",
@@ -119,16 +119,16 @@ class TestTheStateTableInOrder:
         )
         # Control: the same history Off, beside another origin's, is the one
         # to enable.
-        off = destination(archive(assignable=False), archive(enabled=False))
+        off = destination(past_posts(assignable=False), past_posts(enabled=False))
         assert dr.readiness(off)[2] == "enable_history"
 
     def test_5_an_off_history_of_another_origin_is_not_its_remedy(self):
-        mine_elsewhere = archive(enabled=False, assignable=False, origin_here=False)
-        facts = destination(archive(assignable=False), mine_elsewhere)
+        mine_elsewhere = past_posts(enabled=False, assignable=False, origin_here=False)
+        facts = destination(past_posts(assignable=False), mine_elsewhere)
         assert dr.readiness(facts)[2] == "add_source"
 
-    def test_6_candidates_make_it_ready_before_any_archive_trouble(self):
-        troubled = archive(stalled=True, indexing=True, needs_reconnect=True)
+    def test_6_candidates_make_it_ready_before_any_past_posts_trouble(self):
+        troubled = past_posts(stalled=True, indexing=True, needs_reconnect=True)
         facts = destination(troubled, drive(state="error"), **READY)
         assert dr.readiness(facts) == ("ready", "active", None)
 
@@ -141,61 +141,67 @@ class TestTheStateTableInOrder:
         )
         assert dr.readiness(destination(drive(), candidates=0))[0] == "zero_eligible"
 
-    def test_7_every_drawing_archive_needing_reconnect_with_no_usable_drive(self):
-        facts = destination(archive(needs_reconnect=True, stalled=True))
+    def test_7_every_drawing_past_posts_needing_reconnect_with_no_usable_drive(self):
+        facts = destination(past_posts(needs_reconnect=True, stalled=True))
         assert dr.readiness(facts) == ("needs_reconnect", "attention", "reconnect")
         # A Drive folder in error is not a usable one.
-        facts = destination(archive(needs_reconnect=True), drive(state="error"))
+        facts = destination(past_posts(needs_reconnect=True), drive(state="error"))
         assert dr.readiness(facts)[0] == "needs_reconnect"
 
     def test_7_a_usable_drive_means_it_waits_on_content_not_a_reconnect(self):
         for state in ("active", "paused"):
-            facts = destination(archive(needs_reconnect=True), drive(state=state))
+            facts = destination(past_posts(needs_reconnect=True), drive(state=state))
             assert dr.readiness(facts)[0] == "zero_eligible"
 
-    def test_7_one_healthy_archive_is_enough_to_skip_it(self):
-        facts = destination(archive(needs_reconnect=True), archive(indexing=True))
+    def test_7_one_healthy_past_posts_is_enough_to_skip_it(self):
+        facts = destination(past_posts(needs_reconnect=True), past_posts(indexing=True))
         assert dr.readiness(facts)[0] == "indexing"
 
-    def test_7_needs_an_archive_so_a_drive_in_error_is_an_error(self):
+    def test_7_needs_a_past_posts_so_a_drive_in_error_is_an_error(self):
         assert dr.readiness(destination(drive(state="error")))[0] == "error"
 
-    def test_8_a_stalled_archive_is_stalled_before_error_and_indexing(self):
-        facts = destination(archive(stalled=True, indexing=True), drive(state="error"))
+    def test_8_a_stalled_past_posts_is_stalled_before_error_and_indexing(self):
+        facts = destination(
+            past_posts(stalled=True, indexing=True), drive(state="error")
+        )
         assert dr.readiness(facts) == ("stalled", "problem", "retry")
 
-    def test_8_only_a_drawing_archive_counts_as_stalled(self):
-        off = archive(enabled=False, stalled=True)
+    def test_8_only_a_drawing_past_posts_counts_as_stalled(self):
+        off = past_posts(enabled=False, stalled=True)
         facts = destination(off, drive())
         assert dr.readiness(facts)[0] == "zero_eligible"
 
     def test_9_a_drawing_source_in_error_is_an_error_before_indexing(self):
-        facts = destination(archive(indexing=True), drive(state="error"))
+        facts = destination(past_posts(indexing=True), drive(state="error"))
         assert dr.readiness(facts) == ("error", "problem", "retry")
-        # An archive in error also needs a reconnect (`instagram_sync.status`),
+        # A past-posts source in error also needs a reconnect (`instagram_sync.status`),
         # but a usable Drive folder keeps rule 7 from naming it.
-        facts = destination(archive(state="error", needs_reconnect=True), drive())
+        facts = destination(past_posts(state="error", needs_reconnect=True), drive())
         assert dr.readiness(facts)[0] == "error"
 
     def test_9_an_off_source_in_error_is_not_this_ones_error(self):
-        facts = destination(drive(state="error", enabled=False), archive(indexing=True))
+        facts = destination(
+            drive(state="error", enabled=False), past_posts(indexing=True)
+        )
         assert dr.readiness(facts)[0] == "indexing"
 
-    def test_10_an_archive_still_indexing_is_progress(self):
-        facts = destination(archive(indexing=True), drive())
+    def test_10_a_past_posts_still_indexing_is_progress(self):
+        facts = destination(past_posts(indexing=True), drive())
         assert dr.readiness(facts) == ("indexing", "progress", None)
 
-    def test_10_another_destinations_archive_indexing_is_not_this_ones_progress(self):
+    def test_10_another_destinations_past_posts_indexing_is_not_this_ones_progress(
+        self,
+    ):
         # Enabled and being indexed, but its origin is elsewhere: it does not
         # serve this destination, so this one is still waiting on content.
-        elsewhere = archive(assignable=False, indexing=True)
+        elsewhere = past_posts(assignable=False, indexing=True)
         assert dr.readiness(destination(elsewhere, drive()))[0] == "zero_eligible"
-        # Control: the same archive, serving this destination, is progress.
-        here = archive(assignable=True, indexing=True)
+        # Control: the same past-posts source, serving this destination, is progress.
+        here = past_posts(assignable=True, indexing=True)
         assert dr.readiness(destination(here, drive()))[0] == "indexing"
 
     def test_11_otherwise_zero_eligible(self):
-        assert dr.readiness(destination(archive(), drive())) == (
+        assert dr.readiness(destination(past_posts(), drive())) == (
             "zero_eligible",
             "attention",
             None,
@@ -205,18 +211,18 @@ class TestTheStateTableInOrder:
 class TestRemedies:
     @pytest.mark.parametrize("reason", POLICY_EXCLUSIONS)
     def test_a_leading_policy_exclusion_asks_to_review_the_policy(self, reason):
-        facts = destination(archive(exclusions={reason: 5, "locked": 2}))
+        facts = destination(past_posts(exclusions={reason: 5, "locked": 2}))
         assert dr.readiness(facts) == ("zero_eligible", "attention", "review_policy")
 
     @pytest.mark.parametrize(
         "exclusions", [{}, {"locked": 5, "too_recent": 2}, {"live_intent": 1}]
     )
     def test_a_leading_lock_or_nothing_names_no_remedy(self, exclusions):
-        facts = destination(archive(exclusions=exclusions))
+        facts = destination(past_posts(exclusions=exclusions))
         assert dr.readiness(facts) == ("zero_eligible", "attention", None)
 
     def test_an_excluded_source_it_does_not_draw_on_names_nothing(self):
-        other = archive(assignable=False, exclusions={"too_recent": 9})
+        other = past_posts(assignable=False, exclusions={"too_recent": 9})
         facts = destination(other, drive(exclusions={"locked": 1}))
         assert dr.readiness(facts)[2] is None
 
@@ -224,10 +230,10 @@ class TestRemedies:
         cases = [
             destination(drive(), handle_only=True),
             destination(drive(), account_state="reauth_required"),
-            destination(archive(assignable=False), archive(enabled=False)),
+            destination(past_posts(assignable=False), past_posts(enabled=False)),
             destination(),
-            destination(archive(exclusions={"too_recent": 1})),
-            destination(archive(stalled=True)),
+            destination(past_posts(exclusions={"too_recent": 1})),
+            destination(past_posts(stalled=True)),
         ]
         remedies = [dr.readiness(facts)[2] for facts in cases]
         assert remedies == list(READINESS_REMEDIES)
@@ -258,10 +264,10 @@ class TestTones:
                 destination(drive(enabled=False)),
                 destination(),
                 destination(drive(), **READY),
-                destination(archive(stalled=True)),
+                destination(past_posts(stalled=True)),
                 destination(drive(state="error")),
-                destination(archive(indexing=True)),
-                destination(archive()),
+                destination(past_posts(indexing=True)),
+                destination(past_posts()),
             )
         }
         assert {state for state, _, _ in reached} == set(READINESS_TONES)
@@ -270,16 +276,16 @@ class TestTones:
 
 class TestPartialCoverage:
     def test_it_is_a_separate_fact_compatible_with_ready(self):
-        facts = destination(archive(partial=True), **READY)
+        facts = destination(past_posts(partial=True), **READY)
         assert dr.readiness(facts)[0] == "ready" and dr.partial_coverage(facts)
 
-    def test_it_reads_only_archives_this_destination_draws_on(self):
-        assert not dr.partial_coverage(destination(archive(), **READY))
+    def test_it_reads_only_past_posts_this_destination_draws_on(self):
+        assert not dr.partial_coverage(destination(past_posts(), **READY))
         assert not dr.partial_coverage(
-            destination(archive(partial=True, enabled=False), drive(), **READY)
+            destination(past_posts(partial=True, enabled=False), drive(), **READY)
         )
         assert not dr.partial_coverage(
-            destination(archive(partial=True, assignable=False), drive(), **READY)
+            destination(past_posts(partial=True, assignable=False), drive(), **READY)
         )
         assert not dr.partial_coverage(destination(drive(partial=True), **READY))
 
@@ -287,9 +293,9 @@ class TestPartialCoverage:
 class TestLeadingExclusion:
     def test_the_largest_total_across_drawing_sources_leads(self):
         facts = destination(
-            archive(exclusions={"too_recent": 3, "locked": 2}),
+            past_posts(exclusions={"too_recent": 3, "locked": 2}),
             drive(exclusions={"locked": 2, "unavailable": 1}),
-            archive(assignable=False, exclusions={"too_recent": 50}),
+            past_posts(assignable=False, exclusions={"too_recent": 50}),
         )
         assert dr.leading_exclusion(facts) == {"reason": "locked", "count": 4}
 
@@ -298,7 +304,7 @@ class TestLeadingExclusion:
         assert dr.leading_exclusion(facts) == {"reason": "live_intent", "count": 2}
 
     def test_nothing_excluded_is_none(self):
-        assert dr.leading_exclusion(destination(drive(), archive())) is None
+        assert dr.leading_exclusion(destination(drive(), past_posts())) is None
         assert dr.leading_exclusion(destination()) is None
 
 

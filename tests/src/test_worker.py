@@ -799,8 +799,8 @@ class TestThePublishLegIsWired:
 class TestThePublishAdapterTakesTheSharedGraphVersion:
     """The application has one Graph version, `instagram_graph.graph_version`:
     `META_GRAPH_VERSION`, else the default. The publish adapter is built with
-    it here; the archive composition takes the same function's answer
-    (`test_archive_composition.py`)."""
+    it here; the past-posts composition takes the same function's answer
+    (`test_past_posts_composition.py`)."""
 
     @pytest.mark.parametrize("env", [{}, {"META_GRAPH_VERSION": ""}])
     def test_unset_or_blank_is_the_default(self, env):
@@ -818,13 +818,23 @@ class TestThePublishAdapterTakesTheSharedGraphVersion:
 def _a_conversion_record():
     from src.services.target.mix_conversion import MixConversionEvidence
 
-    return MixConversionEvidence("run-1", "d" * 64, "a" * 40, "b" * 40, ("c" * 40,))
+    return MixConversionEvidence("run-1", "d" * 64)
 
 
-class TestTheConversionRecordIsReadOnce:
-    """`main` reads the operator's conversion record once, for the archive
-    composition and for `compose` alike; `compose` reads it itself only when it
-    is handed none."""
+class TestTheConversionRunIsReadOnce:
+    """`main` reads the release's conversion run once and hands it to
+    `compose`, which reads it itself only when it is handed none. Every process
+    has one: there is no record to be missing."""
+
+    @pytest.mark.parametrize("release", ["b" * 40, None], ids=["deployed", "local"])
+    def test_the_worker_s_run_is_its_release_s(self, release):
+        import src.worker as worker
+        from src.services.target import mix_conversion
+
+        env = {} if release is None else {"RAILWAY_GIT_COMMIT_SHA": release}
+        run = worker._conversion_evidence(env)
+        assert run == mix_conversion.release_evidence(release)
+        assert isinstance(run, mix_conversion.MixConversionEvidence)
 
     def test_compose_reads_the_record_when_it_is_handed_none(self, monkeypatch):
         import src.worker as worker
@@ -852,7 +862,7 @@ class TestTheConversionRecordIsReadOnce:
         assert app.mix_conversion_evidence is record
         assert app.deps.mix_conversion_evidence is record
 
-    def test_main_hands_the_one_read_to_the_archive_and_to_compose(
+    def test_main_reads_the_run_once_and_hands_it_to_compose(
         self, ring_env, monkeypatch
     ):
         import src.worker as worker
@@ -861,7 +871,7 @@ class TestTheConversionRecordIsReadOnce:
         record, reads, handed = _a_conversion_record(), [], {}
 
         def build_worker(**kwargs):
-            handed["archive"] = kwargs
+            handed["past_posts"] = kwargs
 
         def fake_compose(**kwargs):
             handed["compose"] = kwargs
@@ -874,13 +884,13 @@ class TestTheConversionRecordIsReadOnce:
             worker, "_conversion_evidence", lambda env: reads.append(env) or record
         )
         monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
-        monkeypatch.setattr(worker.archive_composition, "build_worker", build_worker)
+        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
         monkeypatch.setattr(worker, "compose", fake_compose)
         monkeypatch.setattr(worker, "run", lambda app: app)
         monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
         worker.main()
         assert len(reads) == 1
-        assert handed["archive"]["conversion"] is record
+        assert "conversion" not in handed["past_posts"]
         assert handed["compose"]["conversion_evidence"] is record
 
 

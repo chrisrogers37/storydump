@@ -1,4 +1,4 @@
-"""Archive durable stage/permit ownership under real tenant roles."""
+"""Past-posts source durable stage/permit ownership under real tenant roles."""
 
 import asyncio
 import importlib.util
@@ -8,20 +8,23 @@ import pytest
 from sqlalchemy import text
 
 from src.services.target import jobs, provider_ops, publish_cap, source_policy
-from src.services.target.transit import ArchiveUploadEvidence, ArchiveUploadUncertain
+from src.services.target.transit import (
+    PastPostsUploadEvidence,
+    PastPostsUploadUncertain,
+)
 from src.services.target.unit_of_work import in_transaction
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_sources_gate as foundation
 
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 pytestmark = pytest.mark.integration
 
 
 def module():
     assert importlib.util.find_spec("src.services.target.instagram_publish"), (
-        "durable archive coordinator missing"
+        "durable past-posts coordinator missing"
     )
     from src.services.target import instagram_publish
 
@@ -49,8 +52,8 @@ class Transit:
         if self.hold is not None:
             await self.hold.wait()
         if self.uncertain:
-            raise ArchiveUploadUncertain("archive upload uncertain")
-        return ArchiveUploadEvidence(
+            raise PastPostsUploadUncertain("past-posts upload uncertain")
+        return PastPostsUploadEvidence(
             preallocated_ref, "a" * 32, 123, media_kind, "authenticated", "b" * 40
         )
 
@@ -98,7 +101,7 @@ async def ready(engine, chain):
             (
                 await conn.execute(
                     text(
-                        "INSERT INTO jobs(workspace_id,kind,lane,serialization_key,payload,state,lease_token,locked_by,locked_until,attempts,max_attempts) VALUES(:ws,'publish_pipeline','bulk',:key,CAST(:payload AS jsonb),'leased',:token,'archive-gate',clock_timestamp()+interval '5 minutes',1,5) RETURNING *"
+                        "INSERT INTO jobs(workspace_id,kind,lane,serialization_key,payload,state,lease_token,locked_by,locked_until,attempts,max_attempts) VALUES(:ws,'publish_pipeline','bulk',:key,CAST(:payload AS jsonb),'leased',:token,'past-posts-gate',clock_timestamp()+interval '5 minutes',1,5) RETURNING *"
                     ),
                     dict(
                         ws=str(chain["ws"]),
@@ -111,7 +114,7 @@ async def ready(engine, chain):
             .mappings()
             .one()
         )
-    coordinator = module().ArchivePipeline(
+    coordinator = module().PastPostsPipeline(
         capability=foundation.capability(), fetch_selected=selected.fetch_selected
     )
     return src, item, intent, job, coordinator, calls
@@ -155,23 +158,23 @@ async def off(engine, chain, src):
         )
 
 
-async def test_archive_admission_stage_and_permit_copy_are_atomic(
-    archive_engine, origin
+async def test_past_posts_admission_stage_and_permit_copy_are_atomic(
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit()
     ref = await c.stage(
-        engine=archive_engine, job=job, intent_id=intent, transit=transit
+        engine=past_posts_engine, job=job, intent_id=intent, transit=transit
     )
-    row, artifacts = await state(archive_engine, origin, intent)
+    row, artifacts = await state(past_posts_engine, origin, intent)
     assert row["publish_step"] == "transit_uploaded" and row["transit_asset_ref"] == ref
     assert (
         row["transit_artifact_ref"] == artifacts[0]["artifact_ref"]
         and artifacts[0]["outcome"] == "settled"
     )
     assert artifacts[0]["admitted_asset_ref"] == ref and len(transit.calls) == 1
-    async with archive_engine.connect() as conn:
+    async with past_posts_engine.connect() as conn:
         from src.services.target.unit_of_work import apply_gucs
 
         await apply_gucs(conn, tenant_id=str(origin["ws"]), actor_kind="system")
@@ -182,9 +185,9 @@ async def test_archive_admission_stage_and_permit_copy_are_atomic(
             job_id=job["id"],
             lease_token=job["lease_token"],
             op_kind="container_create",
-            archive_capability=foundation.capability(),
+            past_posts_capability=foundation.capability(),
         )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         copy = (
             (
                 await conn.execute(
@@ -203,42 +206,44 @@ async def test_archive_admission_stage_and_permit_copy_are_atomic(
         )
 
 
-async def test_uncertain_restart_never_reuploads(archive_engine, origin):
+async def test_uncertain_restart_never_reuploads(past_posts_engine, origin):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit(uncertain=True)
-    with pytest.raises(m.ArchiveEffectRefused, match="archive_upload_uncertain"):
-        await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
-    restarted = m.ArchivePipeline(
+    with pytest.raises(m.PastPostsEffectRefused, match="past_posts_upload_uncertain"):
+        await c.stage(
+            engine=past_posts_engine, job=job, intent_id=intent, transit=transit
+        )
+    restarted = m.PastPostsPipeline(
         capability=foundation.capability(), fetch_selected=c.fetch_selected
     )
-    with pytest.raises(m.ArchiveEffectRefused, match="archive_upload_uncertain"):
+    with pytest.raises(m.PastPostsEffectRefused, match="past_posts_upload_uncertain"):
         await restarted.stage(
-            engine=archive_engine, job=job, intent_id=intent, transit=transit
+            engine=past_posts_engine, job=job, intent_id=intent, transit=transit
         )
-    row, artifacts = await state(archive_engine, origin, intent)
+    row, artifacts = await state(past_posts_engine, origin, intent)
     assert len(transit.calls) == 1 and row["transit_asset_ref"] is None
     assert artifacts[0]["outcome"] == "uncertain" and artifacts[0]["settled_at"] is None
 
 
 async def test_cancelled_waiter_late_success_after_off_records_cleanup_only(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     release = asyncio.Event()
     transit = Transit(hold=release)
     waiter = asyncio.create_task(
-        c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
+        c.stage(engine=past_posts_engine, job=job, intent_id=intent, transit=transit)
     )
     await transit.started.wait()
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    await off(archive_engine, origin, src)
+    await off(past_posts_engine, origin, src)
     release.set()
     await c.wait_completions()
-    row, artifacts = await state(archive_engine, origin, intent)
+    row, artifacts = await state(past_posts_engine, origin, intent)
     assert row["publish_step"] == "none" and row["transit_asset_ref"] is None
     assert (
         len(artifacts) == 1
@@ -248,23 +253,26 @@ async def test_cancelled_waiter_late_success_after_off_records_cleanup_only(
     assert len(transit.calls) == 1
 
 
-async def test_off_before_admission_denies_upload(archive_engine, origin):
+async def test_off_before_admission_denies_upload(past_posts_engine, origin):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    await off(archive_engine, origin, src)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    await off(past_posts_engine, origin, src)
     transit = Transit()
-    with pytest.raises(m.ArchiveEffectRefused, match="source_off"):
-        await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
+    with pytest.raises(m.PastPostsEffectRefused, match="source_off"):
+        await c.stage(
+            engine=past_posts_engine, job=job, intent_id=intent, transit=transit
+        )
     assert (
-        transit.calls == [] and (await state(archive_engine, origin, intent))[1] == []
+        transit.calls == []
+        and (await state(past_posts_engine, origin, intent))[1] == []
     )
 
 
 async def test_stage_failure_rolls_back_bundle_but_keeps_created_owner(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     original = m._write_stage
 
     async def fault(*args, **kwargs):
@@ -274,9 +282,9 @@ async def test_stage_failure_rolls_back_bundle_but_keeps_created_owner(
     monkeypatch.setattr(m, "_write_stage", fault)
     with pytest.raises(RuntimeError, match="stage transaction fault"):
         await c.stage(
-            engine=archive_engine, job=job, intent_id=intent, transit=Transit()
+            engine=past_posts_engine, job=job, intent_id=intent, transit=Transit()
         )
-    row, artifacts = await state(archive_engine, origin, intent)
+    row, artifacts = await state(past_posts_engine, origin, intent)
     assert row["publish_step"] == "none" and row["transit_artifact_ref"] is None
     assert (
         artifacts[0]["outcome"] == "settled"
@@ -284,16 +292,16 @@ async def test_stage_failure_rolls_back_bundle_but_keeps_created_owner(
     )
 
 
-async def test_stale_lease_completion_cannot_stage(archive_engine, origin):
+async def test_stale_lease_completion_cannot_stage(past_posts_engine, origin):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     release = asyncio.Event()
     transit = Transit(hold=release)
     waiter = asyncio.create_task(
-        c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
+        c.stage(engine=past_posts_engine, job=job, intent_id=intent, transit=transit)
     )
     await transit.started.wait()
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE jobs SET locked_until=clock_timestamp()-interval '1 second' WHERE id=:id"
@@ -303,7 +311,7 @@ async def test_stale_lease_completion_cannot_stage(archive_engine, origin):
     release.set()
     with pytest.raises(jobs.JobFenced):
         await waiter
-    row, artifacts = await state(archive_engine, origin, intent)
+    row, artifacts = await state(past_posts_engine, origin, intent)
     assert (
         row["publish_step"] == "none"
         and row["transit_artifact_ref"] is None
@@ -323,21 +331,21 @@ async def permit(engine, chain, intent, job, *, kind="container_create"):
             job_id=job["id"],
             lease_token=job["lease_token"],
             op_kind=kind,
-            archive_capability=foundation.capability(),
+            past_posts_capability=foundation.capability(),
         )
 
 
 async def test_off_on_renewal_keeps_created_proof_and_does_not_fetch(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit()
-    await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
-    before, artifacts = await state(archive_engine, origin, intent)
+    await c.stage(engine=past_posts_engine, job=job, intent_id=intent, transit=transit)
+    before, artifacts = await state(past_posts_engine, origin, intent)
     reads = len(calls)
-    await off(archive_engine, origin, src)
-    async with observations.uow(archive_engine, origin) as conn:
+    await off(past_posts_engine, origin, src)
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE category_post_case_mix SET ratio=1 WHERE source_id=:id AND effective_to IS NULL"
@@ -350,11 +358,11 @@ async def test_off_on_renewal_keeps_created_proof_and_does_not_fetch(
             ),
             dict(id=src["source_id"]),
         )
-    issued = await permit(archive_engine, origin, intent, job)
-    after, retained = await state(archive_engine, origin, intent)
+    issued = await permit(past_posts_engine, origin, intent, job)
+    after, retained = await state(past_posts_engine, origin, intent)
     assert len(calls) == reads and len(transit.calls) == 1 and retained == artifacts
     assert after["capture_epoch"] == before["capture_epoch"] + 2
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         copied = (
             await conn.execute(
                 text(
@@ -366,7 +374,7 @@ async def test_off_on_renewal_keeps_created_proof_and_does_not_fetch(
         audit = (
             await conn.execute(
                 text(
-                    "SELECT count(*) FROM audit_events WHERE entity_id=:id AND detail->>'reason'='archive_authorization_renewed'"
+                    "SELECT count(*) FROM audit_events WHERE entity_id=:id AND detail->>'reason'='past_posts_authorization_renewed'"
                 ),
                 dict(id=intent),
             )
@@ -374,21 +382,23 @@ async def test_off_on_renewal_keeps_created_proof_and_does_not_fetch(
         assert copied == after["capture_epoch"] and audit == 1
 
 
-async def test_deleted_stage_never_authorizes_new_permit(archive_engine, origin):
+async def test_deleted_stage_never_authorizes_new_permit(past_posts_engine, origin):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=Transit())
-    row, artifacts = await state(archive_engine, origin, intent)
-    async with observations.uow(archive_engine, origin) as conn:
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    await c.stage(
+        engine=past_posts_engine, job=job, intent_id=intent, transit=Transit()
+    )
+    row, artifacts = await state(past_posts_engine, origin, intent)
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
-                "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:id"
+                "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending' WHERE id=:id"
             ),
             dict(id=str(row["staged_generation_id"])),
         )
-    with pytest.raises(m.ArchiveEffectRefused, match="archive_generation_deleted"):
-        await permit(archive_engine, origin, intent, job)
-    async with observations.uow(archive_engine, origin) as conn:
+    with pytest.raises(m.PastPostsEffectRefused, match="past_posts_generation_deleted"):
+        await permit(past_posts_engine, origin, intent, job)
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text("SELECT count(*) FROM provider_operations WHERE intent_id=:id"),
@@ -396,23 +406,25 @@ async def test_deleted_stage_never_authorizes_new_permit(archive_engine, origin)
             )
             == 0
         )
-    assert (await state(archive_engine, origin, intent))[1] == artifacts
+    assert (await state(past_posts_engine, origin, intent))[1] == artifacts
 
 
 async def test_permit_and_copy_rollback_on_final_lease_failure(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=Transit())
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    await c.stage(
+        engine=past_posts_engine, job=job, intent_id=intent, transit=Transit()
+    )
 
     async def expired(*args, **kwargs):
         return False
 
     monkeypatch.setattr(provider_ops, "_lease_is_live", expired)
     with pytest.raises(provider_ops.PermitRefused):
-        await permit(archive_engine, origin, intent, job)
-    async with observations.uow(archive_engine, origin) as conn:
+        await permit(past_posts_engine, origin, intent, job)
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text("SELECT count(*) FROM provider_operations WHERE intent_id=:id"),
@@ -432,41 +444,41 @@ async def test_permit_and_copy_rollback_on_final_lease_failure(
 
 
 async def test_uncertain_upload_cannot_release_stage_for_revalidation(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    with pytest.raises(m.ArchiveEffectRefused):
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    with pytest.raises(m.PastPostsEffectRefused):
         await c.stage(
-            engine=archive_engine,
+            engine=past_posts_engine,
             job=job,
             intent_id=intent,
             transit=Transit(uncertain=True),
         )
-    with pytest.raises(m.ArchiveEffectRefused, match="archive_upload_uncertain"):
+    with pytest.raises(m.PastPostsEffectRefused, match="past_posts_upload_uncertain"):
         await c.release_stale_stage(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    assert len((await state(archive_engine, origin, intent))[1]) == 1
+    assert len((await state(past_posts_engine, origin, intent))[1]) == 1
 
 
 async def test_restaging_releases_whole_bundle_and_retains_old_owner(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit()
     old = await c.stage(
-        engine=archive_engine, job=job, intent_id=intent, transit=transit
+        engine=past_posts_engine, job=job, intent_id=intent, transit=transit
     )
-    before, artifacts = await state(archive_engine, origin, intent)
+    before, artifacts = await state(past_posts_engine, origin, intent)
     await observations.observe(
-        archive_engine, origin, src, observations.bundle(attribution="not_detected")
+        past_posts_engine, origin, src, observations.bundle(attribution="not_detected")
     )
     assert await c.release_stale_stage(
-        engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
     )
-    released, retained = await state(archive_engine, origin, intent)
+    released, retained = await state(past_posts_engine, origin, intent)
     assert (
         released["transit_artifact_ref"] is None
         and released["staged_generation_id"] is None
@@ -478,9 +490,9 @@ async def test_restaging_releases_whole_bundle_and_retains_old_owner(
         and retained == artifacts
     )
     new = await c.stage(
-        engine=archive_engine, job=job, intent_id=intent, transit=transit
+        engine=past_posts_engine, job=job, intent_id=intent, transit=transit
     )
-    after, retained = await state(archive_engine, origin, intent)
+    after, retained = await state(past_posts_engine, origin, intent)
     assert new != old and len(transit.calls) == 2 and len(retained) == 2
     assert (
         after["capture_observation_revision"] > before["capture_observation_revision"]
@@ -492,26 +504,26 @@ async def no_sleep(seconds):
     return None
 
 
-async def test_actual_archive_pipeline_never_uses_drive_fetch_and_copies_both_permits(
-    archive_engine, origin
+async def test_actual_past_posts_pipeline_never_uses_drive_fetch_and_copies_both_permits(
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     from src.services.target import publish_pipeline
     from src.services.target.meta_adapter import StubMetaAdapter
 
     async def drive_forbidden(*args):
-        raise AssertionError("archive used Drive fetch")
+        raise AssertionError("past-posts source used Drive fetch")
 
     transit = Transit()
     meta = StubMetaAdapter()
     result = await publish_pipeline.run_publish_pipeline(
         job,
-        engine=archive_engine,
+        engine=past_posts_engine,
         meta=meta,
         transit=transit,
         media_fetch=drive_forbidden,
-        archive=c,
+        past_posts=c,
         sleep=no_sleep,
     )
     assert (
@@ -519,7 +531,7 @@ async def test_actual_archive_pipeline_never_uses_drive_fetch_and_copies_both_pe
         and len(transit.calls) == 1
         and len(meta.create_calls) == len(meta.publish_calls) == 1
     )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text(
@@ -541,16 +553,16 @@ async def test_actual_archive_pipeline_never_uses_drive_fetch_and_copies_both_pe
 
 
 async def test_container_ready_restaging_recreates_container_with_new_generation(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit()
     oldref = await c.stage(
-        engine=archive_engine, job=job, intent_id=intent, transit=transit
+        engine=past_posts_engine, job=job, intent_id=intent, transit=transit
     )
-    first = await permit(archive_engine, origin, intent, job)
-    async with observations.uow(archive_engine, origin) as conn:
+    first = await permit(past_posts_engine, origin, intent, job)
+    async with observations.uow(past_posts_engine, origin) as conn:
         await provider_ops.resolve_permit(
             conn,
             op_id=first["id"],
@@ -576,23 +588,23 @@ async def test_container_ready_restaging_recreates_container_with_new_generation
             .one()
         )
     await observations.observe(
-        archive_engine, origin, src, observations.bundle(attribution="not_detected")
+        past_posts_engine, origin, src, observations.bundle(attribution="not_detected")
     )
     from src.services.target import publish_pipeline
     from src.services.target.meta_adapter import StubMetaAdapter
 
     async def drive_forbidden(*args):
-        raise AssertionError("archive used Drive fetch")
+        raise AssertionError("past-posts source used Drive fetch")
 
     meta = StubMetaAdapter()
     assert (
         await publish_pipeline.run_publish_pipeline(
             job,
-            engine=archive_engine,
+            engine=past_posts_engine,
             meta=meta,
             transit=transit,
             media_fetch=drive_forbidden,
-            archive=c,
+            past_posts=c,
             sleep=no_sleep,
         )
         == publish_pipeline.POSTED
@@ -603,7 +615,7 @@ async def test_container_ready_restaging_recreates_container_with_new_generation
         and len(meta.create_calls) == 1
     )
     assert meta.publish_calls[0]["container_id"] != "old-confirmed"
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         generations = list(
             (
                 await conn.execute(
@@ -630,11 +642,13 @@ async def test_container_ready_restaging_recreates_container_with_new_generation
 
 
 async def test_caught_permit_refusal_then_outer_commit_cannot_keep_effect_rows(
-    archive_engine, origin, monkeypatch
+    past_posts_engine, origin, monkeypatch
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=Transit())
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    await c.stage(
+        engine=past_posts_engine, job=job, intent_id=intent, transit=Transit()
+    )
 
     async def expired(*args, **kwargs):
         return False
@@ -642,7 +656,7 @@ async def test_caught_permit_refusal_then_outer_commit_cannot_keep_effect_rows(
     monkeypatch.setattr(provider_ops, "_lease_is_live", expired)
     from src.services.target.unit_of_work import apply_gucs
 
-    async with archive_engine.connect() as conn:
+    async with past_posts_engine.connect() as conn:
         await apply_gucs(conn, tenant_id=str(origin["ws"]), actor_kind="system")
         with pytest.raises(provider_ops.PermitRefused):
             await provider_ops.acquire_permit(
@@ -652,10 +666,10 @@ async def test_caught_permit_refusal_then_outer_commit_cannot_keep_effect_rows(
                 job_id=job["id"],
                 lease_token=job["lease_token"],
                 op_kind="container_create",
-                archive_capability=foundation.capability(),
+                past_posts_capability=foundation.capability(),
             )
         await conn.commit()
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text("SELECT count(*) FROM provider_operations WHERE intent_id=:id"),
@@ -674,23 +688,23 @@ async def test_caught_permit_refusal_then_outer_commit_cannot_keep_effect_rows(
         )
 
 
-async def test_archive_pipeline_missing_coordinator_fails_closed(
-    archive_engine, origin
+async def test_past_posts_pipeline_missing_coordinator_fails_closed(
+    past_posts_engine, origin
 ):
     module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     from src.services.target import publish_pipeline
     from src.services.target.meta_adapter import StubMetaAdapter
 
     async def forbidden(*args):
-        raise AssertionError("uncomposed archive made a media request")
+        raise AssertionError("uncomposed past-posts source made a media request")
 
     transit = Transit()
     meta = StubMetaAdapter()
     assert (
         await publish_pipeline.run_publish_pipeline(
             job,
-            engine=archive_engine,
+            engine=past_posts_engine,
             meta=meta,
             transit=transit,
             media_fetch=forbidden,
@@ -702,23 +716,25 @@ async def test_archive_pipeline_missing_coordinator_fails_closed(
 
 
 async def test_committed_publish_prevents_restaging_and_another_upload(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
     m = module()
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
     transit = Transit()
-    await c.stage(engine=archive_engine, job=job, intent_id=intent, transit=transit)
-    async with observations.uow(archive_engine, origin) as conn:
+    await c.stage(engine=past_posts_engine, job=job, intent_id=intent, transit=transit)
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE post_intents SET ig_container_id='confirmed',publish_step='container_ready' WHERE id=:id"
             ),
             dict(id=intent),
         )
-    await permit(archive_engine, origin, intent, job, kind="publish")
-    with pytest.raises(m.ArchiveEffectRefused, match="archive_operation_unresolved"):
+    await permit(past_posts_engine, origin, intent, job, kind="publish")
+    with pytest.raises(
+        m.PastPostsEffectRefused, match="past_posts_operation_unresolved"
+    ):
         await c.release_stale_stage(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert len(transit.calls) == 1
 
@@ -728,16 +744,16 @@ async def test_committed_publish_prevents_restaging_and_another_upload(
 )
 @pytest.mark.parametrize("failure", ["gone", "unsupported"])
 async def test_bound_early_card_content_failure_parks_review(
-    archive_engine, origin, live_state, failure
+    past_posts_engine, origin, live_state, failure
 ):
-    src, item, intent = await preparation.selected(archive_engine, origin)
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
     selected, calls = preparation.service(
-        archive_engine,
+        past_posts_engine,
         origin,
         changed_child="456" if failure == "gone" else None,
         content=b"unsupported" if failure == "unsupported" else None,
     )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         for state_name in ("prompt_pending", "awaiting_approval"):
             if live_state == "scheduled" or (
                 live_state == "prompt_pending" and state_name == "awaiting_approval"
@@ -747,15 +763,15 @@ async def test_bound_early_card_content_failure_parks_review(
                 text("UPDATE post_intents SET state=:state WHERE id=:id"),
                 dict(state=state_name, id=intent),
             )
-    c = module().ArchivePipeline(
+    c = module().PastPostsPipeline(
         capability=foundation.capability(),
         fetch_selected=selected.fetch_selected,
         prepare_selected=selected.selected_prepare,
     )
     await c.selected_prepare(
-        engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
     )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         row = (
             (
                 await conn.execute(
@@ -767,7 +783,7 @@ async def test_bound_early_card_content_failure_parks_review(
             .one()
         )
         assert row["state"] == "review_required"
-        assert row["last_error"]["error"]["reason"] == "archive_content_unavailable"
+        assert row["last_error"]["error"]["reason"] == "past_posts_content_unavailable"
         p = (
             (
                 await conn.execute(
@@ -796,23 +812,23 @@ async def test_bound_early_card_content_failure_parks_review(
 
 
 async def test_truncated_missing_slide_defers_early_card_without_review(
-    archive_engine, origin
+    past_posts_engine, origin
 ):
-    src, item, intent = await preparation.selected(archive_engine, origin)
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
     selected, calls = preparation.service(
-        archive_engine, origin, changed_child="456", truncated=True
+        past_posts_engine, origin, changed_child="456", truncated=True
     )
-    c = module().ArchivePipeline(
+    c = module().PastPostsPipeline(
         capability=foundation.capability(),
         fetch_selected=selected.fetch_selected,
         prepare_selected=selected.selected_prepare,
     )
     with pytest.raises(source_policy.MediaAdmissionPending) as error:
         await c.selected_prepare(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    assert error.value.reason == "archive_revalidation_required"
-    async with observations.uow(archive_engine, origin) as conn:
+    assert error.value.reason == "past_posts_revalidation_required"
+    async with observations.uow(past_posts_engine, origin) as conn:
         row = (
             (
                 await conn.execute(
@@ -826,22 +842,24 @@ async def test_truncated_missing_slide_defers_early_card_without_review(
     assert calls == ["graph.instagram.com"] * 2
 
 
-async def test_early_card_source_off_is_deferred_without_review(archive_engine, origin):
+async def test_early_card_source_off_is_deferred_without_review(
+    past_posts_engine, origin
+):
     from src.services.target import source_read_admission as admission
 
-    src, item, intent = await preparation.selected(archive_engine, origin)
-    selected, calls = preparation.service(archive_engine, origin)
-    await off(archive_engine, origin, src)
-    c = module().ArchivePipeline(
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    selected, calls = preparation.service(past_posts_engine, origin)
+    await off(past_posts_engine, origin, src)
+    c = module().PastPostsPipeline(
         capability=foundation.capability(),
         fetch_selected=selected.fetch_selected,
         prepare_selected=selected.selected_prepare,
     )
     with pytest.raises(admission.SourceReadRefused, match="source_off"):
         await c.selected_prepare(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text("SELECT state FROM post_intents WHERE id=:id"), dict(id=intent)
@@ -851,29 +869,29 @@ async def test_early_card_source_off_is_deferred_without_review(archive_engine, 
     assert not calls
 
 
-async def test_early_card_cancel_overlay_never_parks_review(archive_engine, origin):
+async def test_early_card_cancel_overlay_never_parks_review(past_posts_engine, origin):
     from src.services.target import source_policy
 
-    src, item, intent = await preparation.selected(archive_engine, origin)
-    selected, calls = preparation.service(archive_engine, origin)
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    selected, calls = preparation.service(past_posts_engine, origin)
     await selected.selected_prepare(
-        engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
     )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text("UPDATE post_intents SET cancel_requested=true WHERE id=:id"),
             dict(id=intent),
         )
-    c = module().ArchivePipeline(
+    c = module().PastPostsPipeline(
         capability=foundation.capability(),
         fetch_selected=selected.fetch_selected,
         prepare_selected=selected.selected_prepare,
     )
     with pytest.raises(source_policy.MediaAdmissionPending, match="asset_unavailable"):
         await c.selected_prepare(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
                 text("SELECT state FROM post_intents WHERE id=:id"), dict(id=intent)
@@ -884,13 +902,15 @@ async def test_early_card_cancel_overlay_never_parks_review(archive_engine, orig
 
 @pytest.mark.parametrize("race", ["reobserve", "generation", "off_on"])
 async def test_early_card_failure_cannot_cross_captured_version(
-    archive_engine, origin, race
+    past_posts_engine, origin, race
 ):
     from src.services.target import source_policy
     from src.services.target.source_read_admission import SourceReadRefused
 
-    src, item, intent = await preparation.selected(archive_engine, origin)
-    selected, calls = preparation.service(archive_engine, origin, changed_child="456")
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    selected, calls = preparation.service(
+        past_posts_engine, origin, changed_child="456"
+    )
 
     async def fail_then_change(**kwargs):
         try:
@@ -898,18 +918,18 @@ async def test_early_card_failure_cannot_cross_captured_version(
         except source_policy.MediaAdmissionPending:
             if race == "reobserve":
                 await observations.observe(
-                    archive_engine,
+                    past_posts_engine,
                     origin,
                     src,
                     observations.bundle(attribution="not_detected"),
                 )
             elif race == "generation":
                 await foundation.ensure(
-                    archive_engine, origin, foundation.authorization()
+                    past_posts_engine, origin, foundation.authorization()
                 )
             else:
-                await off(archive_engine, origin, src)
-                async with observations.uow(archive_engine, origin) as conn:
+                await off(past_posts_engine, origin, src)
+                async with observations.uow(past_posts_engine, origin) as conn:
                     await conn.execute(
                         text(
                             "UPDATE category_post_case_mix SET ratio=1 WHERE source_id=:id AND effective_to IS NULL"
@@ -924,16 +944,16 @@ async def test_early_card_failure_cannot_cross_captured_version(
                     )
             raise
 
-    c = module().ArchivePipeline(
+    c = module().PastPostsPipeline(
         capability=foundation.capability(),
         fetch_selected=selected.fetch_selected,
         prepare_selected=fail_then_change,
     )
     with pytest.raises((SourceReadRefused, source_policy.MediaAdmissionPending)):
         await c.selected_prepare(
-            engine=archive_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         row = (
             (
                 await conn.execute(
@@ -948,13 +968,13 @@ async def test_early_card_failure_cannot_cross_captured_version(
         assert (
             await conn.scalar(
                 text(
-                    "SELECT count(*) FROM audit_events WHERE entity_id=:id AND detail->>'reason' IN ('archive_content_changed','archive_content_unavailable')"
+                    "SELECT count(*) FROM audit_events WHERE entity_id=:id AND detail->>'reason' IN ('past_posts_content_changed','past_posts_content_unavailable')"
                 ),
                 dict(id=intent),
             )
             == 0
         )
-    p = await preparation.proof(archive_engine, origin, intent)
+    p = await preparation.proof(past_posts_engine, origin, intent)
     assert (
         p["selected_asset_identity"] == "123"
         and str(p["selection_generation_id"]) == src["generation_id"]
@@ -964,14 +984,14 @@ async def test_early_card_failure_cannot_cross_captured_version(
 
 
 @pytest.mark.parametrize("during_preparation", [False, True])
-async def test_approved_archive_cancel_refunds_before_content_review(
-    archive_engine, origin, during_preparation
+async def test_approved_past_posts_cancel_refunds_before_content_review(
+    past_posts_engine, origin, during_preparation
 ):
     from src.services.target import publish_pipeline
     from src.services.target.meta_adapter import StubMetaAdapter
 
-    src, item, intent, job, c, calls = await ready(archive_engine, origin)
-    async with observations.uow(archive_engine, origin) as conn:
+    src, item, intent, job, c, calls = await ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
         await conn.execute(
             text(
                 "UPDATE post_intents SET state='approved',cancel_requested=:flag WHERE id=:id"
@@ -987,7 +1007,7 @@ async def test_approved_archive_cancel_refunds_before_content_review(
             )
             == 1
         )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         cap_date = await conn.scalar(
             text("SELECT cap_consumed_on FROM post_intents WHERE id=:id"),
             dict(id=intent),
@@ -1000,7 +1020,7 @@ async def test_approved_archive_cancel_refunds_before_content_review(
         assert during_preparation, (
             "pre-existing cancellation must skip selected preparation"
         )
-        async with observations.uow(archive_engine, origin) as conn:
+        async with observations.uow(past_posts_engine, origin) as conn:
             await conn.execute(
                 text("UPDATE post_intents SET cancel_requested=true WHERE id=:id"),
                 dict(id=intent),
@@ -1010,22 +1030,22 @@ async def test_approved_archive_cancel_refunds_before_content_review(
     c.prepare_capture = prepare_then_cancel
 
     async def forbidden_fetch(subject):
-        pytest.fail("cancelled archive intent cannot fetch media")
+        pytest.fail("cancelled past-posts intent cannot fetch media")
 
     transit = Transit()
     meta = StubMetaAdapter()
     assert (
         await publish_pipeline.run_publish_pipeline(
             job,
-            engine=archive_engine,
+            engine=past_posts_engine,
             meta=meta,
             transit=transit,
             media_fetch=forbidden_fetch,
-            archive=c,
+            past_posts=c,
         )
         == publish_pipeline.CANCELLED
     )
-    async with observations.uow(archive_engine, origin) as conn:
+    async with observations.uow(past_posts_engine, origin) as conn:
         row = (
             (
                 await conn.execute(

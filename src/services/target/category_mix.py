@@ -497,8 +497,8 @@ async def guard_legacy(executor, ws):
         raise MixProtocolRequired()
 
 
-def _source_facts(row, account_id, *, assignable, exclusions, archive):
-    """One mix row as one destination sees it. *archive* is the source's
+def _source_facts(row, account_id, *, assignable, exclusions, past_posts):
+    """One mix row as one destination sees it. *past-posts source* is the source's
     `instagram_sync.status`, or empty for a Drive folder, which has no
     progress facts."""
     return destination_readiness.SourceFacts(
@@ -508,17 +508,17 @@ def _source_facts(row, account_id, *, assignable, exclusions, archive):
         state=row["state"],
         origin_here=row["origin_account_id"] == account_id,
         exclusions=exclusions,
-        indexing=archive.get("indexing", False),
-        partial=archive.get("partial", False),
-        stalled=archive.get("stalled", False),
-        needs_reconnect=archive.get("needs_reconnect", False),
+        indexing=past_posts.get("indexing", False),
+        partial=past_posts.get("partial", False),
+        stalled=past_posts.get("stalled", False),
+        needs_reconnect=past_posts.get("needs_reconnect", False),
     )
 
 
 #: The listed destinations (`LISTED_ACCOUNT_SQL`, in the Accounts tab's order)
 #: with what their readiness reads about each: whether it was added by handle
 #: alone, its own `ig_login` grant (`CREDENTIAL_STATUS_SQL`), and the sources
-#: whose scope admits it. A Drive folder is workspace-wide; an archive serves
+#: whose scope admits it. A Drive folder is workspace-wide; a past-posts source serves
 #: only its origin, through an active self-assignment, which is the v1
 #: `origin_only` rule `fn_source_asset_suitability` applies to each item.
 _DESTINATIONS_SQL = (
@@ -528,7 +528,7 @@ _DESTINATIONS_SQL = (
     "       ARRAY(SELECT s.id::text FROM media_sources s"
     "              WHERE s.workspace_id = :ws"
     "                AND (s.provider = 'gdrive'"
-    "                     OR (s.provider = 'instagram_archive'"
+    "                     OR (s.provider = 'instagram_past_posts'"
     "                         AND s.origin_ig_account_id = a.id"
     "                         AND EXISTS (SELECT 1 FROM media_source_destinations d"
     "                                      WHERE d.workspace_id = :ws AND d.source_id = s.id"
@@ -549,14 +549,14 @@ async def destination_projection(executor, *, workspace_id, rows):
     the mix resource.
 
     One trusted suitability context for the whole read. The destinations and
-    their assignable sources are one statement; each archive's progress facts
+    their assignable sources are one statement; each past-posts source's progress facts
     are read once (`instagram_sync.status`, the source half of the progress
     read); then :func:`pool`, the planner's own read, runs per destination.
     `destination_readiness` turns those facts into the state, tone and remedy.
     A destination whose own grant is unusable shows no supply. Configured
     targets stay intact: the effective shares are each destination's own.
 
-    An archive whose saved checkpoint cannot be read (`status` refuses it) is
+    A past-posts source whose saved checkpoint cannot be read (`status` refuses it) is
     read as stalled and partial, with no coverage, and logged by source id and
     reason alone. One malformed row must not fail the whole read: the editor
     that lets an admin act on it comes from this read.
@@ -568,27 +568,27 @@ async def destination_projection(executor, *, workspace_id, rows):
     accounts = await readers.rows(
         executor, _DESTINATIONS_SQL, ws=ws, provider=IG_LOGIN_PROVIDER
     )
-    capability = executor.info.get("archive_capability")
-    archives = {}
+    capability = executor.info.get("past_posts_capability")
+    past_posts_sources = {}
     for r in rows:
-        if r["provider"] != "instagram_archive":
+        if r["provider"] != "instagram_past_posts":
             continue
         try:
-            archives[r["source_id"]] = await instagram_sync.status(
+            past_posts_sources[r["source_id"]] = await instagram_sync.status(
                 executor,
                 context=context,
                 source_id=r["source_id"],
                 capability=capability,
             )
-        except instagram_sync.ArchiveCheckpointRefused as exc:
+        except instagram_sync.PastPostsCheckpointRefused as exc:
             # `status` raises this after its statements have run, so nothing
             # is left aborted. The reason is logged, never the checkpoint.
             logger.warning(
-                "archive source %s: checkpoint unreadable (%s); read as stalled",
+                "past-posts source %s: checkpoint unreadable (%s); read as stalled",
                 r["source_id"],
                 exc.reason,
             )
-            archives[r["source_id"]] = {"stalled": True, "partial": True}
+            past_posts_sources[r["source_id"]] = {"stalled": True, "partial": True}
     output = []
     for account in accounts:
         drawn = await pool(
@@ -611,7 +611,7 @@ async def destination_projection(executor, *, workspace_id, rows):
                     account["account_id"],
                     assignable=r["source_id"] in assignable,
                     exclusions=exclusions.get(r["source_id"], {}),
-                    archive=archives.get(r["source_id"], {}),
+                    past_posts=past_posts_sources.get(r["source_id"], {}),
                 )
                 for r in rows
             ],
@@ -654,9 +654,9 @@ async def destination_projection(executor, *, workspace_id, rows):
                         "partial_coverage": source.partial,
                         "stalled": source.stalled,
                         "needs_reconnect": source.needs_reconnect,
-                        "oldest_observed_at": archives.get(r["source_id"], {}).get(
-                            "coverage_from"
-                        ),
+                        "oldest_observed_at": past_posts_sources.get(
+                            r["source_id"], {}
+                        ).get("coverage_from"),
                     }
                     for r, source in zip(rows, facts.sources)
                 ],

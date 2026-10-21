@@ -36,13 +36,13 @@ from tests.src.services.target.test_delivery_health import _Doors
 #: who else is refused is `test_ops_routes.py`'s to pin.
 OPERATOR = Principal(session_id="s-op", user_id="00000000-0000-4000-8000-0000000000aa")
 
-#: The `ArchiveRefused` reasons a mix write can meet (an archive row's On/Off,
+#: The `PastPostsRefused` reasons a mix write can meet (a past-posts row's On/Off,
 #: `versioned_mix.mutate` and `preview`) and the status each answers
-#: (`app._ARCHIVE_STATUS`): these four, and no other reason.
-ARCHIVE_REFUSALS = {
-    "archive_not_activated": 503,
-    "archive_source_unavailable": 409,
-    "invalid_archive_choice": 400,
+#: (`app._PAST_POSTS_STATUS`): these four, and no other reason.
+PAST_POSTS_REFUSALS = {
+    "past_posts_not_activated": 503,
+    "past_posts_source_unavailable": 409,
+    "invalid_past_posts_choice": 400,
     "mix_conflict": 409,
 }
 
@@ -423,50 +423,50 @@ class TestRefusalMappingsAreTotal:
         }
         assert resp.json()["detail"] != "the service's own wording"
 
-    def test_the_archive_reasons_a_mix_write_can_meet_are_the_mapped_ones(self):
-        """Deliberately NOT total over `ArchiveRefused`: it also carries the
+    def test_the_past_posts_reasons_a_mix_write_can_meet_are_the_mapped_ones(self):
+        """Deliberately NOT total over `PastPostsRefused`: it also carries the
         allocation, sync and fence machinery's reasons, which no request can
         cause and which stay a logged 500. So the table is pinned to the four
         a mix write can meet, and mapping a fifth is decided here too."""
         from src.api import app as module
 
-        assert module._ARCHIVE_STATUS == ARCHIVE_REFUSALS
+        assert module._PAST_POSTS_STATUS == PAST_POSTS_REFUSALS
 
-    @pytest.mark.parametrize("reason, status", list(ARCHIVE_REFUSALS.items()))
-    def test_a_mapped_archive_refusal_answers_its_status_and_names_its_reason(
+    @pytest.mark.parametrize("reason, status", list(PAST_POSTS_REFUSALS.items()))
+    def test_a_mapped_past_posts_refusal_answers_its_status_and_names_its_reason(
         self, app, client, reason, status
     ):
-        """The rollback case among them: archive rows still present after the
-        capability was withdrawn answer `archive_not_activated` as a 503, not
-        the bare 500 an unhandled `ArchiveRefused` would be."""
-        from src.services.target.instagram_sources import ArchiveRefused
+        """The rollback case among them: past-posts rows still present after the
+        capability was withdrawn answer `past_posts_not_activated` as a 503, not
+        the bare 500 an unhandled `PastPostsRefused` would be."""
+        from src.services.target.instagram_sources import PastPostsRefused
 
         async def refuse():
-            raise ArchiveRefused(reason)
+            raise PastPostsRefused(reason)
 
-        app.add_api_route("/_test/archive-refusal", refuse)
-        response = client.get("/_test/archive-refusal")
+        app.add_api_route("/_test/past-posts-refusal", refuse)
+        response = client.get("/_test/past-posts-refusal")
         assert response.status_code == status
         assert response.json() == {"detail": reason, "reason": reason}
 
     @pytest.mark.parametrize(
-        "reason", ["archive_allocation_contract_failed", "archive_stale_capture"]
+        "reason", ["past_posts_allocation_contract_failed", "past_posts_stale_capture"]
     )
-    def test_any_other_archive_reason_is_a_500_not_a_guessed_client_status(
+    def test_any_other_past_posts_reason_is_a_500_not_a_guessed_client_status(
         self, app, client, reason
     ):
         """An internal invariant of the allocation or the fence is the
         server's fault: the logged 500 and its own sentence, never a status
         somebody chose for it and never the reason on the wire."""
-        from src.services.target.instagram_sources import ArchiveRefused
+        from src.services.target.instagram_sources import PastPostsRefused
 
-        assert reason not in ARCHIVE_REFUSALS
+        assert reason not in PAST_POSTS_REFUSALS
 
         async def refuse():
-            raise ArchiveRefused(reason)
+            raise PastPostsRefused(reason)
 
-        app.add_api_route("/_test/archive-invariant", refuse)
-        response = client.get("/_test/archive-invariant")
+        app.add_api_route("/_test/past-posts-invariant", refuse)
+        response = client.get("/_test/past-posts-invariant")
         assert response.status_code == 500
         assert response.json() == {"detail": "internal error"}
 

@@ -32,7 +32,7 @@ const ACCOUNT = "55555555-5555-4555-8555-555555555555";
 
 function preview(over: Record<string, unknown> = {}): ConnectPreview {
   const parsed = parseConnectPreview({
-    archive_available: true,
+    past_posts_available: true,
     entry: "add",
     account_id: null,
     handle: null,
@@ -43,7 +43,7 @@ function preview(over: Record<string, unknown> = {}): ConnectPreview {
       applies: true,
       mode_after: "equal",
       rows_after: [
-        { source_id: null, provider: "instagram_archive", name: null, target_share: "0.5" },
+        { source_id: null, provider: "instagram_past_posts", name: null, target_share: "0.5" },
         { source_id: DRIVE, provider: "gdrive", name: "Event photos", target_share: "0.5" },
       ],
     },
@@ -139,7 +139,7 @@ describe("the header's Add", () => {
         applies: true,
         mode_after: "equal",
         rows_after: [
-          { source_id: null, provider: "instagram_archive", name: null, target_share: "1" },
+          { source_id: null, provider: "instagram_past_posts", name: null, target_share: "1" },
           { source_id: DRIVE, provider: "gdrive", name: "Event photos", target_share: "0" },
         ],
       },
@@ -162,7 +162,7 @@ describe("a handle-only row's first connect", () => {
       applies: true,
       mode_after: "equal",
       rows_after: [
-        { source_id: null, provider: "instagram_archive", name: "example_handle", target_share: "1" },
+        { source_id: null, provider: "instagram_past_posts", name: "example_handle", target_share: "1" },
       ],
     },
   });

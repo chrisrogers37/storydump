@@ -3,7 +3,7 @@ subject and the payload's own order evidence (#1644).
 
 The revocation itself (the mapping door, the per-workspace transactions, the
 ordering rule, the epoch writer) is proven against PostgreSQL under the API's
-role in `tests/scripts/test_archive_lifecycle_gate.py`. Here the seam is
+role in `tests/scripts/test_past_posts_lifecycle_gate.py`. Here the seam is
 patched and what crosses it is asserted exactly: which app signed the request
 is decided by the setting that verified it, never by the secret's value.
 """
@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.config.settings import settings
-from src.services.target import archive_lifecycle, meta_callbacks
+from src.services.target import past_posts_lifecycle, meta_callbacks
 
 SUBJECT = "1234567890"
 ISSUED = 1_760_000_000
@@ -79,11 +79,11 @@ def revocations(monkeypatch, legacy):
                 "issued_at": issued_at,
             }
         )
-        return archive_lifecycle.SubjectRevocation(
+        return past_posts_lifecycle.SubjectRevocation(
             workspaces=2, revoked=1, held=1, excluded=3
         )
 
-    monkeypatch.setattr(archive_lifecycle, "revoke_subject_authorizations", revoke)
+    monkeypatch.setattr(past_posts_lifecycle, "revoke_subject_authorizations", revoke)
     return seen
 
 
@@ -232,22 +232,22 @@ def test_the_line_reports_each_count_and_no_identifier(
 
 @pytest.fixture
 def unmapped(monkeypatch):
-    """The archive-aware revocation, asked and finding no mapping for the
-    subject, as it does for every request while the archive is not live."""
+    """The past-posts-aware revocation, asked and finding no mapping for the
+    subject, as it does for every request while the past-posts source is not live."""
     seen = []
 
     async def revoke(engine, *, app_identity, subject, issued_at=None):
         seen.append((app_identity, subject, issued_at))
-        return archive_lifecycle.SubjectRevocation(
+        return past_posts_lifecycle.SubjectRevocation(
             workspaces=0, revoked=0, held=0, excluded=0
         )
 
-    monkeypatch.setattr(archive_lifecycle, "revoke_subject_authorizations", revoke)
+    monkeypatch.setattr(past_posts_lifecycle, "revoke_subject_authorizations", revoke)
     return seen
 
 
 class TestWhereNoMappingNamesTheSubjectTheAccountLookupRuns:
-    """No mapping is recorded while the archive is not live, so an account
+    """No mapping is recorded while the past-posts source is not live, so an account
     connected then has none: deauthorize runs the account lookup and the
     revocation on the subject."""
 
@@ -306,7 +306,7 @@ class TestAnAccountAMappingNamesIsLeftToIt:
     @staticmethod
     def mapped(monkeypatch, *pairs, **counts):
         async def revoke(engine, *, app_identity, subject, issued_at=None):
-            return archive_lifecycle.SubjectRevocation(
+            return past_posts_lifecycle.SubjectRevocation(
                 workspaces=len({ws for ws, _ in pairs}),
                 revoked=counts.get("revoked", 0),
                 held=counts.get("held", 0),
@@ -314,7 +314,9 @@ class TestAnAccountAMappingNamesIsLeftToIt:
                 mapped=frozenset(pairs),
             )
 
-        monkeypatch.setattr(archive_lifecycle, "revoke_subject_authorizations", revoke)
+        monkeypatch.setattr(
+            past_posts_lifecycle, "revoke_subject_authorizations", revoke
+        )
 
     def test_the_lookup_runs_when_mappings_exist_and_revokes_what_none_names(
         self, monkeypatch, app, legacy

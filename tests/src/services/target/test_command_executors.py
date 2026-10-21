@@ -644,17 +644,17 @@ class TestRemovingAnAccountGivesUpItsParkedReviews:
     def removed(self, parked, monkeypatch):
         parked["order"] = []
 
-        async def remove_account_archive(session, *, workspace_id, ig_account_id):
-            parked["order"].append(("archive", workspace_id, ig_account_id))
+        async def remove_account_past_posts(session, *, workspace_id, ig_account_id):
+            parked["order"].append(("past_posts", workspace_id, ig_account_id))
 
         async def disable_destination(session, *, workspace_id, ig_account_id):
             parked["order"].append(("destination", workspace_id, ig_account_id))
             return {"credential_revoked": True}
 
         monkeypatch.setattr(
-            command_executors.archive_lifecycle,
-            "remove_account_archive",
-            remove_account_archive,
+            command_executors.past_posts_lifecycle,
+            "remove_account_past_posts",
+            remove_account_past_posts,
         )
 
         async def rows(executor, sql, **params):
@@ -682,9 +682,11 @@ class TestRemovingAnAccountGivesUpItsParkedReviews:
         out = await command_executors.disable_account(_Session(), command)
         assert out.outcome == "executed"
         assert removed["order"] == [
-            ("archive", "ws", "a1"),
+            ("past_posts", "ws", "a1"),
             ("destination", "ws", "a1"),
-        ], "the archive (and the source prefix it takes) goes before the disable"
+        ], (
+            "the past-posts source (and the source prefix it takes) goes before the disable"
+        )
         assert removed["cancels"] == ["i1"], "the parked row takes the give-up edge"
         assert removed["verdicts"] == [
             ("op-9", "failed", "given_up", "admin", "ambiguous")

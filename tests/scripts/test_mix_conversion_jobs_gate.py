@@ -20,11 +20,11 @@ from src.services.target.work_loop import WorkerConfig
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts.conftest import as_user, async_url, set_test_passwords
 from tests.scripts.test_instagram_observations_gate import uow, row
-from tests.scripts.test_versioned_mix_gate import add, evidence, record
+from tests.scripts.test_versioned_mix_gate import add, evidence
 
 pytestmark = pytest.mark.integration
 origin = foundation.origin
-archive_engine = foundation.archive_engine
+past_posts_engine = foundation.past_posts_engine
 
 
 @pytest.fixture
@@ -37,16 +37,12 @@ async def converter_engine(world_db, admin_conn):
         await engine.dispose()
 
 
-def composed(engine, tmp_path):
-    path = tmp_path / "operator-record.json"
-    path.write_text(json.dumps(record()))
+def composed(engine):
+    """The worker on release `b…b`: its conversion run is that release's."""
     return worker.compose(
         engine=engine,
         config=WorkerConfig(),
-        env={
-            "SOURCE_MIX_CONVERSION_RECORD": str(path),
-            "RAILWAY_GIT_COMMIT_SHA": "b" * 40,
-        },
+        env={"RAILWAY_GIT_COMMIT_SHA": "b" * 40},
         adapters={},
     )
 
@@ -67,7 +63,7 @@ async def claimed(engine):
 async def test_elected_clock_to_registered_converter_atomic_success(
     converter_engine, origin, tmp_path
 ):
-    app = composed(converter_engine, tmp_path)
+    app = composed(converter_engine)
     async with converter_engine.connect() as elected:
         clock = scheduler.Clock(
             elected,
@@ -98,7 +94,8 @@ async def test_elected_clock_to_registered_converter_atomic_success(
         assert (
             await row(
                 conn,
-                "SELECT count(*) n FROM audit_events WHERE detail->>'run_id'='synthetic-conversion'",
+                "SELECT count(*) n FROM audit_events WHERE detail->>'run_id'=:run",
+                run=app.mix_conversion_evidence.run_id,
             )
         )["n"] == 1
     async with converter_engine.begin() as conn:
@@ -131,7 +128,7 @@ async def test_elected_clock_to_registered_converter_atomic_success(
         "MIX_CONVERSION_SAMPLE="
         + json.dumps(
             {
-                "typed_record": True,
+                "release_run": True,
                 "minted": 1,
                 "claimed": True,
                 "protocol_version": 2,
@@ -146,7 +143,7 @@ async def test_elected_clock_to_registered_converter_atomic_success(
 async def test_reauth_only_tick_spends_total_max_one_before_conversion(
     converter_engine, origin, tmp_path
 ):
-    app = composed(converter_engine, tmp_path)
+    app = composed(converter_engine)
     async with uow(converter_engine, origin) as conn:
         await conn.execute(
             text(
@@ -183,11 +180,11 @@ async def test_reauth_only_tick_spends_total_max_one_before_conversion(
 async def test_same_run_terminal_failure_is_not_reminted_and_new_run_is(
     converter_engine, origin, tmp_path
 ):
-    old = evidence(tmp_path)
+    old = evidence()
     async with converter_engine.begin() as conn:
         assert await mix_conversion.mint_jobs(conn, evidence=old) == 1
     job = await claimed(converter_engine)
-    new = evidence(tmp_path, lambda data: data.update(run_id="synthetic-new-run"))
+    new = evidence("c" * 40)  # the next release's run
     async with uow(converter_engine, origin) as conn:
         assert (
             await mix_conversion.convert_job(conn, job, evidence=new)
@@ -212,7 +209,7 @@ async def test_same_run_terminal_failure_is_not_reminted_and_new_run_is(
 async def test_converter_waiting_on_prefix_cannot_commit_after_lease_expiry(
     converter_engine, origin, tmp_path, sync_conn
 ):
-    trusted = evidence(tmp_path)
+    trusted = evidence()
     async with converter_engine.begin() as conn:
         assert await mix_conversion.mint_jobs(conn, evidence=trusted) == 1
     job = await claimed(converter_engine)
@@ -267,7 +264,8 @@ async def test_converter_waiting_on_prefix_cannot_commit_after_lease_expiry(
         assert (
             await row(
                 conn,
-                "SELECT count(*) n FROM audit_events WHERE detail->>'run_id'='synthetic-conversion'",
+                "SELECT count(*) n FROM audit_events WHERE detail->>'run_id'=:run",
+                run=trusted.run_id,
             )
         )["n"] == 0
         assert (
@@ -276,18 +274,18 @@ async def test_converter_waiting_on_prefix_cannot_commit_after_lease_expiry(
 
 
 async def test_custom_normalization_roundtrip_retains_legacy_exact_copy(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".3333", ".3333", ".3333", "0"])
         legacy = await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
         assert {r["source_id"]: r["ratio"] for r in legacy["rows"]} == {
             **dict.fromkeys(ids[:3], "0.3333"),
             ids[3]: "0",
         }
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         custom = await category_mix.mutate(
             conn,
             workspace_id=str(origin["ws"]),
@@ -302,7 +300,7 @@ async def test_custom_normalization_roundtrip_retains_legacy_exact_copy(
                 ],
             },
         )
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         persisted = await category_mix.resource(conn, workspace_id=str(origin["ws"]))
         assert persisted == custom
         from decimal import Decimal, localcontext
@@ -317,32 +315,32 @@ async def test_custom_normalization_roundtrip_retains_legacy_exact_copy(
 
 
 async def test_real_account_removal_allocator_resets_once(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
     from src.services.target.source_membership import (
-        connect_archive,
-        remove_archive_account,
-        ArchiveChoice,
+        connect_past_posts,
+        remove_past_posts_account,
+        PastPostsChoice,
     )
 
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         await add(conn, origin, ["1"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
-    async with uow(archive_engine, origin) as conn:
-        linked = await connect_archive(
+    async with uow(past_posts_engine, origin) as conn:
+        linked = await connect_past_posts(
             conn,
             workspace_id=str(origin["ws"]),
             origin_ig_account_id=str(origin["iga"]),
             authorization=foundation.authorization(),
             had_prior_grant=False,
-            choice=ArchiveChoice(True, 1),
+            choice=PastPostsChoice(True, 1),
             allocation_writer=category_mix.allocate_membership,
             capability=foundation.capability(),
         )
-    async with uow(archive_engine, origin) as conn:
-        removed = await remove_archive_account(
+    async with uow(past_posts_engine, origin) as conn:
+        removed = await remove_past_posts_account(
             conn,
             workspace_id=str(origin["ws"]),
             origin_ig_account_id=str(origin["iga"]),
@@ -369,21 +367,21 @@ async def test_real_account_removal_allocator_resets_once(
 
 
 async def test_concurrent_converter_and_legacy_writer_share_one_authority(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".5", ".5"])
     started = asyncio.Event()
 
     async def convert():
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             started.set()
             return await category_mix.convert_workspace(
-                conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+                conn, workspace_id=str(origin["ws"]), evidence=evidence()
             )
 
     async def old_save():
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             return await category_mix.set_mix(
                 conn,
                 workspace_id=str(origin["ws"]),
@@ -394,7 +392,7 @@ async def test_concurrent_converter_and_legacy_writer_share_one_authority(
                 by_user_id=None,
             )
 
-    async with uow(archive_engine, origin) as blocker:
+    async with uow(past_posts_engine, origin) as blocker:
         await source_state.lock_all_workspace_sources(
             blocker, workspace_id=str(origin["ws"])
         )
@@ -406,7 +404,7 @@ async def test_concurrent_converter_and_legacy_writer_share_one_authority(
     converted, saved = await asyncio.gather(first, second, return_exceptions=True)
     assert isinstance(converted, dict)
     assert isinstance(saved, (list, category_mix.MixProtocolRequired))
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         value = await category_mix.resource(conn, workspace_id=str(origin["ws"]))
         assert value["revision"] == 1 and value["protocol_version"] == 2
         ratios = {r["source_id"]: r["ratio"] for r in value["rows"]}
@@ -418,16 +416,16 @@ async def test_concurrent_converter_and_legacy_writer_share_one_authority(
 
 
 async def test_concurrent_membership_add_and_custom_save_resolve_fresh_revision(
-    archive_engine, origin, tmp_path
+    past_posts_engine, origin, tmp_path
 ):
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         ids = await add(conn, origin, [".7", ".3"])
         await category_mix.convert_workspace(
-            conn, workspace_id=str(origin["ws"]), evidence=evidence(tmp_path)
+            conn, workspace_id=str(origin["ws"]), evidence=evidence()
         )
 
     async def connect():
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             return await category_mix.connect_drive(
                 conn,
                 workspace_id=str(origin["ws"]),
@@ -440,7 +438,7 @@ async def test_concurrent_membership_add_and_custom_save_resolve_fresh_revision(
             )
 
     async def save():
-        async with uow(archive_engine, origin) as conn:
+        async with uow(past_posts_engine, origin) as conn:
             return await category_mix.mutate(
                 conn,
                 workspace_id=str(origin["ws"]),
@@ -456,7 +454,7 @@ async def test_concurrent_membership_add_and_custom_save_resolve_fresh_revision(
                 by_user_id=None,
             )
 
-    async with uow(archive_engine, origin) as blocker:
+    async with uow(past_posts_engine, origin) as blocker:
         await source_state.lock_all_workspace_sources(
             blocker, workspace_id=str(origin["ws"])
         )
@@ -466,7 +464,7 @@ async def test_concurrent_membership_add_and_custom_save_resolve_fresh_revision(
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
     assert sum(isinstance(o, category_mix.MixConflict) for o in outcomes) == 1
     assert sum(isinstance(o, dict) for o in outcomes) == 1
-    async with uow(archive_engine, origin) as conn:
+    async with uow(past_posts_engine, origin) as conn:
         value = await category_mix.resource(conn, workspace_id=str(origin["ws"]))
         assert value["revision"] == 2
         assert len(value["rows"]) == (3 if isinstance(outcomes[0], dict) else 2)

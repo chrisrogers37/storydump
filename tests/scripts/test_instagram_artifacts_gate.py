@@ -11,14 +11,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from src.services.target.transit import ArchiveUploadEvidence
+from src.services.target.transit import PastPostsUploadEvidence
 from tests.scripts import test_instagram_catalog_gate as catalog
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts.test_instagram_observations_gate import uow, row
 
 pytestmark = pytest.mark.integration
-archive_engine = foundation.archive_engine
-origin = catalog.archive
+past_posts_engine = foundation.past_posts_engine
+origin = catalog.past_posts
 evidence = catalog.evidence
 
 
@@ -46,7 +46,7 @@ def subject(sync_conn, origin):
 def admission(s, **changes):
     values = dict(
         workspace_id=str(s["ws"]),
-        source_id=str(s["archive"]),
+        source_id=str(s["past_posts"]),
         data_generation_id=str(s["generation"]),
         observation_revision=1,
         media_item_id=str(s["item"]),
@@ -73,7 +73,7 @@ def created(a, **changes):
         signature="b" * 40,
     )
     values.update(changes)
-    return ArchiveUploadEvidence(**values)
+    return PastPostsUploadEvidence(**values)
 
 
 async def snapshot(conn, s, ref):
@@ -85,10 +85,12 @@ async def snapshot(conn, s, ref):
     )
 
 
-async def test_matching_creation_and_exact_replay_are_atomic(archive_engine, subject):
+async def test_matching_creation_and_exact_replay_are_atomic(
+    past_posts_engine, subject
+):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         pending = await snapshot(conn, subject, ref)
         assert (
@@ -126,11 +128,11 @@ async def test_matching_creation_and_exact_replay_are_atomic(archive_engine, sub
 
 
 async def test_uncertainty_blocks_second_attempt_and_late_success_owns_cleanup(
-    archive_engine, subject, sync_conn
+    past_posts_engine, subject, sync_conn
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         assert await m.mark_uncertain(
             conn, workspace_id=a["workspace_id"], artifact_ref=ref
@@ -145,15 +147,15 @@ async def test_uncertainty_blocks_second_attempt_and_late_success_owns_cleanup(
         )
     with sync_conn.cursor() as cur:
         cur.execute(
-            "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=%s",
+            "UPDATE instagram_past_posts_generations SET lifecycle='deletion_pending' WHERE id=%s",
             (subject["generation"],),
         )
         cur.execute(
             "UPDATE media_sources SET source_use_epoch=source_use_epoch+1 WHERE id=%s",
-            (subject["archive"],),
+            (subject["past_posts"],),
         )
     sync_conn.commit()
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         await m.record_created(
             conn, workspace_id=a["workspace_id"], artifact_ref=ref, evidence=created(a)
         )
@@ -186,11 +188,11 @@ async def test_uncertainty_blocks_second_attempt_and_late_success_owns_cleanup(
     ],
 )
 async def test_conflicting_or_invalid_creation_never_settles(
-    archive_engine, subject, change
+    past_posts_engine, subject, change
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         before = await snapshot(conn, subject, ref)
         with pytest.raises(m.ArtifactRefused):
@@ -214,14 +216,14 @@ async def test_conflicting_or_invalid_creation_never_settles(
 
 
 async def test_foreign_tenant_completion_and_missing_tenant_are_denied(
-    archive_engine, subject
+    past_posts_engine, subject
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
     other = {"ws": str(uuid.uuid4())}
-    async with uow(archive_engine, other) as conn:
+    async with uow(past_posts_engine, other) as conn:
         with pytest.raises(m.ArtifactRefused, match="artifact_missing"):
             await m.record_created(
                 conn,
@@ -229,7 +231,7 @@ async def test_foreign_tenant_completion_and_missing_tenant_are_denied(
                 artifact_ref=ref,
                 evidence=created(a),
             )
-    async with archive_engine.begin() as conn:
+    async with past_posts_engine.begin() as conn:
         with pytest.raises(m.ArtifactRefused, match="artifact_missing"):
             await m.record_created(
                 conn,
@@ -247,11 +249,11 @@ async def test_foreign_tenant_completion_and_missing_tenant_are_denied(
     ],
 )
 async def test_admitted_identity_is_database_immutable(
-    archive_engine, subject, column, value
+    past_posts_engine, subject, column, value
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         with pytest.raises(DBAPIError):
             async with conn.begin_nested():
@@ -275,11 +277,11 @@ async def test_admitted_identity_is_database_immutable(
     ],
 )
 async def test_uncertain_cannot_be_settled_or_cleaned_by_absence_or_timestamp(
-    archive_engine, subject, assignment
+    past_posts_engine, subject, assignment
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         with pytest.raises(DBAPIError):
             async with conn.begin_nested():
@@ -293,7 +295,7 @@ async def test_uncertain_cannot_be_settled_or_cleaned_by_absence_or_timestamp(
 
 
 async def test_mark_destroyed_only_moves_a_settled_attempt_whose_cleanup_is_pending(
-    archive_engine, subject
+    past_posts_engine, subject
 ):
     m = service()
     a = admission(subject)
@@ -307,7 +309,7 @@ async def test_mark_destroyed_only_moves_a_settled_attempt_whose_cleanup_is_pend
         )
         return found["destroyed_at"]
 
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         # Unsettled: the upload may still land, so there is nothing to destroy yet.
         assert await m.mark_destroyed(conn, artifact_ref=ref, **ids) is False
@@ -316,9 +318,9 @@ async def test_mark_destroyed_only_moves_a_settled_attempt_whose_cleanup_is_pend
         assert await destroyed_at(conn, ref) is None
         await m.record_created(conn, artifact_ref=ref, evidence=created(a), **ids)
     # Another tenant cannot see it, so cannot move it.
-    async with uow(archive_engine, {"ws": str(uuid.uuid4())}) as conn:
+    async with uow(past_posts_engine, {"ws": str(uuid.uuid4())}) as conn:
         assert await m.mark_destroyed(conn, artifact_ref=ref, **ids) is False
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         assert (await snapshot(conn, subject, ref))["cleanup_state"] == "pending"
         # Settled and pending: moved, once.
         assert await m.mark_destroyed(conn, artifact_ref=ref, **ids) is True
@@ -330,12 +332,14 @@ async def test_mark_destroyed_only_moves_a_settled_attempt_whose_cleanup_is_pend
         assert await destroyed_at(conn, ref) == stamped
 
 
-async def test_concurrent_admissions_have_one_database_winner(archive_engine, subject):
+async def test_concurrent_admissions_have_one_database_winner(
+    past_posts_engine, subject
+):
     m = service()
 
     async def insert():
         try:
-            async with uow(archive_engine, subject) as conn:
+            async with uow(past_posts_engine, subject) as conn:
                 assert (
                     await conn.execute(text("SHOW transaction_isolation"))
                 ).scalar_one() == "read committed"
@@ -368,11 +372,11 @@ def test_database_already_blocks_second_legacy_unresolved_attempt(sync_conn, evi
     "field,value", [("asset_id", 123), ("signature", int("1" * 40))]
 )
 async def test_database_creation_evidence_requires_typed_identity_fields(
-    archive_engine, subject, field, value
+    past_posts_engine, subject, field, value
 ):
     m = service()
     a = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **a)
         invalid = asdict(created(a))
         invalid[field] = value
@@ -408,11 +412,11 @@ def second_subject(sync_conn, subject):
 
 @pytest.mark.parametrize("settled", [False, True])
 async def test_admitted_reference_has_one_lifetime_cleanup_owner(
-    archive_engine, subject, second_subject, settled
+    past_posts_engine, subject, second_subject, settled
 ):
     m = service()
     first = admission(subject)
-    async with uow(archive_engine, subject) as conn:
+    async with uow(past_posts_engine, subject) as conn:
         ref = await m.admit_upload(conn, **first)
         if settled:
             await m.record_created(
@@ -421,7 +425,7 @@ async def test_admitted_reference_has_one_lifetime_cleanup_owner(
                 artifact_ref=ref,
                 evidence=created(first),
             )
-    async with uow(archive_engine, second_subject) as conn:
+    async with uow(past_posts_engine, second_subject) as conn:
         with pytest.raises(m.ArtifactRefused, match="admitted_reference_conflict"):
             await m.admit_upload(
                 conn,
@@ -439,14 +443,14 @@ async def test_admitted_reference_has_one_lifetime_cleanup_owner(
 
 
 async def test_concurrent_reference_reuse_has_one_cleanup_owner(
-    archive_engine, subject, second_subject
+    past_posts_engine, subject, second_subject
 ):
     m = service()
     shared = admission(subject)["admitted_asset_ref"]
 
     async def insert(s):
         try:
-            async with uow(archive_engine, s) as conn:
+            async with uow(past_posts_engine, s) as conn:
                 return await m.admit_upload(
                     conn, **admission(s, admitted_asset_ref=shared)
                 )

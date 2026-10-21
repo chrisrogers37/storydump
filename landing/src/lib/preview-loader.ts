@@ -1,7 +1,7 @@
 /**
- * When an archive preview is asked for, and what it does when it fails.
+ * When a past-posts preview is asked for, and what it does when it fails.
  * Nothing here is React's or the DOM's, so each rule is pinned without either;
- * `ArchiveThumbnail` wires it to a tile.
+ * `PastPostsThumbnail` wires it to a tile.
  *
  * A tile starts idle and asks for nothing until it is near the screen: the
  * viewport and one row of tiles beyond it. Near, it queues for one of the

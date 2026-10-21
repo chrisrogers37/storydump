@@ -4,7 +4,7 @@ Four stand-ins, each at the seam the production object is built over, so the
 real code above it runs unchanged and nothing reaches a socket:
 
 * `FakeInstagram`: Instagram's Graph and its media CDN, as one
-  `httpx.MockTransport`, serving the generated onboarding archives
+  `httpx.MockTransport`, serving the generated onboarding past-posts sources
   (`tests.fixtures.instagram_onboarding`) the way Meta pages them: by time
   window (or, with no `since`, everything older than `until`: the history
   walk's one-row gap probe), newest first, a caption only to the read that
@@ -36,7 +36,7 @@ import httpx
 from PIL import Image
 
 from src.services.target import egress
-from src.services.target.transit import ArchiveUploadEvidence
+from src.services.target.transit import PastPostsUploadEvidence
 from src.services.target.unit_of_work import in_transaction
 
 #: No DNS: the egress floor's private-address check resolves the host, and a
@@ -65,8 +65,8 @@ def graph_time(at: int) -> str:
     return datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
-def retarget(archive, *, owner: str, offset: int):
-    """*archive* as another account's: the same posts under ids shifted by
+def retarget(past_posts, *, owner: str, offset: int):
+    """*past-posts source* as another account's: the same posts under ids shifted by
     *offset* (an id is unique within a workspace, and two accounts of one
     workspace must not share them) and owned by *owner*."""
 
@@ -74,11 +74,11 @@ def retarget(archive, *, owner: str, offset: int):
         return str(int(value) + offset)
 
     posts = []
-    for post in archive.posts:
+    for post in past_posts.posts:
         parent = {**post.parent, "id": shift(post.parent["id"]), "owner": {"id": owner}}
         children = tuple({**c, "id": shift(c["id"])} for c in post.children)
         posts.append(replace(post, parent=parent, children=children))
-    return replace(archive, owner_id=owner, posts=tuple(posts))
+    return replace(past_posts, owner_id=owner, posts=tuple(posts))
 
 
 @dataclass(frozen=True)
@@ -91,18 +91,18 @@ class Seen:
 
 
 class FakeInstagram:
-    """Graph and CDN for the accounts it is given an archive for."""
+    """Graph and CDN for the accounts it is given a past-posts source for."""
 
     def __init__(self):
-        #: account ref -> its archive; the bearer token names the account.
-        self.archives: dict = {}
+        #: account ref -> its past-posts source; the bearer token names the account.
+        self.past_posts_sources: dict = {}
         self.requests: list = []
 
-    def add(self, archive) -> None:
-        self.archives[archive.owner_id] = archive
+    def add(self, past_posts) -> None:
+        self.past_posts_sources[past_posts.owner_id] = past_posts
 
     def client(self) -> httpx.AsyncClient:
-        """The plain client the archive composition is handed: no credentials,
+        """The plain client the past-posts composition is handed: no credentials,
         cookies or default parameters (the adapter refuses anything else)."""
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
 
@@ -136,16 +136,16 @@ class FakeInstagram:
         bearer = request.headers.get("authorization", "")
         account = bearer.removeprefix("Bearer token-for-") if bearer else None
         self.requests.append(Seen(host, path, account))
-        archive = self.archives.get(account)
-        if archive is None:
+        past_posts = self.past_posts_sources.get(account)
+        if past_posts is None:
             return self._error(401, 190, "Invalid OAuth access token")
         parts = path.strip("/").split("/")[1:]  # without the version
         fields = set(request.url.params.get("fields", "").split(","))
         if len(parts) == 2 and parts[1] == "media":
             assert parts[0] == account, "a listing named another account's id"
-            return self._listing(request, archive, fields)
+            return self._listing(request, past_posts, fields)
         if len(parts) == 2 and parts[1] == "children":
-            post = self._post(archive, parts[0])
+            post = self._post(past_posts, parts[0])
             if post is None:
                 return self._error(400, 100, "Unsupported get request")
             rows = [
@@ -161,15 +161,15 @@ class FakeInstagram:
                 }
             return httpx.Response(200, json=body)
         if len(parts) == 1:
-            post = self._post(archive, parts[0])
+            post = self._post(past_posts, parts[0])
             if post is None:
                 return self._error(400, 100, "Unsupported get request")
             return httpx.Response(200, json=self._row(post, fields))
         return self._error(400, 100, "Unsupported get request")
 
     @staticmethod
-    def _post(archive, media_id: str):
-        return next((p for p in archive.posts if p.parent["id"] == media_id), None)
+    def _post(past_posts, media_id: str):
+        return next((p for p in past_posts.posts if p.parent["id"] == media_id), None)
 
     @staticmethod
     def _row(post, fields) -> dict:
@@ -180,7 +180,7 @@ class FakeInstagram:
             row["caption"] = post.caption
         return row
 
-    def _listing(self, request, archive, fields) -> httpx.Response:
+    def _listing(self, request, past_posts, fields) -> httpx.Response:
         params = request.url.params
         # A window is `since` up to `until`. The walk's gap probe sends `until`
         # alone, a one-row listing: the newest posts strictly before `until`,
@@ -189,7 +189,7 @@ class FakeInstagram:
         since = int(params["since"]) if "since" in params else 0
         until = int(params["until"])
         limit, after = int(params["limit"]), int(params.get("after", 0))
-        inside = [p for p in archive.posts if since <= p.at < until]
+        inside = [p for p in past_posts.posts if since <= p.at < until]
         page = inside[after : after + limit]
         body = {"data": [self._row(p, fields) for p in page]}
         if after + limit < len(inside):
@@ -230,7 +230,7 @@ class FakeTransit:
     async def upload(self, data, *, workspace_id, media_kind, preallocated_ref):
         assert not in_transaction()
         self.uploads.append(preallocated_ref)
-        self.assets[preallocated_ref] = ArchiveUploadEvidence(
+        self.assets[preallocated_ref] = PastPostsUploadEvidence(
             preallocated_ref,
             "asset-" + str(len(self.uploads)).zfill(12),
             len(data),
@@ -246,12 +246,12 @@ class FakeTransit:
         self.assets.pop(ref, None)
         return True
 
-    async def archive_lookup(self, public_id, *, resource_type):
+    async def past_posts_lookup(self, public_id, *, resource_type):
         assert not in_transaction()
         self.lookups.append(public_id)
         return self.assets.get(public_id)
 
-    async def destroy_archive(self, public_id, *, resource_type):
+    async def destroy_past_posts(self, public_id, *, resource_type):
         assert not in_transaction()
         self.destroyed.append(public_id)
         return "destroyed" if self.assets.pop(public_id, None) else "not_found"

@@ -53,7 +53,7 @@ export function SourcePolicyEditor({
 }: {
   workspaceId: string;
   sourceId: string;
-  /** The source's accessible name ("Your Instagram @<handle>"), for the toggle's label. */
+  /** The source's accessible name ("Instagram past posts @<handle>"), for the toggle's label. */
   sourceName: string;
   editable: boolean;
 }) {

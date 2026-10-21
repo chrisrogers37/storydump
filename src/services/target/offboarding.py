@@ -47,11 +47,11 @@ loop finalizes the current job `succeeded` and both commit together.
 itself `leased` on the same serialization key and would decline the mint — so
 the duplicate guard is explicit and excludes the current row.
 
-## The archive's transit drain runs only in a run that has written nothing
+## The past-posts source's transit drain runs only in a run that has written nothing
 
-An archive upload that was admitted but not yet settled or destroyed blocks
+A past-posts upload that was admitted but not yet settled or destroyed blocks
 `fn_offboard_finalize` (its guard names it), so leg 3 also drains those:
-`archive_transit_cleanup.settle_and_destroy`, after the archives are fenced and
+`past_posts_transit_cleanup.settle_and_destroy`, after the past-posts sources are fenced and
 before the credentials are revoked. That function takes the pipeline locks of
 the intents it settles, in transactions of its own, and asks the provider
 between them. So it must run while the loop's session holds no row lock the
@@ -65,8 +65,8 @@ nothing before the drain. Revoking waits for the drain in the same run for the
 same reason.
 
 A drain that reports an upload still owed holds the finalize: the run writes an
-`offboard_archive_transit_unresolved` audit row with the counts, mints a
-successor after the recheck interval and returns `archive_transit_pending`. An
+`offboard_past_posts_transit_unresolved` audit row with the counts, mints a
+successor after the recheck interval and returns `past_posts_transit_pending`. An
 upload that is overdue (unsettled past the drain's review horizon) is asked
 about once an hour instead, so one that never resolves writes one audit row an
 hour rather than one a minute. A finalize the guard would refuse is a raise that
@@ -99,8 +99,8 @@ from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
 from src.services.target import (
-    archive_lifecycle,
-    archive_transit_cleanup,
+    past_posts_lifecycle,
+    past_posts_transit_cleanup,
     audit,
     intent_ledger,
     jobs,
@@ -132,8 +132,8 @@ DRAINING_STATES = ("publishing", "publishing_ambiguous")
 #: and its id leaves the cache, so only a cancel counts.
 MAX_WRITING_SAVEPOINTS = 64
 
-#: How long an offboarding waits to ask again while an archive upload it is held
-#: on is overdue (`archive_transit_cleanup.DRAIN_REVIEW_AFTER_SECONDS`). It can
+#: How long an offboarding waits to ask again while a past-posts upload it is held
+#: on is overdue (`past_posts_transit_cleanup.DRAIN_REVIEW_AFTER_SECONDS`). It can
 #: still land, so it is asked about again, but it is not about to: every turn
 #: costs a provider question and an audit row for the same unresolved fact, so
 #: the cadence is an hour, and never below the configured recheck.
@@ -248,9 +248,9 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
     }
 
 
-async def fence_archives(factory, workspace_id: str) -> int:
-    """Leg 2's archive half, before the credentials go: every
-    archive is fenced through the epoch writer (`archive_lifecycle.offboard_fence`),
+async def fence_past_posts(factory, workspace_id: str) -> int:
+    """Leg 2's past-posts half, before the credentials go: every
+    past-posts source is fenced through the epoch writer (`past_posts_lifecycle.offboard_fence`),
     so no new admission or permit outlives the revoke. Returns how many.
 
     **In its OWN transaction, committed before leg 2.** The fence takes the
@@ -259,10 +259,10 @@ async def fence_archives(factory, workspace_id: str) -> int:
     session the prefix would also hold the workspace row and its sources until
     the run ends, and a finalize in the same run would wait on them forever.
     Committed here, it holds neither. Its effects are durable whatever the
-    run does next, and a second run finds every archive fenced already.
+    run does next, and a second run finds every past-posts source fenced already.
     """
     async with factory() as session:
-        fenced = await archive_lifecycle.offboard_fence(
+        fenced = await past_posts_lifecycle.offboard_fence(
             session, workspace_id=workspace_id
         )
         await session.commit()
@@ -357,8 +357,8 @@ async def reap_transit(session, workspace_id: str, *, transit) -> dict[str, Any]
     return {"reaped": reaped, "left_to_ttl": failed, "seam": "wired"}
 
 
-async def drain_archive_transit(deps, workspace_id: str) -> dict[str, Any]:
-    """Leg 3's archive half: settle and destroy every archive upload the
+async def drain_past_posts_transit(deps, workspace_id: str) -> dict[str, Any]:
+    """Leg 3's past-posts half: settle and destroy every past-posts upload the
     workspace admitted, so the finalize guard has nothing left to refuse on.
 
     **Call it only while the loop's session holds no write** (the module
@@ -373,11 +373,11 @@ async def drain_archive_transit(deps, workspace_id: str) -> dict[str, Any]:
     outlives it, and the run waits on it (a successor) instead of finalizing
     into the guard's refusal.
     """
-    drained = await archive_transit_cleanup.settle_and_destroy(
+    drained = await past_posts_transit_cleanup.settle_and_destroy(
         deps.engine,
         workspace_id=workspace_id,
         transit=deps.transit,
-        limit=archive_transit_cleanup.DRAIN_LIMIT,
+        limit=past_posts_transit_cleanup.DRAIN_LIMIT,
     )
     return {
         "seam": "absent" if deps.transit is None else "wired",
@@ -574,21 +574,21 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         successor = await _mint_successor(session, job, workspace_id, "now()", {})
         return {"outcome": "draining", "successor": successor, **drained}
 
-    archives = await fence_archives(own_tx, workspace_id)
+    past_posts_sources = await fence_past_posts(own_tx, workspace_id)
     # Before the first write this session makes in this run. A run that
     # cancelled intents holds their locks, which the drain's own transactions
     # would wait on: it defers, and its successor drains (module docstring).
-    archive_transit = (
+    past_posts_transit = (
         {"seam": "deferred"}
         if drained["cancelled"]
-        else await drain_archive_transit(deps, workspace_id)
+        else await drain_past_posts_transit(deps, workspace_id)
     )
     revoked = await revoke_credentials(session, workspace_id)
     transit = await reap_transit(session, workspace_id, transit=deps.transit)
     report = {
         "revoked": revoked,
-        "archives_fenced": archives,
-        "archive_transit": archive_transit,
+        "past_posts_fenced": past_posts_sources,
+        "past_posts_transit": past_posts_transit,
         "transit": transit,
         **drained,
     }
@@ -619,34 +619,34 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
             **report,
         }
 
-    if archive_transit.get("unresolved"):
+    if past_posts_transit.get("unresolved"):
         # **Never finalize over an upload the provider has not accounted for.**
         # The door would refuse, and a refusal is a raise that spends the job's
         # retry budget: a dead job and a workspace stranded `offboarding` for an
         # upload that may settle in a minute. The run waits instead, as the drain
         # does for publishing work, and says so durably. The successor drains
         # again and finalizes in the run that finds nothing owed; the batch bound
-        # (`archive_transit_cleanup.DRAIN_LIMIT`) is what each turn takes.
+        # (`past_posts_transit_cleanup.DRAIN_LIMIT`) is what each turn takes.
         await _audit(
             own_tx,
             workspace_id,
-            "offboard_archive_transit_unresolved",
+            "offboard_past_posts_transit_unresolved",
             {
-                "unresolved": archive_transit["unresolved"],
-                "overdue": archive_transit["overdue"],
+                "unresolved": past_posts_transit["unresolved"],
+                "overdue": past_posts_transit["overdue"],
             },
         )
         # Every turn writes the audit row above, so an overdue upload (one the
         # provider has not accounted for within the review horizon) is asked
         # about once an hour, not at every recheck.
         recheck = cfg.offboard_drain_recheck_seconds
-        if archive_transit["overdue"]:
+        if past_posts_transit["overdue"]:
             recheck = max(recheck, OVERDUE_TRANSIT_RECHECK_SECONDS)
         successor = await _mint_successor(
             session, job, workspace_id, _AFTER_RECHECK, {"recheck": recheck}
         )
         return {
-            "outcome": "archive_transit_pending",
+            "outcome": "past_posts_transit_pending",
             "successor": successor,
             **report,
         }

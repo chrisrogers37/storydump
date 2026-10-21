@@ -1,4 +1,4 @@
-"""Persist already-authorized archive upload admissions and creation evidence.
+"""Persist already-authorized past-posts upload admissions and creation evidence.
 
 The caller owns canonical locks, suitability and its tenant transaction before
 admission. Completion only records an owned attempt, including after a fence;
@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.exceptions.base import RefusalError
 from src.services.target import readers
-from src.services.target.transit import ArchiveUploadEvidence
+from src.services.target.transit import PastPostsUploadEvidence
 
 
 class ArtifactRefused(RefusalError):
@@ -24,7 +24,7 @@ class ArtifactRefused(RefusalError):
     creation_evidence_invalid or creation_conflict: closed, safe persistence refusal.
     """
 
-    _prefix = "archive artifact refused"
+    _prefix = "past-posts artifact refused"
 
 
 def _uuid(value):
@@ -104,11 +104,11 @@ async def admit_upload(
     except IntegrityError as exc:
         cause = getattr(exc.orig, "__cause__", None)
         constraint = getattr(cause, "constraint_name", None)
-        if constraint == "uq_archive_admitted_owner":
+        if constraint == "uq_past_posts_admitted_owner":
             raise ArtifactRefused("admitted_reference_conflict") from None
-        if constraint == "uq_archive_unsettled_intent":
+        if constraint == "uq_past_posts_unsettled_intent":
             raise ArtifactRefused("upload_already_pending") from None
-        if constraint == "uq_archive_upload_attempt":
+        if constraint == "uq_past_posts_upload_attempt":
             raise ArtifactRefused("attempt_conflict") from None
         raise
 
@@ -159,7 +159,7 @@ async def mark_destroyed(executor, *, workspace_id, artifact_ref):
 async def record_created(executor, *, workspace_id, artifact_ref, evidence):
     """Matching affirmative creation may land late; cleanup remains pending."""
     if (
-        type(evidence) is not ArchiveUploadEvidence
+        type(evidence) is not PastPostsUploadEvidence
         or not isinstance(evidence.public_id, str)
         or len(evidence.public_id) > 256
         or not isinstance(evidence.asset_id, str)

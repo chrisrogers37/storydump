@@ -6,7 +6,7 @@ import { THUMBNAIL_TYPES } from "@/lib/thumbnails";
 
 /**
  * What `?v=` may be: the item's `thumbnail_version` as `thumbnailSrc` puts it in
- * the URL, a Drive item's hash prefix or an archive item's
+ * the URL, a Drive item's hash prefix or a past-posts item's
  * `<generation>.<epoch>`. Opaque here, checked only for length and for the
  * characters a URL leaves alone; the API decides whether it is the current one.
  */
@@ -17,12 +17,12 @@ const VERSION = /^[A-Za-z0-9._~-]{1,128}$/;
  * thumbnail, streamed from the API, which fetched it from the provider behind
  * the workspace check.
  *
- * `v` is forwarded to the API, which needs it for an archive item: it is the
- * generation and epoch the picture may be answered for, and an archive item
+ * `v` is forwarded to the API, which needs it for a past-posts item: it is the
+ * generation and epoch the picture may be answered for, and a past-posts item
  * answers 404 to any other. A Drive item's API ignores it, and its picture is
  * kept by the browser by URL. No other query is forwarded.
  *
- * The API's `Cache-Control` rides through unchanged, so an archive picture's
+ * The API's `Cache-Control` rides through unchanged, so a past-posts picture's
  * `private, no-store, max-age=0` is never turned into a copy anyone keeps. A
  * failure is a bare status that is never kept, and the page draws its
  * placeholder in the picture's place. Only the API's own refusals keep their
@@ -31,7 +31,7 @@ const VERSION = /^[A-Za-z0-9._~-]{1,128}$/;
  * A failure answers at once. The upstream body is released, never awaited: under
  * Next's runtime (`next dev` and `next build` + `next start`, Node 20 and 22) the
  * cancel of a body nobody reads can stay pending for good, and a route that
- * waits on it never sends its 404. The page asks for archive pictures two at a
+ * waits on it never sends its 404. The page asks for past-posts pictures two at a
  * time, so two such requests would hold every other preview in the tab.
  */
 export async function GET(
