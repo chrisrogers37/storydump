@@ -98,16 +98,16 @@ Add these to `~/.zshrc` (or `~/.bashrc`) on your Mac:
 
 ```bash
 # Storydump shortcuts
-alias sl='cd ~/Projects/storydump-v2 && source .venv/bin/activate'
+alias sl='cd ~/Projects/storydump && source .venv/bin/activate'
 
 # Quick checks
-alias sl-test='cd ~/Projects/storydump-v2 && source .venv/bin/activate && pytest'
-alias sl-lint='cd ~/Projects/storydump-v2 && source .venv/bin/activate && ruff check .'
-alias sl-format='cd ~/Projects/storydump-v2 && source .venv/bin/activate && ruff format .'
-alias sl-precommit='cd ~/Projects/storydump-v2 && source .venv/bin/activate && ruff check . && ruff format --check . && pytest'
+alias sl-test='cd ~/Projects/storydump && source .venv/bin/activate && pytest'
+alias sl-lint='cd ~/Projects/storydump && source .venv/bin/activate && ruff check .'
+alias sl-format='cd ~/Projects/storydump && source .venv/bin/activate && ruff format .'
+alias sl-precommit='cd ~/Projects/storydump && source .venv/bin/activate && ruff check . && ruff format --check . && pytest'
 
 # Database shortcuts (local PostgreSQL)
-alias sl-db-reset='cd ~/Projects/storydump-v2 && make reset-db'
+alias sl-db-reset='cd ~/Projects/storydump && make reset-db'
 
 # Railway operations
 alias sl-logs='railway logs --service worker'
