@@ -26,7 +26,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install ruff
         run: pip install ruff
@@ -54,7 +54,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       # No install step, deliberately: the ratchet is stdlib-only, so it runs
       # before and independently of the application's dependency tree. A gate
@@ -114,7 +114,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Cache pip dependencies
         uses: actions/cache@v4
@@ -253,7 +253,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       # Coverage gates nothing (there is no threshold), so a failure to combine
       # or report it must not fail Test either.
@@ -312,7 +312,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
@@ -426,7 +426,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       # A PR adds its entry as a new file in changelog.d/ and never edits
       # CHANGELOG.md, so no two PRs change the same lines; a docs-only PR needs
@@ -470,7 +470,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Compare schema code with the migration tail

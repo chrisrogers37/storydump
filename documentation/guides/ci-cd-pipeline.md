@@ -228,8 +228,8 @@ railway logs --service worker
 
 ## Runtimes CI pins
 
-- **Python 3.10** in every job (`setup.py` `python_requires=">=3.10"`); Railway
-  builds with NIXPACKS' default Python, so the pin is CI's, not the deploy's
+- **Python 3.12** in every job (`setup.py` `python_requires=">=3.12"`), the version
+  Railway's Nixpacks build runs in production (its default; no variable pins it)
 - **Node 22** for the front end (mirrored by `engines` in `landing/package.json`)
 - **PostgreSQL 17** for every test shard and both Schema consistency clusters
 
