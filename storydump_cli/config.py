@@ -2,8 +2,8 @@
 
 One directory — ``$STORYDUMP_CONFIG_DIR`` or ``~/.config/storydump`` — holding
 ``config.json`` with two keys, ``api_url`` and ``token_storage`` (``"keychain"``
-or ``"file"``). JSON rather than TOML because CI runs Python 3.10 and
-``tomllib`` arrived in 3.11; a third-party parser for two keys is not worth
+or ``"file"``). JSON rather than TOML: it was chosen while CI ran Python 3.10,
+which has no ``tomllib``, and a third-party parser for two keys was not worth
 a dependency. The directory is 0700 and the file 0600: the config names no
 secret, but the token file that may sit beside it does, and one rule for
 the whole directory is simpler than two.

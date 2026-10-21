@@ -66,7 +66,7 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
 ```
 
 - `pytest.ini` turns coverage on (`--cov=src`, an HTML report); `--no-cov` is the
-  fast path. CI's Test job runs `pytest tests/` on Python 3.10 with
+  fast path. CI's Test job runs `pytest tests/` on Python 3.12 with
   `postgres:17` and `REQUIRE_TEST_DATABASE=1`.
 - `asyncio_mode = auto`: an `async def test_…` needs no marker.
 - `filterwarnings = error`: a warning fails the test — EXCEPT the three classes
