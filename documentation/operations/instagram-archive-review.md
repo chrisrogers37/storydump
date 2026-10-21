@@ -30,7 +30,7 @@ throwaway PostgreSQL, from connecting an account to a posted story and on to the
 deletion of what the archive imported. The recipe is in
 [`instagram-source-isolated-gate.md`](instagram-source-isolated-gate.md):
 - a Linux machine;
-- Python 3.10;
+- Python 3.12;
 - PostgreSQL 15 in UTC on loopback port 65433;
 - a test-only `ENCRYPTION_KEY`;
 - a checkout with no `.env`.

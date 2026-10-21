@@ -59,7 +59,7 @@ selected is therefore known in advance. Every token, id and URL is synthetic.
   ``the selected-media validator runs only on Linux (`media_validation.run_bounded`): run this gate on the Linux lane``.
   The two that pass on macOS are the OAuth interleaving scene (8) and the
   entry-point scan (9). A macOS result is neither a pass nor a defect.
-- **Python 3.10**, as CI runs it, with the repository's requirements:
+- **Python 3.12**, as CI and production run it, with the repository's requirements:
   `pip install -r requirements.txt && pip install -e '.[cli]'`.
 - **PostgreSQL 15 in UTC, with password authentication over TCP, and a superuser
   test role** (the `POSTGRES_USER` of CI's `postgres:15` service is one). The

@@ -115,7 +115,7 @@ many tenants, and the operator and a tenant are different parties — which is w
 per-tenant isolation is a product requirement rather than a hardening
 preference.
 
-**Tech stack:** Python 3.10+, FastAPI, PostgreSQL (Neon in cloud; hand-written
+**Tech stack:** Python 3.12+, FastAPI, PostgreSQL (Neon in cloud; hand-written
 SQL on asyncpg), the Telegram Bot API over HTTP (no bot framework), the
 Instagram Graph API, Google Drive, Cloudinary, Railway deployment, Next.js
 `landing/` site on Vercel.
@@ -486,7 +486,7 @@ source .venv/bin/activate && ruff check . && ruff format --check . && pytest
 
 CI (`.github/workflows/ci.yml`) runs seven jobs on every push and PR: Lint (ruff
 check + format over the whole repository), the FC-2 Telegram ratchet
-(`scripts/telegram_ratchet.py`), Test (Python 3.10 against a PostgreSQL 17
+(`scripts/telegram_ratchet.py`), Test (Python 3.12 against a PostgreSQL 17
 service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
 Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
 Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` and

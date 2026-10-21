@@ -19,7 +19,7 @@ click==8.3.3
 rich==15.0.0
 
 # Bounded local media decoding
-Pillow==12.3.0
+Pillow==13.0.0
 
 # Cloud Storage
 cloudinary==1.44.2
