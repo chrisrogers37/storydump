@@ -45,7 +45,7 @@ def test_built_wheel_contains_migrations_manifest_and_ddl(tmp_path):
         "from importlib.resources import files; "
         "p=files('scripts').joinpath('migrations'); "
         "assert p.joinpath('adoption_manifest.json').is_file(); "
-        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')]) == 3"
+        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')]) == 4"
     )
     subprocess.run(
         [sys.executable, "-c", isolated_import, str(wheels[0])],
@@ -60,6 +60,7 @@ def test_built_wheel_contains_migrations_manifest_and_ddl(tmp_path):
         "scripts/migrations/000_initial.sql",
         "scripts/migrations/001_catalog_text.sql",
         "scripts/migrations/002_drop_archive_snapshots.sql",
+        "scripts/migrations/003_instagram_past_posts.sql",
         "scripts/migrations/adoption_manifest.json",
     }
     assert migration_files <= names

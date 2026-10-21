@@ -2,7 +2,7 @@
 
 Run `python scripts/check_schema_references.py`. Runtime literals and numeric
 quantities are outside this check: references name schema symbols or files,
-while the empty base and the two supported migration files keep their numbers.
+while the empty base and the supported migration files keep their numbers.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ if __package__ in (None, ""):
 
 from scripts.sql_lexer import COMMENTS, DOLLAR, segments
 
-ALLOWED = frozenset({"000", "001", "002"})
+ALLOWED = frozenset({"000", "001", "002", "003"})
 SOURCE_SUFFIXES = frozenset({".py", ".sql", ".ts", ".tsx", ".js", ".jsx"})
 DOCUMENT_SUFFIXES = frozenset({".md", ".rst"})
 # Higher numbers can also be counts, HTTP statuses, limits or example IDs.

@@ -59,13 +59,22 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 
 
 def test_replaced_functions_are_exact_schema_definitions():
+    """Every function 001 defines is the schema's text, unless 003 replaced it
+    when it renamed what that text names; every one 003 defines is too."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
     migration = _definitions((MIGRATIONS_DIR / "001_catalog_text.sql").read_text())
+    rename = _definitions((MIGRATIONS_DIR / "003_instagram_past_posts.sql").read_text())
     assert len(migration) >= 16
     assert len([name for name, _ in migration if name == "fn_clock_tick"]) == 2
-    assert all(definition in schema for definition in migration)
+    replaced = {
+        name.replace("archive", "past_posts")
+        for name, text in migration
+        if (name, text) not in schema
+    }
+    assert replaced <= {name for name, _ in rename}
+    assert all(definition in schema for definition in rename)
 
 
 @pytest.fixture(scope="module")
@@ -123,6 +132,8 @@ def test_new_build_adopts_catalog_refresh_and_apply_is_empty(world_db):
 
 
 def test_predeploy_leaves_both_cutover_migrations_owed(base_world, capsys):
+    """A deploy never runs 001 or 002, and the rename after them refuses to
+    run until both are applied: the predeploy fails and changes nothing."""
     from scripts.migration_runner import main
     from tests.scripts.test_archive_snapshot_migration import snapshot_names
 
@@ -131,7 +142,7 @@ def test_predeploy_leaves_both_cutover_migrations_owed(base_world, capsys):
             cur.execute(f'CREATE TABLE archive."{name}" (sentinel integer)')
         cur.execute("COMMENT ON FUNCTION public.fn_safe_tz(text) IS 'cutover sentinel'")
 
-    report = apply_pending(base_world, MIGRATIONS_DIR)
+    report = apply_pending(base_world, MIGRATIONS_DIR, max_version=2)
 
     assert report.applied == []
     assert [migration.version for migration in report.owed] == [1, 2]
@@ -148,11 +159,14 @@ def test_predeploy_leaves_both_cutover_migrations_owed(base_world, capsys):
         base_world,
         "SELECT obj_description('public.fn_safe_tz(text)'::regprocedure, 'pg_proc')",
     ) == ("cutover sentinel",)
-    assert main(["--database-url", base_world, "apply"]) == 0
-    output = capsys.readouterr().out
-    assert "0 applied" in output
-    assert "owed (manual) 001" in output
-    assert "owed (manual) 002" in output
+    assert main(["--database-url", base_world, "apply"]) == 1
+    assert "003 runs after 001 and 002" in capsys.readouterr().err
+    assert fetch_one(
+        base_world, "SELECT count(*) FROM runner.schema_migrations WHERE version > 0"
+    ) == (0,)
+    assert fetch_one(
+        base_world, "SELECT to_regclass('public.instagram_archive_generations')"
+    ) == ("instagram_archive_generations",)
 
 
 def test_fresh_schema_adopts_two_versions_before_the_archive_drop(
@@ -368,17 +382,79 @@ def test_retention_refuses_classes_the_worker_does_not_call(world_db, retention_
                 )
 
 
-def test_base_with_catalog_refresh_equals_current_code(
-    base_world, admin_conn, owner_actor
-):
-    from scripts.schema_parity import schema_diff, schema_signature
-
-    report = apply_manual(base_world, MIGRATIONS_DIR, 1)
-    assert [migration.version for migration in report.applied] == [1]
-    with psycopg2.connect(base_world) as conn, conn.cursor() as cur:
+def _through_002(dsn):
+    """The base as production stood before 003: 001, its validation, then 002."""
+    assert [m.version for m in apply_manual(dsn, MIGRATIONS_DIR, 1).applied] == [1]
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             (REPO_ROOT / "scripts/validate_catalog_constraints.sql").read_text()
         )
+    report = apply_manual(dsn, MIGRATIONS_DIR, 2, confirm_archive_backup=True)
+    assert [m.version for m in report.applied] == [2]
+
+
+def test_the_rename_refuses_where_past_posts_data_exists(base_world):
+    """A stored item's identity and its tombstones name the provider, so the
+    rename runs only where no Instagram source exists yet; with one it changes
+    nothing."""
+    _through_002(base_world)
+    with psycopg2.connect(base_world) as conn:
+        chain = seed_workspace_chain(conn, "rename-guard-example")
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO media_sources (workspace_id, provider, config,"
+                " origin_ig_account_id) VALUES (%s, 'instagram_archive', '{}', %s)",
+                (chain["ws"], chain["iga"]),
+            )
+        conn.commit()
+
+    with pytest.raises(MigrationRunnerError, match="past-posts data exists"):
+        apply_pending(base_world, MIGRATIONS_DIR)
+
+    assert fetch_one(
+        base_world, "SELECT count(*) FROM runner.schema_migrations WHERE version = 3"
+    ) == (0,)
+    assert fetch_one(
+        base_world,
+        "SELECT count(*) FROM media_sources WHERE provider = 'instagram_archive'",
+    ) == (1,)
+
+
+def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
+    _through_002(base_world)
+    with psycopg2.connect(base_world) as conn:
+        chain = seed_workspace_chain(conn, "rename-jobs-example")
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
+                " max_attempts) VALUES"
+                " ('archive_lifecycle_sweep', NULL, 'bulk', 'archive_lifecycle_sweep', 1),"
+                " ('reconcile_archive_accounts', %s, 'bulk', 'archive-reconcile:' || %s, 5)",
+                (chain["ws"], str(chain["ws"])),
+            )
+        conn.commit()
+
+    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [3]
+
+    assert fetch_all(
+        base_world,
+        "SELECT kind, serialization_key = 'past-posts-reconcile:' || workspace_id::text"
+        " OR serialization_key = kind AS key_follows FROM jobs"
+        " WHERE kind LIKE '%past_posts%' ORDER BY kind",
+    ) == [
+        {"kind": "past_posts_lifecycle_sweep", "key_follows": True},
+        {"kind": "reconcile_past_posts_accounts", "key_follows": True},
+    ]
+
+
+def test_base_with_catalog_refresh_equals_current_code(
+    base_world, admin_conn, owner_actor
+):
+    """The base with the whole tail, in version order, is the current code."""
+    from scripts.schema_parity import schema_diff, schema_signature
+
+    _through_002(base_world)
+    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [3]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)
     try:
