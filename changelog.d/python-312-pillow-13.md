@@ -5,3 +5,7 @@
 ### Changed
 
 - **CI runs Python 3.12, the version production already runs.** Railway's Nixpacks build installs into Python 3.12, while CI tested on 3.10, and Pillow 13 needs 3.11 or later. Every CI job now uses 3.12, `setup.py` requires it, and ruff targets it.
+
+### Tests
+
+- **setuptools and wheel are pinned in the testing requirements.** `test_built_wheel_contains_migrations_manifest_and_ddl` builds the package and skips without them. Python 3.12 does not put either in a fresh environment, and that skip tripped the suite's skip ceiling. Both are now in the `# Testing` block and in `TEST_TIER`.

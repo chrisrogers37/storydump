@@ -49,7 +49,16 @@ _TEST_HEADER = "# Testing"
 #: `httpx2`, which reads like an application dependency and is not one, cannot
 #: quietly leave (see `test_httpx2_stays_pinned_for_the_testclient`).
 TEST_TIER = frozenset(
-    {"pytest", "pytest-asyncio", "pytest-cov", "pytest-mock", "pytest-split", "httpx2"}
+    {
+        "pytest",
+        "pytest-asyncio",
+        "pytest-cov",
+        "pytest-mock",
+        "pytest-split",
+        "httpx2",
+        "setuptools",
+        "wheel",
+    }
 )
 #: `setup.py`'s opt-in extra. Its contents are not runtime dependencies.
 CLI_EXTRA = "cli"
