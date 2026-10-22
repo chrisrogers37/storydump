@@ -1,0 +1,45 @@
+name: Landing lockfile
+
+# Moves dompurify in landing/'s lockfile to its newest release within what its dependents ask for, and commits the lockfile to
+# this branch. It runs once, on the push that adds it; a push made with GITHUB_TOKEN starts no run, so its own commit does not
+# trigger it again.
+on:
+  push:
+    branches: [landing-next-16.4.2]
+    paths: [.github/workflows/landing-lockfile.yml]
+
+permissions: {}
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: landing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: landing-next-16.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Lockfile only: no node_modules, and no package's install scripts run.
+      - name: Update dompurify in the lockfile
+        run: npm update dompurify --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Check that package.json is unchanged
+        run: git diff --exit-code package.json
+      - name: Commit the lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "The lockfile already has the newest dompurify its dependents allow."
+            exit 0
+          fi
+          git commit -m "landing: dompurify 3.4.17 in the lockfile"
+          git push origin HEAD:landing-next-16.4.2
+          echo "Pushed $(git rev-parse HEAD)."
