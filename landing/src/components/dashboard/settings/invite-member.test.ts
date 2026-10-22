@@ -3,7 +3,7 @@ import type { ReactElement, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/setup/copy-button";
 import type { PendingInvitation } from "@/lib/invitations";
-import { InviteLinkBlock, PendingInvitations, inviteLinkSlot } from "./invite-member";
+import { InviteLinkBlock, InviteLinkSlot, PendingInvitations } from "./invite-member";
 
 /**
  * The render contract of inviting a person (#1563, #1564): THE JOIN LINK IS ON
@@ -69,11 +69,11 @@ function labelled(tree: ReactNode, label: string) {
 
 describe("the join link is shown once, and only while it is in state", () => {
   it("renders nothing for the link slot when no link is in state", () => {
-    expect(inviteLinkSlot(null, noop)).toBeNull();
+    expect(InviteLinkSlot({ minted: null, onDone: noop })).toBeNull();
   });
 
   it("renders the block when a link is in state", () => {
-    const slot = inviteLinkSlot(MINTED, noop);
+    const slot = InviteLinkSlot({ minted: MINTED, onDone: noop });
     expect([...walk(slot)].some((el) => el.type === InviteLinkBlock)).toBe(true);
   });
 
