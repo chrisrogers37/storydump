@@ -77,10 +77,13 @@ export function InviteLinkBlock({
 }
 
 /** The link slot: the block while a link is in state, nothing otherwise. */
-export function inviteLinkSlot(
-  minted: MintedInvite | null,
-  onDone: () => void,
-): ReactElement | null {
+export function InviteLinkSlot({
+  minted,
+  onDone,
+}: {
+  minted: MintedInvite | null;
+  onDone: () => void;
+}): ReactElement | null {
   return minted ? <InviteLinkBlock {...minted} onDone={onDone} /> : null;
 }
 
@@ -270,7 +273,7 @@ export function InviteMember({
     <div className="space-y-3 border-b pb-4">
       {minted ? (
         <div ref={blockRef} tabIndex={-1} className="outline-hidden">
-          {inviteLinkSlot(minted, done)}
+          <InviteLinkSlot minted={minted} onDone={done} />
         </div>
       ) : (
         <form onSubmit={invite} className="space-y-2">
