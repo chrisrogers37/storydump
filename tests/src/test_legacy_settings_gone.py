@@ -510,6 +510,9 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "RAILWAY_GIT_COMMIT_SHA",
     # the API's opt-in docs, for a development server
     "API_DOCS",
+    # the public-record check's private list, which CI sets from a repository
+    # secret and the tree never holds (`scripts/public_record.py`)
+    "PRIVATE_IDENTIFIERS",
     # the storydump CLI's own (a client; never a service's)
     "STORYDUMP_TOKEN",
     "STORYDUMP_API",

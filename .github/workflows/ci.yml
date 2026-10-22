@@ -414,6 +414,41 @@ jobs:
       - name: Audit runtime dependencies
         run: npm audit --omit=dev
 
+  public-record:
+    name: Public record
+    runs-on: ubuntu-latest
+    # The list is the repository secret PRIVATE_IDENTIFIERS, which GitHub
+    # withholds from a fork's pull request: such a PR is checked once it lands.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No install step: the check is stdlib-only, like the Telegram ratchet.
+      # --require-list makes a missing secret a failure, never a clean pass.
+      # --count-only because this log is public: a file and line would show
+      # anyone the word, and so what the list holds.
+      # On a pull request it also reads the commits the PR adds and its title
+      # and body as they stood when the run started; a description edited
+      # after the last push is read again at the next one.
+      - name: Check the public record
+        env:
+          PRIVATE_IDENTIFIERS: ${{ secrets.PRIVATE_IDENTIFIERS }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            python scripts/public_record.py --require-list --count-only \
+              --commits "origin/$BASE_REF..HEAD" --event "$GITHUB_EVENT_PATH"
+          else
+            python scripts/public_record.py --require-list --count-only
+          fi
+
   changelog-check:
     name: Changelog Check
     runs-on: ubuntu-latest

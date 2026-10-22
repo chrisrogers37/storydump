@@ -28,6 +28,7 @@ JOBS = [
     "Test",
     "Security Scan",
     "Front End",
+    "Public record",
     "Changelog Check",
     "Schema consistency",
 ]
@@ -219,7 +220,7 @@ class TestTheShardLegsAreCoveredByTest:
     def test_a_rollup_with_only_the_required_checks_is_ready(self, tmp_path, workflow):
         r = run(tmp_path, workflow, _rollup())
         assert r.returncode == 0, r.stdout + r.stderr
-        assert "all 7 required checks" in r.stdout
+        assert f"all {len(JOBS)} required checks" in r.stdout
 
     def test_green_shard_legs_never_stand_in_for_test(self, tmp_path, workflow):
         checks = [c for c in _rollup()["statusCheckRollup"] if c["name"] != "Test"]

@@ -27,7 +27,7 @@ set -uo pipefail
 
 REQUIRED_DEFAULT=(
   "Lint" "Telegram ratchet" "Test" "Security Scan" "Front End"
-  "Changelog Check" "Schema consistency"
+  "Public record" "Changelog Check" "Schema consistency"
 )
 # Declared in ci.yml but not required here: the test-shard matrix. Its legs
 # report as "Test shard 1".."Test shard N", never under this template, so
