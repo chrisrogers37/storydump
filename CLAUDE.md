@@ -74,10 +74,10 @@ for which verbs only read.
 
 ### The record
 
-This repository is private, but what lands in it is not throwaway: every file,
-commit, pull request, issue, review comment, screenshot and GIF is read by
-every agent and collaborator who works here, and a pushed commit outlives the
-branch that carried it. None of them names a tenant. Write placeholders —
+This repository is public: every file, commit, pull request, issue, review
+comment, screenshot and GIF is world-readable and indexed, and deleting one
+later does not recall it: a pushed commit outlives the branch that carried
+it. None of them names a tenant. Write placeholders —
 `<workspace>`, `@<handle>`, `<ws-id>`, "the owner's account" — never a
 workspace's name, an account's handle, a workspace, account, user or story id
 from production, a person's email (the site's published contact address is
