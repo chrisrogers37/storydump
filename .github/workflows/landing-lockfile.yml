@@ -1,0 +1,44 @@
+name: Landing lockfile
+
+# Resolves landing/'s lockfile for the next that landing/package.json pins and commits it to this branch. It runs once, on the
+# push that adds it; a push made with GITHUB_TOKEN starts no run, so its own commit does not trigger it again.
+on:
+  push:
+    branches: [landing-next-16.4.2]
+    paths: [.github/workflows/landing-lockfile.yml]
+
+permissions: {}
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: landing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: landing-next-16.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Lockfile only: no node_modules, and no package's install scripts run.
+      - name: Resolve the lockfile
+        run: npm install next@16.4.2 eslint-config-next@16.4.2 --save-exact --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Check that package.json kept its pins
+        run: git diff --exit-code package.json
+      - name: Commit the lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "The lockfile already resolves next 16.4.2."
+            exit 0
+          fi
+          git commit -m "landing: resolve the lockfile for next 16.4.2"
+          git push origin HEAD:landing-next-16.4.2
+          echo "Pushed $(git rev-parse HEAD)."
