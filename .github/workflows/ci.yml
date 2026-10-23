@@ -419,9 +419,10 @@ jobs:
     runs-on: ubuntu-latest
     # The list is the repository secret PRIVATE_IDENTIFIERS, which GitHub
     # withholds from a fork's pull request and from a run Dependabot starts, so
-    # the job skips both; once such a PR lands, the push run checks its files,
-    # though not its commit messages or description. A commit someone else
-    # pushes to a Dependabot branch starts a run that has the secret.
+    # the job skips both; once such a PR lands, the push run checks its files
+    # and the commit messages it brings, though not its description. A commit
+    # someone else pushes to a Dependabot branch starts a run that has the
+    # secret.
     if: >-
       github.event_name == 'push' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -437,12 +438,13 @@ jobs:
           python-version: '3.12'
 
       # No install step: the check is stdlib-only, like the Telegram ratchet.
-      # --require-list makes a missing secret a failure, never a clean pass.
-      # --count-only because this log is public: a file and line would show
-      # anyone the word, and so what the list holds.
+      # --require-list makes a missing or emptied secret a failure, never a
+      # clean pass. --count-only because this log is public: a file and line
+      # would show anyone the word, and so what the list holds.
       # On a pull request it also reads the commits the PR adds and its title
       # and body as they stood when the run started; a description edited
-      # after the last push is read again at the next one.
+      # after the last push is read again at the next one. On a push it reads
+      # the commit messages the push brings.
       - name: Check the public record
         env:
           PRIVATE_IDENTIFIERS: ${{ secrets.PRIVATE_IDENTIFIERS }}
@@ -452,7 +454,8 @@ jobs:
             python scripts/public_record.py --require-list --count-only \
               --commits "origin/$BASE_REF..HEAD" --event "$GITHUB_EVENT_PATH"
           else
-            python scripts/public_record.py --require-list --count-only
+            python scripts/public_record.py --require-list --count-only \
+              --event "$GITHUB_EVENT_PATH"
           fi
 
   changelog-check:

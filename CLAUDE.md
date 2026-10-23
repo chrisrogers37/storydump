@@ -87,11 +87,13 @@ Describe production evidence by its shape and its numbers, and take
 screenshots from the demo or a local stack.
 
 The `Public record` CI job (`scripts/public_record.py`) fails a tracked file, a
-pull request's commit messages, or its title or body that names an identifier
-on the owner's private list, a repository secret that never lives in the tree.
-Its CI log reports only a count, never where or which, since the log is
-public; `scripts/lint.sh` shows the lines, against your copy in
-`~/.config/storydump/private-identifiers.txt`.
+commit message a push or pull request brings, or a pull request's title or body
+that names an identifier on the owner's private list, a repository secret that
+never lives in the tree. Its CI log reports only a count, never where or which,
+since the log is public; `scripts/lint.sh` shows the lines in files and in your
+branch's commit messages, against your copy in
+`~/.config/storydump/private-identifiers.txt`, and a pull request's title and
+body are yours to check against it.
 
 ### Main is production
 

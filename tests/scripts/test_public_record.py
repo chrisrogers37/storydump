@@ -133,3 +133,101 @@ def test_a_pull_requests_title_and_body_are_scanned(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "pull request title" in out
     assert "pull request body:2:" in out
+
+
+def test_an_identifier_a_hard_wrap_splits_is_found_where_it_starts(tmp_path, capsys):
+    """Prose wrapped between the identifier's words, and a comment that repeats
+    its marker on the next line, are each found on the line the name starts."""
+    first, second = OTHER.split()
+    root = _repo(
+        tmp_path / "r",
+        {
+            "docs/a.md": f"intro\nthe probe used {first}\n  {second} today\n",
+            "src/b.py": f"x = 1\n# met {first}\n#   {second}\n",
+        },
+    )
+    assert main([], env=_env(tmp_path), root=root) == 1
+    assert sorted(capsys.readouterr().out.splitlines()) == [
+        "docs/a.md:2: private identifier (list line 2)",
+        "src/b.py:2: private identifier (list line 2)",
+    ]
+
+
+def test_a_paragraph_break_or_a_new_list_item_is_not_a_wrap(tmp_path, capsys):
+    first, second = OTHER.split()
+    text = f"ends with {first}\n\n{second} opens a paragraph\n- {first}\n- {second}\n"
+    root = _repo(tmp_path / "r", {"a.md": text})
+    assert main([], env=_env(tmp_path), root=root) == 0
+
+
+def test_a_line_naming_an_identifier_whole_and_wrapped_is_one_finding(tmp_path, capsys):
+    first, second = OTHER.split()
+    root = _repo(tmp_path / "r", {"a.md": f"{OTHER} met {first}\n{second} again\n"})
+    assert main([], env=_env(tmp_path), root=root) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "a.md:1: private identifier (list line 2)"
+    ]
+
+
+def test_a_wrapped_identifier_in_a_commit_message_is_found(tmp_path, capsys):
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    base = _git(root, "rev-parse", "HEAD")
+    first, second = OTHER.split()
+    (root / "b.md").write_text("ok too\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "subject", "-m", f"names {first}\n{second} here")
+    sha = _git(root, "rev-parse", "--short=12", "HEAD")
+    assert main(["--commits", f"{base}..HEAD"], env=_env(tmp_path), root=root) == 1
+    assert f"commit {sha}:3:" in capsys.readouterr().out
+
+
+def test_a_list_holding_only_comments_is_no_list(tmp_path, capsys):
+    """An emptied secret cannot read as a clean pass where a list is required."""
+    root = _repo(tmp_path / "r", {"a.md": f"{SECRET}\n"})
+    env = _env(tmp_path, listing="# nothing listed yet\n\n   \n")
+    assert main([], env=env, root=root) == 0
+    assert main(["--require-list"], env=env, root=root) == 2
+    assert "holds no identifiers" in capsys.readouterr().err
+
+
+def _event(tmp_path, **fields):
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(fields), encoding="utf-8")
+    return str(path)
+
+
+def test_a_push_reads_the_commit_messages_it_brings(tmp_path, capsys):
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    before = _git(root, "rev-parse", "HEAD")
+    (root / "b.md").write_text("ok too\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", f"probe {SECRET} live")
+    after = _git(root, "rev-parse", "HEAD")
+    event = _event(tmp_path, before=before, after=after, commits=[])
+    assert main(["--event", event], env=_env(tmp_path), root=root) == 1
+    assert f"commit {after[:12]}:1:" in capsys.readouterr().out
+
+
+def test_a_push_whose_before_is_unknown_reads_the_commits_the_event_lists(
+    tmp_path, capsys
+):
+    """A new branch's push has an all-zero `before`, and a force push's old head
+    may never have been fetched: the event's own list of commits is read."""
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    after = _git(root, "rev-parse", "HEAD")
+    listed = [{"id": "f" * 40, "message": f"probe\n{SECRET}\n"}]
+    for before in ("0" * 40, "e" * 40):
+        event = _event(tmp_path, before=before, after=after, commits=listed)
+        assert main(["--event", event], env=_env(tmp_path), root=root) == 1
+        assert f"commit {'f' * 12}:2:" in capsys.readouterr().out
+
+
+def test_a_pull_requests_before_and_after_are_not_read_as_a_push(tmp_path, capsys):
+    """A pull request's commits are the range CI passes to --commits."""
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    before = _git(root, "rev-parse", "HEAD")
+    _git(root, "commit", "-q", "--allow-empty", "-m", f"probe {SECRET}")
+    after = _git(root, "rev-parse", "HEAD")
+    pull_request = {"title": "ok", "body": "ok"}
+    event = _event(tmp_path, pull_request=pull_request, before=before, after=after)
+    assert main(["--event", event], env=_env(tmp_path), root=root) == 0

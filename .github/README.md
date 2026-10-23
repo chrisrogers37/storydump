@@ -42,8 +42,9 @@ request into `main` or `develop`, nine jobs (one of them a five-leg matrix):
   every PR), then `npm audit --omit=dev`, which gates: a known advisory
   against the runtime dependencies fails the job
 - **Public record** — `python scripts/public_record.py --require-list
-  --count-only`: a tracked file, a pull request's commit messages, or its title
-  or body that names an identifier on the owner's private list fails the job.
+  --count-only`: a tracked file, a commit message a push or pull request
+  brings, or a pull request's title or body that names an identifier on the
+  owner's private list fails the job.
   The list is the `PRIVATE_IDENTIFIERS` secret, which GitHub withholds from a
   fork's pull request and from a run Dependabot starts, so the job skips both;
   the log reports only a count (stdlib-only, no install)
