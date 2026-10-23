@@ -359,10 +359,10 @@ jobs:
     # the test shards, so it adds nothing to the wall-clock a person waits
     # for, and a gate that costs nothing is a gate nobody routes around.
     #
-    # scripts/pr_ready.sh requires seven checks by name: Lint, Telegram
-    # ratchet, Test, Security Scan, Front End, Changelog Check and Schema
-    # consistency. The test-shard matrix is declared there too, as covered by
-    # Test, and the script checks both lists against this workflow.
+    # scripts/pr_ready.sh requires eight checks by name: Lint, Telegram
+    # ratchet, Test, Security Scan, Front End, Public record, Changelog Check
+    # and Schema consistency. The test-shard matrix is declared there too, as
+    # covered by Test, and the script checks both lists against this workflow.
     # GitHub rulesets govern merge policy; review that configuration when
     # changing job names.
     #
@@ -418,8 +418,14 @@ jobs:
     name: Public record
     runs-on: ubuntu-latest
     # The list is the repository secret PRIVATE_IDENTIFIERS, which GitHub
-    # withholds from a fork's pull request: such a PR is checked once it lands.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # withholds from a fork's pull request and from a run Dependabot starts, so
+    # the job skips both; once such a PR lands, the push run checks its files,
+    # though not its commit messages or description. A commit someone else
+    # pushes to a Dependabot branch starts a run that has the secret.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
     steps:
       - uses: actions/checkout@v4
         with:

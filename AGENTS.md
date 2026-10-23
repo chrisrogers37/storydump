@@ -490,10 +490,11 @@ the card, the web Queue and Settings, and the `storydump` write verbs.
 source .venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
-CI (`.github/workflows/ci.yml`) runs eight jobs on every push and PR: Lint (ruff
-check + format over the whole repository), the FC-2 Telegram ratchet
-(`scripts/telegram_ratchet.py`), Test (Python 3.12 against a PostgreSQL 17
-service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
+CI (`.github/workflows/ci.yml`) runs eight required checks on every push and
+PR: Lint (ruff check + format over the whole repository), the FC-2 Telegram
+ratchet (`scripts/telegram_ratchet.py`), Test (five shards, each on Python 3.12
+against a PostgreSQL 17 service with `REQUIRE_TEST_DATABASE=1`, coverage of
+`src` and `storydump_cli`),
 Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
 Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` and
 `npm audit --omit=dev` in `landing/`; the audit gates on a known advisory

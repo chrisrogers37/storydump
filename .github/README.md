@@ -45,8 +45,8 @@ request into `main` or `develop`, nine jobs (one of them a five-leg matrix):
   --count-only`: a tracked file, a pull request's commit messages, or its title
   or body that names an identifier on the owner's private list fails the job.
   The list is the `PRIVATE_IDENTIFIERS` secret, which GitHub withholds from a
-  fork's pull request, so the job skips one; the log reports only a count
-  (stdlib-only, no install)
+  fork's pull request and from a run Dependabot starts, so the job skips both;
+  the log reports only a count (stdlib-only, no install)
 - **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
   check --base`: the fragment rule in `changelog.d/README.md`
 - **Schema consistency** — `python -m scripts.schema_consistency` compares the
