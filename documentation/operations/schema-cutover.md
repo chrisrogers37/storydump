@@ -62,8 +62,7 @@ dump taken from its temporary branch on 2026-10-16 were deleted the same day.
 Kept with the cutover record, outside Git: the Railway and Vercel settings from
 before the switch, the password-free roles and source catalog taken on
 2026-10-16, which hold no user data, and a bundle of every branch of the
-original repository, renamed `chrisrogers37/storydump-v1` on 2026-10-21. That
-repository is private and archived on GitHub.
+original repository.
 
 **No rollback to the original system.** It ended with the original database.
 The owner deleted it once a rollback was no longer wanted and nothing more was
