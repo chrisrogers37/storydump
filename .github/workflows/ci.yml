@@ -177,16 +177,24 @@ jobs:
           # A hit installs the saved packages with dpkg, which never fetches:
           # apt, handed the same files, downloaded them from the mirror again.
           debs=~/media-probe-debs
-          if ls "$debs"/*.deb > /dev/null 2>&1 && sudo dpkg -i "$debs"/*.deb; then
+          restored=false
+          if ls "$debs"/*.deb > /dev/null 2>&1; then
+            restored=true
+          fi
+          if [ "$restored" = true ] && sudo dpkg -i "$debs"/*.deb; then
             echo "Installed the cached packages."
           else
+            # -f on both calls repairs what a failed dpkg -i left half-done.
             timeout 3m sudo apt-get update
-            timeout 6m sudo apt-get install -y --no-install-recommends --download-only $MEDIA_PACKAGES
-            rm -rf "$debs"
-            mkdir -p "$debs"
-            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$debs" {} +
+            timeout 6m sudo apt-get install -y -f --no-install-recommends --download-only $MEDIA_PACKAGES
+            # Only a leg that restored nothing saves: after a failed restore the
+            # archives hold just what the repair fetched.
+            if [ "$restored" = false ]; then
+              mkdir -p "$debs"
+              find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$debs" {} +
+              echo "downloaded=true" >> "$GITHUB_OUTPUT"
+            fi
             sudo apt-get install -y -f --no-install-recommends $MEDIA_PACKAGES
-            echo "downloaded=true" >> "$GITHUB_OUTPUT"
           fi
           ffprobe -version > /dev/null
           ffmpeg -version | head -n 1
