@@ -444,7 +444,8 @@ jobs:
       # On a pull request it also reads the commits the PR adds and its title
       # and body as they stood when the run started; a description edited
       # after the last push is read again at the next one. On a push it reads
-      # the commit messages the push brings.
+      # the commit messages the push brings, and a failure's log gives the
+      # command that shows them.
       - name: Check the public record
         env:
           PRIVATE_IDENTIFIERS: ${{ secrets.PRIVATE_IDENTIFIERS }}

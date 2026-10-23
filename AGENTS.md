@@ -97,10 +97,11 @@ The `Public record` CI job (`scripts/public_record.py`) fails a tracked file, a
 commit message a push or pull request brings, or a pull request's title or body
 that names an identifier on the owner's private list, a repository secret that
 never lives in the tree. Its CI log reports only a count, never where or which,
-since the log is public; `scripts/lint.sh` shows the lines in files and in your
-branch's commit messages, against your copy in
-`~/.config/storydump/private-identifiers.txt`, and a pull request's title and
-body are yours to check against it.
+since the log is public. Against your copy in
+`~/.config/storydump/private-identifiers.txt`, `scripts/lint.sh` shows the
+lines in files and in your branch's commit messages, a push run's log gives the
+command that shows its commits, and a pull request's title and body are yours
+to check.
 
 ### Main is production
 

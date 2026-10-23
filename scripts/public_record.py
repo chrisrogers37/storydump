@@ -51,10 +51,10 @@ CONFIG_DIR_ENV = "STORYDUMP_CONFIG_DIR"
 LIST_FILE = "private-identifiers.txt"
 ROOT = Path(__file__).resolve().parents[1]
 
-#: What a hard wrap repeats at the start of the next line: the indent, and a
-#: comment or quote marker (`#`, `//`, `--`, `;`, `*`, `>`). A lone `-` is a
-#: list item, not a wrap, so it stays.
-_CONTINUATION = re.compile(r"[ \t]*(?:(?:#+|/{2,}|-{2,}|;+|\*+|>+)[ \t]*)?")
+#: What a hard wrap repeats at the start of the next line: the indent, and
+#: comment or quote markers (`#`, `#:`, `//`, `--`, `;`, `*`, `>`, and nested
+#: ones such as `> >`). A lone `-` is a list item, not a wrap, so it stays.
+_CONTINUATION = re.compile(r"[ \t]*(?:(?:#+:?|/{2,}|-{2,}|;+|\*+|>+)[ \t]*)*")
 
 
 def _list_path(env) -> Path:
@@ -68,7 +68,8 @@ def _list_path(env) -> Path:
 
 
 def load_list(env) -> list[tuple[int, str]] | None:
-    """The identifiers as (list line, lowered text), or None when no list is configured."""
+    """The identifiers as (list line, lowered text with single spaces), or None
+    when no list is configured."""
     text = env.get(LIST_ENV)
     if not text:
         path = _list_path(env)
@@ -77,15 +78,15 @@ def load_list(env) -> list[tuple[int, str]] | None:
         text = path.read_text(encoding="utf-8")
     entries = []
     for number, line in enumerate(text.splitlines(), start=1):
-        entry = line.strip()
+        entry = " ".join(line.split())
         if entry and not entry.startswith("#"):
             entries.append((number, entry.lower()))
     return entries
 
 
 def _joined(text: str) -> tuple[str, list[int]]:
-    """The text lowered with its hard wraps made single spaces, and the offset
-    in it where each line starts."""
+    """The text lowered, with each line's runs of spaces and its hard wraps made
+    single spaces, and the offset in it where each line starts."""
     parts, starts, length = [], [], 0
     for index, line in enumerate(text.splitlines()):
         if index:
@@ -93,7 +94,7 @@ def _joined(text: str) -> tuple[str, list[int]]:
             parts.append(" ")
             length += 1
         starts.append(length)
-        line = line.rstrip().lower()
+        line = " ".join(line.split()).lower()
         parts.append(line)
         length += len(line)
     return "".join(parts), starts
@@ -109,14 +110,14 @@ def scan(where: str, text: str, entries) -> list[str]:
             findings.append(finding)
 
     for line_number, line in enumerate(text.splitlines(), start=1):
-        lowered = line.lower()
+        lowered = " ".join(line.split()).lower()
         for list_line, entry in entries:
             if entry in lowered:
                 found(line_number, list_line)
 
     # An identifier of several words that a hard wrap splits: a match in the
     # joined text that starts on one line and ends on a later one.
-    wrapped = [(n, " ".join(e.split())) for n, e in entries if len(e.split()) > 1]
+    wrapped = [(n, entry) for n, entry in entries if " " in entry]
     if wrapped:
         joined, starts = _joined(text)
         for list_line, entry in wrapped:
@@ -162,8 +163,9 @@ def _is_commit(root: Path, sha: str) -> bool:
     )
 
 
-def _pushed(root: Path, event: dict) -> list[tuple[str, str]]:
-    """The commits a push event brings, as (sha, message).
+def _pushed(root: Path, event: dict) -> tuple[str, list[tuple[str, str]]]:
+    """The commits a push event brings, as (sha, message), and a git range that
+    reads them again.
 
     `before..after` when the clone holds `before`. A new branch (`before` all
     zeros) or a force push whose old head was never fetched falls back to the
@@ -171,14 +173,16 @@ def _pushed(root: Path, event: dict) -> list[tuple[str, str]]:
     """
     after = event.get("after") or ""
     if "pull_request" in event or not after.strip("0"):
-        return []
+        return "", []
     before = event.get("before") or ""
     if before.strip("0") and _is_commit(root, before):
-        return _commits(root, f"{before}..{after}")
-    return [
+        rev_range = f"{before}..{after}"
+        return rev_range, _commits(root, rev_range)
+    listed = [
         (commit.get("id") or "", commit.get("message") or "")
         for commit in event.get("commits") or []
     ]
+    return (f"{listed[0][0]}^..{after}" if listed else ""), listed
 
 
 def main(argv=None, env=None, root=None) -> int:
@@ -218,7 +222,7 @@ def main(argv=None, env=None, root=None) -> int:
         print(f"public record: not checked: {why}", file=sys.stderr)
         return 2 if args.require_list else 0
 
-    findings = []
+    findings, push_hint = [], ""
     for rel in _files(root):
         path = root / rel
         if path.is_file():
@@ -232,18 +236,24 @@ def main(argv=None, env=None, root=None) -> int:
         pull_request = event.get("pull_request") or {}
         findings += scan("pull request title", pull_request.get("title") or "", entries)
         findings += scan("pull request body", pull_request.get("body") or "", entries)
-        for sha, message in _pushed(root, event):
+        rev_range, pushed = _pushed(root, event)
+        for sha, message in pushed:
             findings += scan(f"commit {sha[:12]}", message, entries)
+        if rev_range:
+            push_hint = (
+                f", `python scripts/public_record.py --commits {rev_range}`"
+                " in this push's commits"
+            )
 
     if not findings:
         return 0
     if args.count_only:
         print(
             f"public record: {len(findings)} line(s) name a private identifier."
-            " This log is public, so it says neither where nor which: run"
-            " scripts/lint.sh with your copy of the list to see those in files"
-            " and in your branch's commit messages, and check the pull"
-            " request's title and body against it yourself.",
+            " This log is public, so it says neither where nor which. With your"
+            " copy of the list, scripts/lint.sh shows those in files and in your"
+            f" branch's commit messages{push_hint}; check a pull request's title"
+            " and body against it yourself.",
             file=sys.stderr,
         )
         return 1

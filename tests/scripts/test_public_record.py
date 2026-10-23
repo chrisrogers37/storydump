@@ -153,6 +153,40 @@ def test_an_identifier_a_hard_wrap_splits_is_found_where_it_starts(tmp_path, cap
     ]
 
 
+def test_wraps_in_attribute_comments_nested_quotes_and_after_trailing_spaces(
+    tmp_path, capsys
+):
+    first, second = OTHER.split()
+    root = _repo(
+        tmp_path / "r",
+        {
+            "c.py": f"#: met {first}\n#: {second}\n",
+            "d.md": f"> > quoted {first}\n> > {second}\n",
+            "e.md": f"ends {first}   \n{second}\n",
+        },
+    )
+    assert main([], env=_env(tmp_path), root=root) == 1
+    assert sorted(capsys.readouterr().out.splitlines()) == [
+        "c.py:1: private identifier (list line 2)",
+        "d.md:1: private identifier (list line 2)",
+        "e.md:1: private identifier (list line 2)",
+    ]
+
+
+def test_a_listed_identifiers_doubled_spaces_do_not_stop_a_match(tmp_path, capsys):
+    first, second = OTHER.split()
+    root = _repo(
+        tmp_path / "r",
+        {"a.md": f"met {first}   {second}\n", "b.md": f"{first}\n{second}\n"},
+    )
+    listing = f"{first}  {second}\n"
+    assert main([], env=_env(tmp_path, listing), root=root) == 1
+    assert sorted(capsys.readouterr().out.splitlines()) == [
+        "a.md:1: private identifier (list line 1)",
+        "b.md:1: private identifier (list line 1)",
+    ]
+
+
 def test_a_paragraph_break_or_a_new_list_item_is_not_a_wrap(tmp_path, capsys):
     first, second = OTHER.split()
     text = f"ends with {first}\n\n{second} opens a paragraph\n- {first}\n- {second}\n"
@@ -220,6 +254,29 @@ def test_a_push_whose_before_is_unknown_reads_the_commits_the_event_lists(
         event = _event(tmp_path, before=before, after=after, commits=listed)
         assert main(["--event", event], env=_env(tmp_path), root=root) == 1
         assert f"commit {'f' * 12}:2:" in capsys.readouterr().out
+
+
+def test_a_deleted_branchs_push_reads_no_commits(tmp_path, capsys):
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    before = _git(root, "rev-parse", "HEAD")
+    listed = [{"id": before, "message": f"probe {SECRET}"}]
+    event = _event(tmp_path, before=before, after="0" * 40, commits=listed)
+    assert main(["--event", event], env=_env(tmp_path), root=root) == 0
+
+
+def test_a_push_runs_report_gives_the_command_for_its_commits(tmp_path, capsys):
+    """The SHAs are public, and the hint is the same wherever the hit is."""
+    root = _repo(tmp_path / "r", {"a.md": "ok\n"})
+    before = _git(root, "rev-parse", "HEAD")
+    _git(root, "commit", "-q", "--allow-empty", "-m", f"probe {SECRET}")
+    after = _git(root, "rev-parse", "HEAD")
+    event = _event(tmp_path, before=before, after=after, commits=[])
+    args = ["--count-only", "--event", event]
+    assert main(args, env=_env(tmp_path), root=root) == 1
+    err = capsys.readouterr().err
+    assert f"--commits {before}..{after}" in err
+    assert SECRET.lower() not in err.lower()
+    assert "list line" not in err
 
 
 def test_a_pull_requests_before_and_after_are_not_read_as_a_push(tmp_path, capsys):
