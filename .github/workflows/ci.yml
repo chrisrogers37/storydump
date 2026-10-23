@@ -174,16 +174,19 @@ jobs:
             ffmpeg -version | head -n 1
             exit 0
           fi
+          # A hit installs the saved packages with dpkg, which never fetches:
+          # apt, handed the same files, downloaded them from the mirror again.
           debs=~/media-probe-debs
-          if ! ls "$debs"/*.deb > /dev/null 2>&1; then
+          if ls "$debs"/*.deb > /dev/null 2>&1 && sudo dpkg -i "$debs"/*.deb; then
+            echo "Installed the cached packages."
+          else
             timeout 3m sudo apt-get update
             timeout 6m sudo apt-get install -y --no-install-recommends --download-only $MEDIA_PACKAGES
+            rm -rf "$debs"
             mkdir -p "$debs"
             find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$debs" {} +
+            sudo apt-get install -y -f --no-install-recommends $MEDIA_PACKAGES
             echo "downloaded=true" >> "$GITHUB_OUTPUT"
-          fi
-          if ls "$debs"/*.deb > /dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends "$debs"/*.deb
           fi
           ffprobe -version > /dev/null
           ffmpeg -version | head -n 1
