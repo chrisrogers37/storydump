@@ -79,8 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     # Well inside Railway's two-hour wait on the run. Running out this clock
     # cancels a leg rather than failing it, and Railway has deployed a commit
-    # whose run ended cancelled, so the two slow steps, the package download
-    # and the tests, run under timeout(1) and fail the leg well before it.
+    # whose run ended cancelled, so the steps that install packages, collect
+    # the suite and run the tests carry their own limits, which fail the leg.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -89,6 +89,8 @@ jobs:
     env:
       # One collection order in every process that has to agree on it.
       PYTHONHASHSEED: "0"
+      # The apt packages the media probe tests need, and part of their cache key.
+      MEDIA_PACKAGES: ffmpeg
     services:
       postgres:
         image: postgres:17
@@ -120,6 +122,10 @@ jobs:
 
       - name: Cache pip dependencies
         uses: actions/cache@v4
+        timeout-minutes: 5
+        env:
+          # A stalled download gives up and runs as a miss.
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -127,6 +133,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -135,33 +142,45 @@ jobs:
       - name: Install package
         # the CLI extra too: `storydump_cli` is tested here, with its real
         # credential-store dependency rather than whatever is around
+        timeout-minutes: 5
         run: pip install -e '.[cli]'
 
       # The packages come from the runner's Ubuntu mirror, which has crawled at
       # 30 kB/s and held a leg in this step for 40 minutes. They are cached per
-      # runner image, since what ffmpeg needs depends on what the image holds,
-      # so a leg downloads them only when the image changes.
+      # runner image and package list, since what ffmpeg needs depends on what
+      # the image holds. A leg downloads them when the image changes, when the
+      # cache has gone a week unused, and in a pull request until a run on main
+      # has saved the new image's cache.
       - name: Name the runner image
         id: runner-image
         run: echo "version=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
 
       - name: Restore the media probe tools' packages
-        id: media-debs
         uses: actions/cache/restore@v4
+        timeout-minutes: 5
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
           path: ~/media-probe-debs
-          key: media-probe-debs-${{ steps.runner-image.outputs.version }}
+          key: media-probe-debs-${{ env.MEDIA_PACKAGES }}-${{ steps.runner-image.outputs.version }}
 
       - name: Install local media probe tools
         # Tests fail if tools are absent; actual deployment versions are proven
         # separately in the pinned Nixpacks image, not inferred from this runner.
+        id: media-install
+        timeout-minutes: 12
         run: |
+          if command -v ffprobe > /dev/null && command -v ffmpeg > /dev/null; then
+            ffmpeg -version | head -n 1
+            exit 0
+          fi
           debs=~/media-probe-debs
           if ! ls "$debs"/*.deb > /dev/null 2>&1; then
             timeout 3m sudo apt-get update
-            timeout 6m sudo apt-get install -y --no-install-recommends --download-only ffmpeg
+            timeout 6m sudo apt-get install -y --no-install-recommends --download-only $MEDIA_PACKAGES
             mkdir -p "$debs"
             find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$debs" {} +
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
           fi
           if ls "$debs"/*.deb > /dev/null 2>&1; then
             sudo apt-get install -y --no-install-recommends "$debs"/*.deb
@@ -169,15 +188,17 @@ jobs:
           ffprobe -version > /dev/null
           ffmpeg -version | head -n 1
 
-      # On a cache miss all five legs try to save; one does, and the others'
-      # failure to reserve the key is not a failure of the leg.
+      # Saved by a leg that downloaded. On a miss all five legs download and try
+      # to save; one does, and the save action only warns for the others, so
+      # continue-on-error is there for anything else that goes wrong in a save.
       - name: Save the media probe tools' packages
-        if: steps.media-debs.outputs.cache-hit != 'true'
+        if: steps.media-install.outputs.downloaded == 'true'
+        timeout-minutes: 5
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ~/media-probe-debs
-          key: media-probe-debs-${{ steps.runner-image.outputs.version }}
+          key: media-probe-debs-${{ env.MEDIA_PACKAGES }}-${{ steps.runner-image.outputs.version }}
 
       - name: Generate test encryption key
         id: gen-key
@@ -188,6 +209,7 @@ jobs:
       # count is checked against the ids read, so a line the pattern misses
       # cannot shrink the fingerprinted list unnoticed.
       - name: Fingerprint the collected suite
+        timeout-minutes: 5
         run: |
           python -m pytest --collect-only -qq --no-cov tests/ > collection.txt
           grep -E '^\S+\.py::' collection.txt > ids.txt
@@ -217,6 +239,7 @@ jobs:
         # --store-durations --clean-durations rewrite this leg's copy of the
         # times with exactly the tests it ran; `Test` merges the five copies.
         # A leg's tests take 6 to 11 minutes; timeout(1) fails one that hangs.
+        timeout-minutes: 28
         run: |
           cp .test_durations "test-durations-shard-${{ matrix.group }}.json"
           timeout --kill-after=1m 25m pytest tests/ -v --cov=src --cov=storydump_cli \
