@@ -86,6 +86,13 @@ businesses or their domains, a Telegram chat or user id, or any token or key.
 Describe production evidence by its shape and its numbers, and take
 screenshots from the demo or a local stack.
 
+The `Public record` CI job (`scripts/public_record.py`) fails a tracked file, a
+pull request's commit messages, or its title or body that names an identifier
+on the owner's private list, a repository secret that never lives in the tree.
+Its CI log reports only a count, never where or which, since the log is
+public; `scripts/lint.sh` shows the lines, against your copy in
+`~/.config/storydump/private-identifiers.txt`.
+
 ### Main is production
 
 Railway deploys `main` to production on every push, both the API and the

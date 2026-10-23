@@ -12,4 +12,11 @@ python -m ruff check . --fix || {
 echo "✨ Running ruff format..."
 python -m ruff format .
 
+# Reads your private list from ~/.config/storydump/private-identifiers.txt; without one it says so and passes.
+echo "🔒 Checking the public record..."
+python scripts/public_record.py || {
+    echo "❌ A file names a private identifier. Write a placeholder instead (AGENTS.md › The record)."
+    exit 1
+}
+
 echo "✅ All checks passed!"

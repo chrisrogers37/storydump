@@ -1,0 +1,3 @@
+### Security
+
+- **CI fails a change that names a tenant's identifier.** A new `Public record` job runs `scripts/public_record.py` on every push and pull request: a tracked file, a pull request's commit messages, or its title or body that names an identifier on the owner's private list fails it. The list is the `PRIVATE_IDENTIFIERS` repository secret; a local run reads `private-identifiers.txt` in the CLI's config directory, and `scripts/lint.sh` now runs one. The log reports only how many lines matched, never where or which, because it is public. A fork's pull request and a run Dependabot starts get no secrets, so the job skips them; once such a PR lands, the push run checks its files. `scripts/pr_ready.sh` counts it among the checks it requires.

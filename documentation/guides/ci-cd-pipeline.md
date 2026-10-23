@@ -18,7 +18,7 @@ before deploying.
 
 `.github/workflows/ci.yml` runs on every push to `main`, `develop` and
 `feature/*`, and on every pull request into `main` or `develop`. It declares
-eight jobs, one of them a matrix of five test shards, and none is
+nine jobs, one of them a matrix of five test shards, and none is
 path-filtered — every job runs on every PR:
 
 ```yaml
@@ -45,6 +45,8 @@ jobs:
                     # bandit -r src/ storydump_cli/               (advisory)
   front-end:        # in landing/: npm ci, npm test, npx tsc --noEmit, npm run lint
                     # npm audit --omit=dev                        (GATES)
+  public-record:    # python scripts/public_record.py --require-list --count-only
+                    # (stdlib only; the list is the PRIVATE_IDENTIFIERS secret)
   changelog-check:  # pull requests only: the rule in changelog.d/README.md
   schema-consistency: # python -m scripts.schema_consistency
                       # current code vs pinned schema-code base + migration tail
@@ -61,14 +63,15 @@ jobs:
 | Tests | `pytest`, `pytest-split` | The whole suite, split across five `Test shard` jobs by the recorded test times in `.test_durations`, each against its own PostgreSQL 17 service (the `tests/scripts` suites hold a cluster-wide lock, so two shards cannot share one). `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). The final `Test` job passes only if every shard passed and every shard fingerprinted the same collected suite, which is what makes each test run exactly once. It combines the shards' coverage of `src` and `storydump_cli` into the run summary; no threshold is enforced and coverage never fails the job |
 | Security | `pip-audit`, `bandit` | Vulnerability scanning. `pip-audit` GATES: a known-vulnerable pin in `requirements.txt` fails the job. `bandit` is advisory (`\|\| true` + `continue-on-error`): its findings on this tree have not been triaged, so read the uploaded report rather than the step's colour. The npm dependencies of `landing/` are audited in Front end, below |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint`, `npm audit --omit=dev` | The web app in `landing/` (Node 22). The audit GATES: a known advisory against a runtime dependency, direct or transitive, fails the job. It runs on every PR, so a newly published advisory turns every PR red until a bump lands; the step's note in `ci.yml` has its scope, why it has no severity floor, and how to clear an advisory. `next build` is left to Vercel, which builds every PR |
+| Public record | `scripts/public_record.py --require-list` | The rule in `AGENTS.md` › The record: a tracked file, a pull request's commit messages, or its title or body that names an identifier on the owner's private list fails. The list is the `PRIVATE_IDENTIFIERS` repository secret, which GitHub withholds from a fork's pull request and from a run Dependabot starts, so the job skips both; once such a PR lands, the push run checks its files, though not its commit messages or description. The CI log reports only how many lines matched, never where or which, because it is public; `scripts/lint.sh` shows the lines locally. Stdlib-only, like the ratchet |
 | Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
 | Schema consistency | `python -m scripts.schema_consistency` | Compares the catalog built from current schema code with the pinned schema-code base plus its migration tail. Two independent disposable PostgreSQL 17 clusters keep roles and memberships separate. Catalog snapshots and differences are uploaded as an artifact |
 
-The local `scripts/pr_ready.sh` helper requires seven checks by name: Lint,
-Telegram ratchet, Test, Security Scan, Front End, Changelog Check and Schema
-consistency. The `Test shard` matrix is declared to it as covered by `Test`:
-its legs report as `Test shard 1` … `Test shard 5`, and `Test` needs every one
-of them. It checks both lists against the workflow. GitHub rulesets govern
+The local `scripts/pr_ready.sh` helper requires eight checks by name: Lint,
+Telegram ratchet, Test, Security Scan, Front End, Public record, Changelog
+Check and Schema consistency. The `Test shard` matrix is declared to it as
+covered by `Test`: its legs report as `Test shard 1` … `Test shard 5`, and
+`Test` needs every one of them. It checks both lists against the workflow. GitHub rulesets govern
 merge policy; review that configuration when changing job names. The helper's
 expectations do not establish the remote ruleset settings.
 

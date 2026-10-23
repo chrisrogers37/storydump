@@ -18,7 +18,7 @@ and push gate.
 **File**: `ci.yml`
 
 Runs on every push to `main`, `develop` and `feature/*`, and on every pull
-request into `main` or `develop`, eight jobs (one of them a five-leg matrix):
+request into `main` or `develop`, nine jobs (one of them a five-leg matrix):
 
 - **Lint** — `ruff check .` and `ruff format . --check`, the whole repository
   (`ruff.toml` declares the scope; nothing is left unlinted by a directory list)
@@ -41,6 +41,12 @@ request into `main` or `develop`, eight jobs (one of them a five-leg matrix):
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
   every PR), then `npm audit --omit=dev`, which gates: a known advisory
   against the runtime dependencies fails the job
+- **Public record** — `python scripts/public_record.py --require-list
+  --count-only`: a tracked file, a pull request's commit messages, or its title
+  or body that names an identifier on the owner's private list fails the job.
+  The list is the `PRIVATE_IDENTIFIERS` secret, which GitHub withholds from a
+  fork's pull request and from a run Dependabot starts, so the job skips both;
+  the log reports only a count (stdlib-only, no install)
 - **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
   check --base`: the fragment rule in `changelog.d/README.md`
 - **Schema consistency** — `python -m scripts.schema_consistency` compares the
@@ -50,7 +56,7 @@ request into `main` or `develop`, eight jobs (one of them a five-leg matrix):
   as an artifact
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`). The local
-`scripts/pr_ready.sh` helper requires seven checks by name (every job above
+`scripts/pr_ready.sh` helper requires eight checks by name (every job above
 but the shards, which `Test` covers) and checks its lists against the
 workflow. GitHub rulesets govern merge policy; review that configuration when
 changing job names.

@@ -93,6 +93,13 @@ businesses or their domains, a Telegram chat or user id, or any token or key.
 Describe production evidence by its shape and its numbers, and take
 screenshots from the demo or a local stack.
 
+The `Public record` CI job (`scripts/public_record.py`) fails a tracked file, a
+pull request's commit messages, or its title or body that names an identifier
+on the owner's private list, a repository secret that never lives in the tree.
+Its CI log reports only a count, never where or which, since the log is
+public; `scripts/lint.sh` shows the lines, against your copy in
+`~/.config/storydump/private-identifiers.txt`.
+
 ### Main is production
 
 Railway deploys `main` to production on every push, both the API and the
@@ -483,14 +490,16 @@ the card, the web Queue and Settings, and the `storydump` write verbs.
 source .venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
-CI (`.github/workflows/ci.yml`) runs seven jobs on every push and PR: Lint (ruff
-check + format over the whole repository), the FC-2 Telegram ratchet
-(`scripts/telegram_ratchet.py`), Test (Python 3.12 against a PostgreSQL 17
-service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
+CI (`.github/workflows/ci.yml`) runs eight required checks on every push and
+PR: Lint (ruff check + format over the whole repository), the FC-2 Telegram
+ratchet (`scripts/telegram_ratchet.py`), Test (five shards, each on Python 3.12
+against a PostgreSQL 17 service with `REQUIRE_TEST_DATABASE=1`, coverage of
+`src` and `storydump_cli`),
 Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
 Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` and
 `npm audit --omit=dev` in `landing/`; the audit gates on a known advisory
 against the runtime dependencies; `next build` is left to Vercel's preview),
+Public record (`scripts/public_record.py`, the check under The record above),
 Changelog Check, and Schema consistency (`scripts/schema_consistency.py`: the
 schema built from this tree's code against the pinned schema-code base with
 the newer migration files replayed on it). `scripts/lint.sh`
