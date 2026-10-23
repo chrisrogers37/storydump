@@ -6,7 +6,7 @@ then apply later migrations. The marker is never executed. The owner
 role performs schema changes; the API uses `svc_ingress` and the worker
 uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
 
-**Repository Status**: PRIVATE
+**Repository Status**: PUBLIC
 
 ---
 

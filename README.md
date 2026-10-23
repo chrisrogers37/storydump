@@ -55,8 +55,8 @@ whatever database it is pointed at.
 
 ```bash
 # Clone repository
-git clone <your-repo-url>
-cd storydump-v2
+git clone https://github.com/chrisrogers37/storydump.git
+cd storydump
 
 # Create the virtual environment (.venv/, where the Makefile's test targets look first)
 python3 -m venv .venv

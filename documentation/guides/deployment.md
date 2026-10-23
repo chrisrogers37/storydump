@@ -10,7 +10,7 @@ step is [`cloud-deployment.md`](cloud-deployment.md).
 
 ## Prerequisites
 
-- [ ] GitHub account with access to the private repository
+- [ ] GitHub account with access to the repository
 - [ ] Railway account ([railway.app](https://railway.app))
 - [ ] Neon account ([console.neon.tech](https://console.neon.tech))
 - [ ] Vercel account, for the web front end ([`landing-vercel-deployment.md`](landing-vercel-deployment.md))

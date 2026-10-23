@@ -11,12 +11,14 @@ whose ledger records the retired chain.
 
 **Where production lives.**
 
-- Database: Neon project `storydump-v2` (`divine-lab-41654730`), database
+- Database: Neon project `storydump` (`divine-lab-41654730`, named
+  `storydump-v2` until 2026-10-21), database
   `storydump_v2`, PostgreSQL 17. It was built empty from schema code on
   2026-10-16. Adoption recorded `000`, `001` and `002`, each confirmed by its
   probe, so the deployment pre-step applies nothing and owes nothing.
 - Railway: the `storydump` service (the API, `api.storydump.app`) and the
-  `worker` service deploy `chrisrogers37/storydump-v2` `main`.
+  `worker` service deploy `chrisrogers37/storydump` `main`. The repository was
+  named `storydump-v2` until 2026-10-21.
   `TARGET_DATABASE_URL` connects the API as `svc_ingress` and the worker as
   `svc_worker`. `DATABASE_URL` is the database owner, used only by the
   pre-deploy runner.
@@ -60,8 +62,7 @@ dump taken from its temporary branch on 2026-10-16 were deleted the same day.
 Kept with the cutover record, outside Git: the Railway and Vercel settings from
 before the switch, the password-free roles and source catalog taken on
 2026-10-16, which hold no user data, and a bundle of every branch of the
-original repository, `chrisrogers37/storydump`. That repository is archived on
-GitHub and stays readable.
+original repository.
 
 **No rollback to the original system.** It ended with the original database.
 The owner deleted it once a rollback was no longer wanted and nothing more was
