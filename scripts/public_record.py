@@ -14,6 +14,15 @@ Set the secret from the file (`gh secret set PRIVATE_IDENTIFIERS <
 ~/.config/storydump/private-identifiers.txt`) so a finding's list line means
 the same line in both.
 
+Each text is read a line at a time, and again with its hard wraps joined: a
+line break, with the indent and the comment or quote marker that open the next
+line, read as one space, so an identifier of several words that a wrap splits
+is still found, on the line where it starts.
+
+`--commits` reads the commit messages in a git range. `--event` reads what a
+GitHub event file brings: a pull request's title and body, or the commit
+messages a push adds.
+
 A finding names where it is and the list line it matched, never the
 identifier. CI passes `--count-only`: its log is public, and a file and line
 would show anyone the word, and so what the list holds.
@@ -21,8 +30,9 @@ would show anyone the word, and so what the list holds.
 Standalone stdlib module by the repository's rule for gates, so it runs in CI
 without installing the application.
 
-Exit: 0 clean, or no list configured · 1 a finding · 2 no list under
-`--require-list`, which CI passes so a missing secret cannot read as clean.
+Exit: 0 clean, or no list configured · 1 a finding · 2 under `--require-list`,
+no list or one that holds no identifiers, which CI passes so a missing or
+emptied secret cannot read as clean.
 """
 
 from __future__ import annotations
@@ -30,14 +40,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from bisect import bisect_right
 from pathlib import Path
 
 LIST_ENV = "PRIVATE_IDENTIFIERS"
 CONFIG_DIR_ENV = "STORYDUMP_CONFIG_DIR"
 LIST_FILE = "private-identifiers.txt"
 ROOT = Path(__file__).resolve().parents[1]
+
+#: What a hard wrap repeats at the start of the next line: the indent, and
+#: comment or quote markers (`#`, `#:`, `//`, `--`, `;`, `*`, `>`, and nested
+#: ones such as `> >`). A lone `-` is a list item, not a wrap, so it stays.
+_CONTINUATION = re.compile(r"[ \t]*(?:(?:#+:?|/{2,}|-{2,}|;+|\*+|>+)[ \t]*)*")
 
 
 def _list_path(env) -> Path:
@@ -51,7 +68,8 @@ def _list_path(env) -> Path:
 
 
 def load_list(env) -> list[tuple[int, str]] | None:
-    """The identifiers as (list line, lowered text), or None when no list is configured."""
+    """The identifiers as (list line, lowered text with single spaces), or None
+    when no list is configured."""
     text = env.get(LIST_ENV)
     if not text:
         path = _list_path(env)
@@ -60,22 +78,55 @@ def load_list(env) -> list[tuple[int, str]] | None:
         text = path.read_text(encoding="utf-8")
     entries = []
     for number, line in enumerate(text.splitlines(), start=1):
-        entry = line.strip()
+        entry = " ".join(line.split())
         if entry and not entry.startswith("#"):
             entries.append((number, entry.lower()))
     return entries
 
 
+def _joined(text: str) -> tuple[str, list[int]]:
+    """The text lowered, with each line's runs of spaces and its hard wraps made
+    single spaces, and the offset in it where each line starts."""
+    parts, starts, length = [], [], 0
+    for index, line in enumerate(text.splitlines()):
+        if index:
+            line = line[_CONTINUATION.match(line).end() :]
+            parts.append(" ")
+            length += 1
+        starts.append(length)
+        line = " ".join(line.split()).lower()
+        parts.append(line)
+        length += len(line)
+    return "".join(parts), starts
+
+
 def scan(where: str, text: str, entries) -> list[str]:
     """One finding per line that names an identifier. The identifier is not in it."""
     findings = []
+
+    def found(line_number: int, list_line: int) -> None:
+        finding = f"{where}:{line_number}: private identifier (list line {list_line})"
+        if finding not in findings:
+            findings.append(finding)
+
     for line_number, line in enumerate(text.splitlines(), start=1):
-        lowered = line.lower()
+        lowered = " ".join(line.split()).lower()
         for list_line, entry in entries:
             if entry in lowered:
-                findings.append(
-                    f"{where}:{line_number}: private identifier (list line {list_line})"
-                )
+                found(line_number, list_line)
+
+    # An identifier of several words that a hard wrap splits: a match in the
+    # joined text that starts on one line and ends on a later one.
+    wrapped = [(n, entry) for n, entry in entries if " " in entry]
+    if wrapped:
+        joined, starts = _joined(text)
+        for list_line, entry in wrapped:
+            at = joined.find(entry)
+            while at != -1:
+                first = bisect_right(starts, at) - 1
+                if bisect_right(starts, at + len(entry) - 1) - 1 != first:
+                    found(first + 1, list_line)
+                at = joined.find(entry, at + 1)
     return findings
 
 
@@ -101,12 +152,45 @@ def _commits(root: Path, rev_range: str) -> list[tuple[str, str]]:
     return commits
 
 
+def _is_commit(root: Path, sha: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=root,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
+def _pushed(root: Path, event: dict) -> tuple[str, list[tuple[str, str]]]:
+    """The commits a push event brings, as (sha, message), and a git range that
+    reads them again.
+
+    `before..after` when the clone holds `before`. A new branch (`before` all
+    zeros) or a force push whose old head was never fetched falls back to the
+    commits the event lists. A pull request's event, or a deletion, brings none.
+    """
+    after = event.get("after") or ""
+    if "pull_request" in event or not after.strip("0"):
+        return "", []
+    before = event.get("before") or ""
+    if before.strip("0") and _is_commit(root, before):
+        rev_range = f"{before}..{after}"
+        return rev_range, _commits(root, rev_range)
+    listed = [
+        (commit.get("id") or "", commit.get("message") or "")
+        for commit in event.get("commits") or []
+    ]
+    return (f"{listed[0][0]}^..{after}" if listed else ""), listed
+
+
 def main(argv=None, env=None, root=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--require-list",
         action="store_true",
-        help="fail when no list is configured (CI, where it is a secret)",
+        help="fail when no list, or no identifier in it, is configured (CI)",
     )
     parser.add_argument(
         "--commits",
@@ -116,7 +200,8 @@ def main(argv=None, env=None, root=None) -> int:
     parser.add_argument(
         "--event",
         metavar="PATH",
-        help="also scan a pull request's title and body from a GitHub event file",
+        help="also scan what a GitHub event file brings: a pull request's title"
+        " and body, or the commit messages a push adds",
     )
     parser.add_argument(
         "--count-only",
@@ -128,14 +213,16 @@ def main(argv=None, env=None, root=None) -> int:
     root = ROOT if root is None else Path(root)
 
     entries = load_list(env)
-    if entries is None:
-        print(
-            f"public record: not checked: no ${LIST_ENV} and no {_list_path(env)}",
-            file=sys.stderr,
+    if not entries:
+        why = (
+            f"no ${LIST_ENV} and no {_list_path(env)}"
+            if entries is None
+            else "the list holds no identifiers, only blank lines and comments"
         )
+        print(f"public record: not checked: {why}", file=sys.stderr)
         return 2 if args.require_list else 0
 
-    findings = []
+    findings, push_hint = [], ""
     for rel in _files(root):
         path = root / rel
         if path.is_file():
@@ -149,14 +236,24 @@ def main(argv=None, env=None, root=None) -> int:
         pull_request = event.get("pull_request") or {}
         findings += scan("pull request title", pull_request.get("title") or "", entries)
         findings += scan("pull request body", pull_request.get("body") or "", entries)
+        rev_range, pushed = _pushed(root, event)
+        for sha, message in pushed:
+            findings += scan(f"commit {sha[:12]}", message, entries)
+        if rev_range:
+            push_hint = (
+                f", `python scripts/public_record.py --commits {rev_range}`"
+                " in this push's commits"
+            )
 
     if not findings:
         return 0
     if args.count_only:
         print(
             f"public record: {len(findings)} line(s) name a private identifier."
-            " This log is public, so it says neither where nor which: run"
-            " scripts/lint.sh with your copy of the list to see them.",
+            " This log is public, so it says neither where nor which. With your"
+            " copy of the list, scripts/lint.sh shows those in files and in your"
+            f" branch's commit messages{push_hint}; check a pull request's title"
+            " and body against it yourself.",
             file=sys.stderr,
         )
         return 1
