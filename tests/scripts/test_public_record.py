@@ -153,9 +153,7 @@ def test_an_identifier_a_hard_wrap_splits_is_found_where_it_starts(tmp_path, cap
     ]
 
 
-def test_wraps_in_attribute_comments_nested_quotes_and_after_trailing_spaces(
-    tmp_path, capsys
-):
+def test_wraps_behind_comment_and_quote_markers_and_trailing_spaces(tmp_path, capsys):
     first, second = OTHER.split()
     root = _repo(
         tmp_path / "r",
@@ -163,6 +161,8 @@ def test_wraps_in_attribute_comments_nested_quotes_and_after_trailing_spaces(
             "c.py": f"#: met {first}\n#: {second}\n",
             "d.md": f"> > quoted {first}\n> > {second}\n",
             "e.md": f"ends {first}   \n{second}\n",
+            "f.ts": f"// met {first}\n// {second}\n",
+            "g.js": f"/*\n * met {first}\n * {second}\n */\n",
         },
     )
     assert main([], env=_env(tmp_path), root=root) == 1
@@ -170,6 +170,17 @@ def test_wraps_in_attribute_comments_nested_quotes_and_after_trailing_spaces(
         "c.py:1: private identifier (list line 2)",
         "d.md:1: private identifier (list line 2)",
         "e.md:1: private identifier (list line 2)",
+        "f.ts:1: private identifier (list line 2)",
+        "g.js:2: private identifier (list line 2)",
+    ]
+
+
+def test_runs_of_spaces_in_a_wrapped_line_do_not_stop_a_match(tmp_path, capsys):
+    root = _repo(tmp_path / "r", {"a.md": "the  big  quokka\nholdings\n"})
+    listing = "big quokka holdings\n"
+    assert main([], env=_env(tmp_path, listing), root=root) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "a.md:1: private identifier (list line 1)"
     ]
 
 
@@ -277,6 +288,19 @@ def test_a_push_runs_report_gives_the_command_for_its_commits(tmp_path, capsys):
     assert f"--commits {before}..{after}" in err
     assert SECRET.lower() not in err.lower()
     assert "list line" not in err
+
+
+def test_a_push_runs_hint_is_the_same_for_a_hit_in_a_file(tmp_path, capsys):
+    """Printed only for a commit's hit, the hint would tell the public log where
+    the hit is."""
+    root = _repo(tmp_path / "r", {"a.md": f"{SECRET}\n"})
+    before = _git(root, "rev-parse", "HEAD")
+    _git(root, "commit", "-q", "--allow-empty", "-m", "a clean message")
+    after = _git(root, "rev-parse", "HEAD")
+    event = _event(tmp_path, before=before, after=after, commits=[])
+    args = ["--count-only", "--event", event]
+    assert main(args, env=_env(tmp_path), root=root) == 1
+    assert f"--commits {before}..{after}" in capsys.readouterr().err
 
 
 def test_a_pull_requests_before_and_after_are_not_read_as_a_push(tmp_path, capsys):
