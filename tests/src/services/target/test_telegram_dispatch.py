@@ -25,6 +25,7 @@ from src.services.target import (
     vocabulary,
 )
 from src.services.target.commands import CommandRefused, CommandResult
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.start_router import GREETED, UNROUTED
 from src.services.target.tenant_resolution import ResolvedTenant, TenantResolutionError
 
@@ -140,6 +141,20 @@ class _Savepoints:
     async def begin_nested(self):
         self.opened += 1
         yield self
+
+
+#: An enabled capability, as the key ring builds it (tests may build one;
+#: `src/` may not, `test_past_posts_activation`'s scan).
+ARMED = PastPostsCapability(enabled=True)
+
+
+class _Pooled(_Savepoints):
+    """A delivery's connection as the route hands it over: savepoints, and the
+    pooled DBAPI connection's own `info` dict, which outlives the checkout."""
+
+    def __init__(self, **info):
+        super().__init__()
+        self.info = dict(info)
 
 
 class TestGroupMessagesReachTheMembershipStep:
@@ -359,7 +374,12 @@ def tap(action="skip", *, data=None, with_message=True, uid=7, cid=-100):
 @pytest.fixture
 def seams(monkeypatch):
     """Everything `_tap` reaches through, scripted and recorded."""
-    log = {"executed": [], "gucs": [], "tenant_at_execute": []}
+    log = {
+        "executed": [],
+        "gucs": [],
+        "tenant_at_execute": [],
+        "capability_at_execute": [],
+    }
     state = {
         "tenant": ResolvedTenant(
             workspace_id="ws", channel_binding_id="b1", via="chat"
@@ -393,6 +413,11 @@ def seams(monkeypatch):
         # The port sets no tenant: its gate reads under whichever the tap set.
         log["tenant_at_execute"].append(
             log["gucs"][-1]["tenant_id"] if log["gucs"] else None
+        )
+        # What the executors' readers would find on the connection
+        # (`source_policy._read_context`): the dispatch's capability.
+        log["capability_at_execute"].append(
+            (getattr(session, "info", None) or {}).get("past_posts_capability")
         )
         if state["raise"] is not None:
             raise state["raise"]
@@ -759,6 +784,181 @@ class TestTheTap:
         d = telegram_dispatch.TelegramDispatcher()
         with pytest.raises(DBAPIError):
             await d(None, tap())
+
+
+class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
+    """#15: a command a delivery runs reads Instagram past posts as the web's
+    unit of work does (`principal.open_tenant`). The dispatcher reads the
+    app's capability as the delivery runs, puts it on the delivery's
+    connection for the dispatch, and puts back what the pooled connection
+    carried before."""
+
+    def test_the_dispatcher_takes_a_reader_never_the_value(self):
+        """A value would be read once, at construction, and drift from
+        `app.state`: the constructor refuses it."""
+        # The message pins the guard: on `main` the unknown keyword raises a
+        # TypeError too, which this must not mistake for it.
+        with pytest.raises(TypeError, match="zero-argument reader"):
+            telegram_dispatch.TelegramDispatcher(capability=ARMED)
+
+    async def test_what_the_connection_carried_before_is_put_back(self, seams):
+        before = object()
+        conn = _Pooled(past_posts_capability=before)
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        await d(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [ARMED]
+        assert conn.info["past_posts_capability"] is before
+
+    async def test_an_unarmed_app_masks_what_a_pooled_connection_was_left_with(
+        self, seams
+    ):
+        """Without the key ring the app's capability is None, and the dispatch
+        reads None: never one a pooled connection still carries."""
+        conn = _Pooled(past_posts_capability=ARMED)
+        await telegram_dispatch.TelegramDispatcher()(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [None]
+        assert conn.info["past_posts_capability"] is ARMED
+
+    @pytest.mark.parametrize(
+        "raised, outcome",
+        [
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "media admission refused",
+                    facts={"source_reason": "validation_pending"},
+                ),
+                "media_unsuitable",
+            ),
+            (RuntimeError("boom"), "tap_failed"),
+        ],
+    )
+    async def test_a_refused_or_failed_tap_puts_it_back(self, seams, raised, outcome):
+        seams["raise"] = raised
+        conn = _Pooled()
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        assert (await d(conn, tap("post"))).outcome == outcome
+        assert "past_posts_capability" not in conn.info
+
+    async def test_a_database_error_escapes_and_still_puts_it_back(self, seams):
+        from sqlalchemy.exc import DBAPIError
+
+        seams["raise"] = DBAPIError("stmt", {}, Exception("down"))
+        conn = _Pooled()
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        with pytest.raises(DBAPIError):
+            await d(conn, tap("post"))
+        assert "past_posts_capability" not in conn.info
+
+    async def test_every_lane_of_a_delivery_carries_it(self, monkeypatch):
+        """The migration notice, the join path, `/start` and the link prompt
+        run under the same capability as a card tap, so a command any lane
+        comes to run reads past posts as the web does."""
+        from src.services.target import identity_link
+        from src.services.target.start_router import StartResult, StartRouter
+
+        seen = []
+
+        def record(lane, conn):
+            seen.append((lane, conn.info.get("past_posts_capability")))
+
+        async def follow(conn, *, old_ref, new_ref):
+            record("migration", conn)
+            return StartResult(outcome="chat_followed", handled=True)
+
+        async def observe(conn, **kw):
+            record("group", conn)
+            return StartResult(outcome="joined", handled=True)
+
+        async def probe(conn, ctx):
+            record("start", conn)
+            return StartResult(outcome="probed", handled=False)
+
+        async def handle_tap(conn, link_tap, **kw):
+            record("link", conn)
+            return identity_link.LinkTapOutcome("linked", "Linked.")
+
+        monkeypatch.setattr(telegram_dispatch.chat_migration, "follow", follow)
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        router = StartRouter()
+        router.register("probe-", probe)
+        d = telegram_dispatch.TelegramDispatcher(
+            router=router, capability=lambda: ARMED
+        )
+        conn = _Pooled()
+        for update in (
+            {
+                "message": {
+                    "from": {"id": 42},
+                    "chat": {"id": -1009876543210, "type": "supergroup"},
+                    "migrate_from_chat_id": -4012345678,
+                }
+            },
+            {
+                "message": {
+                    "text": "hi",
+                    "from": {"id": 42},
+                    "chat": {"id": -100777, "type": "supergroup"},
+                }
+            },
+            start("/start probe-x"),
+            link_tap_update(),
+        ):
+            await d(conn, update)
+            assert "past_posts_capability" not in conn.info
+        assert seen == [
+            ("migration", ARMED),
+            ("group", ARMED),
+            ("start", ARMED),
+            ("link", ARMED),
+        ]
+
+    async def test_a_connection_without_an_info_dict_is_dispatched_as_it_is(
+        self, seams
+    ):
+        """A test's double, or None: nothing to carry, and nothing raises."""
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        assert (await d(None, tap("skip"))).outcome == "executed"
+        assert (await d(_Savepoints(), tap("skip"))).outcome == "executed"
+        assert seams["log"]["capability_at_execute"] == [None, None]
+
+
+class TestTheKeyIsTheReadersOwn:
+    """The dispatcher writes the key every past-posts reader asks its executor
+    for. The readers spell it inline, so a rename on their side (as `ac36bc2`
+    renamed `archive_capability`) must fail here, on any OS, and not only in
+    the Linux-only source gate. A reader moved to a shared constant fails here
+    too: then pin the constant instead."""
+
+    @pytest.mark.parametrize(
+        "module, function",
+        [
+            ("source_policy", "_read_context"),
+            ("category_mix", "destination_projection"),
+            ("versioned_mix", "resource"),
+            ("versioned_mix", "preview"),
+            ("command_executors", "sync_now"),
+        ],
+    )
+    def test_each_reader_asks_for_the_key_the_dispatcher_writes(self, module, function):
+        import importlib
+        import inspect
+        import re
+
+        reader = getattr(
+            importlib.import_module(f"src.services.target.{module}"), function
+        )
+        asked = set(
+            re.findall(
+                r"\.info\.get\(\s*[\"']([^\"']+)[\"']", inspect.getsource(reader)
+            )
+        )
+        assert telegram_dispatch.PAST_POSTS_CAPABILITY_KEY in asked, (
+            module,
+            function,
+            asked,
+        )
 
 
 class TestEveryReasonHasAnAnswer:

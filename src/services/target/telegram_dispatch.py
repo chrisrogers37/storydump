@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -461,21 +462,85 @@ def build_router() -> StartRouter:
     return router
 
 
+#: The key every past-posts reader asks its executor for
+#: (`source_policy._read_context`, `category_mix.destination_projection`,
+#: `versioned_mix.resource` and `preview`, `command_executors.sync_now`, each
+#: spelling it inline; `TestTheKeyIsTheReadersOwn` pins this to them). The
+#: web's unit of work sets it on its session (`principal.open_tenant`).
+PAST_POSTS_CAPABILITY_KEY = "past_posts_capability"
+_ABSENT = object()
+
+
+@contextmanager
+def _carrying_capability(conn, capability):
+    """*conn* carries *capability* for the block, then what it carried before.
+
+    A delivery runs on a pooled connection, and `AsyncConnection.info` is the
+    pooled DBAPI connection's own dict (SQLAlchemy's `_ConnectionRecord.info`):
+    it outlives the checkout and is cleared only when the pool reconnects. So
+    the value is set for one dispatch, and the prior one is put back (or the
+    key removed) however the dispatch ends, as `unit_of_work.apply_gucs` makes
+    a tenant die with its transaction. The dict is read once, because an
+    invalidated connection's `info` raises. A connection with no `info` dict
+    (a test's double, or None) is dispatched as it is."""
+    info = getattr(conn, "info", None)
+    if not isinstance(info, dict):
+        yield
+        return
+    prior = info.get(PAST_POSTS_CAPABILITY_KEY, _ABSENT)
+    info[PAST_POSTS_CAPABILITY_KEY] = capability
+    try:
+        yield
+    finally:
+        if prior is _ABSENT:
+            info.pop(PAST_POSTS_CAPABILITY_KEY, None)
+        else:
+            info[PAST_POSTS_CAPABILITY_KEY] = prior
+
+
 class TelegramDispatcher:
     """`IngressRuntime.dispatch` for the `/start` door.
 
     Constructed once at the composition root and closed over for the app's
     lifetime — the `IngressRuntime` docstring's rule, since it holds the
-    router rather than per-request state.
+    router and a reader of the app's past-posts capability rather than
+    per-request state. Each delivery reads the capability as it runs and is
+    dispatched with it on its connection, as the web reads `request.app.state`
+    on every request (`principal.open_tenant`).
     """
 
-    def __init__(self, router: Optional[StartRouter] = None) -> None:
+    def __init__(
+        self,
+        router: Optional[StartRouter] = None,
+        *,
+        capability: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        if capability is not None and not callable(capability):
+            # A value would be read once, here: a reader keeps `app.state`
+            # the one source, as it is for the web.
+            raise TypeError("capability is a zero-argument reader, not a value")
         self.router = router if router is not None else build_router()
+        #: Reads the app's past-posts capability (`app.state`) when a delivery
+        #: runs; None, or a reader that answers None, carries none.
+        self._capability = capability
+
+    @property
+    def past_posts_capability(self):
+        """The capability a delivery dispatched now would carry."""
+        return self._capability() if self._capability is not None else None
 
     async def __call__(self, conn, payload: dict):
-        """Dispatch one admitted delivery. Never raises for an unservable
-        update — the delivery is already admitted, so raising would strand it.
+        """Dispatch one admitted delivery, with the app's past-posts capability,
+        read now, on *conn* for this dispatch alone. Never raises for an
+        unservable update — the delivery is already admitted, so raising would
+        strand it.
         """
+        with _carrying_capability(conn, self.past_posts_capability):
+            return await self._dispatch(conn, payload)
+
+    async def _dispatch(self, conn, payload: dict):
+        """The delivery, by kind: a tap, a group's migration notice, a group
+        message, a `/start`."""
         if isinstance(payload.get("callback_query"), dict):
             return await self._tap(conn, payload)
         moved = chat_migration.migration_of(payload)

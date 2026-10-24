@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.services.target import commands  # noqa: F401 — the port first: the registry cycle
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.telegram_dispatch import TapResult, TelegramDispatcher
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
@@ -1341,3 +1342,36 @@ class TestPostedMyselfThroughTheTap:
             (i["id"],),
         ) == ("posted", "manual", True)
         assert _day_count(world) == before
+
+
+class TestTheCapabilityStaysWithTheDispatch:
+    """The dispatcher puts the app's past-posts capability on the delivery's
+    connection for the dispatch and takes it off again. `AsyncConnection.info`
+    is the pooled DBAPI connection's own dict, so without that the next
+    borrower of the same connection would read it."""
+
+    def test_the_next_borrower_of_a_pooled_connection_reads_no_capability(self, world):
+        i = _intent(world, "pooled-1")
+        armed = PastPostsCapability(enabled=True)
+
+        async def go():
+            # One pooled connection, so the second checkout is the first's.
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), pool_size=1, max_overflow=0
+            )
+            try:
+                async with engine.connect() as conn:
+                    conn.info["pooled_marker"] = True  # the control
+                    result = await TelegramDispatcher(capability=lambda: armed)(
+                        conn, _tap_payload("skip", i["id"])
+                    )
+                    await conn.commit()
+                async with engine.connect() as again:
+                    return result, dict(again.info)
+            finally:
+                await engine.dispose()
+
+        result, info = asyncio.run(go())
+        assert result.outcome == "executed"
+        assert info.get("pooled_marker") is True, "the same pooled connection came back"
+        assert "past_posts_capability" not in info
