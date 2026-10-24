@@ -62,6 +62,7 @@ from src.services.target import (
 )
 from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
+from src.utils.logger import loggable_path
 
 #: The session cookie. One name, imported by the auth routes and the tests.
 COOKIE = "sd_session"
@@ -287,9 +288,10 @@ def require_same_origin(request: Request) -> None:
     if settings.web_app_origin:
         admitted.add(_origin_of(settings.web_app_origin))
     if claimed is None or claimed.lower() not in admitted:
+        where = loggable_path(request.scope)
         raise CrossSiteRefused(
             "cross_site",
-            f"{request.method} {request.url.path} from {claimed or 'no origin'}",
+            f"{request.method} {where} from {claimed or 'no origin'}",
         )
 
 

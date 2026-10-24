@@ -163,6 +163,23 @@ def _refuse(path: str, key: str, reason: str, **extra: str) -> Response:
     return JSONResponse(status_code=400, content={"detail": reason, **extra})
 
 
+#: RFC 6749 §4.1.2.1's closed list of authorization error codes. A callback's
+#: ``error`` arrives in the query string, which the access log no longer
+#: prints, so `_consume_callback` logs it: as one of these, or as ``other``,
+#: because any other value is the caller's own text.
+OAUTH_ERRORS = frozenset(
+    {
+        "access_denied",
+        "invalid_request",
+        "invalid_scope",
+        "server_error",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_response_type",
+    }
+)
+
+
 def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
     """The error page — or JSON 400 without a front end — with the leg named
     when it is not sign-in's."""
@@ -202,13 +219,20 @@ async def _consume_callback(
     then carries that session's id as ``presenter_session_id``: an applied
     connection result is bound to it."""
     engine = require_engine(request)
-    if error:
-        return _fail("denied", flow=flow)
-    if not state or not code:
-        return _fail("missing_params", flow=flow)
     label = {DRIVE_FLOW: "drive connect", INSTAGRAM_FLOW: "instagram connect"}.get(
         flow, "google sign-in"
     )
+    # The access log prints no query string (`src/utils/logger.py`), so these
+    # two exits name themselves. Neither prints the provider's own text.
+    if error:
+        said = error if error in OAUTH_ERRORS else "other"
+        logger.info(
+            "%s: the provider returned error=%s; nothing was consumed", label, said
+        )
+        return _fail("denied", flow=flow)
+    if not state or not code:
+        logger.info("%s: the callback carried no state or no code", label)
+        return _fail("missing_params", flow=flow)
     async with engine.begin() as conn:
         await preauth_guard(conn, request, detail=SIGNIN_LIMITED)
         try:
