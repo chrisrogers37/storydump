@@ -91,6 +91,21 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   that embeds a token is redacted before it reaches an exception or a log line
   (`TelegramTransport.redact`); a provider's error body is summarised by status,
   not quoted.
+- uvicorn's access line and the app's own refusal lines print no query string
+  and no invitation token. `src/utils/logger.py` puts `AccessLogRedactor` on
+  `uvicorn.access` and on the trace-level `uvicorn.asgi`, which print
+  `?<redacted>` and mask a credential path segment (`CREDENTIAL_PATH_PREFIXES`).
+  An application line names a request by `loggable_path(request.scope)`: its
+  route template, with only `LOGGABLE_PATH_PARAMS` values filled in. Never name
+  it by `request.url`, `scope["path"]` or the query.
+  `tests/src/api/test_log_redaction.py` fails on a log line or an exception
+  message that does. A new secret travels in a header or the body; a route that
+  must carry one in its path joins `CREDENTIAL_PATH_PREFIXES`. Even redacted,
+  do not run the API at `--log-level trace` (or `UVICORN_LOG_LEVEL=trace`) on
+  real traffic: it logs every ASGI message of every request.
+- httpx and httpcore log at WARNING (`LIBRARY_LOG_LEVELS`, set at import):
+  httpx's INFO line prints the whole outbound URL, and a provider URL carries a
+  secret. Never lower them to see requests; log the call's outcome yourself.
 
 ## Media
 
@@ -109,7 +124,7 @@ logger.exception("sender-job sweep failed; retrying on cadence")
 ## Security patterns
 
 - CORS admits ONE origin, `settings.web_app_origin`, with credentials; with no
-  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:780`).
+  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:793`).
 - `TRUSTED_PROXY_HOSTS` is a network list and never `"*"`: the wildcard makes
   every IP-keyed control caller-partitionable (`src/config/settings.py:300`).
 - No existence oracle: a non-member's workspace is 404; a rejected webhook

@@ -12,9 +12,12 @@ import { targetFetch } from "@/lib/target-api";
  * POST /api/invitations/[token]/accept
  *
  * The invite token is never sent anywhere but the router, which holds only its
- * SHA256 (`workspace_invitations.token_hash`). It is not logged and does not
- * appear in an error body — an invite token is a bearer credential for joining
- * a workspace, and the URL it arrives in is already the weakest part of that.
+ * SHA256 (`workspace_invitations.token_hash`). This route does not log it and
+ * puts it in no error body, and the router masks it in its access log and in
+ * its own log lines (`src/utils/logger.py`). An invite token is a bearer
+ * credential for joining a workspace, and the URL it arrives in is still the
+ * weakest part of that: this route's own path, like `/join/[token]`'s, can
+ * reach the hosting platform's request log, which no code here controls.
  *
  * Accepting is `fn_invitation_accept`, a SECURITY DEFINER door: it has to write
  * a `workspace_members` row for a user who is by definition not yet a member,

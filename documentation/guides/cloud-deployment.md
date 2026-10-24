@@ -415,6 +415,25 @@ Both processes log to the console, which Railway captures: the API through
 `src/utils/logger.py` at `LOG_LEVEL`, the worker through `logging.basicConfig`
 at `WORKER_LOG_LEVEL` (`src/worker.py`).
 
+The API's access log is uvicorn's: one line per request with the client
+address, the method, the path and the status. It prints no query string
+(`?<redacted>`) and masks the invitation token
+(`/api/v1/invitations/<redacted>/accept`), and so does uvicorn's trace-level
+request log. The API's own refusal lines name a request by its route template
+(`src/utils/logger.py`). So an OAuth callback's code and state, and the
+invitation token, reach neither the access line nor a refusal line.
+
+One deliberate exception: a deployment without the `PAST_POSTS_HMAC_KEYS` ring
+logs each Meta data-deletion request's receipt code
+(`src/api/routes/meta.py`). It is that deployment's only record of the
+request, and the code's status page says only `received`. A deployment with
+the ring never logs it.
+
+httpx and httpcore log at WARNING in both processes, so no outbound provider
+URL is printed. Railway's HTTP logs, and Vercel's for the site, are the
+platforms' own and are not configured here. The invitation link's path may
+reach them.
+
 ```bash
 railway logs --service worker
 railway logs --service storydump
