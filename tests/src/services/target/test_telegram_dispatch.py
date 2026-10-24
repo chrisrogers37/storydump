@@ -924,6 +924,84 @@ class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
         assert seams["log"]["capability_at_execute"] == [None, None]
 
 
+class TestARefusalNamesItsSuitabilityReason:
+    """#15: a refusal's closed suitability reason reaches the tap's log lines
+    (`TapResult.source_reason`); the tapper's answer is unchanged."""
+
+    async def test_a_media_refusal_carries_its_reason_to_the_result_and_the_log(
+        self, seams, caplog
+    ):
+        caplog.set_level("INFO")
+        seams["raise"] = CommandRefused(
+            "media_unsuitable",
+            "media admission refused",
+            facts={"source_reason": "past_posts_not_activated"},
+        )
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("post"))
+        assert (r.outcome, r.source_reason) == (
+            "media_unsuitable",
+            "past_posts_not_activated",
+        )
+        assert (r.answer_text, r.show_alert) == telegram_dispatch.ANSWERS[
+            "media_unsuitable"
+        ], "the tapper's answer is the reason's, unchanged"
+        (line,) = [
+            m
+            for m in (rec.getMessage() for rec in caplog.records)
+            if m.startswith("tap update_id=")
+        ]
+        assert " outcome=media_unsuitable " in line
+        assert line.endswith(" source_reason=past_posts_not_activated")
+
+    async def test_an_executed_tap_carries_none(self, seams):
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "executed" and r.source_reason is None
+
+    @pytest.mark.parametrize(
+        "exc, logged",
+        [
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "x",
+                    facts={"source_reason": "validation_pending"},
+                ),
+                "validation_pending",
+            ),
+            (
+                CommandRefused(
+                    "media_unsuitable", "x", facts={"source_reason": "not_found"}
+                ),
+                "not_found",
+            ),
+            (CommandRefused("manual_mode", "by hand"), None),
+            (
+                CommandRefused(
+                    "locked",
+                    "x",
+                    facts={"in_the_way": ["item_removed"], "overridable": False},
+                ),
+                None,
+            ),
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "x",
+                    facts={"source_reason": "cannot identify image file '/tmp/a.jpg'"},
+                ),
+                "unlisted",
+            ),
+            (
+                CommandRefused("media_unsuitable", "x", facts={"source_reason": 7}),
+                "unlisted",
+            ),
+            (TenantResolutionError("not_a_member", "no"), None),
+        ],
+    )
+    def test_only_a_closed_code_reaches_the_log(self, exc, logged):
+        assert telegram_dispatch._source_reason(exc) == logged
+
+
 class TestTheKeyIsTheReadersOwn:
     """The dispatcher writes the key every past-posts reader asks its executor
     for. The readers spell it inline, so a rename on their side (as `ac36bc2`

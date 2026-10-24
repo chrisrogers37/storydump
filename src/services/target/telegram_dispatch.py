@@ -37,6 +37,7 @@ redeliver the same update forever.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -361,6 +362,11 @@ class TapResult:
     #: menu, Back to the card's keyboard, or none. One edit by the route after
     #: the commit, best effort; never through the outbox or the ledger.
     edit_markup: Optional[dict] = None
+    #: The closed suitability reason of a `media_unsuitable` refusal
+    #: (`CommandRefused.facts["source_reason"]`, read by `_source_reason`), for
+    #: the log lines alone: the dispatcher's and the route's `tap answered`.
+    #: The tapper reads `answer_text`, never this.
+    source_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +504,27 @@ def _carrying_capability(conn, capability):
             info[PAST_POSTS_CAPABILITY_KEY] = prior
 
 
+#: A suitability reason is a snake_case code: the literals of
+#: `fn_source_asset_suitability`'s CASE (`ddl/04_functions.sql`) and
+#: `command_executors._admit_media`'s `not_found`. Anything else is logged as
+#: `unlisted`, so a value that is not a code never reaches a log line.
+_REASON_CODE = re.compile(r"[a-z][a-z_]{0,63}")
+UNLISTED_REASON = "unlisted"
+
+
+def _source_reason(exc: Exception) -> Optional[str]:
+    """The suitability reason a refusal carries, for the log lines: the code
+    itself, `unlisted` for a value that is not a code, and None for a refusal
+    that carries none (every refusal but `media_unsuitable`, and every
+    resolver refusal)."""
+    reason = (getattr(exc, "facts", None) or {}).get("source_reason")
+    if reason is None:
+        return None
+    if isinstance(reason, str) and _REASON_CODE.fullmatch(reason):
+        return reason
+    return UNLISTED_REASON
+
+
 class TelegramDispatcher:
     """`IngressRuntime.dispatch` for the `/start` door.
 
@@ -594,17 +621,20 @@ class TelegramDispatcher:
             answer_key: Optional[str] = None,
             answer: Optional[tuple[str, bool]] = None,
             edit_markup: Optional[dict] = None,
+            source_reason: Optional[str] = None,
         ) -> TapResult:
             text, alert = answer or answer_for(
                 answer_key or outcome, result=result, action=action
             )
             logger.info(
-                "tap update_id=%s workspace=%s action=%s outcome=%s dispatch_ms=%d",
+                "tap update_id=%s workspace=%s action=%s outcome=%s dispatch_ms=%d"
+                " source_reason=%s",
                 payload.get("update_id"),
                 workspace,
                 action,
                 outcome,
                 int((time.monotonic() - started) * 1000),
+                source_reason,
             )
             return TapResult(
                 outcome=outcome,
@@ -615,6 +645,7 @@ class TelegramDispatcher:
                 answer_text=text,
                 show_alert=alert,
                 edit_markup=edit_markup,
+                source_reason=source_reason,
             )
 
         link_tap = callback_tokens.parse_link(cq.get("data"))
@@ -694,7 +725,9 @@ class TelegramDispatcher:
                     conn, command, tenant, window, limit
                 )
             except (TenantResolutionError, CommandRefused) as exc:
-                return done(exc.reason)
+                # The refusal's closed suitability reason rides to the log
+                # lines (`TapResult.source_reason`); the answer is the reason's.
+                return done(exc.reason, source_reason=_source_reason(exc))
             except _AdmissionExhausted:
                 return done("too_many")
             outcome = "answered" if result.outcome == "answered" else "executed"
