@@ -487,8 +487,13 @@ def _carrying_capability(conn, capability):
     the value is set for one dispatch, and the prior one is put back (or the
     key removed) however the dispatch ends, as `unit_of_work.apply_gucs` makes
     a tenant die with its transaction. The dict is read once, because an
-    invalidated connection's `info` raises. A connection with no `info` dict
-    (a test's double, or None) is dispatched as it is."""
+    invalidated connection's `info` raises. Writing to that dict after a hard
+    invalidation is still safe: the invalidation has already checked the
+    record back into the pool, nothing between it and the `finally` waits on
+    the database or lets another delivery run (an invalidated connection
+    refuses every later statement of its transaction at once), and the pool
+    clears `info` before it hands that record out again. A connection with no
+    `info` dict (a test's double, or None) is dispatched as it is."""
     info = getattr(conn, "info", None)
     if not isinstance(info, dict):
         yield
@@ -506,17 +511,20 @@ def _carrying_capability(conn, capability):
 
 #: A suitability reason is a snake_case code: the literals of
 #: `fn_source_asset_suitability`'s CASE (`ddl/04_functions.sql`) and
-#: `command_executors._admit_media`'s `not_found`. Anything else is logged as
-#: `unlisted`, so a value that is not a code never reaches a log line.
+#: `command_executors._admit_media`'s `not_found`. The guard admits a value
+#: shaped like one (lowercase letters and underscores, 64 at most), which does
+#: not prove it is one of those codes. Anything else is logged as `unlisted`,
+#: so a value holding a space, a digit, a dot or a slash never reaches a log
+#: line.
 _REASON_CODE = re.compile(r"[a-z][a-z_]{0,63}")
 UNLISTED_REASON = "unlisted"
 
 
 def _source_reason(exc: Exception) -> Optional[str]:
-    """The suitability reason a refusal carries, for the log lines: the code
-    itself, `unlisted` for a value that is not a code, and None for a refusal
-    that carries none (every refusal but `media_unsuitable`, and every
-    resolver refusal)."""
+    """The suitability reason a refusal carries, for the log lines: the value
+    when it is shaped like a code (`_REASON_CODE`), `unlisted` when it is not,
+    and None for a refusal that carries none (every refusal but
+    `media_unsuitable`, and every resolver refusal)."""
     reason = (getattr(exc, "facts", None) or {}).get("source_reason")
     if reason is None:
         return None

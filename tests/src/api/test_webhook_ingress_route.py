@@ -868,9 +868,9 @@ def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatc
 def test_the_tap_line_ends_with_the_refusals_suitability_reason(
     client, armed, monkeypatch, caplog, source_reason, outcome
 ):
-    """#15: the route's `tap answered` line, the shared logger's one the API
-    process emits, ends with the closed suitability reason a media refusal
-    carried, so a refused Post now is diagnosable from the API's log. The
+    """A Post now tap refused for its media is diagnosable from the API's log:
+    the route's `tap answered` line, the shared logger's one the API process
+    emits, ends with the closed suitability reason the refusal carried. The
     prefix is unchanged."""
     from src.services.target.telegram_dispatch import TapResult
 

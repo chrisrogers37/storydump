@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 import httpx
+from sqlalchemy.exc import PendingRollbackError
 
 from src.config.settings import settings
 from src.services.target import (
@@ -148,6 +149,11 @@ class TestTheCompositionRoot:
         `off`, and no capability or id. After a deploy it shows, before anyone
         taps, whether a tap's command will read past posts."""
         from src.api import app as app_module
+        from src.utils.logger import logger as shared
+
+        # The line below is caught on whatever `app_module.logger` is: pinned
+        # to the shared logger, so a module logger bound to that name fails.
+        assert app_module.logger is shared
 
         told = []
         monkeypatch.setattr(
@@ -189,6 +195,27 @@ class _Pooled(_Savepoints):
     def __init__(self, **info):
         super().__init__()
         self.info = dict(info)
+
+
+class _InvalidatedAfterTheFirstRead(_Savepoints):
+    """A delivery's connection that the pool hard-invalidates mid-dispatch: its
+    first `info` read answers the pooled record's dict, and every later read
+    raises, as SQLAlchemy's `Connection.info` does for an invalidated
+    connection inside its transaction (`_revalidate_connection`)."""
+
+    def __init__(self, **info):
+        super().__init__()
+        self.record_info = dict(info)
+        self.info_reads = 0
+
+    @property
+    def info(self):
+        self.info_reads += 1
+        if self.info_reads > 1:
+            raise PendingRollbackError(
+                "Can't reconnect until invalid transaction is rolled back."
+            )
+        return self.record_info
 
 
 class _ConnectOnly:
@@ -841,11 +868,11 @@ class TestTheTap:
 
 
 class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
-    """#15: a command a delivery runs reads Instagram past posts as the web's
-    unit of work does (`principal.open_tenant`). The dispatcher reads the
-    app's capability as the delivery runs, puts it on the delivery's
-    connection for the dispatch, and puts back what the pooled connection
-    carried before."""
+    """A Post now tap on a past-posts card, and any command a delivery runs,
+    reads Instagram past posts as the web's unit of work does
+    (`principal.open_tenant`). The dispatcher reads the app's capability as
+    the delivery runs, puts it on the delivery's connection for the dispatch,
+    and puts back what the pooled connection carried before."""
 
     async def test_the_dispatcher_create_app_wires_runs_post_now_with_the_apps_capability(
         self, seams
@@ -944,6 +971,35 @@ class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
             await d(conn, tap("post"))
         assert "past_posts_capability" not in conn.info
 
+    async def test_the_restore_writes_the_dict_it_read_and_never_reads_info_again(
+        self, seams, monkeypatch
+    ):
+        """An invalidated connection's `info` raises inside its transaction, so
+        a restore that read `conn.info` again would raise from the `finally`
+        and hide the tap's own outcome. The dispatch reads `info` once and puts
+        the prior value back into that same dict."""
+
+        async def refused(session, command):
+            # Refused without touching the connection: its `info` has been
+            # read once already, by the dispatch.
+            raise CommandRefused(
+                "media_unsuitable",
+                "media admission refused",
+                facts={"source_reason": "validation_pending"},
+            )
+
+        monkeypatch.setattr(commands, "execute", refused)
+        before = object()
+        conn = _InvalidatedAfterTheFirstRead(past_posts_capability=before)
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        r = await d(conn, tap("post"))
+        assert (r.outcome, r.source_reason) == (
+            "media_unsuitable",
+            "validation_pending",
+        )
+        assert conn.record_info == {"past_posts_capability": before}
+        assert conn.info_reads == 1
+
     async def test_every_lane_of_a_delivery_carries_it(self, monkeypatch):
         """The migration notice, the join path, `/start` and the link prompt
         run under the same capability as a card tap, so a command any lane
@@ -1019,8 +1075,9 @@ class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
 
 
 class TestARefusalNamesItsSuitabilityReason:
-    """#15: a refusal's closed suitability reason reaches the tap's log lines
-    (`TapResult.source_reason`); the tapper's answer is unchanged."""
+    """A Post now tap refused for its media names the refusal's closed
+    suitability reason on the tap's log lines (`TapResult.source_reason`); the
+    tapper's answer is unchanged."""
 
     async def test_a_media_refusal_carries_its_reason_to_the_result_and_the_log(
         self, seams, caplog

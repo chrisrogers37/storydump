@@ -14,15 +14,15 @@ way the deployment assembles it:
 * The real services over the replayed target schema, as the real logins: the
   API as `svc_ingress` (sign-in, the OAuth callback, the source-mix and
   source-policy routes, the command port, the Telegram webhook, the
-  data-deletion callback), the worker as `svc_worker` (the clock, the claim,
-  the executors, the prompt and sender sweeps). The worker's own `WorkLoop`s
-  claim and run its jobs one at a time, a tick of its clock mints what is
-  due, and its sweepers make one pass each: `src.main` and `src.worker.main`
-  are never entered, and no clock loop, cadence sleep or background task
-  runs. Where a cadence would have
-  passed (a retry's backoff, the lifecycle sweep's minute) the scene says so
-  with an owner `UPDATE` of the due time, as the sibling gates do. A source's
-  first read is not one of those places: connecting, switching On or
+  data-deletion callback), the worker as `svc_worker` (the clock, the
+  claim, the executors, the prompt and sender sweeps). The worker's own
+  `WorkLoop`s claim and run its jobs one at a time, a tick of its clock
+  mints what is due, and its sweepers make one pass each: `src.main` and
+  `src.worker.main` are never entered, and no clock loop, cadence sleep
+  or background task runs. Where a cadence would have passed (a retry's
+  backoff, the lifecycle sweep's minute) the scene says so with an owner
+  `UPDATE` of the due time, as the sibling gates do. A source's first
+  read is not one of those places: connecting, switching On or
   reconnecting arms it, and a tick of the clock mints it.
 * Fake providers at their seams (`tests/fixtures/fake_providers.py`): the
   OAuth exchange, Instagram's Graph and CDN (the generated onboarding past-posts sources,
@@ -1795,12 +1795,12 @@ def test_the_gate_enters_no_worker_or_api_entrypoint():
 async def test_post_now_on_the_telegram_card_approves_a_past_posts_story_as_the_web_does(
     world, google_configured, instagram_configured, monkeypatch, tmp_path
 ):
-    """Bug-log #15 end to end: a Post now tap reaches `approve` through the
-    real webhook and the dispatcher `create_app` wires, which carries the
-    API's past-posts capability, so a past-posts story whose media validated is
-    approved from its card exactly as scene 1's web Approve approves it, and
-    posts once. Before, the tap ran with no capability and answered
-    `media_unsuitable`."""
+    """A Post now tap on a past-posts card, end to end: the tap reaches
+    `approve` through the real webhook and the dispatcher `create_app` wires,
+    which carries the API's past-posts capability, so a past-posts story whose
+    media validated is approved from its card exactly as scene 1's web Approve
+    approves it, and posts once. Before, the tap ran with no capability and
+    answered `media_unsuitable`."""
     async with armed_gate(world, monkeypatch, tmp_path) as g:
         past_posts = past_posts_of(REF_A)
         g.publishing()
