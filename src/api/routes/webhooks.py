@@ -96,8 +96,10 @@ class IngressRuntime:
     as the app does.
 
     `dispatch` is the command handler. It receives the open connection and the
-    admitted payload, and owns resolution and the command flips. Nothing about its
-    contract beyond that is decided here.
+    admitted payload, and owns resolution, the command flips and what the
+    connection carries for the commands it runs (the app's past-posts
+    capability, `TelegramDispatcher`). Nothing about its contract beyond that
+    is decided here.
     """
 
     connect: Callable[[], Any]
@@ -395,12 +397,17 @@ async def _answer_tap(
                 payload.get("update_id"),
                 result.outcome,
             )
+    # The refusal's closed suitability reason (`TapResult.source_reason`) ends
+    # the line: this route's shared logger is the one the API process emits,
+    # and the prefix a monitor matches is unchanged.
     logger.info(
-        "tap answered update_id=%s outcome=%s answered=%s answer_ms=%d",
+        "tap answered update_id=%s outcome=%s answered=%s answer_ms=%d"
+        " source_reason=%s",
         payload.get("update_id"),
         result.outcome,
         answered,
         answer_ms,
+        getattr(result, "source_reason", None),
     )
 
 
