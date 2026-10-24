@@ -17,9 +17,12 @@ The past-posts source runs in every process where `past_posts_activation.resolve
 `PAST_POSTS_HMAC_KEYS` ring. The ring is required, not optional: it keys the tombstones
 and deletion receipts the past-posts source cannot run without.
 
-Without the ring, each composition root wires nothing and logs
-`instagram past posts: off (keys_missing)` or `off (keys_invalid)`. With it,
-each logs `instagram past posts: on (run=release-<first 12 hex of the commit>)`.
+Without the ring, each composition root wires nothing; with it, each arms the
+source. The worker's log says which: `instagram past posts: off (keys_missing)`
+or `off (keys_invalid)`, or `instagram past posts: on (run=release-<first 12
+hex of the commit>)`. The API writes that line to a module logger its process
+does not emit, so the API's own log shows `telegram ingress: instagram past
+posts on` or `off` instead.
 
 The run is the release's own (`mix_conversion.release_run`). Each deploy's
 source-mix conversion jobs and existing-account reconciliation jobs carry it, so a
@@ -133,10 +136,13 @@ Record what a live check shows without naming the account or any of its posts.
 Set `PAST_POSTS_HMAC_KEYS` on both the API and the worker (step 5). There is nothing
 else to set.
 
-**Check each service.** Read the compose line in each service's log:
-- `instagram past posts: on (run=<run id>)` means the service is on;
-- `instagram past posts: off (<reason>)` means it is not, and the reason is
-  `keys_missing` or `keys_invalid`.
+**Check each service.** Read each service's own line in its log:
+- the worker: `instagram past posts: on (run=<run id>)` means it is on, and
+  `instagram past posts: off (<reason>)` means it is not, the reason being
+  `keys_missing` or `keys_invalid`;
+- the API: `telegram ingress: instagram past posts on` means it is on, and
+  `… off` means it is not. The API's line gives no reason, so when it reads
+  `off`, check the ring set on the API service.
 
 **What happens next, on its own:**
 - **Conversion.** A workspace still on the folder-keyed posting mix is converted to
