@@ -11,6 +11,8 @@ import uuid
 from contextlib import asynccontextmanager
 
 import pytest
+import httpx
+from sqlalchemy.exc import PendingRollbackError
 
 from src.config.settings import settings
 from src.services.target import (
@@ -18,6 +20,8 @@ from src.services.target import (
     callback_tokens,
     commands,
     identity,
+    past_posts_activation,
+    past_posts_composition,
     signup_admissions,
     telegram_dispatch,
     tenant_resolution,
@@ -25,8 +29,10 @@ from src.services.target import (
     vocabulary,
 )
 from src.services.target.commands import CommandRefused, CommandResult
+from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.start_router import GREETED, UNROUTED
 from src.services.target.tenant_resolution import ResolvedTenant, TenantResolutionError
+from tests.src.services.target import test_past_posts_activation as activation
 
 
 def start(text="/start", uid=7, cid=99):
@@ -128,6 +134,41 @@ class TestTheCompositionRoot:
         application = app_module.create_app(env={})
         assert application.state.ingress is None
 
+    def test_without_the_key_ring_the_dispatcher_carries_none(self):
+        from src.api import app as app_module
+
+        application = app_module.create_app(engine=_ConnectOnly(), env={})
+        assert application.state.past_posts_capability is None
+        assert application.state.ingress.dispatch.past_posts_capability is None
+
+    @pytest.mark.parametrize("armed, said", [(True, "on"), (False, "off")])
+    async def test_startup_says_whether_taps_read_past_posts(
+        self, monkeypatch, armed, said
+    ):
+        """One fixed line on the shared logger, which the API emits: `on` or
+        `off`, and no capability or id. After a deploy it shows, before anyone
+        taps, whether a tap's command will read past posts."""
+        from src.api import app as app_module
+        from src.utils.logger import logger as shared
+
+        # The line below is caught on whatever `app_module.logger` is: pinned
+        # to the shared logger, so a module logger bound to that name fails.
+        assert app_module.logger is shared
+
+        told = []
+        monkeypatch.setattr(
+            app_module.logger, "info", lambda msg, *a: told.append(msg % a)
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as client:
+            app_module.create_app(
+                engine=_ConnectOnly(),
+                env=_armed_env() if armed else {},
+                past_posts_client=client,
+            )
+        assert [m for m in told if m.startswith("telegram ingress:")] == [
+            f"telegram ingress: instagram past posts {said}"
+        ]
+
 
 class _Savepoints:
     """A connection that opens savepoints and nothing else: the membership
@@ -140,6 +181,61 @@ class _Savepoints:
     async def begin_nested(self):
         self.opened += 1
         yield self
+
+
+#: An enabled capability, as the key ring builds it (tests may build one;
+#: `src/` may not, `test_past_posts_activation`'s scan).
+ARMED = PastPostsCapability(enabled=True)
+
+
+class _Pooled(_Savepoints):
+    """A delivery's connection as the route hands it over: savepoints, and the
+    pooled DBAPI connection's own `info` dict, which outlives the checkout."""
+
+    def __init__(self, **info):
+        super().__init__()
+        self.info = dict(info)
+
+
+class _InvalidatedAfterTheFirstRead(_Savepoints):
+    """A delivery's connection that the pool hard-invalidates mid-dispatch: its
+    first `info` read answers the pooled record's dict, and every later read
+    raises, as SQLAlchemy's `Connection.info` does for an invalidated
+    connection inside its transaction (`_revalidate_connection`)."""
+
+    def __init__(self, **info):
+        super().__init__()
+        self.record_info = dict(info)
+        self.info_reads = 0
+
+    @property
+    def info(self):
+        self.info_reads += 1
+        if self.info_reads > 1:
+            raise PendingRollbackError(
+                "Can't reconnect until invalid transaction is rolled back."
+            )
+        return self.record_info
+
+
+class _ConnectOnly:
+    """An engine the composition root can wire the ingress over."""
+
+    def connect(self):
+        return object()
+
+
+def _refuse(request):
+    return httpx.Response(599)
+
+
+def _armed_env() -> dict:
+    """The API's environment where the past-posts key ring loads (the
+    activation tests' ring and release)."""
+    return {
+        past_posts_activation.KEYS_VAR: activation.RING,
+        past_posts_composition.RELEASE_VAR: activation.API_SHA,
+    }
 
 
 class TestGroupMessagesReachTheMembershipStep:
@@ -359,7 +455,12 @@ def tap(action="skip", *, data=None, with_message=True, uid=7, cid=-100):
 @pytest.fixture
 def seams(monkeypatch):
     """Everything `_tap` reaches through, scripted and recorded."""
-    log = {"executed": [], "gucs": [], "tenant_at_execute": []}
+    log = {
+        "executed": [],
+        "gucs": [],
+        "tenant_at_execute": [],
+        "capability_at_execute": [],
+    }
     state = {
         "tenant": ResolvedTenant(
             workspace_id="ws", channel_binding_id="b1", via="chat"
@@ -393,6 +494,11 @@ def seams(monkeypatch):
         # The port sets no tenant: its gate reads under whichever the tap set.
         log["tenant_at_execute"].append(
             log["gucs"][-1]["tenant_id"] if log["gucs"] else None
+        )
+        # What the executors' readers would find on the connection
+        # (`source_policy._read_context`): the dispatch's capability.
+        log["capability_at_execute"].append(
+            (getattr(session, "info", None) or {}).get("past_posts_capability")
         )
         if state["raise"] is not None:
             raise state["raise"]
@@ -759,6 +865,329 @@ class TestTheTap:
         d = telegram_dispatch.TelegramDispatcher()
         with pytest.raises(DBAPIError):
             await d(None, tap())
+
+
+class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
+    """A Post now tap on a past-posts card, and any command a delivery runs,
+    reads Instagram past posts as the web's unit of work does
+    (`principal.open_tenant`). The dispatcher reads the app's capability as
+    the delivery runs, puts it on the delivery's connection for the dispatch,
+    and puts back what the pooled connection carried before."""
+
+    async def test_the_dispatcher_create_app_wires_runs_post_now_with_the_apps_capability(
+        self, seams
+    ):
+        """The regression: before, the composition root built the dispatcher
+        with no capability, and every past post read as not activated."""
+        from src.api import app as app_module
+
+        seams["result"] = CommandResult(
+            "enqueued",
+            {"intent_id": INTENT, "state": "approved", "job": "publish_pipeline"},
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as client:
+            application = app_module.create_app(
+                engine=_ConnectOnly(), env=_armed_env(), past_posts_client=client
+            )
+            conn = _Pooled()
+            r = await application.state.ingress.dispatch(conn, tap("post"))
+        assert application.state.past_posts_capability == ARMED
+        assert r.outcome == "executed"
+        assert seams["log"]["executed"][0].kind == "approve"
+        assert seams["log"]["capability_at_execute"] == [
+            application.state.past_posts_capability
+        ]
+        assert "past_posts_capability" not in conn.info
+
+    async def test_an_app_armed_after_create_app_arms_its_taps_too(self, seams):
+        """The dispatcher reads `app.state` as each delivery runs, as the web
+        reads `request.app.state` per request: a suite that arms a built app
+        (five do) arms its Telegram path too, and a disarm is seen at once."""
+        from src.api import app as app_module
+
+        application = app_module.create_app(engine=_ConnectOnly(), env={})
+        conn = _Pooled()
+        application.state.past_posts_capability = ARMED
+        await application.state.ingress.dispatch(conn, tap("skip"))
+        application.state.past_posts_capability = None
+        await application.state.ingress.dispatch(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [ARMED, None]
+        assert "past_posts_capability" not in conn.info
+
+    def test_the_dispatcher_takes_a_reader_never_the_value(self):
+        """A value would be read once, at construction, and drift from
+        `app.state`: the constructor refuses it."""
+        # The message pins the guard: on `main` the unknown keyword raises a
+        # TypeError too, which this must not mistake for it.
+        with pytest.raises(TypeError, match="zero-argument reader"):
+            telegram_dispatch.TelegramDispatcher(capability=ARMED)
+
+    async def test_what_the_connection_carried_before_is_put_back(self, seams):
+        before = object()
+        conn = _Pooled(past_posts_capability=before)
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        await d(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [ARMED]
+        assert conn.info["past_posts_capability"] is before
+
+    async def test_an_unarmed_app_masks_what_a_pooled_connection_was_left_with(
+        self, seams
+    ):
+        """Without the key ring the app's capability is None, and the dispatch
+        reads None: never one a pooled connection still carries."""
+        conn = _Pooled(past_posts_capability=ARMED)
+        await telegram_dispatch.TelegramDispatcher()(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [None]
+        assert conn.info["past_posts_capability"] is ARMED
+
+    @pytest.mark.parametrize(
+        "raised, outcome",
+        [
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "media admission refused",
+                    facts={"source_reason": "validation_pending"},
+                ),
+                "media_unsuitable",
+            ),
+            (RuntimeError("boom"), "tap_failed"),
+        ],
+    )
+    async def test_a_refused_or_failed_tap_puts_it_back(self, seams, raised, outcome):
+        seams["raise"] = raised
+        conn = _Pooled()
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        assert (await d(conn, tap("post"))).outcome == outcome
+        assert "past_posts_capability" not in conn.info
+
+    async def test_a_database_error_escapes_and_still_puts_it_back(self, seams):
+        from sqlalchemy.exc import DBAPIError
+
+        seams["raise"] = DBAPIError("stmt", {}, Exception("down"))
+        conn = _Pooled()
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        with pytest.raises(DBAPIError):
+            await d(conn, tap("post"))
+        assert "past_posts_capability" not in conn.info
+
+    async def test_the_restore_writes_the_dict_it_read_and_never_reads_info_again(
+        self, seams, monkeypatch
+    ):
+        """An invalidated connection's `info` raises inside its transaction, so
+        a restore that read `conn.info` again would raise from the `finally`
+        and hide the tap's own outcome. The dispatch reads `info` once and puts
+        the prior value back into that same dict."""
+
+        async def refused(session, command):
+            # Refused without touching the connection: its `info` has been
+            # read once already, by the dispatch.
+            raise CommandRefused(
+                "media_unsuitable",
+                "media admission refused",
+                facts={"source_reason": "validation_pending"},
+            )
+
+        monkeypatch.setattr(commands, "execute", refused)
+        before = object()
+        conn = _InvalidatedAfterTheFirstRead(past_posts_capability=before)
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        r = await d(conn, tap("post"))
+        assert (r.outcome, r.source_reason) == (
+            "media_unsuitable",
+            "validation_pending",
+        )
+        assert conn.record_info == {"past_posts_capability": before}
+        assert conn.info_reads == 1
+
+    async def test_every_lane_of_a_delivery_carries_it(self, monkeypatch):
+        """The migration notice, the join path, `/start` and the link prompt
+        run under the same capability as a card tap, so a command any lane
+        comes to run reads past posts as the web does."""
+        from src.services.target import identity_link
+        from src.services.target.start_router import StartResult, StartRouter
+
+        seen = []
+
+        def record(lane, conn):
+            seen.append((lane, conn.info.get("past_posts_capability")))
+
+        async def follow(conn, *, old_ref, new_ref):
+            record("migration", conn)
+            return StartResult(outcome="chat_followed", handled=True)
+
+        async def observe(conn, **kw):
+            record("group", conn)
+            return StartResult(outcome="joined", handled=True)
+
+        async def probe(conn, ctx):
+            record("start", conn)
+            return StartResult(outcome="probed", handled=False)
+
+        async def handle_tap(conn, link_tap, **kw):
+            record("link", conn)
+            return identity_link.LinkTapOutcome("linked", "Linked.")
+
+        monkeypatch.setattr(telegram_dispatch.chat_migration, "follow", follow)
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        router = StartRouter()
+        router.register("probe-", probe)
+        d = telegram_dispatch.TelegramDispatcher(
+            router=router, capability=lambda: ARMED
+        )
+        conn = _Pooled()
+        for update in (
+            {
+                "message": {
+                    "from": {"id": 42},
+                    "chat": {"id": -1009876543210, "type": "supergroup"},
+                    "migrate_from_chat_id": -4012345678,
+                }
+            },
+            {
+                "message": {
+                    "text": "hi",
+                    "from": {"id": 42},
+                    "chat": {"id": -100777, "type": "supergroup"},
+                }
+            },
+            start("/start probe-x"),
+            link_tap_update(),
+        ):
+            await d(conn, update)
+            assert "past_posts_capability" not in conn.info
+        assert seen == [
+            ("migration", ARMED),
+            ("group", ARMED),
+            ("start", ARMED),
+            ("link", ARMED),
+        ]
+
+    async def test_a_connection_without_an_info_dict_is_dispatched_as_it_is(
+        self, seams
+    ):
+        """A test's double, or None: nothing to carry, and nothing raises."""
+        d = telegram_dispatch.TelegramDispatcher(capability=lambda: ARMED)
+        assert (await d(None, tap("skip"))).outcome == "executed"
+        assert (await d(_Savepoints(), tap("skip"))).outcome == "executed"
+        assert seams["log"]["capability_at_execute"] == [None, None]
+
+
+class TestARefusalNamesItsSuitabilityReason:
+    """A Post now tap refused for its media names the refusal's closed
+    suitability reason on the tap's log lines (`TapResult.source_reason`); the
+    tapper's answer is unchanged."""
+
+    async def test_a_media_refusal_carries_its_reason_to_the_result_and_the_log(
+        self, seams, caplog
+    ):
+        caplog.set_level("INFO")
+        seams["raise"] = CommandRefused(
+            "media_unsuitable",
+            "media admission refused",
+            facts={"source_reason": "past_posts_not_activated"},
+        )
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("post"))
+        assert (r.outcome, r.source_reason) == (
+            "media_unsuitable",
+            "past_posts_not_activated",
+        )
+        assert (r.answer_text, r.show_alert) == telegram_dispatch.ANSWERS[
+            "media_unsuitable"
+        ], "the tapper's answer is the reason's, unchanged"
+        (line,) = [
+            m
+            for m in (rec.getMessage() for rec in caplog.records)
+            if m.startswith("tap update_id=")
+        ]
+        assert " outcome=media_unsuitable " in line
+        assert line.endswith(" source_reason=past_posts_not_activated")
+
+    async def test_an_executed_tap_carries_none(self, seams):
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "executed" and r.source_reason is None
+
+    @pytest.mark.parametrize(
+        "exc, logged",
+        [
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "x",
+                    facts={"source_reason": "validation_pending"},
+                ),
+                "validation_pending",
+            ),
+            (
+                CommandRefused(
+                    "media_unsuitable", "x", facts={"source_reason": "not_found"}
+                ),
+                "not_found",
+            ),
+            (CommandRefused("manual_mode", "by hand"), None),
+            (
+                CommandRefused(
+                    "locked",
+                    "x",
+                    facts={"in_the_way": ["item_removed"], "overridable": False},
+                ),
+                None,
+            ),
+            (
+                CommandRefused(
+                    "media_unsuitable",
+                    "x",
+                    facts={"source_reason": "cannot identify image file '/tmp/a.jpg'"},
+                ),
+                "unlisted",
+            ),
+            (
+                CommandRefused("media_unsuitable", "x", facts={"source_reason": 7}),
+                "unlisted",
+            ),
+            (TenantResolutionError("not_a_member", "no"), None),
+        ],
+    )
+    def test_only_a_closed_code_reaches_the_log(self, exc, logged):
+        assert telegram_dispatch._source_reason(exc) == logged
+
+
+class TestTheKeyIsTheReadersOwn:
+    """The dispatcher writes the key every past-posts reader asks its executor
+    for. The readers spell it inline, so a rename on their side (as `ac36bc2`
+    renamed `archive_capability`) must fail here, on any OS, and not only in
+    the Linux-only source gate. A reader moved to a shared constant fails here
+    too: then pin the constant instead."""
+
+    @pytest.mark.parametrize(
+        "module, function",
+        [
+            ("source_policy", "_read_context"),
+            ("category_mix", "destination_projection"),
+            ("versioned_mix", "resource"),
+            ("versioned_mix", "preview"),
+            ("command_executors", "sync_now"),
+        ],
+    )
+    def test_each_reader_asks_for_the_key_the_dispatcher_writes(self, module, function):
+        import importlib
+        import inspect
+        import re
+
+        reader = getattr(
+            importlib.import_module(f"src.services.target.{module}"), function
+        )
+        asked = set(
+            re.findall(
+                r"\.info\.get\(\s*[\"']([^\"']+)[\"']", inspect.getsource(reader)
+            )
+        )
+        assert telegram_dispatch.PAST_POSTS_CAPABILITY_KEY in asked, (
+            module,
+            function,
+            asked,
+        )
 
 
 class TestEveryReasonHasAnAnswer:

@@ -469,7 +469,10 @@ and do not wire another provider without the owner's acknowledgement.
 adapter, the index, selection, the lifecycle and the deletion receipts) is in the
 tree, and `past_posts_activation.resolve` arms it in every process that loads a whole
 `PAST_POSTS_HMAC_KEYS` ring: there is no record file and no switch. Without the ring
-each composition root wires nothing and logs `instagram past posts: off (<reason>)`.
+each composition root wires nothing. The worker's log carries the activation line,
+`instagram past posts: off (<reason>)`, or `on (run=<run id>)` with the ring. The
+API writes that line to a module logger its process does not emit, so the API's own
+log shows `telegram ingress: instagram past posts on|off` instead.
 The ring is required, not a switch: it keys tombstones and Meta data-deletion
 receipts, so never remove it to turn the past-posts source off. A connected account's past-posts source
 is switched Off on the posting-mix card instead. Do not build an enabled capability
