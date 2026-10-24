@@ -11,6 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import pytest
+import httpx
 
 from src.config.settings import settings
 from src.services.target import (
@@ -18,6 +19,8 @@ from src.services.target import (
     callback_tokens,
     commands,
     identity,
+    past_posts_activation,
+    past_posts_composition,
     signup_admissions,
     telegram_dispatch,
     tenant_resolution,
@@ -28,6 +31,7 @@ from src.services.target.commands import CommandRefused, CommandResult
 from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.start_router import GREETED, UNROUTED
 from src.services.target.tenant_resolution import ResolvedTenant, TenantResolutionError
+from tests.src.services.target import test_past_posts_activation as activation
 
 
 def start(text="/start", uid=7, cid=99):
@@ -129,6 +133,36 @@ class TestTheCompositionRoot:
         application = app_module.create_app(env={})
         assert application.state.ingress is None
 
+    def test_without_the_key_ring_the_dispatcher_carries_none(self):
+        from src.api import app as app_module
+
+        application = app_module.create_app(engine=_ConnectOnly(), env={})
+        assert application.state.past_posts_capability is None
+        assert application.state.ingress.dispatch.past_posts_capability is None
+
+    @pytest.mark.parametrize("armed, said", [(True, "on"), (False, "off")])
+    async def test_startup_says_whether_taps_read_past_posts(
+        self, monkeypatch, armed, said
+    ):
+        """One fixed line on the shared logger, which the API emits: `on` or
+        `off`, and no capability or id. After a deploy it shows, before anyone
+        taps, whether a tap's command will read past posts."""
+        from src.api import app as app_module
+
+        told = []
+        monkeypatch.setattr(
+            app_module.logger, "info", lambda msg, *a: told.append(msg % a)
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as client:
+            app_module.create_app(
+                engine=_ConnectOnly(),
+                env=_armed_env() if armed else {},
+                past_posts_client=client,
+            )
+        assert [m for m in told if m.startswith("telegram ingress:")] == [
+            f"telegram ingress: instagram past posts {said}"
+        ]
+
 
 class _Savepoints:
     """A connection that opens savepoints and nothing else: the membership
@@ -155,6 +189,26 @@ class _Pooled(_Savepoints):
     def __init__(self, **info):
         super().__init__()
         self.info = dict(info)
+
+
+class _ConnectOnly:
+    """An engine the composition root can wire the ingress over."""
+
+    def connect(self):
+        return object()
+
+
+def _refuse(request):
+    return httpx.Response(599)
+
+
+def _armed_env() -> dict:
+    """The API's environment where the past-posts key ring loads (the
+    activation tests' ring and release)."""
+    return {
+        past_posts_activation.KEYS_VAR: activation.RING,
+        past_posts_composition.RELEASE_VAR: activation.API_SHA,
+    }
 
 
 class TestGroupMessagesReachTheMembershipStep:
@@ -792,6 +846,46 @@ class TestTheAppsPastPostsCapabilityRidesEveryDispatch:
     app's capability as the delivery runs, puts it on the delivery's
     connection for the dispatch, and puts back what the pooled connection
     carried before."""
+
+    async def test_the_dispatcher_create_app_wires_runs_post_now_with_the_apps_capability(
+        self, seams
+    ):
+        """The regression: before, the composition root built the dispatcher
+        with no capability, and every past post read as not activated."""
+        from src.api import app as app_module
+
+        seams["result"] = CommandResult(
+            "enqueued",
+            {"intent_id": INTENT, "state": "approved", "job": "publish_pipeline"},
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as client:
+            application = app_module.create_app(
+                engine=_ConnectOnly(), env=_armed_env(), past_posts_client=client
+            )
+            conn = _Pooled()
+            r = await application.state.ingress.dispatch(conn, tap("post"))
+        assert application.state.past_posts_capability == ARMED
+        assert r.outcome == "executed"
+        assert seams["log"]["executed"][0].kind == "approve"
+        assert seams["log"]["capability_at_execute"] == [
+            application.state.past_posts_capability
+        ]
+        assert "past_posts_capability" not in conn.info
+
+    async def test_an_app_armed_after_create_app_arms_its_taps_too(self, seams):
+        """The dispatcher reads `app.state` as each delivery runs, as the web
+        reads `request.app.state` per request: a suite that arms a built app
+        (five do) arms its Telegram path too, and a disarm is seen at once."""
+        from src.api import app as app_module
+
+        application = app_module.create_app(engine=_ConnectOnly(), env={})
+        conn = _Pooled()
+        application.state.past_posts_capability = ARMED
+        await application.state.ingress.dispatch(conn, tap("skip"))
+        application.state.past_posts_capability = None
+        await application.state.ingress.dispatch(conn, tap("skip"))
+        assert seams["log"]["capability_at_execute"] == [ARMED, None]
+        assert "past_posts_capability" not in conn.info
 
     def test_the_dispatcher_takes_a_reader_never_the_value(self):
         """A value would be read once, at construction, and drift from

@@ -89,7 +89,7 @@ from src.services.target import (
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.connect_choice import ConnectChoiceRefused
 from src.services.target.health_reads import StatementTimedOut
-from src.services.target.instagram_sources import PastPostsRefused
+from src.services.target.instagram_sources import PastPostsRefused, is_activated
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import (
     MixInvalid,
@@ -988,7 +988,12 @@ def create_app(
     app.state.ingress = (
         webhooks.IngressRuntime(
             connect=app.state.engine.connect,
-            dispatch=TelegramDispatcher(),
+            # The dispatcher reads the app's past-posts capability as each
+            # delivery runs, as `principal.open_tenant` reads it for each web
+            # request: `app.state` stays the one source, re-armed or not.
+            dispatch=TelegramDispatcher(
+                capability=lambda: getattr(app.state, "past_posts_capability", None)
+            ),
             reply=None if bot is None else bot.send_text,
             answer_callback=None if bot is None else bot.answer_callback,
             edit=None if bot is None else bot.edit,
@@ -996,6 +1001,15 @@ def create_app(
         if app.state.engine is not None
         else None
     )
+    if app.state.ingress is not None:
+        # One line on the shared logger, which this process emits, saying
+        # whether a tap's command reads Instagram past posts: `on` or `off`,
+        # never the capability itself (the activation line is a module
+        # logger's, which the API does not emit).
+        logger.info(
+            "telegram ingress: instagram past posts %s",
+            "on" if is_activated(app.state.past_posts_capability) else "off",
+        )
 
     _register_handlers(app)
 
