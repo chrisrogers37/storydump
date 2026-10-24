@@ -11,8 +11,8 @@ whose ledger records the retired chain.
 
 **Where production lives.**
 
-- Database: Neon project `storydump` (`divine-lab-41654730`, named
-  `storydump-v2` until 2026-10-21), database
+- Database: Neon project `storydump` (named `storydump-v2` until
+  2026-10-21), database
   `storydump_v2`, PostgreSQL 17. It was built empty from schema code on
   2026-10-16. Adoption recorded `000`, `001` and `002`, each confirmed by its
   probe, so the deployment pre-step applies nothing and owes nothing.
@@ -53,8 +53,8 @@ earlier name, `ARCHIVE_HMAC_KEYS`, and its value carried over to
 every version it has held; see
 [the key ring](instagram-past-posts-review.md#5-the-key-ring).
 
-**The original database, deleted.** Neon project `storyline-ai-db`
-(`ancient-grass-50759240`), database `neondb`, was the rollback copy from the
+**The original database, deleted.** Neon project `storyline-ai-db`, database
+`neondb`, was the rollback copy from the
 switch until the owner deleted the project, with its branches, on 2026-10-19.
 Nothing wrote to it after the switch. The full dump and the archive-snapshot
 dump taken from its temporary branch on 2026-10-16 were deleted the same day.
