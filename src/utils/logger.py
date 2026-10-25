@@ -119,15 +119,28 @@ for _lib_logger_name, _lib_level in LIBRARY_LOG_LEVELS.items():
 #: What a log line prints in place of a query string or a credential.
 REDACTED = "<redacted>"
 
-#: The API paths whose next segment is a credential. That segment, up to the
-#: next "/", is masked wherever a path is logged. A route that has to carry a
-#: credential in its path is added here, and `tests/src/api/test_log_redaction.py`
-#: fails until it is; a new credential belongs in a header or the body instead.
+#: The paths whose next segment is a credential. Wherever one of them appears
+#: in a path a log line prints, `redact_path` masks the segment after it. A
+#: route that has to carry a credential in its path is added here, and
+#: `tests/src/api/test_log_redaction.py` fails until it is; a new credential
+#: belongs in a header or the body instead.
 CREDENTIAL_PATH_PREFIXES: tuple[str, ...] = (
     # POST /api/v1/invitations/{token}/accept: the invitation token, a 7-day
     # bearer credential for joining a workspace (`src/api/routes/v1.py`).
     "/api/v1/invitations/",
+    # The site's invitation link, /join/{token} (`landing/src/app/join/`). The
+    # API serves no such route, so a request for one is a misdirected link.
+    "/join/",
 )
+
+#: Each of `CREDENTIAL_PATH_PREFIXES` as the segment names `redact_path` matches.
+_CREDENTIAL_SEGMENTS: tuple[tuple[str, ...], ...] = tuple(
+    tuple(prefix.strip("/").split("/")) for prefix in CREDENTIAL_PATH_PREFIXES
+)
+
+#: Segments that name nothing (`//`, `/./`): a prefix, and the credential after
+#: it, are matched across them.
+_EMPTY_SEGMENTS = frozenset({"", "."})
 
 #: Path parameters whose value an application log line may print. Each names a
 #: row, a key or a command, which the caller reaches only through its own
@@ -161,18 +174,41 @@ _PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]*)?\}")
 REDACTED_LOGGERS: tuple[str, ...] = ("uvicorn.access", "uvicorn.asgi")
 
 
+def _segment_name(segment: str) -> str:
+    """*segment* as a prefix is compared with it: lowercased, and without its
+    parameters (``;p=1``, which uvicorn's access line prints as ``%3Bp%3D1``)."""
+    name = segment.lower()
+    for mark in (";", "%3b"):
+        name = name.partition(mark)[0]
+    return name
+
+
 def redact_path(path: str) -> str:
-    """*path* with its credential segment, if it has one, as `REDACTED`.
+    """*path* with each credential segment in it as `REDACTED`.
 
     ``/api/v1/invitations/<token>/accept`` becomes
-    ``/api/v1/invitations/<redacted>/accept``. A path under no prefix of
-    `CREDENTIAL_PATH_PREFIXES` is returned unchanged.
+    ``/api/v1/invitations/<redacted>/accept``. The prefixes of
+    `CREDENTIAL_PATH_PREFIXES` are matched as whole segments anywhere in the
+    path, in any letter case and whatever parameters a segment carries, and
+    across empty and ``.`` segments: so a root path in front
+    (``/x/api/v1/...``), a doubled slash (``//api/v1/...``) and an
+    absolute-form target (``http%3A//host/api/v1/...``) are masked too. The
+    first non-empty segment after a prefix is the one masked; nothing else
+    changes, so redacting twice changes nothing. A path with no prefix in it is
+    returned unchanged (``/api/v1/me/invitations/<id>/resend``).
     """
-    for prefix in CREDENTIAL_PATH_PREFIXES:
-        if path.startswith(prefix) and len(path) > len(prefix):
-            _secret, slash, tail = path[len(prefix) :].partition("/")
-            return f"{prefix}{REDACTED}{slash}{tail}"
-    return path
+    lowered = path.lower()
+    if not any(segments[-1] in lowered for segments in _CREDENTIAL_SEGMENTS):
+        return path
+    parts = path.split("/")
+    names = [_segment_name(part) for part in parts]
+    named = [i for i, name in enumerate(names) if name not in _EMPTY_SEGMENTS]
+    for segments in _CREDENTIAL_SEGMENTS:
+        size = len(segments)
+        for start in range(len(named) - size):
+            if all(names[named[start + k]] == segments[k] for k in range(size)):
+                parts[named[start + size]] = REDACTED
+    return "/".join(parts)
 
 
 def redact_target(target: str) -> str:
@@ -216,14 +252,15 @@ def loggable_path(scope: Mapping[str, Any]) -> str:
 
 def _redact_scope(scope: Mapping[str, Any]) -> dict:
     """A copy of an ASGI scope, as uvicorn's trace line prints it, with its
-    target masked: ``path`` and ``raw_path`` through `redact_path`, any
-    ``query_string`` as `REDACTED`. The scope the app runs on is untouched."""
+    target masked: ``path`` through `redact_path`, and any ``raw_path`` and
+    ``query_string`` as `REDACTED`. ``raw_path`` is the target as sent, still
+    percent-encoded, so a prefix can hide in it (``invitation%73``) while the
+    request still reaches its route; the masked ``path`` says what it said.
+    The scope the app runs on is untouched."""
     shown = dict(scope)
     shown["path"] = redact_path(str(scope.get("path") or ""))
-    raw = scope.get("raw_path")
-    if raw:
-        text = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
-        shown["raw_path"] = redact_path(text)
+    if scope.get("raw_path"):
+        shown["raw_path"] = REDACTED
     if scope.get("query_string"):
         shown["query_string"] = REDACTED
     return shown

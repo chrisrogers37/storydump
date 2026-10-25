@@ -170,6 +170,61 @@ class TestWhatALogLinePrintsOfARequest:
                 f"/api/v1/me/invitations/{WS}/resend",
                 f"/api/v1/me/invitations/{WS}/resend",
             ),
+            (
+                f"/api/v1/workspaces/{WS}/invitations",
+                f"/api/v1/workspaces/{WS}/invitations",
+            ),
+            # The prefix anywhere in the path, not only at its start: uvicorn's
+            # --root-path, a base URL with a trailing slash, an absolute-form
+            # target (the access line prints `http%3A//...`), empty or `.`
+            # segments, a segment's parameters (`;p=1`, printed `%3Bp%3D1`) and
+            # any letter case. Each of these 404s, and uvicorn still logs it.
+            (
+                f"/x/api/v1/invitations/{FAKE_TOKEN}/accept",
+                "/x/api/v1/invitations/<redacted>/accept",
+            ),
+            (
+                f"//api/v1/invitations/{FAKE_TOKEN}/accept",
+                "//api/v1/invitations/<redacted>/accept",
+            ),
+            (
+                f"/api//v1/invitations/{FAKE_TOKEN}/accept",
+                "/api//v1/invitations/<redacted>/accept",
+            ),
+            (
+                f"/api/v1/./invitations/{FAKE_TOKEN}/accept",
+                "/api/v1/./invitations/<redacted>/accept",
+            ),
+            (
+                f"/api/v1/invitations//{FAKE_TOKEN}/accept",
+                "/api/v1/invitations//<redacted>/accept",
+            ),
+            (
+                f"/api/v1/invitations;p=1/{FAKE_TOKEN}/accept",
+                "/api/v1/invitations;p=1/<redacted>/accept",
+            ),
+            (
+                f"/api/v1/invitations%3Bp%3D1/{FAKE_TOKEN}/accept",
+                "/api/v1/invitations%3Bp%3D1/<redacted>/accept",
+            ),
+            (
+                f"/API/V1/INVITATIONS/{FAKE_TOKEN}/accept",
+                "/API/V1/INVITATIONS/<redacted>/accept",
+            ),
+            (
+                f"http://api.example.test/api/v1/invitations/{FAKE_TOKEN}/accept",
+                "http://api.example.test/api/v1/invitations/<redacted>/accept",
+            ),
+            (
+                f"http%3A//api.example.test/api/v1/invitations/{FAKE_TOKEN}/accept"
+                f"?code={FAKE_CODE}",
+                "http%3A//api.example.test/api/v1/invitations/<redacted>/accept"
+                "?<redacted>",
+            ),
+            # The site's join link, which the API serves no route for: a hit is
+            # a misdirected invitation link.
+            (f"/join/{FAKE_TOKEN}", "/join/<redacted>"),
+            (f"/join/{FAKE_TOKEN}/start", "/join/<redacted>/start"),
         ],
     )
     def test_a_target_prints_without_its_query_or_its_credential(self, target, printed):
@@ -211,6 +266,8 @@ class TestWhatALogLinePrintsOfARequest:
 
         unrouted = {"path": f"/api/v1/invitations/{FAKE_TOKEN}/accept"}
         assert loggable_path(unrouted) == "/api/v1/invitations/<redacted>/accept"
+        doubled = {"path": f"//api/v1/invitations/{FAKE_TOKEN}/accept"}
+        assert loggable_path(doubled) == "//api/v1/invitations/<redacted>/accept"
         assert loggable_path({"path": "/health"}) == "/health"
         assert loggable_path({}) == ""
 
@@ -276,6 +333,7 @@ class TestTheAccessLogRedactor:
         assert AccessLogRedactor().filter(record) is True
         line = record.getMessage()
         assert "'path': '/api/v1/invitations/<redacted>/accept'" in line
+        assert "'raw_path': '<redacted>'" in line
         assert "'query_string': '<redacted>'" in line
         assert [fake for fake in FAKES if fake in line] == []
         assert scope["path"] == target, "the scope itself is untouched"
@@ -376,29 +434,54 @@ class TestUvicornsOwnAccessLine:
     record or this protocol's API fails here, in that upgrade's pull request."""
 
     @pytest.mark.parametrize(
-        "method, target, printed",
+        "root_path, method, target, printed",
         [
             (
+                "",
                 "POST",
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept",
                 "/api/v1/invitations/<redacted>/accept",
             ),
             (
+                "",
                 "GET",
                 f"/auth/instagram-login/callback?code={FAKE_CODE}&state={FAKE_STATE}",
                 "/auth/instagram-login/callback?<redacted>",
             ),
             (
+                "",
                 "GET",
                 f"/webhooks/meta/data-deletion/status?code={FAKE_CAPABILITY}",
                 "/webhooks/meta/data-deletion/status?<redacted>",
             ),
-            ("GET", "/health", "/health"),
+            ("", "GET", "/health", "/health"),
+            # `--root-path /x` (or UVICORN_ROOT_PATH): uvicorn prints the path
+            # with the root path in front of it.
+            (
+                "/x",
+                "POST",
+                f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                "/x/api/v1/invitations/<redacted>/accept",
+            ),
+            # A base URL with a trailing slash (`TARGET_API_URL`) doubles it.
+            (
+                "",
+                "POST",
+                f"//api/v1/invitations/{FAKE_TOKEN}/accept",
+                "//api/v1/invitations/<redacted>/accept",
+            ),
         ],
-        ids=["invitation", "oauth-callback", "deletion-status", "plain"],
+        ids=[
+            "invitation",
+            "oauth-callback",
+            "deletion-status",
+            "plain",
+            "root-path",
+            "double-slash",
+        ],
     )
     async def test_uvicorn_prints_no_query_and_no_token(
-        self, access_lines, method, target, printed
+        self, access_lines, root_path, method, target, printed
     ):
         from uvicorn.config import Config
         from uvicorn.protocols.http.h11_impl import H11Protocol
@@ -406,7 +489,11 @@ class TestUvicornsOwnAccessLine:
 
         # log_config=None: no dictConfig, so this process's logging is untouched.
         config = Config(
-            app=_answer, log_config=None, proxy_headers=False, lifespan="off"
+            app=_answer,
+            log_config=None,
+            proxy_headers=False,
+            lifespan="off",
+            root_path=root_path,
         )
         state = ServerState()
         protocol = H11Protocol(
@@ -438,7 +525,18 @@ class TestUvicornsTraceLine:
     request's scope on `uvicorn.asgi` (`uvicorn/middleware/message_logger.py:76-78`).
     This drives that middleware itself."""
 
-    async def test_the_scope_line_prints_no_query_and_no_token(self):
+    @pytest.mark.parametrize(
+        "raw_path",
+        [
+            f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+            # uvicorn decodes `path` and keeps `raw_path` as sent: both of these
+            # route to the accept handler, and only `path` reads as its prefix.
+            f"/api/v1/invitation%73/{FAKE_TOKEN}/accept",
+            f"/api/v1/invitations%2F{FAKE_TOKEN}/accept",
+        ],
+        ids=["plain", "encoded-letter", "encoded-slash"],
+    )
+    async def test_the_scope_line_prints_no_query_and_no_token(self, raw_path):
         import src.utils.logger  # noqa: F401 — its import installs the redactor
         from uvicorn.logging import TRACE_LOG_LEVEL
         from uvicorn.middleware.message_logger import MessageLoggerMiddleware
@@ -455,13 +553,12 @@ class TestUvicornsTraceLine:
         asgi.setLevel(TRACE_LOG_LEVEL)
         asgi.addHandler(grab)
         try:
-            target = f"/api/v1/invitations/{FAKE_TOKEN}/accept"
             scope = {
                 "type": "http",
                 "method": "POST",
                 "client": ("10.0.0.7", 41000),
-                "path": target,
-                "raw_path": target.encode("ascii"),
+                "path": f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                "raw_path": raw_path.encode("ascii"),
                 "query_string": f"code={FAKE_CODE}".encode("ascii"),
                 "headers": [],
             }
@@ -478,7 +575,8 @@ class TestUvicornsTraceLine:
             asgi.setLevel(previous)
         started = [line for line in lines if "Started scope=" in line]
         assert len(started) == 1, lines
-        assert "/api/v1/invitations/<redacted>/accept" in started[0]
+        assert "'path': '/api/v1/invitations/<redacted>/accept'" in started[0]
+        assert "'raw_path': '<redacted>'" in started[0]
         assert [fake for fake in FAKES if any(fake in line for line in lines)] == []
 
 
