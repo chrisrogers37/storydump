@@ -29,6 +29,7 @@ import pytest
 from src.services.target import egress as egress_mod
 from src.services.target.egress import (
     TIMEOUT_CLASSES,
+    EgressAnswerLost,
     EgressBudgetExhausted,
     EgressPolicy,
     EgressRefused,
@@ -150,6 +151,64 @@ class TestProofTwoARetryStormExhaustsONEAbsoluteBudget:
                     ).without(enforce_budget=False),
                 )
         assert calls["n"] == 4
+
+
+class TestACreatingCallIsNeverSentTwice:
+    """`retry_after_send=False`, the policy of a call that creates something
+    (a message): a request whose answer was lost after it left is not
+    attempted again, while one that never left is. The pair: at the default,
+    the same lost answer is attempted again."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lost", [httpx.ReadTimeout, httpx.RemoteProtocolError])
+    async def test_a_request_that_left_is_attempted_once(self, lost):
+        calls = {"n": 0}
+
+        async def answer_lost(request):
+            calls["n"] += 1
+            raise lost("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressAnswerLost):
+                await request(
+                    client,
+                    "POST",
+                    ALLOWED,
+                    policy=EgressPolicy(retry_after_send=False),
+                )
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_at_the_default_the_same_lost_answer_is_attempted_again(self):
+        """The negative half: it really is the flag that stops the resend."""
+        calls = {"n": 0}
+
+        async def answer_lost(request):
+            calls["n"] += 1
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(client, "POST", ALLOWED, policy=EgressPolicy())
+        assert calls["n"] == EgressPolicy().max_attempts
+
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_left_is_attempted_again(self):
+        calls = {"n": 0}
+
+        async def refused_then_answered(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("refused", request=request)
+            return httpx.Response(200, json={"ok": True})
+
+        async with httpx.AsyncClient(
+            transport=_transport(refused_then_answered)
+        ) as client:
+            response = await request(
+                client, "POST", ALLOWED, policy=EgressPolicy(retry_after_send=False)
+            )
+        assert response.status_code == 200 and calls["n"] == 2
 
 
 class TestProofThreeAnOversizedResponseCutsAtTheByteCap:
