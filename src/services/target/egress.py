@@ -175,7 +175,16 @@ _NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 class ResponseTooLarge(StorydumpError):
-    """The response exceeded the byte cap and was cut."""
+    """The response exceeded the byte cap and was cut.
+
+    `cap` and `received` are the cap and the bytes read when the read was
+    abandoned, so a caller can keep them as evidence without parsing the message.
+    """
+
+    def __init__(self, message: str = "", *, cap=None, received=None):
+        super().__init__(message)
+        self.cap = cap
+        self.received = received
 
 
 @dataclass(frozen=True)
@@ -342,7 +351,9 @@ async def _read_capped(response: httpx.Response, policy: EgressPolicy) -> bytes:
         if policy.enforce_byte_cap and total > policy.max_response_bytes:
             raise ResponseTooLarge(
                 f"response exceeded the {policy.max_response_bytes}-byte cap "
-                f"after {total} bytes — read abandoned (#857)"
+                f"after {total} bytes — read abandoned (#857)",
+                cap=policy.max_response_bytes,
+                received=total,
             )
         chunks.append(chunk)
     return b"".join(chunks)

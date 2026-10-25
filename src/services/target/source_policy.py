@@ -449,8 +449,13 @@ async def intent_suitability(
 
 
 class MediaAdmissionPending(StorydumpError):
-    """A selected live card waits; it must not be silently superseded."""
+    """A selected live card waits; it must not be silently superseded.
 
-    def __init__(self, reason):
+    `evidence` is the refusal's evidence when a fetch was refused
+    (`refusal_evidence`); the park records it beside the reason.
+    """
+
+    def __init__(self, reason, *, evidence=None):
         self.reason = reason
+        self.evidence = evidence
         super().__init__(reason)
