@@ -90,6 +90,22 @@ def _refusal(exc, counters, selected) -> dict:
     return facts
 
 
+def _validation_refusal(validation, counters) -> dict | None:
+    """A result that is not supported, as refusal evidence: the check that
+    decided it and the values it measured, with the turn's counters."""
+    if validation.state == "supported" or not validation.failed_check:
+        return None
+    return refusal_evidence.evidence(
+        "local_validation",
+        state=validation.state,
+        check=validation.failed_check["check"],
+        measured=dict(validation.failed_check["measured"]),
+        bytes=validation.evidence.get("bytes"),
+        matrix_version=validation.matrix_version,
+        counters=asdict(counters),
+    )
+
+
 class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
@@ -288,12 +304,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 selected.subject["selected_asset_id"],
             )
         )
-        await self._land(engine, workspace_id, intent_id, selected, validation)
+        refusal = _validation_refusal(validation, counters)
+        await self._land(
+            engine, workspace_id, intent_id, selected, validation, refusal=refusal
+        )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
                 "unsupported"
                 if validation.state == "unsupported"
-                else "validation_pending"
+                else "validation_pending",
+                evidence=refusal,
             )
         return SelectedPastPostsBytes(
             str(intent_id),
