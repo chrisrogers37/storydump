@@ -148,18 +148,20 @@ class TestWhatALogLinePrintsOfARequest:
             ),
             ("/auth/signout?everywhere=true", "/auth/signout?<redacted>"),
             ("/api/v1/me?", "/api/v1/me?<redacted>"),
+            # Everything after a credential prefix prints as one <redacted>,
+            # whatever follows it: the token, and any segment after it.
             (
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept",
-                "/api/v1/invitations/<redacted>/accept",
+                "/api/v1/invitations/<redacted>",
             ),
             (
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept/",
-                "/api/v1/invitations/<redacted>/accept/",
+                "/api/v1/invitations/<redacted>",
             ),
             (f"/api/v1/invitations/{FAKE_TOKEN}", "/api/v1/invitations/<redacted>"),
             (
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept?code={FAKE_CODE}",
-                "/api/v1/invitations/<redacted>/accept?<redacted>",
+                "/api/v1/invitations/<redacted>?<redacted>",
             ),
             ("/api/v1/invitations/", "/api/v1/invitations/"),
             (
@@ -174,57 +176,84 @@ class TestWhatALogLinePrintsOfARequest:
                 f"/api/v1/workspaces/{WS}/invitations",
                 f"/api/v1/workspaces/{WS}/invitations",
             ),
+            # A token segment of any shape: one that is empty once its
+            # parameters are set aside (`;<T>`, printed `%3B<T>`, and `.;<T>`;
+            # Starlette routes the first to the accept handler), a dot-dot, or a
+            # segment before it.
+            (
+                f"/api/v1/invitations/;{FAKE_TOKEN}/accept",
+                "/api/v1/invitations/<redacted>",
+            ),
+            (
+                f"/api/v1/invitations/%3B{FAKE_TOKEN}/accept",
+                "/api/v1/invitations/<redacted>",
+            ),
+            (
+                f"/api/v1/invitations/.;{FAKE_TOKEN}/accept",
+                "/api/v1/invitations/<redacted>",
+            ),
+            (f"/api/v1/invitations/;{FAKE_TOKEN}", "/api/v1/invitations/<redacted>"),
+            (f"/join/;{FAKE_TOKEN}", "/join/<redacted>"),
+            (
+                f"/api/v1/invitations/../{FAKE_TOKEN}/accept",
+                "/api/v1/invitations/<redacted>",
+            ),
+            (f"/api/v1/invitations/x/{FAKE_TOKEN}", "/api/v1/invitations/<redacted>"),
+            (
+                f"/api/v1/invitations/%09/{FAKE_TOKEN}",
+                "/api/v1/invitations/<redacted>",
+            ),
             # The prefix anywhere in the path, not only at its start: uvicorn's
             # --root-path, a base URL with a trailing slash, an absolute-form
             # target (the access line prints `http%3A//...`), empty or `.`
-            # segments, a segment's parameters (`;p=1`, printed `%3Bp%3D1`) and
-            # any letter case. Each of these 404s, and uvicorn still logs it.
+            # segments inside it, a segment's parameters (`;p=1`, printed
+            # `%3Bp%3D1`) and any letter case. Most of these 404, and uvicorn
+            # still logs them; under a configured root path the request routes.
             (
                 f"/x/api/v1/invitations/{FAKE_TOKEN}/accept",
-                "/x/api/v1/invitations/<redacted>/accept",
+                "/x/api/v1/invitations/<redacted>",
             ),
             (
                 f"//api/v1/invitations/{FAKE_TOKEN}/accept",
-                "//api/v1/invitations/<redacted>/accept",
+                "//api/v1/invitations/<redacted>",
             ),
             (
                 f"/api//v1/invitations/{FAKE_TOKEN}/accept",
-                "/api//v1/invitations/<redacted>/accept",
+                "/api//v1/invitations/<redacted>",
             ),
             (
                 f"/api/v1/./invitations/{FAKE_TOKEN}/accept",
-                "/api/v1/./invitations/<redacted>/accept",
+                "/api/v1/./invitations/<redacted>",
             ),
             (
                 f"/api/v1/invitations//{FAKE_TOKEN}/accept",
-                "/api/v1/invitations//<redacted>/accept",
+                "/api/v1/invitations/<redacted>",
             ),
             (
                 f"/api/v1/invitations;p=1/{FAKE_TOKEN}/accept",
-                "/api/v1/invitations;p=1/<redacted>/accept",
+                "/api/v1/invitations/<redacted>",
             ),
             (
                 f"/api/v1/invitations%3Bp%3D1/{FAKE_TOKEN}/accept",
-                "/api/v1/invitations%3Bp%3D1/<redacted>/accept",
+                "/api/v1/invitations/<redacted>",
             ),
             (
                 f"/API/V1/INVITATIONS/{FAKE_TOKEN}/accept",
-                "/API/V1/INVITATIONS/<redacted>/accept",
+                "/API/V1/INVITATIONS/<redacted>",
             ),
             (
                 f"http://api.example.test/api/v1/invitations/{FAKE_TOKEN}/accept",
-                "http://api.example.test/api/v1/invitations/<redacted>/accept",
+                "http://api.example.test/api/v1/invitations/<redacted>",
             ),
             (
                 f"http%3A//api.example.test/api/v1/invitations/{FAKE_TOKEN}/accept"
                 f"?code={FAKE_CODE}",
-                "http%3A//api.example.test/api/v1/invitations/<redacted>/accept"
-                "?<redacted>",
+                "http%3A//api.example.test/api/v1/invitations/<redacted>?<redacted>",
             ),
             # The site's join link, which the API serves no route for: a hit is
             # a misdirected invitation link.
             (f"/join/{FAKE_TOKEN}", "/join/<redacted>"),
-            (f"/join/{FAKE_TOKEN}/start", "/join/<redacted>/start"),
+            (f"/join/{FAKE_TOKEN}/start", "/join/<redacted>"),
         ],
     )
     def test_a_target_prints_without_its_query_or_its_credential(self, target, printed):
@@ -265,9 +294,12 @@ class TestWhatALogLinePrintsOfARequest:
         from src.utils.logger import loggable_path
 
         unrouted = {"path": f"/api/v1/invitations/{FAKE_TOKEN}/accept"}
-        assert loggable_path(unrouted) == "/api/v1/invitations/<redacted>/accept"
+        assert loggable_path(unrouted) == "/api/v1/invitations/<redacted>"
         doubled = {"path": f"//api/v1/invitations/{FAKE_TOKEN}/accept"}
-        assert loggable_path(doubled) == "//api/v1/invitations/<redacted>/accept"
+        assert loggable_path(doubled) == "//api/v1/invitations/<redacted>"
+        # Percent-encoded first (`%3B`), as the access line prints it.
+        parameter = {"path": f"/api/v1/invitations/;{FAKE_TOKEN}/accept"}
+        assert loggable_path(parameter) == "/api/v1/invitations/<redacted>"
         assert loggable_path({"path": "/health"}) == "/health"
         assert loggable_path({}) == ""
 
@@ -338,7 +370,7 @@ class TestTheAccessLogRedactor:
         )
         assert AccessLogRedactor().filter(record) is True
         line = record.getMessage()
-        assert "'path': '/api/v1/invitations/<redacted>/accept'" in line
+        assert "'path': '/api/v1/invitations/<redacted>'" in line
         assert "'raw_path': '<redacted>'" in line
         assert "'query_string': '<redacted>'" in line
         assert [fake for fake in FAKES if fake in line] == []
@@ -447,7 +479,16 @@ class TestUvicornsOwnAccessLine:
                 "",
                 "POST",
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept",
-                "/api/v1/invitations/<redacted>/accept",
+                "/api/v1/invitations/<redacted>",
+            ),
+            # A token segment that is empty once its parameters are set aside:
+            # Starlette routes it to the accept handler, and uvicorn prints the
+            # `;` as `%3B`.
+            (
+                "",
+                "POST",
+                f"/api/v1/invitations/;{FAKE_TOKEN}/accept",
+                "/api/v1/invitations/<redacted>",
             ),
             (
                 "",
@@ -468,18 +509,19 @@ class TestUvicornsOwnAccessLine:
                 "/x",
                 "POST",
                 f"/api/v1/invitations/{FAKE_TOKEN}/accept",
-                "/x/api/v1/invitations/<redacted>/accept",
+                "/x/api/v1/invitations/<redacted>",
             ),
             # A base URL with a trailing slash (`TARGET_API_URL`) doubles it.
             (
                 "",
                 "POST",
                 f"//api/v1/invitations/{FAKE_TOKEN}/accept",
-                "//api/v1/invitations/<redacted>/accept",
+                "//api/v1/invitations/<redacted>",
             ),
         ],
         ids=[
             "invitation",
+            "parameter-token",
             "oauth-callback",
             "deletion-status",
             "plain",
@@ -533,17 +575,30 @@ class TestUvicornsTraceLine:
     This drives that middleware itself."""
 
     @pytest.mark.parametrize(
-        "raw_path",
+        "path, raw_path",
         [
-            f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+            (
+                f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+            ),
             # uvicorn decodes `path` and keeps `raw_path` as sent: both of these
             # route to the accept handler, and only `path` reads as its prefix.
-            f"/api/v1/invitation%73/{FAKE_TOKEN}/accept",
-            f"/api/v1/invitations%2F{FAKE_TOKEN}/accept",
+            (
+                f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                f"/api/v1/invitation%73/{FAKE_TOKEN}/accept",
+            ),
+            (
+                f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                f"/api/v1/invitations%2F{FAKE_TOKEN}/accept",
+            ),
+            (
+                f"/api/v1/invitations/;{FAKE_TOKEN}/accept",
+                f"/api/v1/invitations/;{FAKE_TOKEN}/accept",
+            ),
         ],
-        ids=["plain", "encoded-letter", "encoded-slash"],
+        ids=["plain", "encoded-letter", "encoded-slash", "parameter-token"],
     )
-    async def test_the_scope_line_prints_no_query_and_no_token(self, raw_path):
+    async def test_the_scope_line_prints_no_query_and_no_token(self, path, raw_path):
         import src.utils.logger  # noqa: F401 — its import installs the redactor
         from uvicorn.logging import TRACE_LOG_LEVEL
         from uvicorn.middleware.message_logger import MessageLoggerMiddleware
@@ -564,7 +619,7 @@ class TestUvicornsTraceLine:
                 "type": "http",
                 "method": "POST",
                 "client": ("10.0.0.7", 41000),
-                "path": f"/api/v1/invitations/{FAKE_TOKEN}/accept",
+                "path": path,
                 "raw_path": raw_path.encode("ascii"),
                 "query_string": f"code={FAKE_CODE}".encode("ascii"),
                 "headers": [],
@@ -582,7 +637,7 @@ class TestUvicornsTraceLine:
             asgi.setLevel(previous)
         started = [line for line in lines if "Started scope=" in line]
         assert len(started) == 1, lines
-        assert "'path': '/api/v1/invitations/<redacted>/accept'" in started[0]
+        assert "'path': '/api/v1/invitations/<redacted>'" in started[0]
         assert "'raw_path': '<redacted>'" in started[0]
         assert [fake for fake in FAKES if any(fake in line for line in lines)] == []
 

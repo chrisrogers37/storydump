@@ -212,7 +212,7 @@ class TestTheAppsLinesNameTheRoute:
         client = TestClient(create_app(env={}))
         resp = post_body(client, ACCEPT, b"x" * 1025)
         assert resp.status_code == 413
-        expected = "refused POST /api/v1/invitations/<redacted>/accept from"
+        expected = "refused POST /api/v1/invitations/<redacted> from"
         assert any(expected in line for line in app_lines), app_lines
         assert [line for line in app_lines if FAKE_TOKEN in line] == []
 
