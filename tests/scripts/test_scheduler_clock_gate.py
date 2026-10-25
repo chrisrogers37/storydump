@@ -319,6 +319,101 @@ class TestTheClockElectionIsExclusive:
             await loser_engine.dispose()
         assert _jobs_of_kind(clock_db, kind) == 0, "the loser inserted nothing"
 
+    @pytest.mark.asyncio
+    async def test_a_clock_that_ticked_many_times_hands_over_at_release(self, clock_db):
+        """Re-electing every tick must not stack holds. The holder's connection
+        stays OPEN across the release, as a transaction pooler keeps a server
+        session open after its client leaves, so only the unlock can hand
+        over: one unlock must free the key after any number of ticks."""
+        from src.services.target.scheduler import ClockElection
+
+        ticks = 5
+        engine_a, engine_b = self._engine(clock_db), self._engine(clock_db)
+        try:
+            async with engine_a.connect() as a, engine_b.connect() as b:
+                holder, successor = ClockElection(a), ClockElection(b)
+                for _ in range(ticks):
+                    assert await holder.try_acquire() is True
+                assert await successor.try_acquire() is False, "positive control: held"
+                await holder.release()
+                assert await successor.try_acquire() is True, (
+                    "one release left the election held: each tick's"
+                    " re-election stacked a hold, so a clean shutdown handed"
+                    " nothing over and the successor waits for the old"
+                    " session to end"
+                )
+                await successor.release()
+        finally:
+            await engine_a.dispose()
+            await engine_b.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_ticking_clock_hands_over_the_moment_it_stops(
+        self, clock_db, monkeypatch
+    ):
+        """The same through the loop the worker runs: elected ticks through
+        `Clock.tick_once`, then `Clock.stop()`, and a successor elects on its
+        next try. The tick body is stubbed: the property is the election
+        connection's, and a real tick would mint into the shared module
+        database."""
+        from src.services.target import scheduler
+        from src.services.target.scheduler import Clock, ClockElection
+
+        async def no_work(session, **_kwargs):
+            return {"slot_jobs": 0}
+
+        monkeypatch.setattr(scheduler, "tick", no_work)
+        engine_a, engine_b = self._engine(clock_db), self._engine(clock_db)
+        try:
+            async with engine_a.connect() as a, engine_b.connect() as b:
+                clock = Clock(
+                    a,
+                    self._factory(engine_a, clock_db),
+                    interval_seconds=0.05,
+                    max_inserts=TICK_MAX,
+                    refresh_cadence_seconds=REFRESH_CADENCE_S,
+                    recurring={"v": 1},
+                )
+                for _ in range(5):
+                    assert await clock.tick_once() is not None
+                assert clock.elected is True and clock.ticks == 5
+                successor = ClockElection(b)
+                assert await successor.try_acquire() is False, "positive control: held"
+                await clock.stop()
+                assert await successor.try_acquire() is True, (
+                    "the stopped clock still held its election: no successor"
+                    " can become the clock until the old session ends"
+                )
+                await successor.release()
+        finally:
+            await engine_a.dispose()
+            await engine_b.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_lock_the_session_lost_is_reported_lost(self, clock_db):
+        """The database decides, not the `held` flag. An election whose session
+        lost the lock (dropped here behind its back) while another session took
+        it must answer False on its next try, not True from memory: two
+        clocks would mint twice. Green on `main` too; it is here so that the
+        fix confirms with the server rather than trusting its flag."""
+        from sqlalchemy import text as _t
+
+        from src.services.target.scheduler import ClockElection
+
+        engine_a, engine_b = self._engine(clock_db), self._engine(clock_db)
+        try:
+            async with engine_a.connect() as a, engine_b.connect() as b:
+                first, second = ClockElection(a), ClockElection(b)
+                assert await first.try_acquire() is True
+                await a.execute(_t("SELECT pg_advisory_unlock_all()"))
+                assert await second.try_acquire() is True
+                assert await first.try_acquire() is False
+                assert first.held is False
+                await second.release()
+        finally:
+            await engine_a.dispose()
+            await engine_b.dispose()
+
     def _engine(self, clock_db):
         from sqlalchemy.ext.asyncio import create_async_engine
 

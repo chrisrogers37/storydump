@@ -220,9 +220,13 @@ suite a PostgreSQL and set `REQUIRE_TEST_DATABASE=1`
 railway logs --service worker
 
 # Common issues:
-# - the pre-deploy step failed -> a migration failed, or DATABASE_URL is
-#   missing or is not the owner login; the old version keeps serving
-# - the worker exits 2 -> TARGET_DATABASE_URL is unset on the worker
+# - the pre-deploy step failed -> a migration failed; DATABASE_URL is missing,
+#   not the owner login, names a pooled host or cannot be read; or another
+#   run held the runner lock past five minutes. The old version keeps
+#   serving, and the runner's last lines on stderr name the cause
+# - the worker exited 2 -> read its FATAL line, which names the cause:
+#   TARGET_DATABASE_URL is unset, names a pooled host or no host, or cannot
+#   be read, or the credential key ring cannot load
 # - the API answers 503 on data routes -> TARGET_DATABASE_URL is unset on the API
 # - Build failed -> Check build logs
 ```

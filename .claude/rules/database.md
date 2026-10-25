@@ -134,7 +134,7 @@ Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
   owner, which owns every table and bypasses RLS, is `DATABASE_URL`, the
   pre-deploy runner's login alone
   (`documentation/operations/schema-cutover.md`). The worker logs its login at
-  boot (`connection_role`, `src/worker.py:884`); `storydump posture` and the
+  boot (`connection_role`, `src/worker.py:883`); `storydump posture` and the
   API's `db_role` report the live answer. The predicate is still the first
   fence. Every query names its tenant with an explicit `workspace_id = :ws`
   predicate on each table it touches, as `ops_views.py` and

@@ -93,6 +93,22 @@ from src.services.target import (
 #: name, so two spellings of the same intent cannot elect two clocks.
 CLOCK_ELECTION_KEY = 0x5701_C10C
 
+#: Elect, or confirm, in one statement that never adds a hold. A session that
+#: already holds the key (its own granted row in `pg_locks`, matched on the
+#: whole key: `objsubid = 1` is the one-bigint form, whose halves are
+#: `classid` and `objid`) answers true without taking it again; any other
+#: session tries for it. `CASE` evaluates only the branch it needs, so the
+#: holder never calls `pg_try_advisory_lock`, which is re-entrant: called
+#: again by the holder, it adds a hold that one unlock cannot take back.
+CLOCK_ELECTION_SQL = (
+    "SELECT CASE WHEN EXISTS ("
+    "SELECT 1 FROM pg_locks"
+    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+    " AND pid = pg_backend_pid() AND objsubid = 1"
+    " AND ((classid::bigint << 32) | objid::bigint) = :k"
+    ") THEN true ELSE pg_try_advisory_lock(:k) END"
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +129,21 @@ class ClockElection:
     clock in mid-loop; a table-row election would need its own lease, expiry
     and reaper, which is the machinery this avoids.
 
+    **Only where the connection IS the session.** Through a transaction
+    pooler (PgBouncer in transaction mode; Neon's ``-pooler`` host) the server
+    session outlives the client's connection, so a lock taken on it stays
+    held after this process closes, or dies, and no successor elects. The
+    worker refuses a pooled host at boot (``src.worker.main``,
+    ``unit_of_work.engine_url_refusal``).
+
+    **One hold.** The lock is re-entrant: each success by the holding session
+    adds a hold, and ``pg_advisory_unlock`` takes away one. So
+    :meth:`try_acquire` confirms a lock this session already holds (its own
+    row in ``pg_locks``) instead of taking it again (``CLOCK_ELECTION_SQL``),
+    an elected clock holds exactly one, and :meth:`release` hands over at
+    once. Taken again every tick, a clock held one per tick, and the one
+    unlock at a clean shutdown handed nothing over.
+
     The connection is the caller's and is held for the elected process's
     lifetime. That is the one long-lived connection the design permits here,
     and it is why the clock rides inside an elected worker rather than owning a
@@ -125,10 +156,14 @@ class ClockElection:
         self.held = False
 
     async def try_acquire(self) -> bool:
+        """Elect, or confirm that this session still holds the election.
+
+        One statement either way (`CLOCK_ELECTION_SQL`), and the database
+        decides, not `held`: a lock this session lost reads as lost even while
+        `held` says True, and a held one is never taken a second time.
+        """
         got = (
-            await self._conn.execute(
-                text("SELECT pg_try_advisory_lock(:k)"), {"k": self._key}
-            )
+            await self._conn.execute(text(CLOCK_ELECTION_SQL), {"k": self._key})
         ).scalar()
         self.held = bool(got)
         return self.held
@@ -138,7 +173,8 @@ class ClockElection:
 
         Never required for correctness — the session dying does this — but a
         clean shutdown that hands over in milliseconds rather than in a TCP
-        timeout is worth the call.
+        timeout is worth the call. One unlock is enough because this session
+        holds one count (`try_acquire` never takes a second).
         """
         if not self.held:
             return

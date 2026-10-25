@@ -59,10 +59,10 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import text
+from sqlalchemy import exc as sa_exc, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from src.config.db_url import userinfo
+from src.config.db_url import is_pooled_host, pooled_endpoint_refusal, userinfo
 from src.config.settings import settings
 from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.utils.logger import logger
@@ -545,3 +545,54 @@ async def connection_role(conn) -> Optional[dict]:
     if row is None:
         return None
     return {"user": str(row[0]), "bypassrls": bool(row[1])}
+
+
+def engine_url_refusal(url: str) -> Optional[str]:
+    """Why the worker must not open its engine on *url*, or None.
+
+    *url* is ``engine_url_from_env``'s answer, the string the engine gets. Its
+    hosts are read the way SQLAlchemy's asyncpg dialect hands them to asyncpg
+    (``create_connect_args``): the ``host`` query values (a comma list, or
+    repeated ``host=h:p``), which replace the authority's host, and the
+    authority's host. Every host named counts, so a URL that names a pooled
+    host anywhere is refused, even where another one would be used.
+
+    Two forms cannot be classified, and are refused too:
+
+    - a URL that names no host, for which asyncpg would take one from the
+      environment (``PGHOST``, a service file, a local socket), when the
+      worker's database comes from ``TARGET_DATABASE_URL`` alone;
+    - a string SQLAlchemy cannot parse, which ``create_engine`` would refuse
+      anyway, with a traceback that can quote part of it. A key/value string
+      is one, and so is a URL that ``asyncpg_url`` split at a raw ``?`` in its
+      password.
+
+    Each answer names the variable, never its value.
+    """
+    try:
+        parsed = make_url(url)
+    except (sa_exc.ArgumentError, ValueError):
+        return (
+            f"{DATABASE_URL_VAR} is not a connection URL the worker can read:"
+            " give it as postgresql://user:password@host/database, with any"
+            " @ / ? # or % in the user or password percent-encoded."
+        )
+    hosts = [
+        part
+        for value in parsed.normalized_query.get("host", ())
+        for part in value.split(",")
+        if part.strip()
+    ]
+    if parsed.host:
+        hosts.append(parsed.host)
+    if not hosts:
+        return (
+            f"{DATABASE_URL_VAR} names no host, so the driver would take one"
+            " from the environment (PGHOST, a service file or a local socket),"
+            f" and the worker's database comes from {DATABASE_URL_VAR} alone."
+            " Name the host in it; for a local socket, ?host=<the socket"
+            " directory>."
+        )
+    if any(is_pooled_host(host) for host in hosts):
+        return pooled_endpoint_refusal(DATABASE_URL_VAR)
+    return None

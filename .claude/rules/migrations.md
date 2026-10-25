@@ -35,27 +35,44 @@ its predeploy (`railway.toml:8`), so **merged is applied**. The ledger is
   test worlds, `make init-db`) is entered by `adopt`, which records each file
   whose probe is true. Carry `-- runner:postcondition <SQL returning bool>`
   lines, or an `adoption_manifest.json` entry; a file with neither fails
-  `_load_manifest` (`scripts/migration_runner.py:722`). A false probe leaves it
+  `_load_manifest` (`scripts/migration_runner.py:918`). A false probe leaves it
   pending, and `apply` then runs it over a schema that already has it.
 - **A probe is permanent**: a false probe below a true one is an incoherent
-  chain and fails adopt (`migration_runner.py:851`). So the code keeps 001's
+  chain and fails adopt (`migration_runner.py:1047`). So the code keeps 001's
   postconditions true: no catalog comments on `public`'s functions and relations
   (describe in `--` lines, as `ddl/__init__.py` says) and a pinned `search_path`
   on every `SECURITY DEFINER` function.
 - `000_initial.sql` is empty and never executed: a byte in it is refused at
-  discovery (`migration_runner.py:287`), and `apply` refuses a database that has
+  discovery (`migration_runner.py:309`), and `apply` refuses a database that has
   not adopted it.
 - No `BEGIN`/`COMMIT`: the runner wraps the file and its ledger row in one
   transaction, bounds its lock waits and retries a lock-wait failure
-  (`LOCK_TIMEOUT`, `LOCK_RETRY_DELAYS_S`, `migration_runner.py:95`-`:102`); the
+  (`LOCK_TIMEOUT`, `LOCK_RETRY_DELAYS_S`, `migration_runner.py:117`-`:124`); the
   file sets no `lock_timeout`. A retry re-runs the whole file, so take the
   contended lock before heavy work.
+- The run holds the runner's session lock (`RUNNER_LOCK_KEY`) through
+  `_locked_connection`, the one door every writing verb opens. It refuses to
+  run where libpq connected to a pooled host (`conn.info.host`, judged by
+  `src/config/db_url.py`, the one module the runner imports from `src`, pinned
+  by `tests/test_deploy_guardrails.py`), waits a bounded time
+  (`RUNNER_LOCK_WAIT`) for another run's lock, naming the holder, then fails,
+  and unlocks before it closes. A writing verb that connects any other way
+  skips all three, so `TestAPooledEndpointIsRefused` fails when anything but
+  `_locked_connection` takes the lock, anything but it and the read-only
+  `status` calls `_connect`, or anything but `_connect` calls
+  `psycopg2.connect`.
+- The wait polls: one `pg_try_advisory_lock` in autocommit every
+  `RUNNER_LOCK_POLL_S`, so the waiting run holds no transaction or snapshot.
+  Do not turn it back into a blocking `pg_advisory_lock`: its statement holds
+  a snapshot for the whole wait, the holder's `CREATE INDEX CONCURRENTLY`
+  waits for every older snapshot, and the server ends one of the two as a
+  deadlock (`test_a_waiting_run_lets_the_holder_build_an_index_concurrently`).
 - **An applied file is immutable** — the ledger stores its SHA-256, and a changed
   or deleted file fails every later apply (`ledger_discrepancies`,
-  `migration_runner.py:465`); a file at the base is immutable to the consistency
+  `migration_runner.py:654`); a file at the base is immutable to the consistency
   job too (`schema_consistency.py:55`). Fix forward with a new number, and never
   remove `001` or `002`: production's ledger records them.
-- Markers are a closed grammar (`KNOWN_MARKERS`, `migration_runner.py:117`):
+- Markers are a closed grammar (`KNOWN_MARKERS`, `migration_runner.py:139`):
   `postcondition`, `no-transaction`, `reapply-safe`, `manual`. A misspelt one is a
   hard failure at discovery, and a comment must not open with `runner` plus a
   marker word. A `-- runner:manual` file is owed by the deploy, never applied by

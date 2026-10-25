@@ -252,8 +252,9 @@ before this.
 
 `src/config/settings.py` requires **no variable**: every field has a default, so the settings load with an empty
 environment — in the web service, the tests and the `storydump` CLI. A process
-needs what it reads: the worker refuses to boot without `TARGET_DATABASE_URL`
-(exit 2, naming it), the API answers 503 on every data route without it, both
+needs what it reads: the worker refuses to boot without `TARGET_DATABASE_URL`,
+or with one that names a pooled host, no host, or cannot be read (exit 2,
+naming it), the API answers 503 on every data route without it, both
 refuse to start without a credential key ring that loads (`ENCRYPTION_KEY`, or
 `ENCRYPTION_KEYS`), and the CLI imports from `src` only
 `src/services/target/vocabulary.py` and needs no variable but its token. Tests
@@ -406,9 +407,11 @@ The `Procfile` names the two deployed processes; both run the one tier.
 - **Worker:** `python -m src.main` — see the safety rules. `src/main.py` only
   dispatches to `src.worker.main`, which elects the clock, claims jobs on two
   lanes, runs the publish pipeline and sends the Telegram cards. It reads
-  `TARGET_DATABASE_URL` from the process environment and exits 2 without it
-  (`src/worker.py::main`); `make run` exports `.env`, a bare invocation does
-  not read it. It receives nothing from Telegram: nothing in `src` polls.
+  `TARGET_DATABASE_URL` from the process environment and exits 2 without it,
+  or when it names a pooled host, no host, or cannot be read
+  (`src/worker.py::main`; why: `documentation/guides/cloud-deployment.md` ›
+  Two logins); `make run` exports `.env`, a bare invocation does not read it.
+  It receives nothing from Telegram: nothing in `src` polls.
 - **API:** `uvicorn src.api.app:app` → health at `GET /health`, which says ok
   and the version and commit that answer, nothing else (the details — usage
   counts, the database login, the pool, the webhook, the queue — are
@@ -430,7 +433,11 @@ The `Procfile` names the two deployed processes; both run the one tier.
   merged migration is an applied one; `status` is the read-only report. A
   gated file (`-- runner:manual`: 001, 002) is never run by a deploy. A
   database built from code adopts both, as production did; only one converted
-  in place owes them (`documentation/operations/schema-cutover.md`).
+  in place owes them (`documentation/operations/schema-cutover.md`). The
+  runner refuses to run where libpq connected to a pooled host, waits a
+  bounded time for another run's lock (`RUNNER_LOCK_WAIT`), naming the holder,
+  then fails the deploy with the old version serving, and unlocks before it
+  closes.
 - **Landing / dashboard:** `npm --prefix landing run dev` → http://localhost:3000;
   the BFF proxies to `TARGET_API_URL` (`BACKEND_URL` is the fallback). The
   owner area at `/ops`, whose first page is the waitlist with Admit and Send

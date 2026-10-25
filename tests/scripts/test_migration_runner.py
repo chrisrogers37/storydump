@@ -10,8 +10,10 @@ import hashlib
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import psycopg2
+from psycopg2.extensions import make_dsn, parse_dsn
 import pytest
 
 import scripts.migration_runner as runner_module
@@ -19,6 +21,7 @@ from scripts.migration_runner import (
     INITIAL_VERSION,
     RUNNER_LOCK_KEY,
     MigrationRunnerError,
+    _connect,
     adopt,
     apply_manual,
     apply_pending,
@@ -26,6 +29,7 @@ from scripts.migration_runner import (
     main,
     status,
 )
+from src.config.db_url import userinfo
 from src.config.settings import settings
 from tests.scripts.conftest import (
     fetch_ledger,
@@ -478,6 +482,428 @@ class TestAdvisoryLock:
         conn.close()
         assert len(fetch_ledger(scratch_db)) == 1
 
+    def test_a_lock_held_past_the_bound_fails_the_run_and_names_its_holder(
+        self, scratch_db, tmp_path, monkeypatch, capsys
+    ):
+        """A lock nobody lets go must fail the run, not hang the deploy. A
+        control session keeps the lock, and the bound (seconds) is shortened to
+        fit the test. `raising=False`, so that on a runner without a bound this
+        fails on the test's own clock rather than at setup."""
+        monkeypatch.setattr(runner_module, "RUNNER_LOCK_WAIT", 0.3, raising=False)
+        write_migration(tmp_path, 1, "CREATE TABLE t_waited (id INT);")
+        holder = psycopg2.connect(scratch_db)
+        holder.autocommit = True
+        with holder.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
+        holder_pid = holder.get_backend_pid()
+        thread, errors = _apply_in_thread(scratch_db, tmp_path)
+        try:
+            thread.join(timeout=10)
+            assert not thread.is_alive(), (
+                "the run is still waiting on a lock nobody lets go: a deploy's"
+                " predeploy would hang on it"
+            )
+        finally:
+            holder.close()
+            thread.join(timeout=30)
+        assert len(errors) == 1 and isinstance(errors[0], MigrationRunnerError)
+        assert "runner lock was still held" in str(errors[0])
+        assert f"pid {holder_pid}" in str(errors[0]), "the error must name the holder"
+        assert "waiting up to 0.3s" in capsys.readouterr().err
+        assert not table_exists(scratch_db, "t_waited"), "nothing may be applied"
+
+    def test_a_waiting_run_lets_the_holder_build_an_index_concurrently(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """Run A holds the lock and builds an index CONCURRENTLY while run B
+        waits for it. The build waits for every older snapshot, so a wait that
+        held one (a blocking `pg_advisory_lock` statement) deadlocks with it:
+        the build fails and leaves an INVALID index, or the waiter dies. B must
+        wait holding nothing, then take the lock and find nothing pending."""
+        write_migration(
+            tmp_path,
+            1,
+            "CREATE TABLE t_ix (v INT);\nINSERT INTO t_ix SELECT generate_series(1, 100);",
+        )
+        apply_pending(scratch_db, tmp_path)
+        # The sleep keeps A applying, lock held, until B is waiting; then A
+        # builds the index while B still waits.
+        write_migration(
+            tmp_path,
+            2,
+            "-- runner:no-transaction\n"
+            "SELECT pg_sleep(2);\n"
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_t_ix_v ON t_ix (v);",
+            name="index_concurrently",
+        )
+        results = {}
+
+        def run(name):
+            try:
+                results[name] = apply_pending(scratch_db, tmp_path)
+            except Exception as exc:  # noqa: BLE001 - collected for assertion
+                results[name] = exc
+
+        first = threading.Thread(target=run, args=("A",))
+        first.start()
+        poll = psycopg2.connect(scratch_db)
+        poll.autocommit = True
+        try:
+            with poll.cursor() as cur:
+                assert _until(lambda: _holder_sleeps(cur), 10), (
+                    "run A never took the lock and began applying"
+                )
+            second = threading.Thread(target=run, args=("B",))
+            second.start()
+            first.join(timeout=60)
+            second.join(timeout=60)
+        finally:
+            poll.close()
+        assert not first.is_alive() and not second.is_alive()
+        assert not isinstance(results["A"], Exception), (
+            f"the holder's run failed while another run waited: {results['A']}"
+        )
+        assert not isinstance(results["B"], Exception), (
+            f"the waiting run failed: {results['B']}"
+        )
+        assert fetch_one(
+            scratch_db,
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'ix_t_ix_v'::regclass",
+        ) == (True,), "the concurrent build left an INVALID index"
+        assert [m.version for m in results["A"].applied] == [2]
+        assert results["B"].applied == [], "the waiting run must find nothing pending"
+        assert "the runner lock is held by" in capsys.readouterr().err, (
+            "run B never waited, so the test proved nothing"
+        )
+        assert [r[0] for r in fetch_ledger(scratch_db)] == [1, 2]
+
+    def test_a_run_gives_its_lock_back_before_it_closes(
+        self, scratch_db, tmp_path, monkeypatch
+    ):
+        """Closing frees the lock only where the connection is the session.
+        Here close() keeps the session open, as a pooler does, and the lock
+        must be free once the run returns all the same."""
+        sessions = []
+        monkeypatch.setattr(
+            runner_module, "_connect", _connect_keeping_sessions(sessions)
+        )
+        write_migration(tmp_path, 1, "CREATE TABLE t_given_back (id INT);")
+        try:
+            apply_pending(scratch_db, tmp_path)
+            assert _lock_is_free(scratch_db), (
+                "the run left its lock on a session that outlived it: the next"
+                " deploy's runner would wait on it"
+            )
+        finally:
+            for conn in sessions:
+                conn.close()
+
+    def test_a_failed_self_managed_file_still_gives_the_lock_back(
+        self, scratch_db, tmp_path, monkeypatch
+    ):
+        """A file with its own BEGIN that fails leaves its block open on the
+        session, and the server refuses an unlock inside an aborted block.
+        The release ends the block first."""
+        sessions = []
+        monkeypatch.setattr(
+            runner_module, "_connect", _connect_keeping_sessions(sessions)
+        )
+        write_migration(
+            tmp_path,
+            1,
+            "BEGIN;\nCREATE TABLE t_open_block (v INT);\nSELECT 1/0;\nCOMMIT;",
+            name="self_managed_fail",
+        )
+        try:
+            with pytest.raises(MigrationRunnerError, match="001"):
+                apply_pending(scratch_db, tmp_path)
+            assert _lock_is_free(scratch_db)
+        finally:
+            for conn in sessions:
+                conn.close()
+
+    def test_a_self_managed_file_left_open_fails_the_run(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """A file with its own BEGIN and no COMMIT applies inside a block that
+        nothing commits, and the release's rollback then discards it. The run
+        must fail and say so, not report the file applied and exit 0."""
+        write_migration(
+            tmp_path, 1, "BEGIN;\nCREATE TABLE t_left_open (v INT);", name="no_commit"
+        )
+        code = main(
+            ["--database-url", scratch_db, "--migrations-dir", str(tmp_path), "apply"]
+        )
+        out, err = capsys.readouterr()
+        assert code == 1, f"the run reported success: {out!r}"
+        assert "a self-managed file left its transaction open" in err
+        assert (
+            "the open transaction was rolled back and the file is not recorded" in err
+        )
+        assert "applied 001" not in out
+        assert not table_exists(scratch_db, "t_left_open")
+        assert fetch_ledger(scratch_db) == [], "the file must not be recorded"
+        assert _lock_is_free(scratch_db)
+
+    def test_a_no_transaction_file_left_open_is_named_for_its_mode(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """A `-- runner:no-transaction` file commits statement by statement, so
+        one that ends inside a BEGIN has committed what came before it: the
+        refusal names the file's own mode, and only the open transaction is
+        rolled back."""
+        write_migration(
+            tmp_path,
+            1,
+            "-- runner:no-transaction\n"
+            "CREATE TABLE t_committed_first (v INT);\n"
+            "BEGIN;\nCREATE TABLE t_left_in_block (v INT);",
+            name="trailing_begin",
+        )
+        code = main(
+            ["--database-url", scratch_db, "--migrations-dir", str(tmp_path), "apply"]
+        )
+        out, err = capsys.readouterr()
+        assert code == 1, f"the run reported success: {out!r}"
+        assert "a no-transaction file left its transaction open" in err
+        assert (
+            "the open transaction was rolled back and the file is not recorded" in err
+        )
+        assert table_exists(scratch_db, "t_committed_first"), (
+            "a statement before the BEGIN commits on its own"
+        )
+        assert not table_exists(scratch_db, "t_left_in_block")
+        assert fetch_ledger(scratch_db) == []
+        assert _lock_is_free(scratch_db)
+
+    def test_a_self_managed_file_left_open_fails_before_the_next_file_runs(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """A wrapped file after an unclosed self-managed one starts its
+        transaction inside the open block, and its COMMIT commits both. So the
+        run must fail at the file that left the block open, naming it, before
+        anything after it runs."""
+        write_migration(
+            tmp_path,
+            1,
+            "BEGIN;\nCREATE TABLE t_left_open_first (v INT);",
+            name="no_commit",
+        )
+        write_migration(
+            tmp_path, 2, "CREATE TABLE t_after_open (v INT);", name="wrapped"
+        )
+        code = main(
+            ["--database-url", scratch_db, "--migrations-dir", str(tmp_path), "apply"]
+        )
+        out, err = capsys.readouterr()
+        assert code == 1, f"the run reported success: {out!r}"
+        assert "migration 001" in err and "left its transaction open" in err
+        assert "applied" not in out
+        assert not table_exists(scratch_db, "t_left_open_first")
+        assert not table_exists(scratch_db, "t_after_open"), "the next file ran"
+        assert fetch_ledger(scratch_db) == []
+        assert _lock_is_free(scratch_db)
+
+    def test_a_verb_that_returns_inside_a_transaction_fails_the_run(self, scratch_db):
+        """The backstop behind the per-file check: a verb that returns with its
+        connection still inside a transaction fails, rather than have the
+        release's rollback discard that transaction unseen."""
+        with pytest.raises(MigrationRunnerError, match="left a transaction open"):
+            with runner_module._locked_connection(scratch_db) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("BEGIN")
+                    cur.execute("CREATE TABLE t_backstop (v INT)")
+        assert not table_exists(scratch_db, "t_backstop")
+        assert _lock_is_free(scratch_db)
+
+    def test_a_run_whose_session_lost_its_lock_says_so(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """The runner's own witness for a pooler its host name does not show:
+        a run whose session no longer holds its lock at the end ran on more
+        than one server session. A file that drops every session lock stands
+        in for that here."""
+        write_migration(tmp_path, 1, "SELECT pg_advisory_unlock_all();")
+        apply_pending(scratch_db, tmp_path)
+        assert "was not held by this session" in capsys.readouterr().err
+
+    def test_a_dead_connection_at_the_end_does_not_hide_the_runs_error(
+        self, scratch_db, tmp_path, capsys
+    ):
+        """The unlock runs in a `finally`. It must never raise there, or its
+        error would replace the run's own."""
+        write_migration(tmp_path, 1, "SELECT pg_terminate_backend(pg_backend_pid());")
+        with pytest.raises(MigrationRunnerError, match="001"):
+            apply_pending(scratch_db, tmp_path)
+        assert "not given back explicitly" in capsys.readouterr().err
+
+
+class TestTheRefusalReadsLibpqsHost:
+    """The runner judges `conn.info.host`, the host libpq connected to, so a
+    connection string in any form libpq accepts is classified the way libpq
+    resolved it. No pooler is reachable from a test, so the predicate is
+    replaced by one that refuses whatever host it is shown, and records it."""
+
+    @pytest.mark.parametrize(
+        "form", ["host_parameter", "key_value", "host_list", "pghost"]
+    )
+    def test_the_host_judged_is_the_one_libpq_connected_to(
+        self, scratch_db, tmp_path, monkeypatch, form
+    ):
+        parts = parse_dsn(scratch_db)
+        host, port = parts["host"], parts.get("port", "5432")
+        rest = {k: v for k, v in parts.items() if k not in ("host", "port")}
+        if form == "host_parameter":  # `host=` in a URL's query
+            dsn = (
+                f"postgresql://{userinfo(rest.get('user'), rest.get('password'))}"
+                f"/{rest['dbname']}?host={host}&port={port}"
+            )
+        elif form == "key_value":
+            dsn = make_dsn(**parts)
+        elif form == "host_list":
+            # The first entry refuses the connection (port 1), so libpq
+            # connects to the second: a runner that judged the first listed
+            # host would be seen judging the decoy.
+            decoy = "localhost" if host == "127.0.0.1" else "127.0.0.1"
+            dsn = make_dsn(**rest, host=f"{decoy},{host}", port=f"1,{port}")
+        else:  # no host in the string: libpq takes PGHOST
+            monkeypatch.setenv("PGHOST", host)
+            dsn = make_dsn(**rest, port=port)
+        seen = []
+
+        def refuse_every_host(shown):
+            seen.append(shown)
+            return True
+
+        monkeypatch.setattr(
+            runner_module, "is_pooled_host", refuse_every_host, raising=False
+        )
+        with pytest.raises(
+            MigrationRunnerError, match="names a pooled database endpoint"
+        ):
+            apply_pending(dsn, tmp_path)
+        assert seen == [host], (
+            f"the runner judged {seen}, not the host libpq connected to"
+        )
+        assert _lock_is_free(scratch_db), "the refusal came after the lock"
+        assert not table_exists(scratch_db, "schema_migrations", schema="runner"), (
+            "a statement ran before the refusal"
+        )
+
+
+class TestAPooledEndpointIsRefused:
+    """A pooled host is refused after libpq connects and before any statement.
+    `_connect` hands back a fake connection that says which host libpq
+    reached."""
+
+    POOLED_HOST = "ep-xxx-pooler.region.aws.neon.tech"
+    DIRECT_HOST = "ep-xxx.region.aws.neon.tech"
+    PASSWORD = "not-a-real-password"
+
+    def _main(self, tmp_path, host):
+        return main(
+            [
+                "--database-url",
+                f"postgresql://owner:{self.PASSWORD}@{host}/db?sslmode=require",
+                "--migrations-dir",
+                str(tmp_path),
+                "apply",
+            ]
+        )
+
+    def test_the_cli_refuses_it_before_any_statement_and_never_prints_the_url(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        fake = _FakeConnection(self.POOLED_HOST)
+        monkeypatch.setattr(runner_module, "_connect", lambda dsn: fake)
+        code = self._main(tmp_path, self.POOLED_HOST)
+        err = capsys.readouterr().err
+        assert code == 1
+        assert "names a pooled database endpoint" in err and "direct host" in err
+        assert self.POOLED_HOST not in err and self.PASSWORD not in err
+        assert fake.closed_by_runner, "the refused connection must be closed"
+
+    def test_control_a_direct_host_goes_on_to_take_the_lock(
+        self, tmp_path, monkeypatch
+    ):
+        class Reached(Exception):
+            pass
+
+        fake = _FakeConnection(self.DIRECT_HOST, on_cursor=Reached())
+        monkeypatch.setattr(runner_module, "_connect", lambda dsn: fake)
+        with pytest.raises(Reached):
+            self._main(tmp_path, self.DIRECT_HOST)
+
+    def test_every_writing_verb_opens_the_one_guarded_door(self):
+        """Only `_locked_connection` takes the lock, only it and the read-only
+        `status` call `_connect`, and only `_connect` calls `psycopg2.connect`.
+        A verb that connected another way would be neither refused a pooled
+        host nor bounded nor unlocked."""
+        import ast
+        import inspect
+
+        def called(node):
+            func = node.func
+            if isinstance(func, ast.Name):
+                return func.id
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                return f"{func.value.id}.{func.attr}"
+            return None
+
+        tree = ast.parse(inspect.getsource(runner_module))
+        callers = {"_acquire_lock": set(), "_connect": set(), "psycopg2.connect": set()}
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and called(node) in callers:
+                    callers[called(node)].add(fn.name)
+        assert callers["_acquire_lock"] == {"_locked_connection"}
+        assert callers["_connect"] == {"_locked_connection", "status"}
+        assert callers["psycopg2.connect"] == {"_connect"}
+
+
+class TestAnUnreadableUrlIsRefused:
+    """libpq refuses a connection string it cannot parse and quotes the part
+    it choked on, which can be the password. The runner names the fix
+    instead, one hint for every such cause. No database: libpq refuses before
+    it connects."""
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql://owner:not-a-real-password-%zz@db.invalid/db",
+            "postgresql://owner:not-a-real-password@db.invalid/db?sslmod=require",
+            "postgresql://owner:not-a-real-password@db.invalid/db?sslmode",
+            "host=db.invalid user=owner password=not-a-real-password bogus=1",
+        ],
+        ids=[
+            "invalid-escape-in-password",
+            "mistyped-query-parameter",
+            "query-parameter-without-equals",
+            "unknown-key-value-option",
+        ],
+    )
+    def test_the_cli_refuses_it_without_printing_the_password(
+        self, tmp_path, capsys, dsn
+    ):
+        code = main(["--database-url", dsn, "--migrations-dir", str(tmp_path), "apply"])
+        out, err = capsys.readouterr()
+        assert code == 1
+        assert "is not one libpq can read" in err
+        assert "check each query parameter" in err, (
+            "the hint names only the password, and this string's fault is elsewhere"
+        )
+        assert "not-a-real-password" not in out + err, "the refusal printed it"
+        # Nor may the refusal carry libpq's error along with it: a logger or
+        # a traceback that walks the chain would print the password.
+        with pytest.raises(MigrationRunnerError) as caught:
+            _connect(dsn)
+        chain = (caught.value.__cause__, caught.value.__context__)
+        assert not any("not-a-real-password" in str(link) for link in chain), (
+            "the refusal chains libpq's error, which quotes the password"
+        )
+
 
 def _column_exists(dsn, table, column):
     return fetch_one(
@@ -520,6 +946,87 @@ def _apply_in_thread(dsn, migrations_dir):
     thread = threading.Thread(target=run)
     thread.start()
     return thread, errors
+
+
+class _SessionOutlivesClose:
+    """A connection whose close() leaves its server session open: the shape a
+    connection pooler gives its client, since the pooler keeps the server
+    session and lends it on. Every other attribute is the real connection's."""
+
+    def __init__(self, conn):
+        object.__setattr__(self, "_conn", conn)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    def close(self):
+        """Keep the session: the pooler's half."""
+
+
+def _connect_keeping_sessions(sessions):
+    """The runner's own `_connect` (imported before any test patches it),
+    with connections that outlive close(); each real one is kept in
+    *sessions* for the test to close."""
+
+    def connect(dsn):
+        conn = _connect(dsn)
+        sessions.append(conn)
+        return _SessionOutlivesClose(conn)
+
+    return connect
+
+
+def _lock_is_free(dsn) -> bool:
+    """Whether another session can take the runner lock now."""
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
+            free = cur.fetchone()[0]
+            if free:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (RUNNER_LOCK_KEY,))
+        return free
+    finally:
+        conn.close()
+
+
+def _holder_sleeps(cur) -> bool:
+    """Whether the session holding the runner lock in *cur*'s database is
+    inside `pg_sleep`: a run that has taken the lock and is applying."""
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks l"
+        " JOIN pg_stat_activity a ON a.pid = l.pid"
+        " WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1"
+        " AND l.database = (SELECT oid FROM pg_database"
+        " WHERE datname = current_database())"
+        " AND ((l.classid::bigint << 32) | l.objid::bigint) = %s"
+        " AND a.wait_event = 'PgSleep')",
+        (RUNNER_LOCK_KEY,),
+    )
+    return cur.fetchone()[0]
+
+
+class _FakeConnection:
+    """What `_locked_connection` sees of a connection libpq opened to *host*:
+    its `info.host`. No statement may reach it before the host is judged, so
+    a cursor raises *on_cursor*, by default a test failure."""
+
+    def __init__(self, host, on_cursor=None):
+        self.info = SimpleNamespace(host=host)
+        self.closed_by_runner = False
+        self._on_cursor = on_cursor or AssertionError(
+            "a statement was sent before the host was refused"
+        )
+
+    def cursor(self):
+        raise self._on_cursor
+
+    def close(self):
+        self.closed_by_runner = True
 
 
 class TestTheLockWaitIsBounded:

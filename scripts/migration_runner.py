@@ -1,9 +1,14 @@
 """Numbered-SQL migration runner — ledger, apply, adopt, repair.
 
 Standalone by design: a Railway predeploy step runs this before the app code
-boots, so it imports nothing from ``src`` (a predeploy step must not depend on
-the application's import closure or its configuration) and depends only on the
-standard library plus psycopg2. The database is addressed by ``DATABASE_URL`` or ``--database-url``.
+boots, so it must not depend on the application's import closure or its
+configuration. It depends on the standard library, psycopg2, and, from
+``src``, one standard-library module alone: ``src.config.db_url``, the
+pooled-host predicate the worker shares (``tests/test_deploy_guardrails.py``
+pins what importing the runner loads). The database is addressed by
+``DATABASE_URL`` or ``--database-url``, through its direct host: every writing
+verb holds a session-scoped advisory lock, and refuses a connection libpq made
+to a pooled host (``_locked_connection``).
 
 The ledger lives in the dedicated `runner` schema, separate from application
 objects in `public`. Schema operations therefore preserve the ledger and the
@@ -46,7 +51,9 @@ use ``wrapped`` unless their SQL requires another mode.
 A wrapped file's lock waits are bounded, and a failure on one is tried again
 (``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``). Self-managed and
 no-transaction files run without the bound: their statements and their
-transactions are their own.
+transactions are their own. The run's own wait for another run's lock is
+bounded too (``RUNNER_LOCK_WAIT``), and polls with no transaction open, so it
+never holds a snapshot the holder's ``CREATE INDEX CONCURRENTLY`` would wait for.
 """
 
 import argparse
@@ -63,12 +70,27 @@ from pathlib import Path
 import psycopg2
 
 from scripts.sql_lexer import CODE, COMMENTS, segments
+from src.config.db_url import is_pooled_host, pooled_endpoint_refusal
 
 
 # One fixed key for every runner invocation against a given database: the
-# whole run holds pg_advisory_lock(RUNNER_LOCK_KEY), so concurrent deploys
-# serialize and the loser finds the versions applied and no-ops.
+# whole run holds it (`_locked_connection`), so concurrent deploys serialize
+# and the loser finds the versions applied and no-ops. The cutover runbook's
+# rollback SQL takes the same key by its number.
 RUNNER_LOCK_KEY = 712_050_2026
+
+#: The longest a run waits, in seconds, for another run's lock before it
+#: fails. Both services' predeploys run on every deploy, and the second waits
+#: out the first, whose apply takes seconds; five minutes is far past that. A
+#: lock still held then is not a run finishing but a session nobody uses (one
+#: a connection pooler kept, or a run that hung), and the deploy fails with
+#: the previous version serving instead of waiting on it for good.
+RUNNER_LOCK_WAIT = 300
+
+#: The pause, in seconds, between two tries for a held runner lock. Each try
+#: is one autocommit statement, so the waiting run holds no transaction and no
+#: snapshot between tries (`_acquire_lock`).
+RUNNER_LOCK_POLL_S = 0.5
 
 #: The corpus, relative to this file — the home for the path the suites import.
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -367,14 +389,181 @@ def split_statements(sql: str) -> list:
 
 
 def _connect(dsn: str):
-    conn = psycopg2.connect(dsn)
+    # libpq quotes the part of the string it could not parse, which can be the
+    # password: the refusal names the fixes, never the value, and is raised
+    # outside the `except` so that libpq's error is not even its context. The
+    # same error covers an unencoded character in the userinfo, a misspelt or
+    # `=`-less query parameter and an unknown key/value option, so the hint
+    # names all of them rather than guess which.
+    unreadable = False
+    try:
+        conn = psycopg2.connect(dsn)
+    except psycopg2.ProgrammingError:
+        unreadable = True
+    if unreadable:
+        raise MigrationRunnerError(
+            "the runner's database URL is not one libpq can read; percent-encode"
+            " @ / ? # % in the user or password, and check each query parameter's"
+            " (or key/value option's) name and its ="
+        )
     conn.autocommit = True
     return conn
 
 
-def _acquire_lock(conn) -> None:
+#: Who holds the runner lock in THIS database (advisory keys are per database,
+#: and a cluster can carry many): its pid, its state, and the seconds since
+#: that state began. A run applying reads `active` or `idle in transaction`
+#: for seconds; a session idle for minutes is one nothing is using. The key is
+#: matched whole: it is above 2**32, so `classid` carries its high half.
+RUNNER_LOCK_HOLDER_SQL = (
+    "SELECT a.pid, a.state,"
+    " round(extract(epoch FROM now() - a.state_change))::int"
+    " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+    " WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1"
+    " AND l.database = (SELECT oid FROM pg_database"
+    " WHERE datname = current_database())"
+    " AND ((l.classid::bigint << 32) | l.objid::bigint) = %s"
+)
+
+
+def _describe_holder(row) -> str:
+    if row is None:
+        return "a session that has just let it go"
+    pid, state, seconds = row
+    since = "" if seconds is None else f" for {seconds}s"
+    return f"pid {pid} ({state or 'state unknown'}{since})"
+
+
+def _lock_holder(conn) -> str:
+    """The runner lock's holder, described. Never raises, so a failed read
+    cannot replace the message it was meant to explain."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(RUNNER_LOCK_HOLDER_SQL, (RUNNER_LOCK_KEY,))
+            return _describe_holder(cur.fetchone())
+    except psycopg2.Error:
+        return "a session the runner could not read"
+
+
+def _try_lock(conn) -> bool:
+    """One try for the runner lock, in autocommit: it never waits."""
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
+        return bool(cur.fetchone()[0])
+
+
+def _acquire_lock(conn) -> None:
+    """Take the runner lock, waiting at most `RUNNER_LOCK_WAIT` seconds for
+    another run's. A free lock costs one statement. A held one is named before
+    the wait, so a deploy's log says what it waits on, and again when the wait
+    runs out, so the error names the holder as it stands then.
+
+    The wait polls, one `_try_lock` every `RUNNER_LOCK_POLL_S`, so between
+    tries this connection holds no statement, transaction or snapshot. A
+    blocking `pg_advisory_lock` would hold its statement's snapshot for the
+    whole wait, and the holder's `CREATE INDEX CONCURRENTLY` waits for every
+    older snapshot: each would wait on the other until the server ended one of
+    them as a deadlock, the build leaving an INVALID index.
+    """
+    wait = RUNNER_LOCK_WAIT  # read here, not bound as a default: tests patch it
+    if _try_lock(conn):
+        return
+    print(
+        f"the runner lock is held by {_lock_holder(conn)}; waiting up to {wait:g}s",
+        file=sys.stderr,
+    )
+    deadline = time.monotonic() + wait
+    while True:
+        time.sleep(max(0.0, min(RUNNER_LOCK_POLL_S, deadline - time.monotonic())))
+        if _try_lock(conn):
+            return
+        if time.monotonic() >= deadline:
+            raise MigrationRunnerError(
+                f"the runner lock was still held after {wait:g}s, by"
+                f" {_lock_holder(conn)}; nothing was applied. Another run may"
+                " still be applying: redeploy once it ends. If nothing is"
+                " running, the lock is stranded on a session nobody uses, which"
+                " a connection pooler between a runner and the database leaves"
+                " behind: the runner needs the database's direct host."
+            )
+
+
+def _release_lock(conn) -> None:
+    """Give the runner lock back before the connection closes.
+
+    Closing ends the session and frees the lock, on a direct connection. The
+    explicit unlock is for a session that outlives its connection, which is
+    what a connection pooler keeps. An unlock that finds nothing held is
+    reported, because a run whose session no longer holds its lock ran its
+    statements on more than one server session. Never raises: it runs in a
+    `finally`, where an error would replace the run's own.
+    """
+    try:
+        with conn.cursor() as cur:
+            status = conn.info.transaction_status
+            if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                # A self-managed file can leave its own block open, failed or
+                # with no COMMIT, and the server refuses the unlock inside an
+                # aborted one.
+                cur.execute("ROLLBACK")
+            cur.execute("SELECT pg_advisory_unlock(%s)", (RUNNER_LOCK_KEY,))
+            released = cur.fetchone()[0]
+    except psycopg2.Error as exc:
+        print(
+            "the runner lock was not given back explicitly"
+            f" ({type(exc).__name__}); closing the connection frees it",
+            file=sys.stderr,
+        )
+        return
+    if not released:
+        print(
+            "the runner lock was not held by this session when the run ended:"
+            " its statements reached more than one server session, as through a"
+            " connection pooler, and the lock may outlive the run. The runner"
+            " needs the database's direct host.",
+            file=sys.stderr,
+        )
+
+
+@contextmanager
+def _locked_connection(dsn: str):
+    """The connection a writing verb runs on, holding the runner lock. It is
+    the one door to that lock, so every writer is refused a pooled host, waits
+    a bounded time and gives the lock back the same way.
+
+    The host judged is the one libpq connected to (`conn.info.host`). libpq
+    has already resolved a URL, a key/value string, a `host` parameter, a host
+    list, PGHOST or a service file, so no reading here can differ from its own.
+    The refusal comes before any statement: through a transaction pooler the
+    session lock this would take stays on a pooled server session after the
+    run, and the next deploy's runner waits on it.
+    """
+    conn = _connect(dsn)
+    try:
+        if is_pooled_host(conn.info.host):
+            raise MigrationRunnerError(
+                pooled_endpoint_refusal(
+                    "the runner's database (DATABASE_URL, --database-url or PGHOST)"
+                )
+            )
+        _acquire_lock(conn)
+        try:
+            yield conn
+            # The backstop behind `_apply_one`'s per-file check: the verb
+            # returned, so nothing failed, yet the connection is still inside
+            # a transaction, which the release's rollback would discard
+            # unseen. No verb reaches this today; on a failure that rollback
+            # is the cleanup.
+            status = conn.info.transaction_status
+            if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                raise MigrationRunnerError(
+                    "the run left a transaction open when it ended; nothing in"
+                    " it was committed"
+                )
+        finally:
+            _release_lock(conn)
+    finally:
+        conn.close()
 
 
 #: The API reads the ledger for `storydump posture`. The runner creates the
@@ -548,13 +737,28 @@ def _apply_one(conn, migration, *, confirm_archive_backup: bool = False) -> None
     else:
         # Statement-by-statement in autocommit: a multi-statement simple
         # query runs as one implicit transaction block, which both CREATE
-        # INDEX CONCURRENTLY and a file's own BEGIN/COMMIT refuse. The
-        # rollback clears a self-managed file's dangling aborted block on
-        # failure; atomicity here is the file's own responsibility.
+        # INDEX CONCURRENTLY and a file's own BEGIN/COMMIT refuse. Atomicity
+        # here is the file's own responsibility. The rollback below sends
+        # nothing under autocommit, so a self-managed file that fails inside
+        # its own BEGIN leaves that block open on the session; `_release_lock`
+        # ends it before it unlocks.
         try:
             with conn.cursor() as cur:
                 for statement in migration.statements:
                     cur.execute(statement)
+                # A BEGIN with no COMMIT leaves the block open, and the next
+                # file would run inside it: a wrapped one's COMMIT would commit
+                # both. So the file that left it open fails here, before its
+                # ledger row and before anything after it runs. What it
+                # committed before that BEGIN stays committed: only the open
+                # transaction is rolled back (`_release_lock`).
+                status = conn.info.transaction_status
+                if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                    raise MigrationRunnerError(
+                        f"migration {migration.label}: a {migration.execution_mode}"
+                        " file left its transaction open; the open transaction was"
+                        " rolled back and the file is not recorded"
+                    )
                 _run_postconditions(cur, migration)
                 _record(cur, migration, _elapsed_ms(started), "applied")
         except Exception:
@@ -609,9 +813,7 @@ def apply_pending(
     corpus = discover_migrations(migrations_dir)
     migrations = _within(corpus, max_version)
     report = ApplyReport()
-    conn = _connect(dsn)
-    try:
-        _acquire_lock(conn)
+    with _locked_connection(dsn) as conn:
         _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
@@ -639,8 +841,6 @@ def apply_pending(
         for migration in pending:
             _apply_guarded(conn, migration)
             report.applied.append(migration)
-    finally:
-        conn.close()
     return report
 
 
@@ -682,9 +882,7 @@ def apply_manual(
     if confirm_archive_backup and migration.execution_mode != "wrapped":
         raise MigrationRunnerError("archive backup confirmation requires wrapped 002")
     report = ApplyReport()
-    conn = _connect(dsn)
-    try:
-        _acquire_lock(conn)
+    with _locked_connection(dsn) as conn:
         _refuse_retired_history(conn, migrations)
         _ensure_ledger(conn)
         ledger = _ledger_rows(conn)
@@ -706,8 +904,6 @@ def apply_manual(
             )
         _apply_guarded(conn, migration, confirm_archive_backup=confirm_archive_backup)
         report.applied.append(migration)
-    finally:
-        conn.close()
     return report
 
 
@@ -879,9 +1075,7 @@ def adopt(
     corpus = discover_migrations(migrations_dir)
     migrations = _within(corpus, max_version)
     required_through, entries = _load_manifest(manifest_path, migrations, corpus)
-    conn = _connect(dsn)
-    try:
-        _acquire_lock(conn)
+    with _locked_connection(dsn) as conn:
         _refuse_retired_history(conn, corpus)
         _ensure_ledger(conn)
         report, to_record = _adoption_plan(conn, migrations, required_through, entries)
@@ -889,8 +1083,6 @@ def adopt(
         with _transaction(conn) as cur:
             for migration in to_record:
                 _record(cur, migration, None, "adopted")
-    finally:
-        conn.close()
     return report
 
 
@@ -914,9 +1106,7 @@ def convert_ledger(
     required_through, entries = _load_manifest(manifest_path, migrations, migrations)
     checksums = {migration.checksum for migration in migrations}
     filenames = {migration.path.name for migration in migrations}
-    conn = _connect(dsn)
-    try:
-        _acquire_lock(conn)
+    with _locked_connection(dsn) as conn:
         with _transaction(conn) as cur:
             # A writer may commit while the table lock waits. Read its rows
             # after that wait even when the DSN defaults to repeatable read.
@@ -988,8 +1178,6 @@ def convert_ledger(
             )
             for migration in to_record:
                 _record(cur, migration, None, "adopted")
-    finally:
-        conn.close()
     return report
 
 
@@ -1006,9 +1194,7 @@ def repair(dsn: str, migrations_dir, version: int, reason: str) -> None:
         raise MigrationRunnerError(
             f"repair: no migration file for version {version:03d}"
         )
-    conn = _connect(dsn)
-    try:
-        _acquire_lock(conn)
+    with _locked_connection(dsn) as conn:
         _refuse_retired_history(conn, list(migrations.values()))
         _ensure_ledger(conn)
         with conn.cursor() as cur:
@@ -1023,8 +1209,6 @@ def repair(dsn: str, migrations_dir, version: int, reason: str) -> None:
                     f"repair: ledger has no row for version {version:03d}"
                 )
         print(f"repaired {migration.label}: {reason.strip()}")
-    finally:
-        conn.close()
 
 
 @dataclass
