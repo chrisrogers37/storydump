@@ -91,15 +91,19 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   that embeds a token is redacted before it reaches an exception or a log line
   (`TelegramTransport.redact`); a provider's error body is summarised by status,
   not quoted.
-- uvicorn's access line and the app's own refusal lines print no query string
-  and no invitation token. `src/utils/logger.py` puts `AccessLogRedactor` on
-  `uvicorn.access` and on the trace-level `uvicorn.asgi`, which print
-  `?<redacted>` and mask a credential path segment (`CREDENTIAL_PATH_PREFIXES`).
-  An application line names a request by `loggable_path(request.scope)`: its
-  route template, with only `LOGGABLE_PATH_PARAMS` values filled in. Never name
-  it by `request.url`, `scope["path"]` or the query.
-  `tests/src/api/test_log_redaction.py` fails on a log line or an exception
-  message that does. A new secret travels in a header or the body; a route that
+- uvicorn's access line and the app's own refusal lines print no query string,
+  and mask the segment after a `CREDENTIAL_PATH_PREFIXES` prefix wherever a
+  path they print carries one. `src/utils/logger.py` puts `AccessLogRedactor`
+  on `uvicorn.access` and on the trace-level `uvicorn.asgi`, which print
+  `?<redacted>` and that masked path (the trace line no raw path either). An
+  application line names a request by `loggable_path(request.scope)`: its route
+  template, with only `LOGGABLE_PATH_PARAMS` values filled in, or before
+  routing its masked path. Never name it by `request.url`, `scope["path"]`, the
+  scope itself or the query. `tests/src/api/test_log_redaction.py` reads `src/`
+  as written and fails on a logging call or an exception message whose
+  arguments name a `.url`, a raw target key of a scope, a whole scope or a
+  credential parameter by its own name; a value first bound to a variable is
+  not followed. A new secret travels in a header or the body; a route that
   must carry one in its path joins `CREDENTIAL_PATH_PREFIXES`. Even redacted,
   do not run the API at `--log-level trace` (or `UVICORN_LOG_LEVEL=trace`) on
   real traffic: it logs every ASGI message of every request.

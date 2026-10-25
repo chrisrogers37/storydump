@@ -7,8 +7,8 @@ calls a provider:
 - it pins the HTTP libraries' loggers at WARNING (`LIBRARY_LOG_LEVELS`): httpx
   prints every outbound URL at INFO, and a provider URL carries a secret;
 - it puts `AccessLogRedactor` on uvicorn's access logger and on its trace-level
-  ASGI logger (`REDACTED_LOGGERS`), so neither prints a query string or a
-  credential from a path.
+  ASGI logger (`REDACTED_LOGGERS`), so neither prints a query string, nor the
+  segment after a `CREDENTIAL_PATH_PREFIXES` prefix in a path.
 
 Both composition roots import it: the API through `src/api/app.py`, the worker
 through the services it imports (`src/services/target/unit_of_work.py`).
@@ -193,9 +193,10 @@ def redact_path(path: str) -> str:
     across empty and ``.`` segments: so a root path in front
     (``/x/api/v1/...``), a doubled slash (``//api/v1/...``) and an
     absolute-form target (``http%3A//host/api/v1/...``) are masked too. The
-    first non-empty segment after a prefix is the one masked; nothing else
-    changes, so redacting twice changes nothing. A path with no prefix in it is
-    returned unchanged (``/api/v1/me/invitations/<id>/resend``).
+    first segment after a prefix that is neither empty nor ``.`` is the one
+    masked; nothing else changes, so redacting twice changes nothing. A path
+    with no prefix in it is returned unchanged
+    (``/api/v1/me/invitations/<id>/resend``).
     """
     lowered = path.lower()
     if not any(segments[-1] in lowered for segments in _CREDENTIAL_SEGMENTS):
@@ -275,7 +276,7 @@ def _redact_argument(arg: Any) -> Any:
 
 
 class AccessLogRedactor(logging.Filter):
-    """uvicorn's request lines, with no query string and no credential in them.
+    """uvicorn's request lines, with no query string and their paths masked.
 
     On ``uvicorn.access`` uvicorn logs each response as
     ``'%s - "%s %s HTTP/%s" %d'`` over ``(client_addr, method, full_path,

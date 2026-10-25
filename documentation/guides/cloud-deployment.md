@@ -417,11 +417,16 @@ at `WORKER_LOG_LEVEL` (`src/worker.py`).
 
 The API's access log is uvicorn's: one line per request with the client
 address, the method, the path and the status. It prints no query string
-(`?<redacted>`) and masks the invitation token
-(`/api/v1/invitations/<redacted>/accept`), and so does uvicorn's trace-level
-request log. The API's own refusal lines name a request by its route template
-(`src/utils/logger.py`). So an OAuth callback's code and state, and the
-invitation token, reach neither the access line nor a refusal line.
+(`?<redacted>`). Wherever the path carries `/api/v1/invitations/`, or a
+misdirected `/join/`, it prints the segment after it as `<redacted>`
+(`/api/v1/invitations/<redacted>/accept`): under a root path, after a doubled
+slash, in an absolute-form target and in any letter case too. uvicorn's
+trace-level request log prints the same masked path, and no raw path or query
+string. The API's own refusal lines name a request by its route template, or
+before routing by that masked path (`src/utils/logger.py`). So an OAuth
+callback's code and state reach neither the access line nor a refusal line,
+and an invitation token reaches them only in a path that does not carry one
+of those prefixes before it.
 
 One deliberate exception: a deployment without the `PAST_POSTS_HMAC_KEYS` ring
 logs each Meta data-deletion request's receipt code
@@ -429,9 +434,9 @@ logs each Meta data-deletion request's receipt code
 request, and the code's status page says only `received`. A deployment with
 the ring never logs it.
 
-httpx and httpcore log at WARNING in both processes, so no outbound provider
-URL is printed. Railway's HTTP logs, and Vercel's for the site, are the
-platforms' own and are not configured here. The invitation link's path may
+httpx and httpcore log at WARNING in both processes, so neither library prints
+an outbound provider URL. Railway's HTTP logs, and Vercel's for the site, are
+the platforms' own and are not configured here. The invitation link's path may
 reach them.
 
 ```bash
