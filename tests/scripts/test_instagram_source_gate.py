@@ -51,7 +51,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
-import json
 import sys
 import time
 import uuid
@@ -826,14 +825,17 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             }
         ]
 
-        # The card is the rendered approval: the picture, the account, the taps.
+        # The card is the rendered approval: the picture and the account, then
+        # the edit that gives that message its taps.
         await g.deliver()
         (photo,) = g.telegram.sent("sendPhoto")
         assert fakes.jpeg() in photo.body
         assert fakes.multipart_field(photo, "caption").startswith(
             "\U0001f4f8 @example_handle_a"
         )
-        markup = json.loads(fakes.multipart_field(photo, "reply_markup"))
+        assert fakes.multipart_field(photo, "reply_markup") is None
+        (armed,) = g.telegram.sent("editMessageReplyMarkup")
+        markup = armed.json["reply_markup"]
         assert [
             b["callback_data"]
             for row in markup["inline_keyboard"]

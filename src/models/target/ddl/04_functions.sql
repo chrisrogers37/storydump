@@ -582,6 +582,9 @@ $$;
 
 -- The outbox sender sweep: one deliver_outbox job per pushable Telegram
 -- binding with pending (or aged ambiguous) outbox rows and no live sender job,
+-- an ambiguous row aged p_age times its attempts (outbox.resolve_aged_ambiguous
+-- resolves it on the same schedule, so a row still waiting mints no sender;
+-- the plain p_age bound keeps ix_outbox_ambiguous_age's range),
 -- every workspace's, minted in the one statement whose NOT EXISTS is its
 -- idempotence. The key prefix, the lane budget and the bound are its
 -- parameters, spelled once in Python; the binding predicate is
@@ -603,7 +606,9 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_
                      WHERE o.binding_id = b.id AND o.state = 'pending')
             OR EXISTS (SELECT 1 FROM channel_outbox o
                         WHERE o.binding_id = b.id AND o.state = 'ambiguous'
-                          AND o.updated_at <= now() - make_interval(secs => p_age)))
+                          AND o.updated_at <= now() - make_interval(secs => p_age)
+                          AND o.updated_at <= now() - make_interval(
+                                secs => p_age * GREATEST(o.attempts, 1))))
        AND NOT EXISTS (SELECT 1 FROM jobs j
                         WHERE j.serialization_key = p_prefix || b.id
                           AND j.state IN ('ready', 'leased'))

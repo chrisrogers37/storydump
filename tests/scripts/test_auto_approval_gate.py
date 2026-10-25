@@ -692,6 +692,13 @@ def _yolo_approved(world, name):
     return w, story
 
 
+def _send_card_and_arm(world, w):
+    """Two ticks: the card, which leaves with no keyboard, then the edit that
+    gives it its story's."""
+    _send(world, w)
+    _send(world, w)
+
+
 class TestTheCardOfAStoryARuleApproved:
     def test_a_story_that_posts_before_its_card_is_claimed_sends_one_settled_card(
         self, world
@@ -707,12 +714,17 @@ class TestTheCardOfAStoryARuleApproved:
         assert line not in card["caption"] and line not in card["text"], (
             "the card's own text stays its header; the line rides outcome_text"
         )
-        assert card["reply_markup"] == prompts.card_keyboard(
-            story["intent"], state="posted", api_publishing_enabled=True
-        ), "a settled card offers Configure alone"
+        assert "reply_markup" not in card, "a card leaves bare; an edit arms it"
         ((state, stored_ref, _),) = _cards(world, story)
         assert (state, stored_ref) == ("superseded", ref)
-        assert _cards(world, story, "prompt_supersede") == [], "no redundant edit"
+        ((_, _, arm),) = _cards(world, story, "prompt_supersede")
+        assert arm["supersedes_ref"] == ref
+        assert "outcome_text" not in arm, "its line is already on the card"
+        armed, _, _ = _send(world, w)
+        (edit,) = armed
+        assert edit["payload"]["reply_markup"] == prompts.card_keyboard(
+            story["intent"], state="posted", api_publishing_enabled=True
+        ), "a settled card offers Configure alone"
         again, _, nothing = _send(world, w)
         assert (again, nothing) == ([], None), "the card goes out once"
 
@@ -809,7 +821,8 @@ class TestTheCardOfAStoryARuleApproved:
             tenant=w["ws"],
         )
         assert queued == 1
-        ((_, _, edit),) = _cards(world, story, "prompt_supersede")
+        (_, _, arm), (_, _, edit) = _cards(world, story, "prompt_supersede")
+        assert "outcome_text" not in arm, "the edit that arms the card"
         assert edit["supersedes_ref"] == ref
         assert edit["header"] == card["caption"], edit["header"]
         assert "Posted by YOLO" not in edit["header"], "the line is not stacked"
@@ -831,12 +844,12 @@ class TestTheSenderRendersEveryKeyboard:
             tenant=w["ws"],
         )
         assert queued == 1
-        ((_, _, edit),) = _cards(world, story, "prompt_supersede")
+        (*_, (_, _, edit)) = _cards(world, story, "prompt_supersede")
         assert "reply_markup" not in edit, "the caller stores no keyboard"
 
     def test_a_parked_storys_edit_goes_out_with_its_review_buttons(self, world):
         w, story = _yolo_approved(world, "kb-parked")
-        _send(world, w)
+        _send_card_and_arm(world, w)
         _park(world, story)
         self._restated(world, w, story, "👀 Needs review")
         sent, _, _ = _send(world, w)
@@ -848,7 +861,7 @@ class TestTheSenderRendersEveryKeyboard:
 
     def test_a_posted_storys_edit_goes_out_with_configure_alone(self, world):
         w, story = _yolo_approved(world, "kb-posted")
-        _send(world, w)
+        _send_card_and_arm(world, w)
         _post(world, story)
         self._restated(world, w, story, "✅ Posted by YOLO · later")
         sent, _, _ = _send(world, w)
@@ -870,6 +883,8 @@ class TestTheSenderRendersEveryKeyboard:
         _serve(world)
         sent, _, _ = _send(world, w)
         assert [row["kind"] for row in sent] == ["approval_prompt"]
+        armed, _, _ = _send(world, w)
+        assert [row["kind"] for row in armed] == ["prompt_supersede"]
         cancel = Command(
             kind="cancel",
             workspace_id=w["ws"],
@@ -898,7 +913,7 @@ class TestTheSenderRendersEveryKeyboard:
 
     def test_a_removed_items_edit_goes_out_with_no_keyboard(self, world):
         w, story = _yolo_approved(world, "kb-removed")
-        _send(world, w)
+        _send_card_and_arm(world, w)
         with _owner_cursor(world) as cur:
             cur.execute("SET LOCAL app.actor_kind = 'migration'")
             cur.execute(

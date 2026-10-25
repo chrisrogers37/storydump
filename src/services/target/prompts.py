@@ -227,13 +227,13 @@ def _card_for(row, *, intent_id: str, note: Optional[str] = None) -> dict:
 def _settled_card(row, *, intent_id: str, line: str) -> dict:
     """The card of a story a rule approved, sent settled: the card as
     rendered, and its line in ``outcome_text`` — the outbox's own record of
-    the line a card carries. It leaves with the keyboard the sender gives
-    every approval card: for a settled story, ⚙️ Configure alone,
-    or none once its item is removed. The transport sends the line under the
-    card's text; a later edit replaces it rather than stacking under it,
-    since the card's text stays its header; the sender records the card
-    `superseded`; and its after-send edit heals it only when the line it would
-    write is not the one the card already carries."""
+    the line a card carries. Its keyboard arrives as every approval card's
+    does, by the edit that follows its send: for a settled story, ⚙️
+    Configure alone, or none once its item is removed. The transport sends
+    the line under the card's text; a later edit replaces it rather than
+    stacking under it, since the card's text stays its header; the sender
+    records the card `superseded`; and its after-send edit carries a line
+    only when it is not the one the card already carries."""
     card = _card_for(row, intent_id=intent_id)
     card["outcome_text"] = line
     return card
@@ -256,8 +256,8 @@ _CARD_FACTS = (
 async def card_facts(session, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """A card's story as it is now (`_CARD_FACTS`), or None when this session
     cannot see it: the one read behind a card's keyboard — the sender's at
-    every send and edit of an approval card, and Configure's at
-    every tap."""
+    every edit of an approval card (a card itself leaves with none), and
+    Configure's at every tap."""
     return await readers.row(
         session, _CARD_FACTS, ws=str(workspace_id), id=str(intent_id)
     )
@@ -267,8 +267,8 @@ async def card_keyboard_for(
     session, *, workspace_id: str, intent_id: str
 ) -> Optional[dict]:
     """A card's keyboard for its story as it is now: the sender's, at every
-    send and every edit of an approval card. None when the story
-    is gone, or carries no keyboard."""
+    edit of an approval card. None when the story is gone, or carries no
+    keyboard."""
     facts = await card_facts(session, workspace_id=workspace_id, intent_id=intent_id)
     return None if facts is None else keyboard_of(intent_id, facts)
 

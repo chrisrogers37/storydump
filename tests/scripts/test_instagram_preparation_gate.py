@@ -913,8 +913,12 @@ async def test_posted_rule_past_posts_card_sends_text_outcome_without_selected_f
     assert result["state"] == "sent" and poller.sent == 1 and poller.deferred == 0
     assert len(sent) == 1 and sent[0][0].endswith("/sendMessage")
     assert card["outcome_text"] in sent[0][1]["text"]
-    # The settled card goes out with Configure alone.
-    assert sent[0][1]["reply_markup"] == {
+    # The settled card leaves bare; the edit that follows brings Configure alone.
+    assert "reply_markup" not in sent[0][1]
+    edit = await poller.tick()
+    assert edit["state"] == "sent" and edit["kind"] == "prompt_supersede"
+    assert len(sent) == 2 and sent[1][0].endswith("/editMessageReplyMarkup")
+    assert sent[1][1]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "⚙️ Configure", "callback_data": f"v1:cfg:{intent}"}]
         ]

@@ -260,6 +260,21 @@ def _card_states(world, intent_id):
     )
 
 
+def _edit_states(world, intent_id, ref):
+    """The states of the edits queued for the message *ref*, oldest first."""
+    return [
+        state
+        for (state,) in _write(
+            world,
+            "SELECT state FROM channel_outbox WHERE intent_id = %s"
+            " AND kind = 'prompt_supersede' AND payload->>'supersedes_ref' = %s"
+            " ORDER BY created_at",
+            (intent_id, ref),
+            fetch=True,
+        )
+    ]
+
+
 class TestATapFlipsOnceAndEditsEveryCard:
     def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
         """`post_intents.origin` lets only a person approve a planned story. A tap is a person:
@@ -575,6 +590,114 @@ class TestARepeatOrLateTapAnswers:
         assert set(_card_states(world, i["id"])) == set(i["cards"].values())
         assert len(_supersedes(world, i["id"])) == 2, (
             "one edit per known card, nothing more"
+        )
+
+    def test_a_tap_on_a_stale_card_posts_nothing_and_repaints_it(self, world):
+        """A card whose only edit failed still shows what the chat last held.
+        A tap on it answers with the story's settled state and writes nothing
+        to the story, and it is the moment the card is repainted: one edit is
+        queued for that message, with the story's line. A second tap finds
+        that edit pending and queues none."""
+        i = _intent(world, "stale-1", state="skipped")
+        ref = i["cards"]["a"]
+        _write(
+            world,
+            "UPDATE channel_outbox SET state = 'superseded'"
+            " WHERE intent_id = %s AND external_message_ref = %s",
+            (i["id"], ref),
+        )
+        _write(
+            world,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state)"
+            " VALUES (%s, %s, 'prompt_supersede', %s, %s, 'failed')",
+            (
+                world["ws"],
+                world["bindings"]["a"],
+                i["id"],
+                json.dumps(
+                    {
+                        "v": 1,
+                        "supersedes_ref": ref,
+                        "outcome_text": "⏭️ Skipped",
+                        "header": "📸 f.jpg (stale-1)",
+                        "sent_as": "text",
+                    }
+                ),
+            ),
+        )
+        assert _edit_states(world, i["id"], ref) == ["failed"], "its only edit failed"
+
+        r = tap(world, "post", i["id"], message_id=int(ref))
+        assert r.outcome == "answered" and "Skipped" in r.answer_text
+        assert _state(world, i["id"]) == "skipped"
+        assert _one(
+            world,
+            "SELECT count(*) FROM jobs WHERE kind = 'publish_pipeline'"
+            " AND payload->>'intent_id' = %s",
+            (i["id"],),
+        ) == (0,), "a Post now tap on a skipped story posts nothing"
+        assert _edit_states(world, i["id"], ref) == ["failed", "pending"]
+        for_ref = [
+            p for _, p in _supersedes(world, i["id"]) if p["supersedes_ref"] == ref
+        ]
+        repaint = for_ref[-1]  # the newest: the failed edit above is older
+        assert repaint["outcome_text"].startswith("⏭️ Skipped")
+        assert repaint["header"].startswith("📸 f.jpg")
+        assert repaint["sent_as"] == "text", "the message is edited as it was sent"
+
+        again = tap(world, "post", i["id"], message_id=int(ref))
+        assert again.outcome == "answered"
+        assert _edit_states(world, i["id"], ref) == ["failed", "pending"], (
+            "the first repaint is still pending: nothing more is queued"
+        )
+
+    @pytest.mark.parametrize(
+        "kind, owned, fresh",
+        [
+            ("notification", 5151, 5152),
+            ("invitation", 5251, 5252),
+            # An invitation's sent edit: a kind a story's rows have, with no story.
+            ("prompt_supersede", 5351, 5352),
+        ],
+    )
+    def test_a_message_only_an_intentless_row_owns_is_never_adopted(
+        self, world, kind, owned, fresh
+    ):
+        """Telegram does not bind a callback's story token to its message id,
+        so a message that only rows of no story own on the binding (a notice,
+        an invitation, an invitation's edit) is never adopted as a card, nor
+        edited. A twin's evidence is on the card (two sends), so the owner is
+        what refuses, and the same story still adopts a message nobody owns."""
+        i = _intent(world, f"intentless-{kind}", state="posted")
+        _lost_answer(world, i["id"])
+        payload = (
+            {"v": 1, "supersedes_ref": str(owned)}
+            if kind == "prompt_supersede"
+            else {"v": 1, "text": "notice"}
+        )
+        _write(
+            world,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload,"
+            " state, external_message_ref) VALUES (%s, %s, %s, %s, 'sent', %s)",
+            (
+                world["ws"],
+                world["bindings"]["a"],
+                kind,
+                json.dumps(payload),
+                str(owned),
+            ),
+        )
+        r = tap(world, "skip", i["id"], message_id=owned)
+        assert r.outcome == "answered"
+        assert str(owned) not in _card_states(world, i["id"]), "not adopted as a card"
+        assert _edit_states(world, i["id"], str(owned)) == [], "and not edited"
+        assert len(_supersedes(world, i["id"])) == 2, "the two known cards only"
+
+        again = tap(world, "skip", i["id"], message_id=fresh)
+        assert again.outcome == "answered"
+        assert _card_states(world, i["id"])[str(fresh)] == "superseded", (
+            "positive control: a message nobody owns is adopted"
         )
 
     def test_an_approval_tap_on_a_review_card_answers_the_review_has_its_own_buttons(
