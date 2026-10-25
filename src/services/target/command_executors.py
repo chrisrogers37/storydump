@@ -251,8 +251,8 @@ async def _settle(
         # transit state (`approved`, `publishing`, `review_required`) is not
         # superseded here: the flip's own supersede rows edited every copy,
         # and a repeat tap answers without writing (one write per tap is the
-        # throughput rule). A copy whose supersede row failed
-        # past the resend cap keeps its buttons until touched: the sweep and
+        # throughput rule). The card the tap came from is edited again when
+        # its newest edit did not land (`outbox.adopt_card`): the sweep and
         # `supersede_everywhere` address live rows only, and the pipeline's
         # restate-by-ref reaches a superseded card at posted, failed or
         # review.
@@ -283,16 +283,16 @@ async def _adopt_touched(
     command: Command,
     line: str,
 ) -> bool:
-    """Restate-by-ref on touch. The message a tap came from may be
-    one the ledger never learned — a resend's twin, left with live buttons
-    through Approved and Posted because no edit could name it. The tap is
-    the moment its id is known: adopt it as a card of the story and edit it
-    with *line* — the same line every known card carries, and the story's
-    keyboard as the sender claims the edit — so every later line reaches it
-    too. Every tap that writes a line calls this: the deciding tap, a
-    resolution, a repeat on a settled story (the deciding tap is as
-    likely to come from the twin). A web command carries no card and adopts
-    nothing."""
+    """Restate-by-ref on touch. The message a tap came from may be one the
+    ledger never learned (a copy with buttons whose send lost its answer),
+    or a known card of the story whose newest edit did not land. The tap is
+    the moment its id is known: adopt it as a card of the story, or queue
+    its edit again, with *line* — the same line every known card carries,
+    and the story's keyboard as the sender claims the edit — so every later
+    line reaches it too. Every tap that writes a line calls this: the
+    deciding tap, a resolution, a repeat on a settled story (the deciding
+    tap is as likely to come from such a copy). A web command carries no
+    card and adopts nothing."""
     if not (command.card_ref and command.binding_id):
         return False
     return await outbox.adopt_card(

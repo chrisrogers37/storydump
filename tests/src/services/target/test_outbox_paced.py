@@ -252,8 +252,8 @@ class TestThePromptResendIsCapped:
     answer is resent, but not forever — past MAX_PROMPT_RESENDS it fails."""
 
     class _Session:
-        def __init__(self, kind, attempts, newer_edit=False):
-            self.row = (kind, attempts, newer_edit)
+        def __init__(self, kind, attempts, newer_edit=False, fresh=True):
+            self.row = (kind, attempts, newer_edit, fresh)
             self.updates = []
 
         async def execute(self, stmt, params=None):
@@ -280,15 +280,31 @@ class TestThePromptResendIsCapped:
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
         assert s.updates == ["failed"]
 
-    async def test_a_lost_card_edit_is_resent_under_the_same_cap(self):
-        """A `prompt_supersede`, the card's outcome edit, is resent under the
-        prompt cap (`outbox.RESEND_KINDS` says why): the notification's single
-        retry would leave a card live with buttons after one bad Telegram
-        minute."""
-        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS)
-        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
-        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS + 1)
+    async def test_a_lost_card_edit_is_resent_until_confirmed(self):
+        """A `prompt_supersede`, the card's edit, is idempotent, so a lost
+        answer never fails it: it goes back to `pending` however many attempts
+        it has spent (`outbox.RESEND_KINDS` says why), where a card past
+        `MAX_PROMPT_RESENDS` fails. The notification's single retry would
+        leave a card without its buttons after one bad Telegram minute."""
+        for attempts in (
+            outbox.MAX_PROMPT_RESENDS,
+            outbox.MAX_PROMPT_RESENDS + 1,
+            10 * outbox.MAX_PROMPT_RESENDS,
+        ):
+            s = self._Session("prompt_supersede", attempts)
+            assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
+            assert s.updates == ["pending"], attempts
+
+    async def test_a_lost_card_edit_past_its_horizon_fails(self):
+        """An edit is resent until Telegram confirms it, but not past
+        `EDIT_RESEND_HORIZON_SECONDS` from its creation: one that never
+        answers fails, so it holds nothing open."""
+        s = self._Session("prompt_supersede", 2, fresh=False)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+        assert s.updates == ["failed"]
+        (sql, params), *_ = s.sql
+        assert "make_interval(secs => :horizon) AS fresh" in sql
+        assert params["horizon"] == outbox.EDIT_RESEND_HORIZON_SECONDS
 
     async def test_a_lost_edit_with_a_newer_edit_of_the_same_message_is_superseded(
         self,
@@ -418,3 +434,24 @@ def source_prefix_seam(monkeypatch):
     from unittest.mock import AsyncMock
 
     monkeypatch.setattr(outbox, "_lock_binding_sources", AsyncMock())
+
+
+class TestTheBackoffIsOneSchedule:
+    """A lost answer waits `AMBIGUOUS_RESOLVE_AFTER_SECONDS` times its row's
+    attempts, in two places that cannot share code: the sender's own
+    resolution (`resolve_aged_ambiguous`) and the sender sweep's door
+    (`fn_sender_sweep`), which mints a sender only for a row that is due. One
+    schedule, or the sweep mints idle senders every pass, or none for a due
+    row; the plain bound keeps `ix_outbox_ambiguous_age`'s range."""
+
+    def test_the_sweep_door_and_the_sender_read_one_schedule(self):
+        import inspect
+
+        from tests.src.services.target.schema_code import function_body
+
+        body = function_body("fn_sender_sweep")
+        assert "o.updated_at <= now() - make_interval(secs => p_age)" in body
+        assert "secs => p_age * GREATEST(o.attempts, 1)" in body
+        source = inspect.getsource(outbox.resolve_aged_ambiguous)
+        assert "updated_at <= now() - make_interval(secs => :age)" in source
+        assert "* GREATEST(attempts, 1)" in source

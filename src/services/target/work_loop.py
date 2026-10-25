@@ -1440,10 +1440,11 @@ async def ensure_sender_jobs(
 
     The sweep-driven cycle is the design: a sender hold drains and the job
     finalizes `succeeded`; the next sweep re-mints only while pending rows
-    exist — or an `ambiguous` row has waited the resolution backoff (
-    a live sender's lost answer is resolved by the binding's sender, and a
-    quiet binding has none) — so an empty outbox mints nothing and a busy
-    one always has exactly one live sender per binding.
+    exist — or an `ambiguous` row has waited the resolution backoff, which
+    grows with its attempts (a live sender's lost answer is resolved by the
+    binding's sender, and a quiet binding has none) — so an empty outbox
+    mints nothing and a busy one always has exactly one live sender per
+    binding.
     """
     attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
     # The statement is `fn_sender_sweep`'s body (worker sweep functions): one INSERT … SELECT whose

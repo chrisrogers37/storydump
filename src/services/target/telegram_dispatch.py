@@ -290,9 +290,9 @@ def _command_for(
         # field, never in `args` — so the outcome line needs no
         # second identity read.
         actor_label=actor_label,
-        # The card this tap came from: a settled story's
-        # answer adopts a message the ledger never learned — a resend's
-        # twin — and edits it, so no card keeps dead buttons.
+        # The card this tap came from: a settled story's answer edits it —
+        # adopting a message the ledger never learned, or repainting a known
+        # card whose newest edit did not land — so no card keeps dead buttons.
         binding_id=tenant.channel_binding_id,
         card_ref=card_ref,
     )

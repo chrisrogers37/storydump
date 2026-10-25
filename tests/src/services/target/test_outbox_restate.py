@@ -4,10 +4,10 @@ resolutions; the sender's claim of a card and of its edit.
 `restate_cards` reaches a card the tap already superseded (by ref, any settled
 state). `restate_everywhere` is the executor's door: every active Telegram
 binding in one statement, the shape `supersede_everywhere` set for the tap
-(#1286). Neither carries a keyboard: the sender gives every approval card, and
-every edit of one, its story's keyboard as it is when the row is claimed
-(#1477) — a parked story's edit keeps the member's three resolutions
-because the story is `review_required`.
+(#1286). Neither carries a keyboard: the sender gives every edit of an
+approval card its story's keyboard as it is when the row is claimed (#1477),
+and sends the card itself with none — a parked story's edit keeps the member's
+three resolutions because the story is `review_required`.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.services.target import outbox, prompts
+from src.services.target import outbox
 from src.services.target.outbox import OutboxPaced
 
 PARKED = "00000000-0000-4000-8000-0000000000aa"
@@ -201,8 +201,8 @@ class TestACardIsRenderedAgainAtClaimTime:
     """`_claim_current`: every claimed `approval_prompt` with an
     intent is rendered again before the send; a slot that moved on is retired
     unsent and the next row claimed; a live one goes out as the fresh card,
-    written through the one `sending` fence. After the pacing, every card and
-    every edit of one gets its story's keyboard (#1477)."""
+    written through the one `sending` fence. After the pacing, a card leaves
+    with no keyboard and every edit of one gets its story's (#1477)."""
 
     def test_the_rule(self):
         assert outbox._needs_refresh({"kind": "approval_prompt", "intent_id": "i"})
@@ -290,22 +290,27 @@ class TestACardIsRenderedAgainAtClaimTime:
         assert row is not None and row["id"] == "ob-2"
         assert claims["left"] == [("ob-1", "superseded", {})]
 
-    async def test_a_live_card_goes_out_as_the_fresh_card(self, claims):
+    async def test_a_live_card_goes_out_as_the_fresh_card_without_a_keyboard(
+        self, claims
+    ):
+        """A card leaves with no keyboard, whatever its render carries and
+        whatever its story is: the keyboard reaches the chat only as the edit
+        of a message whose id the ledger holds, so a copy a lost answer leaves
+        behind has no buttons. The card never asks for its story's keyboard,
+        and its record is the card as sent."""
         fresh = {"v": 2, "text": "new", "reply_markup": {"inline_keyboard": []}}
-        keyboard = prompts.card_keyboard(
-            "live", state="awaiting_approval", api_publishing_enabled=True
-        )
         claims["claimed"] = [
             _claimed("approval_prompt", "live", {"v": 2, "text": "old"}),
         ]
         claims["rendered"] = {"live": fresh}
         claims["facts"] = {"live": _facts()}
         row = await self._claim()
-        sent = {**fresh, "reply_markup": keyboard}
+        sent = {"v": 2, "text": "new"}
         assert row is not None and row["payload"] == sent
         assert claims["left"] == [("ob-1", "sending", {"payload": sent})], (
             "the record is rewritten through the one fence, in the claim transaction"
         )
+        assert claims["keyed"] == [], "a card does not read its story's keyboard"
 
     async def test_a_cards_edit_gets_the_storys_keyboard_as_it_is_now(self, claims):
         """#1477: a `prompt_supersede` of an approval card leaves with the
@@ -355,15 +360,14 @@ class TestACardIsRenderedAgainAtClaimTime:
         self, claims, kind
     ):
         """`card_facts` reads nothing when the session cannot see the story:
-        `card_keyboard_for` answers None, and the row leaves with no keyboard.
+        `card_keyboard_for` answers None, and an edit leaves with no keyboard.
         A raise here would roll the claim back at every tick and stall the
-        chat's queue behind the row. The edit is the half the sender can reach:
-        an edit is not rendered again before its keyboard. The card half is
-        synthetic: `_claim_current` reads a card's story first (`_CARD_SELECT`)
-        and retires one it cannot see as `superseded`, so only an outbox row
-        whose workspace is not its story's, which no writer makes, brings a
-        card here. It stays as the one unit test of a card recorded with no
-        keyboard."""
+        chat's queue behind the row. A card never asks: it leaves with no
+        keyboard whatever the story's facts are, and its record is written as
+        it was sent. (`_claim_current` reads a card's story first
+        (`_CARD_SELECT`) and retires one it cannot see as `superseded`, so only
+        an outbox row whose workspace is not its story's, which no writer
+        makes, brings a card here.)"""
         stale = {"inline_keyboard": [[{"text": "stale"}]]}
         claims["claimed"] = [
             _claimed(
@@ -374,7 +378,9 @@ class TestACardIsRenderedAgainAtClaimTime:
         claims["facts"] = {}
         row = await self._claim()
         assert "reply_markup" not in row["payload"]
-        assert claims["keyed"] == ["unseen"], "the story was read, and read nothing"
+        assert claims["keyed"] == (["unseen"] if kind == "prompt_supersede" else []), (
+            "an edit reads its story, and reads nothing; a card never asks"
+        )
         assert claims["left"] == (
             [("ob-1", "sending", {"payload": row["payload"]})]
             if kind == "approval_prompt"
