@@ -1,12 +1,66 @@
-"""The schema builder controls its namespace and rolls failed builds back."""
+"""The schema builder controls its namespace and rolls failed builds back, and
+refuses a URL it cannot read by the variable's name."""
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import Engine, create_engine, exc as sa_exc, text
 
 from scripts.migration_runner import MIGRATIONS_DIR, adopt, apply_pending
 from src.models.target import ddl
-from src.models.target.ddl.__main__ import main
+from src.models.target.ddl.__main__ import main, run
 from tests.scripts.conftest import as_user
+from tests.unreadable_urls import (
+    BUILDER_READABLE,
+    BUILDER_UNREADABLE,
+    MISREAD_HOSTS,
+    OWNER_URL,
+    REFUSAL,
+    assert_names_only_the_host,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+    forms,
+)
+
+
+@pytest.mark.parametrize("url", **cases(BUILDER_UNREADABLE))
+def test_an_unreadable_url_is_refused_by_name(url, capsys):
+    """SQLAlchemy quotes the part of a URL it could not read, such as a port
+    read out of the password, and libpq would quote a host or a database name
+    read out of it, so the builder names the variable instead and exits 2, as
+    it does without one, before it reads its command. No database: the URL is
+    refused before anything connects."""
+    assert main(["init", "--database-url", url]) == 2
+    out, err = capsys.readouterr()
+    assert f"refused: {OWNER_URL} {REFUSAL}" in err
+    assert_withheld(out, err)
+
+    with pytest.raises(ValueError) as caught:
+        run("build", url)
+    assert_refused_by_name(caught.value, OWNER_URL)
+
+
+@pytest.mark.parametrize("url", **cases(BUILDER_READABLE))
+def test_control_a_url_it_reads_fails_on_the_host_alone(url):
+    """A URL the builder reads is not refused: connecting fails on a host
+    that never resolves, and that error names the host, never the password."""
+    with pytest.raises(sa_exc.OperationalError) as caught:
+        main(["build", "--database-url", url])
+    assert_names_only_the_host(str(caught.value))
+
+
+@pytest.mark.parametrize("url", **cases(MISREAD_HOSTS))
+def test_a_host_read_out_of_the_password_is_refused_before_connecting(url, monkeypatch):
+    """libpq would resolve the host SQLAlchemy read, sending the password's
+    tail to the resolver, and a name that resolved, under a wildcard record,
+    would fail with an error that quotes it. The refusal comes first."""
+
+    def connected(_engine):
+        raise AssertionError("the builder connected to a host read out of the password")
+
+    monkeypatch.setattr(Engine, "connect", connected)
+    with pytest.raises(ValueError) as caught:
+        run("build", url)
+    assert_refused_by_name(caught.value, OWNER_URL)
 
 
 def _prepare_shadow(conn, schema, search_path):
@@ -122,3 +176,29 @@ def test_failed_build_restores_the_namespace_and_rolls_back_every_object(
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "url",
+    **cases(
+        forms(
+            "raw-at-sign-in-a-socket-directory-and-no-user",
+            "encoded-socket-directory-beside-a-password",
+            "encoded-abstract-socket-beside-a-password",
+        )
+    ),
+)
+def test_control_an_at_sign_in_a_host_value_goes_on_to_connect(url, monkeypatch):
+    """A socket directory or an abstract socket named in a `host` query value
+    goes on to connect when its `@` is the URL's only one, or is encoded
+    beside a user's: the builder reads the URL and connects."""
+
+    class Connected(Exception):
+        pass
+
+    def connected(_engine):
+        raise Connected
+
+    monkeypatch.setattr(Engine, "connect", connected)
+    with pytest.raises(Connected):
+        run("build", url)

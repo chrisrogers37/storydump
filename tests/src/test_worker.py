@@ -273,15 +273,17 @@ class TestEngineUrlFromEnv:
     def test_plain_postgres_url_gains_the_asyncpg_driver(self):
         from src.services.target.unit_of_work import engine_url_from_env
 
-        url = engine_url_from_env({"TARGET_DATABASE_URL": "postgresql://u:p@h/db"})
-        assert url == "postgresql+asyncpg://u:p@h/db"
+        url = engine_url_from_env(
+            {"TARGET_DATABASE_URL": "postgresql://u:not-a-real-password@h/db"}
+        )
+        assert url == "postgresql+asyncpg://u:not-a-real-password@h/db"
 
     def test_libpq_ssl_params_are_rewritten_for_asyncpg(self):
         from src.services.target.unit_of_work import engine_url_from_env
 
         url = engine_url_from_env(
             {
-                "TARGET_DATABASE_URL": "postgresql://u:p@h/db?sslmode=require&channel_binding=require"
+                "TARGET_DATABASE_URL": "postgresql://u:not-a-real-password@h/db?sslmode=require&channel_binding=require"
             }
         )
         assert "sslmode" not in url and "channel_binding" not in url
@@ -297,6 +299,81 @@ class TestEngineUrlFromEnv:
 
         assert engine_url_from_env({"TARGET_DATABASE_URL": ""}) is None
         assert engine_url_from_env({"TARGET_DATABASE_URL": "   "}) is None
+
+
+class TestAsyncpgUrl:
+    """`unit_of_work.asyncpg_url` renders SQLAlchemy's one reading of a URL
+    for asyncpg, so what the engine reads back is what was written, but for
+    the libpq-only parameters it drops and a repeated parameter, which takes
+    its last value."""
+
+    @staticmethod
+    def _round_trip(url):
+        from sqlalchemy.engine import make_url
+
+        from src.services.target.unit_of_work import asyncpg_url
+
+        return make_url(url), make_url(asyncpg_url(url))
+
+    def test_the_production_shape_keeps_who_connects_where_and_takes_ssl(self):
+        given, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@ep-x.region.aws.neon.tech/db"
+            "?sslmode=require&channel_binding=require"
+        )
+        assert read.drivername == "postgresql+asyncpg"
+        assert dict(read.query) == {"ssl": "require"}
+        for part in ("username", "password", "host", "port", "database"):
+            assert getattr(read, part) == getattr(given, part), part
+
+    def test_an_ssl_parameter_already_there_is_kept(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?ssl=verify-full&sslmode=require"
+        )
+        assert dict(read.query) == {"ssl": "verify-full"}
+
+    def test_a_repeated_host_takes_its_last_value_as_libpq_does(self):
+        _, read = self._round_trip(
+            "postgresql://owner@/db?host=a.invalid:5432&host=b.invalid:5432"
+        )
+        assert read.query["host"] == "b.invalid:5432"
+
+    def test_any_other_repeated_parameter_takes_its_last_value(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?sslmode=disable&sslmode=require&application_name=a&application_name=b"
+        )
+        assert dict(read.query) == {"ssl": "require", "application_name": "b"}
+
+    @pytest.mark.parametrize(
+        "form", ["raw-slash", "raw-question-mark", "raw-hash", "raw-bracket"]
+    )
+    def test_a_raw_delimiter_in_the_password_reads_back_as_written(self, form):
+        from tests.unreadable_urls import PASSWORDS, URLS
+
+        given, read = self._round_trip(URLS[form])
+        assert read.password == PASSWORDS[form]
+        for part in ("username", "password", "host", "port", "database"):
+            assert getattr(read, part) == getattr(given, part), part
+
+    def test_an_encoded_option_reads_back_as_written(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?options=-c%20search_path%3Dx"
+        )
+        assert read.query["options"] == "-c search_path=x"
+
+    def test_a_percent_encoded_password_reads_back_as_written(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real%40%2F%3F%23%25password@db.invalid/db"
+        )
+        assert read.password == "not-a-real@/?#%password"
+
+    def test_an_asyncpg_url_or_another_scheme_is_left_as_it_is(self):
+        _, read = self._round_trip("postgresql+asyncpg://owner@db.invalid/db")
+        assert read.drivername == "postgresql+asyncpg"
+        _, read = self._round_trip("postgres://owner@db.invalid/db")
+        assert read.drivername == "postgres"
 
 
 class TestStatusLine:

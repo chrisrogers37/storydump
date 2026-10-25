@@ -3,8 +3,18 @@
 import psycopg2
 import pytest
 
-from scripts.migration_runner import main
+from scripts.migration_runner import main, parity
 from tests.scripts.conftest import _scratch, build_world
+from tests.unreadable_urls import (
+    LIBPQ_UNREADABLE,
+    OWNER_URL,
+    READABLE,
+    REFUSAL,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+    forms,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -74,3 +84,43 @@ class TestParitySubcommand:
         output = capsys.readouterr().out
         assert f"first floor tables: {table_count} < 44" in output
         assert f"second floor tables: {table_count} < 44" in output
+
+
+class TestAnUnreadableUrlIsRefusedByItsName:
+    """`parity` reads two catalogs, each through a URL libpq may not read. The
+    refusal names which one, `DATABASE_URL (or --database-url)` or
+    `--against`, and quotes neither, the way the writing verbs refuse theirs
+    (`test_migration_runner.py`)."""
+
+    @pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
+    def test_the_database_url_is_refused_by_name(self, dsn, capsys):
+        """No database: the URL under test is the first one read."""
+        rc = main(["--database-url", dsn, "parity", "--against", READABLE])
+
+        out, err = capsys.readouterr()
+        assert rc == 1
+        assert f"error: {OWNER_URL} {REFUSAL}" in err
+        assert_withheld(out, err)
+
+        with pytest.raises(ValueError) as caught:
+            parity(dsn, READABLE)
+        assert_refused_by_name(caught.value, OWNER_URL)
+
+    @pytest.mark.parametrize(
+        "dsn", **cases(forms("invalid-escape-in-password", "raw-slash"))
+    )
+    def test_the_url_it_is_compared_against_is_refused_by_name(
+        self, scratch_db, dsn, capsys
+    ):
+        """The first catalog is read from a real database, so the refusal is
+        the second URL's."""
+        rc = main(["--database-url", scratch_db, "parity", "--against", dsn])
+
+        out, err = capsys.readouterr()
+        assert rc == 1
+        assert f"error: --against {REFUSAL}" in err
+        assert_withheld(out, err)
+
+        with pytest.raises(ValueError) as caught:
+            parity(scratch_db, dsn)
+        assert_refused_by_name(caught.value, "--against")

@@ -57,12 +57,17 @@ from __future__ import annotations
 import contextvars
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import exc as sa_exc, make_url, text
+from sqlalchemy import URL, exc as sa_exc, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from src.config.db_url import is_pooled_host, pooled_endpoint_refusal, userinfo
+from src.config.db_url import (
+    UnreadableUrl,
+    is_ambiguous_url,
+    is_pooled_host,
+    pooled_endpoint_refusal,
+    userinfo,
+)
 from src.config.settings import settings
 from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.utils.logger import logger
@@ -170,33 +175,95 @@ def async_database_url(database: Optional[str] = None) -> str:
 
 def asyncpg_url(url: str) -> str:
     """A platform-shaped `postgresql://` URL made asyncpg-safe — the deploy door
-    both roots share (worker and api), so the rewrite lives once.
+    both roots share (worker and api), so the rewrite lives once
+    (:func:`_asyncpg`, on SQLAlchemy's own reading of *url*)."""
+    return _asyncpg(make_url(url))
 
-    Rewrites what the asyncpg driver refuses: the dialect suffix, and the
-    libpq-only `sslmode`/`channel_binding` query params (Neon appends both;
-    asyncpg takes `ssl=`).
-    """
-    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    parts = urlsplit(url)
-    params = dict(parse_qsl(parts.query))
-    sslmode = params.pop("sslmode", None)
-    params.pop("channel_binding", None)
-    if sslmode and "ssl" not in params:
-        params["ssl"] = sslmode
-    return urlunsplit(parts._replace(query=urlencode(params)))
+
+def _asyncpg(parsed: URL) -> str:
+    """*parsed* rendered for the asyncpg driver: `postgresql` becomes
+    `postgresql+asyncpg` (a `postgresql+asyncpg` URL is left as it is, and
+    works; any other scheme is left as it is, and fails at engine creation),
+    every repeated query parameter, `host` among them, takes its last value,
+    as libpq takes it, and the libpq-only `sslmode`/`channel_binding`
+    parameters go (Neon appends both), `sslmode` becoming `ssl=` unless one is
+    there. Everything else is SQLAlchemy's one reading of the URL, rendered
+    back with each part encoded: a raw `/`, `?`, `#`, `[` or `]` or a
+    compatibility character in a password is read as SQLAlchemy reads it.
+    Query parameters render sorted."""
+    query = {
+        key: value[-1] if isinstance(value, tuple) else value
+        for key, value in parsed.query.items()
+    }
+    sslmode = query.pop("sslmode", None)
+    query.pop("channel_binding", None)
+    if sslmode and "ssl" not in query:
+        query["ssl"] = sslmode
+    if parsed.drivername == "postgresql":
+        parsed = parsed.set(drivername="postgresql+asyncpg")
+    return parsed.set(query=query).render_as_string(hide_password=False)
+
+
+def _hosts(parsed: URL) -> list[str]:
+    """The hosts *parsed* names, read the way SQLAlchemy's asyncpg dialect
+    hands them to asyncpg (``create_connect_args``): the ``host`` query value
+    (a comma list), which replaces the authority's host, and the authority's
+    host."""
+    hosts = [
+        part
+        for value in parsed.normalized_query.get("host", ())
+        for part in value.split(",")
+        if part.strip()
+    ]
+    if parsed.host:
+        hosts.append(parsed.host)
+    return hosts
+
+
+def _read(url: str) -> Optional[URL]:
+    """SQLAlchemy's reading of *url*, or None for one it cannot read: one that
+    carries a raw `@` besides the one before the host
+    (`db_url.is_ambiguous_url`), part of whose password SQLAlchemy would read
+    as the rest of the URL and asyncpg could quote; one `make_url` refuses,
+    whose own error can quote part of it (its `int()` quotes the port); and
+    one it reads into a database name carrying an `@`, which no door accepts.
+    With one `@` at most, the name carries it only where SQLAlchemy read no
+    user information, as after a raw `/` in the user, and then the name
+    carries the password. The accepted cost: SQLAlchemy keeps `%40` literal in
+    a database name, so a database whose own name has an `@` cannot be reached
+    through `TARGET_DATABASE_URL`."""
+    if is_ambiguous_url(url):
+        return None
+    try:
+        parsed = make_url(url)
+    except (sa_exc.ArgumentError, ValueError):
+        return None
+    return None if "@" in (parsed.database or "") else parsed
 
 
 def engine_url_from_env(env) -> Optional[str]:
     """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset —
     and None is the caller's to refuse: the worker exits 2 naming the variable
     (`src.worker.main`), the API runs with no engine and answers 503 on every
-    data route (`src.api.app`). There is no settings-built fallback."""
+    data route (`src.api.app`). There is no settings-built fallback.
+
+    A URL SQLAlchemy cannot read, or that carries a raw `@` besides the one
+    before the host (:func:`_read`), is refused here, for both roots, with
+    `UnreadableUrl` (`src.config.db_url`): it names the variable alone and
+    carries none of the URL. The worker exits 2 on it; the API fails to start,
+    so a bad deploy fails its health check and the previous one keeps serving.
+    A URL it reads is rendered from that one reading (:func:`_asyncpg`)."""
     url = (env.get(DATABASE_URL_VAR) or "").strip()
     if not url:
         # Blank is absent: a dashboard row saved empty must meet the callers'
         # named refusal, never a traceback out of `create_engine`.
         return None
-    return asyncpg_url(url)
+    parsed = _read(url)
+    if parsed is None:
+        # Past `_read`'s `except`: SQLAlchemy's error is not even this one's
+        # context.
+        raise UnreadableUrl(DATABASE_URL_VAR)
+    return _asyncpg(parsed)
 
 
 def create_engine(url: str, *, pool_timeout: float = POOL_TIMEOUT_SEAM) -> AsyncEngine:
@@ -550,41 +617,21 @@ async def connection_role(conn) -> Optional[dict]:
 def engine_url_refusal(url: str) -> Optional[str]:
     """Why the worker must not open its engine on *url*, or None.
 
-    *url* is ``engine_url_from_env``'s answer, the string the engine gets. Its
-    hosts are read the way SQLAlchemy's asyncpg dialect hands them to asyncpg
-    (``create_connect_args``): the ``host`` query values (a comma list, or
-    repeated ``host=h:p``), which replace the authority's host, and the
-    authority's host. Every host named counts, so a URL that names a pooled
-    host anywhere is refused, even where another one would be used.
+    *url* is ``engine_url_from_env``'s answer, the string the engine gets,
+    which has refused a URL SQLAlchemy cannot read already and kept the last
+    of each repeated query parameter. Its hosts are read the way SQLAlchemy's
+    asyncpg dialect hands them to asyncpg (``_hosts``). Every host it names
+    counts, so a URL that names a pooled host anywhere is refused, even where
+    another one would be used.
 
-    Two forms cannot be classified, and are refused too:
-
-    - a URL that names no host, for which asyncpg would take one from the
-      environment (``PGHOST``, a service file, a local socket), when the
-      worker's database comes from ``TARGET_DATABASE_URL`` alone;
-    - a string SQLAlchemy cannot parse, which ``create_engine`` would refuse
-      anyway, with a traceback that can quote part of it. A key/value string
-      is one, and so is a URL that ``asyncpg_url`` split at a raw ``?`` in its
-      password.
+    A URL that names no host cannot be classified, and is refused too: asyncpg
+    would take one from the environment (``PGHOST``, a service file, a local
+    socket), when the worker's database comes from ``TARGET_DATABASE_URL``
+    alone.
 
     Each answer names the variable, never its value.
     """
-    try:
-        parsed = make_url(url)
-    except (sa_exc.ArgumentError, ValueError):
-        return (
-            f"{DATABASE_URL_VAR} is not a connection URL the worker can read:"
-            " give it as postgresql://user:password@host/database, with any"
-            " @ / ? # or % in the user or password percent-encoded."
-        )
-    hosts = [
-        part
-        for value in parsed.normalized_query.get("host", ())
-        for part in value.split(",")
-        if part.strip()
-    ]
-    if parsed.host:
-        hosts.append(parsed.host)
+    hosts = _hosts(make_url(url))
     if not hosts:
         return (
             f"{DATABASE_URL_VAR} names no host, so the driver would take one"

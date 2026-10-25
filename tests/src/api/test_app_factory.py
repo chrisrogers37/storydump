@@ -8,7 +8,11 @@ means a 503 that NAMES the variable (never the settings-built URL), and no
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
@@ -30,6 +34,15 @@ from src.services.target import (
 )
 from tests.src.api.conftest import FakeEngine
 from tests.src.services.target.test_delivery_health import _Doors
+from tests.unreadable_urls import (
+    ENGINE_READABLE,
+    ENGINE_UNREADABLE,
+    PASSWORDS,
+    REFUSAL,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+)
 
 
 #: An operator, for the operating details (`/api/v1/ops/health`);
@@ -82,12 +95,61 @@ class TestEngineConfiguration:
     def test_target_url_builds_an_asyncpg_engine_without_connecting(self):
         app = create_app(
             env={
-                "TARGET_DATABASE_URL": "postgresql://u:p@db.example.test/neondb?sslmode=require"
+                "TARGET_DATABASE_URL": "postgresql://u:not-a-real-password@db.example.test/neondb?sslmode=require"
             }
         )
         assert app.state.engine is not None
         assert app.state.engine.url.drivername == "postgresql+asyncpg"
         assert details(TestClient(app))["target_database"] is True
+
+
+class TestAnUnreadableTargetUrlFailsStartup:
+    """A URL that carries a raw `@` besides the one before the host, part of
+    whose password SQLAlchemy reads as the rest of the URL, or one SQLAlchemy
+    cannot read as written. Its own error, or asyncpg's on the first
+    connection, would quote that part. The API still fails to start, so a bad
+    deploy fails its health check and the previous one keeps serving, but its
+    error names the variable and the cause, quotes none of the URL and carries
+    no error that does. Only this case changes: an unset URL still means no
+    engine and a 503 on every data route, and a URL SQLAlchemy reads builds an
+    engine on the password its writer meant."""
+
+    @pytest.mark.parametrize("url", **cases(ENGINE_UNREADABLE))
+    def test_it_names_the_variable_and_nothing_of_its_value(self, url):
+        with pytest.raises(ValueError) as caught:
+            create_app(env={"TARGET_DATABASE_URL": url})
+        assert_refused_by_name(caught.value, "TARGET_DATABASE_URL")
+
+    @pytest.mark.parametrize("form", list(ENGINE_READABLE))
+    def test_control_a_url_sqlalchemy_reads_builds_an_engine_on_its_password(
+        self, form
+    ):
+        app = create_app(env={"TARGET_DATABASE_URL": ENGINE_READABLE[form]})
+        assert app.state.engine is not None
+        assert app.state.engine.url.password == PASSWORDS[form]
+
+    def test_the_process_that_imports_the_app_exits_without_quoting_it(self):
+        """The start command imports `src.api.app`, which builds the app at
+        import: the traceback that process prints is the one an operator
+        reads in the deploy's log."""
+        repo = Path(__file__).resolve().parents[3]
+        proc = subprocess.run(
+            [sys.executable, "-c", "import src.api.app"],
+            cwd=repo,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(repo),
+                "TARGET_DATABASE_URL": ENGINE_UNREADABLE["raw-at-sign-then-colon"],
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0
+        assert f"TARGET_DATABASE_URL {REFUSAL}" in proc.stderr, proc.stderr
+        assert "During handling of the above exception" not in proc.stderr
+        assert "was the direct cause" not in proc.stderr
+        assert_withheld(proc.stdout, proc.stderr)
 
 
 class TestThePublicProbeSaysLittle:
@@ -1179,7 +1241,7 @@ class TestHealthReportsThePoolArithmetic:
         from src.services.target import unit_of_work as uow
 
         engine = uow.create_engine(
-            "postgresql+asyncpg://u:p@localhost:1/db",
+            "postgresql+asyncpg://u:not-a-real-password@localhost:1/db",
             pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
         )
         monkeypatch.setattr(app_module, "_engine_from_env", lambda env: engine)

@@ -26,7 +26,9 @@ from psycopg2.extras import RealDictCursor
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts import libpq_connect
 from scripts.sql_lexer import CODE, COMMENTS, segments
+from src.config.db_url import DATABASE_URL_NAME
 
 FORMAT_VERSION = 2
 MEMBERSHIP_OPTIONS = ("admin_option", "inherit_option", "set_option")
@@ -476,8 +478,13 @@ def extract(conn, *, read_only=False):
         conn.rollback()
 
 
-def schema_signature(dsn, *, read_only=True):
-    conn = psycopg2.connect(dsn)
+def schema_signature(
+    dsn, *, read_only=True, variable="the dsn passed to schema_signature"
+):
+    """The catalog snapshot of *dsn*'s database. A *dsn* libpq cannot read is
+    refused by *variable*, where the caller got it, and never quoted
+    (`scripts/libpq_connect.py`)."""
+    conn = libpq_connect.connect(dsn, variable)
     try:
         return extract(conn, read_only=read_only)
     finally:
@@ -602,7 +609,11 @@ def main(argv=None):
         if args.command == "extract":
             if not args.database_url:
                 parser.error("set DATABASE_URL or pass --database-url")
-            snapshot = schema_signature(args.database_url, read_only=args.read_only)
+            snapshot = schema_signature(
+                args.database_url,
+                read_only=args.read_only,
+                variable=DATABASE_URL_NAME,
+            )
             args.out.write_text(
                 json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )

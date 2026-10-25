@@ -6,13 +6,16 @@ This gate separately enforces an invariant: every workspace-keyed table is
 RLS-enabled and has at least one policy, with a consistent FORCE posture.
 The invariant catches an omission even when both compared schemas share it.
 
-Standalone stdlib plus psycopg2, matching the runner and catalog comparator;
-this gate imports no application code.
+Standalone stdlib plus psycopg2, matching the runner and catalog comparator,
+and connected as they are, through `scripts/libpq_connect.py`, so a connection
+string libpq cannot read is refused without being quoted. From `src` that
+loads the standard-library `src.config.db_url` alone; this gate imports no
+application code.
 """
 
 from __future__ import annotations
 
-import psycopg2
+from scripts import libpq_connect
 
 #: The column that marks a table as belonging to a tenant.
 TENANT_KEY = "workspace_id"
@@ -69,7 +72,7 @@ def tenancy_signature(dsn: str) -> dict:
     every legitimate rewording.
     """
     sig: dict[str, dict] = {}
-    conn = psycopg2.connect(dsn)
+    conn = libpq_connect.connect(dsn, "the dsn passed to tenancy_signature")
     try:
         with conn.cursor() as cur:
             cur.execute(

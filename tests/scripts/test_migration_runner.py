@@ -38,6 +38,17 @@ from tests.scripts.conftest import (
     txn,
     write_migration,
 )
+from tests.unreadable_urls import (
+    LIBPQ_READABLE,
+    LIBPQ_UNREADABLE,
+    MISREAD_HOSTS,
+    OWNER_URL,
+    REFUSAL,
+    assert_names_only_the_host,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -836,9 +847,11 @@ class TestAPooledEndpointIsRefused:
 
     def test_every_writing_verb_opens_the_one_guarded_door(self):
         """Only `_locked_connection` takes the lock, only it and the read-only
-        `status` call `_connect`, and only `_connect` calls `psycopg2.connect`.
-        A verb that connected another way would be neither refused a pooled
-        host nor bounded nor unlocked."""
+        `status` call `_connect`, only `_connect` calls `libpq_connect.connect`,
+        and nothing in the runner calls `psycopg2.connect` itself. A writing
+        verb that connected another way would be neither refused a pooled host
+        nor bounded nor unlocked, and would print an unreadable URL's
+        password."""
         import ast
         import inspect
 
@@ -851,7 +864,12 @@ class TestAPooledEndpointIsRefused:
             return None
 
         tree = ast.parse(inspect.getsource(runner_module))
-        callers = {"_acquire_lock": set(), "_connect": set(), "psycopg2.connect": set()}
+        callers = {
+            "_acquire_lock": set(),
+            "_connect": set(),
+            "libpq_connect.connect": set(),
+            "psycopg2.connect": set(),
+        }
         for fn in ast.walk(tree):
             if not isinstance(fn, ast.FunctionDef):
                 continue
@@ -860,49 +878,59 @@ class TestAPooledEndpointIsRefused:
                     callers[called(node)].add(fn.name)
         assert callers["_acquire_lock"] == {"_locked_connection"}
         assert callers["_connect"] == {"_locked_connection", "status"}
-        assert callers["psycopg2.connect"] == {"_connect"}
+        assert callers["libpq_connect.connect"] == {"_connect"}
+        assert callers["psycopg2.connect"] == set()
 
 
 class TestAnUnreadableUrlIsRefused:
-    """libpq refuses a connection string it cannot parse and quotes the part
-    it choked on, which can be the password. The runner names the fix
-    instead, one hint for every such cause. No database: libpq refuses before
-    it connects."""
+    """libpq refuses a connection string it cannot read and quotes the part it
+    could not read, which can be the password, whether it cannot parse the
+    string at all or an unencoded `@` or `/` left the password's tail in the
+    host, the port or the database name. The runner names the variable and the
+    fix instead, one hint for every such cause. No database: the string is
+    refused before libpq connects."""
 
-    @pytest.mark.parametrize(
-        "dsn",
-        [
-            "postgresql://owner:not-a-real-password-%zz@db.invalid/db",
-            "postgresql://owner:not-a-real-password@db.invalid/db?sslmod=require",
-            "postgresql://owner:not-a-real-password@db.invalid/db?sslmode",
-            "host=db.invalid user=owner password=not-a-real-password bogus=1",
-        ],
-        ids=[
-            "invalid-escape-in-password",
-            "mistyped-query-parameter",
-            "query-parameter-without-equals",
-            "unknown-key-value-option",
-        ],
-    )
+    @pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
     def test_the_cli_refuses_it_without_printing_the_password(
         self, tmp_path, capsys, dsn
     ):
         code = main(["--database-url", dsn, "--migrations-dir", str(tmp_path), "apply"])
         out, err = capsys.readouterr()
         assert code == 1
-        assert "is not one libpq can read" in err
-        assert "check each query parameter" in err, (
+        assert f"error: {OWNER_URL} {REFUSAL}" in err
+        assert "check its port and each query parameter" in err, (
             "the hint names only the password, and this string's fault is elsewhere"
         )
-        assert "not-a-real-password" not in out + err, "the refusal printed it"
+        assert_withheld(out, err)
         # Nor may the refusal carry libpq's error along with it: a logger or
         # a traceback that walks the chain would print the password.
-        with pytest.raises(MigrationRunnerError) as caught:
+        with pytest.raises(ValueError) as caught:
             _connect(dsn)
-        chain = (caught.value.__cause__, caught.value.__context__)
-        assert not any("not-a-real-password" in str(link) for link in chain), (
-            "the refusal chains libpq's error, which quotes the password"
-        )
+        assert_refused_by_name(caught.value, OWNER_URL)
+
+    @pytest.mark.parametrize("dsn", **cases(LIBPQ_READABLE))
+    def test_control_a_host_that_never_resolves_keeps_libpqs_own_error(self, dsn):
+        """A string libpq reads is not refused: its failure to connect names
+        the host it could not reach, never the password."""
+        with pytest.raises(psycopg2.OperationalError) as caught:
+            _connect(dsn)
+        assert_names_only_the_host(str(caught.value))
+
+    @pytest.mark.parametrize("dsn", **cases(MISREAD_HOSTS))
+    def test_a_host_read_out_of_the_password_never_reaches_libpq(
+        self, dsn, monkeypatch
+    ):
+        """libpq would resolve it, sending the password's tail to the
+        resolver, and a name that resolved, under a wildcard record, would
+        fail with an error that quotes it. The refusal comes first."""
+
+        def handed(_dsn):
+            raise AssertionError("libpq was handed a host read out of the password")
+
+        monkeypatch.setattr(psycopg2, "connect", handed)
+        with pytest.raises(ValueError) as caught:
+            _connect(dsn)
+        assert_refused_by_name(caught.value, OWNER_URL)
 
 
 def _column_exists(dsn, table, column):
