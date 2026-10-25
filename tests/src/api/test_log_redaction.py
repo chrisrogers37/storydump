@@ -3,10 +3,14 @@
 The access log is uvicorn's and is redacted at the logger
 (`src/utils/logger.py::AccessLogRedactor`, pinned in
 `tests/src/utils/test_logger.py`). These pin the rest: every path parameter is
-classified, every credential in a path is masked, every app line that names a
-request names its route template (classified values filled in) or its masked
-path before routing, and no log line or exception message under `src/` names a
-URL or a raw request target.
+classified, every credential in a path is masked, and every app line that
+names a request names its route template (classified values filled in) or its
+masked path before routing. A syntactic ratchet over `src/` fails on a logging
+call or an exception message whose arguments name a URL (`.url`,
+`.query_params`, `.path_params`), a raw target key of a scope, a whole scope,
+or a credential parameter by its own name, and on code outside the masks that
+reads a raw request target. It does not follow a value through a variable into
+a message.
 """
 
 import ast
@@ -37,8 +41,9 @@ WS = "00000000-0000-0000-0000-000000000001"
 _PARAM = re.compile(r"\{([^}:]+)(?::[^}]*)?\}")
 
 #: Path parameters whose value is a bearer credential. A route that has one is
-#: masked by `redact_path` (`CREDENTIAL_PATH_PREFIXES`, src/utils/logger.py).
-#: The printable ones are `LOGGABLE_PATH_PARAMS`, in the source.
+#: masked by `redact_path` (`CREDENTIAL_PATH_PREFIXES`, src/utils/logger.py),
+#: and the ratchet below fails on a message that names one as a variable. The
+#: printable ones are `LOGGABLE_PATH_PARAMS`, in the source.
 CREDENTIAL_PARAMS = frozenset({"token"})
 
 
@@ -197,6 +202,18 @@ RAW_TARGET_READERS = {
     "line prints",
 }
 
+#: Messages that name one of `_message_hits`' values on purpose, by (file,
+#: function, what the message names), each with its reason: a credential passed
+#: to the code that scrubs it from the text, or a name that means something else
+#: in that function.
+MESSAGE_EXEMPTIONS = {
+    ("src/services/target/instagram_graph.py", "_call", "token"): "the Graph "
+    "access token, passed only to _redact and _detail_of, which replace it in "
+    "the text with <TOKEN>",
+    ("src/services/target/outbox.py", "pace_and_claim", "scope"): "the pacing "
+    "scope's label (tg_chat or tg_global), not an ASGI scope",
+}
+
 
 def _is_scope(node: ast.AST) -> bool:
     return (isinstance(node, ast.Name) and node.id == "scope") or (
@@ -234,17 +251,39 @@ def _names_a_url(node: ast.AST) -> bool:
     return url or _reads_raw_target(node)
 
 
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+
+
+def _printed(part: ast.AST):
+    """The nodes in one message argument that the message must not print: a URL
+    or a raw target (`_names_a_url`), a credential parameter by its own name
+    (`CREDENTIAL_PARAMS`), and a scope used whole. A scope indexed or read
+    from (`scope["type"]`, `scope.get("client")`) is not used whole, and
+    neither is one handed straight to `loggable_path`."""
+    held = set()
+    for node in ast.walk(part):
+        if isinstance(node, (ast.Subscript, ast.Attribute)):
+            held.add(id(node.value))
+        elif isinstance(node, ast.Call) and _callee(node) == "loggable_path":
+            held.update(id(arg) for arg in node.args)
+    for node in ast.walk(part):
+        credential = isinstance(node, ast.Name) and node.id in CREDENTIAL_PARAMS
+        whole_scope = _is_scope(node) and id(node) not in held
+        if _names_a_url(node) or credential or whole_scope:
+            yield node
+
+
 def _is_message(node: ast.AST, raised: set[int]) -> bool:
     """A logging call, what a `raise` raises, or an exception built by name."""
     if not isinstance(node, ast.Call):
         return False
     if id(node) in raised:
         return True
-    func = node.func
-    if isinstance(func, ast.Attribute) and func.attr in _LOG_METHODS:
+    if isinstance(node.func, ast.Attribute) and node.func.attr in _LOG_METHODS:
         return True
-    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-    return name.endswith(("Error", "Exception", "Refused"))
+    return _callee(node).endswith(("Error", "Exception", "Refused"))
 
 
 def _walk(tree: ast.AST):
@@ -259,7 +298,9 @@ def _walk(tree: ast.AST):
         stack.extend((child, where) for child in ast.iter_child_nodes(node))
 
 
-def _message_hits(tree: ast.AST) -> list[tuple[int, str]]:
+def _message_hits(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """(line, function, what) for each value a logging call or an exception
+    message names that `_printed` refuses, *what* as the source spells it."""
     raised = {
         id(node.exc)
         for node in ast.walk(tree)
@@ -270,7 +311,7 @@ def _message_hits(tree: ast.AST) -> list[tuple[int, str]]:
         if not _is_message(node, raised):
             continue
         for part in [*node.args, *(keyword.value for keyword in node.keywords)]:
-            hits += [(n.lineno, where) for n in ast.walk(part) if _names_a_url(n)]
+            hits += [(n.lineno, where, ast.unparse(n)) for n in _printed(part)]
     return hits
 
 
@@ -287,20 +328,37 @@ def _sources():
 
 
 class TestNoLogLineCarriesARequestTarget:
-    """A ratchet over `src/`: a new log line or exception message that names a
-    URL or a raw request target fails here, not in a production log."""
+    """A ratchet over `src/`, read syntactically: a logging call or an
+    exception message that names one of the values `_message_hits` lists
+    fails here, not in a production log. It reads each argument as written,
+    so a value first bound to a variable and then logged is not followed; a
+    raw request target read anywhere outside the masks is caught by
+    `test_only_the_masks_read_a_raw_target` instead."""
 
-    def test_no_log_line_or_exception_message_names_a_url_or_a_raw_target(self):
+    def test_no_message_names_a_target_a_whole_scope_or_a_credential(self):
         found = [
-            f"{rel}:{line} in {where or '<module>'}"
+            f"{rel}:{line} in {where or '<module>'}: {what}"
             for rel, tree in _sources()
-            for line, where in _message_hits(tree)
+            for line, where, what in _message_hits(tree)
+            if (rel, where, what) not in MESSAGE_EXEMPTIONS
         ]
         assert found == [], (
-            "a log line or an exception message names a URL or a request's raw "
-            "target: name the request by `loggable_path(request.scope)` "
-            f"(src/utils/logger.py), and redact a provider URL first: {found}"
+            "a log line or an exception message names a URL, a request's raw "
+            "target, a whole scope or a credential by its name: name the "
+            "request by `loggable_path(request.scope)` (src/utils/logger.py), "
+            "redact a provider URL first, and never print a credential. If the "
+            "name means something else there, classify it in "
+            f"MESSAGE_EXEMPTIONS: {found}"
         )
+
+    def test_every_message_exemption_still_applies(self):
+        named = {
+            (rel, where, what)
+            for rel, tree in _sources()
+            for _, where, what in _message_hits(tree)
+        }
+        stale = set(MESSAGE_EXEMPTIONS) - named
+        assert stale == set(), f"exempt, but no longer named: {sorted(stale)}"
 
     def test_only_the_masks_read_a_raw_target(self):
         found = sorted(
@@ -329,5 +387,37 @@ class TestNoLogLineCarriesARequestTarget:
             "    raise ValueError(str(response.request.url))\n"
             "    where = scope.get('query_string')\n"
         )
-        assert sorted(_message_hits(planted)) == [(2, "leak"), (3, "leak"), (4, "leak")]
+        assert sorted(_message_hits(planted)) == [
+            (2, "leak", "request.url"),
+            (3, "leak", "scope['path']"),
+            (4, "leak", "response.request.url"),
+        ]
         assert sorted(_raw_reads(planted)) == [(2, "leak"), (3, "leak"), (5, "leak")]
+
+    def test_the_ratchet_sees_a_credential_named_in_a_message(self):
+        planted = ast.parse(
+            "def accept(request, token):\n"
+            "    logger.info('accepting %s', token)\n"
+            "    raise InvitationRefused('not_acceptable', f'no {token[:6]}')\n"
+            "    logger.info('accepted for %s', request.method)\n"
+        )
+        assert sorted(_message_hits(planted)) == [
+            (2, "accept", "token"),
+            (3, "accept", "token"),
+        ]
+
+    def test_the_ratchet_sees_a_whole_scope_in_a_message(self):
+        """A scope printed whole prints its path, raw path and query string. Read
+        from (`scope["type"]`, `scope.get("client")`) or handed to
+        `loggable_path`, it is not."""
+        planted = ast.parse(
+            "def leak(request, scope):\n"
+            "    logger.info('request %s', request.scope)\n"
+            "    raise ValueError(f'refused {scope}')\n"
+            "    logger.info('refused %s', loggable_path(request.scope))\n"
+            "    logger.info('a %s from %s', scope['type'], scope.get('client'))\n"
+        )
+        assert sorted(_message_hits(planted)) == [
+            (2, "leak", "request.scope"),
+            (3, "leak", "scope"),
+        ]
