@@ -4,11 +4,13 @@ Standalone by design: a Railway predeploy step runs this before the app code
 boots, so it must not depend on the application's import closure or its
 configuration. It depends on the standard library, psycopg2, and, from
 ``src``, one standard-library module alone: ``src.config.db_url``, the
-pooled-host predicate the worker shares (``tests/test_deploy_guardrails.py``
-pins what importing the runner loads). The database is addressed by
-``DATABASE_URL`` or ``--database-url``, through its direct host: every writing
-verb holds a session-scoped advisory lock, and refuses a connection libpq made
-to a pooled host (``_locked_connection``).
+pooled-host predicate the worker shares and the refusal of an unreadable URL
+every process shares (``tests/test_deploy_guardrails.py`` pins what importing
+the runner loads). The database is addressed by ``DATABASE_URL`` or
+``--database-url``, through its direct host: every writing verb holds a
+session-scoped advisory lock, and refuses a connection libpq made to a pooled
+host (``_locked_connection``). A URL libpq cannot read is refused by that
+name, never quoted (``scripts/libpq_connect.py``).
 
 The ledger lives in the dedicated `runner` schema, separate from application
 objects in `public`. Schema operations therefore preserve the ledger and the
@@ -69,8 +71,14 @@ from pathlib import Path
 
 import psycopg2
 
+from scripts import libpq_connect
 from scripts.sql_lexer import CODE, COMMENTS, segments
-from src.config.db_url import is_pooled_host, pooled_endpoint_refusal
+from src.config.db_url import (
+    DATABASE_URL_NAME,
+    UnreadableUrl,
+    is_pooled_host,
+    pooled_endpoint_refusal,
+)
 
 
 # One fixed key for every runner invocation against a given database: the
@@ -389,23 +397,9 @@ def split_statements(sql: str) -> list:
 
 
 def _connect(dsn: str):
-    # libpq quotes the part of the string it could not parse, which can be the
-    # password: the refusal names the fixes, never the value, and is raised
-    # outside the `except` so that libpq's error is not even its context. The
-    # same error covers an unencoded character in the userinfo, a misspelt or
-    # `=`-less query parameter and an unknown key/value option, so the hint
-    # names all of them rather than guess which.
-    unreadable = False
-    try:
-        conn = psycopg2.connect(dsn)
-    except psycopg2.ProgrammingError:
-        unreadable = True
-    if unreadable:
-        raise MigrationRunnerError(
-            "the runner's database URL is not one libpq can read; percent-encode"
-            " @ / ? # % in the user or password, and check each query parameter's"
-            " (or key/value option's) name and its ="
-        )
+    # A string libpq cannot read is refused by name, never quoted
+    # (`libpq_connect`); `main` prints the refusal as any other error.
+    conn = libpq_connect.connect(dsn, DATABASE_URL_NAME)
     conn.autocommit = True
     return conn
 
@@ -1260,6 +1254,27 @@ def status(dsn: str, migrations_dir) -> StatusReport:
         conn.close()
 
 
+def parity(
+    database_url: str,
+    against: str,
+    *,
+    database_url_name: str = DATABASE_URL_NAME,
+    against_name: str = "--against",
+) -> int:
+    """The read-only `parity` command: the full catalog of *database_url*
+    against *against*'s, every difference printed, 1 when there is one. The
+    names are where each URL came from, which a refusal of one libpq cannot
+    read prints instead of its value: the CLI's own flags by default, the
+    variable an operator set when another script runs the command
+    (`scripts/cutover_rehearsal.py`)."""
+    from scripts.schema_parity import print_comparison, schema_signature
+
+    return print_comparison(
+        schema_signature(database_url, read_only=True, variable=database_url_name),
+        schema_signature(against, read_only=True, variable=against_name),
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="migration_runner")
     parser.add_argument(
@@ -1414,13 +1429,8 @@ def main(argv=None) -> int:
             if status_report.discrepancies:
                 return 1
         elif args.command == "parity":
-            from scripts.schema_parity import print_comparison, schema_signature
-
-            return print_comparison(
-                schema_signature(args.database_url, read_only=True),
-                schema_signature(args.against, read_only=True),
-            )
-    except MigrationRunnerError as exc:
+            return parity(args.database_url, args.against)
+    except (MigrationRunnerError, UnreadableUrl) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

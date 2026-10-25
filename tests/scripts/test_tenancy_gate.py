@@ -15,6 +15,7 @@ compares them rather than this gate, and a missing one is a diff there.
 import pytest
 
 from scripts.tenancy_gate import tenancy_signature, tenancy_violations
+from tests.unreadable_urls import LIBPQ_UNREADABLE, assert_refused_by_name, cases
 
 
 def _sig(**tables):
@@ -52,6 +53,17 @@ class TestTheGateCanFail:
         """user-plane and auth-plane tables legitimately carry no workspace key
         — the gate must not demand tenancy of them."""
         assert tenancy_violations(_sig(users=(False, False, 0))) == []
+
+
+@pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
+def test_an_unreadable_dsn_is_refused_without_quoting_it(dsn):
+    """libpq quotes the part of a connection string it could not read, which
+    can be the password; the gate's refusal names the argument instead and
+    carries nothing of libpq's error. No database: the string is refused
+    before libpq connects."""
+    with pytest.raises(ValueError) as caught:
+        tenancy_signature(dsn)
+    assert_refused_by_name(caught.value, "the dsn passed to tenancy_signature")
 
 
 @pytest.mark.integration

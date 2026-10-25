@@ -22,9 +22,10 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
 
 ## Composition (`src/worker.py`)
 
-- `main` refuses to boot without `TARGET_DATABASE_URL`, with one that names a
-  pooled host, no host, or cannot be read (`unit_of_work.engine_url_refusal`),
-  or without a credential key ring that loads (`oauth_states.RingUnavailable`)
+- `main` refuses to boot without `TARGET_DATABASE_URL`, with one that cannot be
+  read (`unit_of_work.engine_url_from_env`) or names a pooled host or no host
+  (`unit_of_work.engine_url_refusal`), or without a credential key ring that
+  loads (`oauth_states.RingUnavailable`)
   — exit 2 for all of them, before anything connects.
 - `compose` (`:343`) builds the whole graph without touching the network. A seam
   the deployment lacks **parks** its kinds with the reason named, rather than

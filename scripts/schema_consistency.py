@@ -29,6 +29,7 @@ from psycopg2.extensions import make_dsn
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts import libpq_connect
 from scripts.migration_runner import (
     MigrationRunnerError,
     adopt,
@@ -37,6 +38,7 @@ from scripts.migration_runner import (
     discover_migrations,
 )
 from scripts.schema_parity import print_comparison, schema_signature
+from src.config.db_url import DATABASE_URL_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_FILE = ROOT / "scripts/schema_consistency_base.txt"
@@ -111,8 +113,13 @@ def run(
     administrators, created = [], []
     isolated = False
     try:
-        for database in (database_url, replay_database_url):
-            admin = psycopg2.connect(database)
+        for database, variable in (
+            (database_url, DATABASE_URL_NAME),
+            (replay_database_url, "REPLAY_DATABASE_URL (or --replay-database-url)"),
+        ):
+            # A URL libpq cannot read is refused by where it came from, never
+            # quoted; the URLs built from these below are `make_dsn`'s.
+            admin = libpq_connect.connect(database, variable)
             admin.autocommit = True
             administrators.append(admin)
         require_isolated_clusters(administrators)

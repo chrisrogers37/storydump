@@ -599,7 +599,7 @@ storydump burst --since 3h --watch
 railway logs --service worker | tail -50
 # `FATAL: TARGET_DATABASE_URL is unset` — set it on the worker (exit 2)
 # `FATAL: TARGET_DATABASE_URL names a pooled database endpoint`, `names no host`
-#   or `is not a connection URL the worker can read` — give it the endpoint's
+#   or `cannot be read as a database URL` — give it the endpoint's
 #   direct host, written in the URL (exit 2)
 # `FATAL: the credential key ring cannot load` — set the key the API service
 #   holds, never a newly generated one (exit 2)

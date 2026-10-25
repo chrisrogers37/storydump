@@ -13,6 +13,16 @@ import pytest
 
 from scripts import cutover_rehearsal as rehearsal
 from tests.scripts.conftest import _scratch, build_world, fetch_one
+from tests.unreadable_urls import (
+    LIBPQ_UNREADABLE,
+    READABLE,
+    REFUSAL,
+    STAND_IN,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+    stand_in_administrator,
+)
 
 
 @pytest.fixture
@@ -107,6 +117,137 @@ def test_drift_only_mode_propagates_catalog_difference(
 
     assert rehearsal.main(["--check-drift", "--against", expected]) == 1
     assert "catalog parity failed" in capsys.readouterr().err
+
+
+@pytest.fixture
+def no_drift_check(monkeypatch):
+    monkeypatch.delenv("SCHEMA_DRIFT_DSN", raising=False)
+    monkeypatch.delenv("REQUIRE_SCHEMA_DRIFT_CHECK", raising=False)
+
+
+#: How the rehearsal names its two administrator URLs in a refusal.
+RESTORE_ADMIN = "REHEARSAL_RESTORE_ADMIN_DSN (or --restore-admin-url)"
+CODE_ADMIN = "REHEARSAL_CODE_ADMIN_DSN (or --code-admin-url)"
+
+
+@pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
+def test_an_unreadable_drift_dsn_is_refused_by_name(
+    dsn, no_drift_check, monkeypatch, capsys
+):
+    """libpq quotes the part of a URL it could not read, which can be the
+    password. The rehearsal names the variable instead: the one an operator
+    set, not the runner's flag it hands the URL to. No database: the drift
+    DSN is read first."""
+    monkeypatch.setenv("SCHEMA_DRIFT_DSN", dsn)
+
+    assert rehearsal.main(["--check-drift", "--against", READABLE]) == 1
+
+    out, err = capsys.readouterr()
+    assert f"cutover rehearsal failed: SCHEMA_DRIFT_DSN {REFUSAL}" in err
+    assert "catalog parity failed" not in err, "an unread URL is not a difference"
+    assert_withheld(out, err)
+
+    with pytest.raises(ValueError) as caught:
+        rehearsal.require_parity(dsn, READABLE, restored_name=rehearsal.DRIFT_NAME)
+    assert_refused_by_name(caught.value, "SCHEMA_DRIFT_DSN")
+
+
+@pytest.mark.integration
+def test_an_unreadable_against_url_is_refused_by_name(
+    scratch_db, no_drift_check, monkeypatch, capsys
+):
+    """The drift catalog is read from a real database, so the refusal is the
+    second URL's."""
+    monkeypatch.setenv("SCHEMA_DRIFT_DSN", scratch_db)
+
+    against = LIBPQ_UNREADABLE["raw-slash"]
+    assert rehearsal.main(["--check-drift", "--against", against]) == 1
+
+    out, err = capsys.readouterr()
+    assert f"cutover rehearsal failed: --against {REFUSAL}" in err
+    assert_withheld(out, err)
+
+    with pytest.raises(ValueError) as caught:
+        rehearsal.require_parity(
+            scratch_db,
+            against,
+            restored_name=rehearsal.DRIFT_NAME,
+            code_name="--against",
+        )
+    assert_refused_by_name(caught.value, "--against")
+
+
+@pytest.fixture
+def artifacts(tmp_path):
+    """Stand-in artifacts: the administrators connect before anything reads
+    them."""
+    dump = tmp_path / "cutover.dump"
+    dump.touch()
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("{}", encoding="utf-8")
+    return dump, catalog
+
+
+def _rehearsal(artifacts, restore_admin_url, code_admin_url):
+    """The whole rehearsal's arguments."""
+    dump, catalog = artifacts
+    return [
+        "--dump",
+        str(dump),
+        "--source-catalog",
+        str(catalog),
+        "--restore-admin-url",
+        restore_admin_url,
+        "--code-admin-url",
+        code_admin_url,
+        "--confirm-disposable-clusters",
+        "--confirm-archive-backup",
+    ]
+
+
+def _refusal(artifacts, restore_admin_url, code_admin_url):
+    """The whole rehearsal's refusal, run as a function so it can be read
+    whole: its message, its chain and its traceback."""
+    dump, catalog = artifacts
+    with pytest.raises(ValueError) as caught:
+        rehearsal.run(
+            dump,
+            restore_admin_url,
+            code_admin_url,
+            source_catalog=catalog,
+            confirm_archive_backup=True,
+        )
+    return caught.value
+
+
+@pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
+def test_an_unreadable_restore_administrator_dsn_is_refused_by_name(
+    dsn, artifacts, no_drift_check, capsys
+):
+    """No database: the restore cluster's administrator connects first."""
+    assert rehearsal.main(_rehearsal(artifacts, dsn, READABLE)) == 1
+
+    out, err = capsys.readouterr()
+    assert f"cutover rehearsal failed: {RESTORE_ADMIN} {REFUSAL}" in err
+    assert_withheld(out, err)
+    assert_refused_by_name(_refusal(artifacts, dsn, READABLE), RESTORE_ADMIN)
+
+
+def test_an_unreadable_code_administrator_dsn_is_refused_by_name(
+    artifacts, no_drift_check, monkeypatch, capsys
+):
+    """The restore cluster's administrator is a stand-in, so the refusal is
+    the code cluster's, and the stand-in is still closed."""
+    stand_in = stand_in_administrator(monkeypatch)
+
+    code = LIBPQ_UNREADABLE["raw-at-sign"]
+    assert rehearsal.main(_rehearsal(artifacts, STAND_IN, code)) == 1
+
+    out, err = capsys.readouterr()
+    assert f"cutover rehearsal failed: {CODE_ADMIN} {REFUSAL}" in err
+    assert_withheld(out, err)
+    assert_refused_by_name(_refusal(artifacts, STAND_IN, code), CODE_ADMIN)
+    assert stand_in.closed
 
 
 def test_whole_rehearsal_rejects_shared_cluster(admin_conn):

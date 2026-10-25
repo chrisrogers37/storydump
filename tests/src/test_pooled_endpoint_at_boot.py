@@ -22,17 +22,27 @@ from tests.src.conftest import (
     _WentPastTheRefusal,
     leaks,
 )
+from sqlalchemy.engine import make_url
+
+from tests.unreadable_urls import (
+    ENGINE_READABLE,
+    ENGINE_UNREADABLE,
+    PASSWORDS,
+    REFUSAL,
+    assert_exception_withholds,
+    assert_withheld,
+    cases,
+)
 
 #: Placeholders in Neon's shape. The password is the suite's planted secret,
-#: so `leaks` can look for any run of it in what the refusal prints; the two
-#: unreadable forms carry an obviously fake one instead, checked by name.
+#: so `leaks` can look for any run of it in what the refusal prints. The
+#: unreadable forms are `tests/unreadable_urls.py`'s, below.
 POOLED_HOST = "ep-xxx-pooler.region.aws.neon.tech"
 DIRECT_HOST = "ep-xxx.region.aws.neon.tech"
 CREDS = f"svc_worker:{MALFORMED_KEY}"
 
 POOLED = "names a pooled database endpoint"
 NO_HOST = "names no host"
-UNREADABLE = "is not a connection URL the worker can read"
 
 
 @pytest.mark.parametrize(
@@ -53,14 +63,6 @@ UNREADABLE = "is not a connection URL the worker can read"
         ),
         # no host: asyncpg would take PGHOST, set to the pooler below
         (f"postgresql://{CREDS}@/db", NO_HOST),
-        # a key/value string is not a URL SQLAlchemy reads
-        (
-            f"host={POOLED_HOST} dbname=db user=svc_worker password=not-a-real-password",
-            UNREADABLE,
-        ),
-        # a raw `?` inside the password makes `asyncpg_url` split the URL
-        # there, and a traceback would quote what came before it
-        (f"postgresql://svc_worker:not-a-real?password@{POOLED_HOST}/db", UNREADABLE),
     ],
 )
 def test_the_worker_refuses_by_name_and_never_echoes_the_url(
@@ -79,7 +81,29 @@ def test_the_worker_refuses_by_name_and_never_echoes_the_url(
     assert f"TARGET_DATABASE_URL {refusal}" in err and "Refusing to boot" in err
     assert POOLED_HOST not in err, "the refusal printed the host"
     assert not leaks(err), "the refusal printed part of the password"
-    assert "not-a-real" not in err, "the refusal printed part of the password"
+
+
+@pytest.mark.parametrize("url", **cases(ENGINE_UNREADABLE))
+def test_the_worker_refuses_a_url_it_cannot_read_and_never_echoes_it(
+    url, ring_env, monkeypatch, capsys
+):
+    """Every form the API refuses to start on (`test_app_factory.py`), the
+    worker refuses to boot on: one door reads the URL for both,
+    `unit_of_work.engine_url_from_env`. What SQLAlchemy or asyncpg would raise
+    can quote part of the password, so the refusal names the variable alone
+    and carries nothing that quotes it."""
+    import src.worker as worker
+
+    _nothing_past_the_refusal_may_run(monkeypatch, worker)
+    ring_env(key=Fernet.generate_key().decode())
+    monkeypatch.setenv("TARGET_DATABASE_URL", url)
+    with pytest.raises(SystemExit) as exc:
+        worker.main()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"FATAL: TARGET_DATABASE_URL {REFUSAL}" in err and "Refusing to boot" in err
+    assert_withheld(err)
+    assert_exception_withholds(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -87,6 +111,8 @@ def test_the_worker_refuses_by_name_and_never_echoes_the_url(
     [
         f"postgresql://{CREDS}@{DIRECT_HOST}/db?sslmode=require",
         "postgresql://svc_worker@/storydump?host=/var/run/postgresql",
+        # an abstract socket, its `@` encoded beside the user's
+        "postgresql://svc_worker@/storydump?host=%40pgsock",
     ],
 )
 def test_control_a_direct_host_goes_on_to_connect(url, ring_env, monkeypatch):
@@ -100,3 +126,27 @@ def test_control_a_direct_host_goes_on_to_connect(url, ring_env, monkeypatch):
     monkeypatch.setenv("TARGET_DATABASE_URL", url)
     with pytest.raises(_WentPastTheRefusal):
         worker.main()
+
+
+@pytest.mark.parametrize("form", list(ENGINE_READABLE))
+def test_the_worker_builds_its_engine_on_the_password_its_writer_meant(
+    form, ring_env, monkeypatch
+):
+    """A raw `/`, `?`, `#`, `[` or `]`, a compatibility character or an
+    encoded `@` in a password is read as SQLAlchemy reads it, and the URL the
+    engine gets carries it whole."""
+    import src.worker as worker
+
+    _nothing_past_the_refusal_may_run(monkeypatch, worker)
+    handed = []
+
+    def create_engine(url, **_kwargs):
+        handed.append(url)
+        raise _WentPastTheRefusal("the worker built its engine")
+
+    monkeypatch.setattr(worker.unit_of_work, "create_engine", create_engine)
+    ring_env(key=Fernet.generate_key().decode())
+    monkeypatch.setenv("TARGET_DATABASE_URL", ENGINE_READABLE[form])
+    with pytest.raises(_WentPastTheRefusal):
+        worker.main()
+    assert make_url(handed[0]).password == PASSWORDS[form]

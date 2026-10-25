@@ -1103,7 +1103,13 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     env = dict(os.environ)
-    url = unit_of_work.engine_url_from_env(env)
+    try:
+        url = unit_of_work.engine_url_from_env(env)
+    except unit_of_work.UnreadableUrl as exc:
+        # A URL the engine cannot read, refused by name: what SQLAlchemy or
+        # asyncpg would raise can quote the password (`engine_url_from_env`).
+        print(f"FATAL: {exc} Refusing to boot.", file=sys.stderr)
+        raise SystemExit(2)
     if url is None:
         # No fallback: a root that ran against a database nobody named is the
         # plausible-wrong-value casualty this refusal exists to prevent. By
