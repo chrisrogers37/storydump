@@ -172,7 +172,10 @@ def _measured_value(value):
         return value
     if isinstance(value, (list, tuple)):
         return [_measured_value(item) for item in value[:_MEASURED_ITEMS]]
-    return str(value)[:_MEASURED_TEXT]
+    # Printable text only: a box kind or a codec name read from the file can
+    # carry NUL, which jsonb refuses, or other control characters.
+    text = "".join(c if c.isprintable() else "?" for c in str(value))
+    return text[:_MEASURED_TEXT]
 
 
 def _measured(exc: Exception, **values) -> Exception:
@@ -452,12 +455,7 @@ def _image_worker(path, pixels):
                 raise _measured(UnsupportedMedia("image_format"), format=found)
             with Image.open(path, formats=["JPEG"]) as image:
                 if image.width * image.height > pixels:
-                    raise _measured(
-                        ValidationPending("pixel_budget"),
-                        width=image.width,
-                        height=image.height,
-                        pixel_limit=pixels,
-                    )
+                    raise ValidationPending("pixel_budget")
                 image.verify()
             with Image.open(path, formats=["JPEG"]) as image:
                 image.load()

@@ -39,6 +39,12 @@ def jpeg(color="red"):
     return output.getvalue()
 
 
+def png(color="red"):
+    output = BytesIO()
+    Image.new("RGB", (64, 128), color).save(output, format="PNG")
+    return output.getvalue()
+
+
 async def selected(engine, chain):
     async with obs.uow(engine, chain) as conn:
         await conn.execute(
@@ -582,6 +588,27 @@ def refusing(error):
     )
 
 
+def serving(content):
+    """A preparation whose adapter reports `TURN`, then returns `content` as the
+    CDN's JPEG-labelled bytes."""
+    from src.services.target.instagram_preparation import (
+        PastPostsPreparationPorts,
+        SelectedPreparation,
+    )
+
+    class ServingAdapter:
+        async def fetch_bytes(self, *args, **kwargs):
+            kwargs["on_counters"](media_adapters.MediaTurnCounters(**TURN))
+            return content, "Instagram 123.jpg", "image/jpeg"
+
+    async def prepare(capture, config):
+        return ServingAdapter()
+
+    return SelectedPreparation(
+        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+    )
+
+
 def no_media_link():
     """A terminal refusal carrying the evidence of a part with no link."""
     return refusal_evidence.attach(
@@ -698,6 +725,43 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
     }
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
+async def test_unsupported_bytes_record_the_failed_check_with_what_it_measured(
+    past_posts_engine, origin
+):
+    """Bytes that fail a local check land that check's refusal evidence (the
+    state, the check, the values it measured, the byte count, the matrix
+    version and the turn's counters) under the asset's `validation_capture ->
+    'refusal'` beside its usual keys, and on the pending it raises. The latch
+    is unchanged: the asset reads `unsupported` and the candidate stays
+    excluded as `unsupported`."""
+    src, _, intent = await selected(past_posts_engine, origin)
+    content = png()
+    prepared = serving(content)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    refusal = {
+        "v": 1,
+        "kind": "local_validation",
+        "state": "unsupported",
+        "check": "image_format",
+        "measured": {"format": "PNG"},
+        "bytes": len(content),
+        "matrix_version": media_validation.MATRIX_VERSION,
+        "counters": TURN,
+    }
+    assert err.value.reason == "unsupported" and err.value.evidence == refusal
+    row = await proof(past_posts_engine, origin, intent)
+    capture = row["validation_capture"]
+    assert row["validation_state"] == "unsupported"
+    assert capture["state"] == "unsupported" and capture["reason"] == "image_format"
+    assert capture["refusal"] == refusal
+    async with obs.uow(past_posts_engine, origin) as conn:
+        verdict = await selection.verdict(conn, origin, src, intent=intent)
+    assert verdict["reason"] == "unsupported" and not verdict["suitable"]
 
 
 async def test_slide_gone_refusal_carries_its_evidence_and_the_indexed_slide_count(
