@@ -217,6 +217,23 @@ class TestSendText:
         await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
         assert sent == [{"chat_id": "7", "text": "hi"}]
 
+    @pytest.mark.parametrize(
+        "lost", [httpx.ReadTimeout("no answer"), httpx.RemoteProtocolError("cut")]
+    )
+    async def test_a_lost_answer_is_not_sent_again_inside_the_call(self, lost):
+        # The request reached Telegram and its answer did not come back: the
+        # message may stand, so a second sendMessage would be a second copy.
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            raise lost
+
+        t = _transport(handler)
+        with pytest.raises(TelegramSendError):
+            await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
+        assert calls == ["sendMessage"]
+
 
 class TestACardSentSettled:
     """#1477: a card sent settled keeps the card's own text in its payload
@@ -545,12 +562,27 @@ class TestMediaCardsStayHonest:
 
         def handler(request):
             calls.append(str(request.url).rsplit("/", 1)[1])
-            raise httpx.ConnectError("boom")
+            raise httpx.ReadTimeout("no answer")
 
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
         with pytest.raises(TelegramSendError):
             await t.for_chat("7")(MEDIA_ROW)
         assert calls == ["sendPhoto"], "one attempt, no re-upload, no text card"
+
+    async def test_an_upload_that_never_left_is_attempted_again(self):
+        # No connection was made, so no card can stand: a second attempt
+        # cannot be a second card.
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            if len(calls) == 1:
+                raise httpx.ConnectError("refused")
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        assert await t.for_chat("7")(MEDIA_ROW) == "5"
+        assert calls == ["sendPhoto", "sendPhoto"]
 
     @pytest.mark.parametrize("code", [429, 500, 502])
     async def test_a_429_or_5xx_on_the_upload_is_ambiguous_not_a_refusal(self, code):
