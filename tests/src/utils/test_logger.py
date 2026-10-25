@@ -304,11 +304,17 @@ class TestTheAccessLogRedactor:
             install_access_log_redaction,
         )
 
-        assert REDACTED_LOGGERS == ("uvicorn.access", "uvicorn.asgi")
-        install_access_log_redaction()  # a second call adds nothing
-        for name in REDACTED_LOGGERS:
+        def installed(name):
             filters = logging.getLogger(name).filters
-            assert [type(f) for f in filters].count(AccessLogRedactor) == 1, name
+            return [type(f) for f in filters].count(AccessLogRedactor)
+
+        assert REDACTED_LOGGERS == ("uvicorn.access", "uvicorn.asgi")
+        # Before any call here: what this process's import installed. An
+        # earlier test can call it too, so `TestEachProcessIsConfiguredAtImport`
+        # is what proves the import alone does, in a fresh interpreter.
+        assert [installed(name) for name in REDACTED_LOGGERS] == [1, 1]
+        install_access_log_redaction()  # a second call adds nothing
+        assert [installed(name) for name in REDACTED_LOGGERS] == [1, 1]
 
     def test_a_trace_scope_loses_its_target_on_a_copy(self):
         from src.utils.logger import AccessLogRedactor
@@ -409,8 +415,9 @@ class _FakeTransport:
 @pytest.fixture
 def access_lines():
     """uvicorn's access logger at INFO with uvicorn's own formatter on a buffer,
-    restored afterwards. The redactor is the one this module's import
-    installed: the fixture adds none, so the test fails if the import stops."""
+    restored afterwards. The fixture adds no redactor: the one on the logger is
+    whatever this process installed. That the import alone installs it is
+    `TestEachProcessIsConfiguredAtImport`'s to prove, in a fresh interpreter."""
     import src.utils.logger  # noqa: F401 — its import installs the redactor
 
     buffer = io.StringIO()
@@ -578,6 +585,23 @@ class TestUvicornsTraceLine:
         assert "'path': '/api/v1/invitations/<redacted>/accept'" in started[0]
         assert "'raw_path': '<redacted>'" in started[0]
         assert [fake for fake in FAKES if any(fake in line for line in lines)] == []
+
+
+class TestUvicornsWebSocketLines:
+    def test_no_websocket_protocol_can_log_a_handshake(self):
+        """uvicorn's WebSocket protocols log each handshake's path and raw query
+        string on `uvicorn.error` (`protocols/websockets/websockets_impl.py`,
+        `wsproto_impl.py`), which `AccessLogRedactor` does not filter. uvicorn
+        loads one only when `websockets` or `wsproto` can be imported, and
+        `requirements.txt` pins plain `uvicorn`, so neither is.
+
+        If this fails, a WebSocket library has arrived, perhaps with
+        `uvicorn[standard]`: before it ships, put the redaction on those
+        records (`REDACTED_LOGGERS`, with a test of their shape) or keep the
+        library out."""
+        from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
+
+        assert AutoWebSocketsProtocol is None
 
 
 class TestTheHttpLibrariesArePinned:
