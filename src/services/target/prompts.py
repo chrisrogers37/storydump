@@ -350,9 +350,10 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     """The card for *intent_id* rendered from the intent AS IT IS NOW — at
     send time: the workspace's current buttons, the slot in its
     clock. None when the slot has moved on (answered, expired, ended) — such
-    a card is never sent. Two exceptions: a waiting card says
-    when a block stopped a rule from approving it, and a story a rule
-    approved is sent settled (`sends_settled`)."""
+    a card is never sent. Three exceptions: a waiting card says
+    when a block stopped a rule from approving it, a story a rule
+    approved is sent settled (`sends_settled`), and a story parked for
+    review is sent as its review card, which is the workspace's to resolve."""
     row = (
         (
             await session.execute(
@@ -379,12 +380,15 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
             intent_id=intent_id,
             note=await _block_note_for(session, row, intent_id=intent_id),
         )
-    if row.get("state") not in SETTLED_CARD_STATES:
+    in_review = row.get("state") == "review_required"
+    if not in_review and row.get("state") not in SETTLED_CARD_STATES:
         return None
     settled = await intent_ledger.settlement(
         session, workspace_id=str(row["workspace_id"]), intent_id=intent_id
     )
-    if not sends_settled(settled["state"], settled.get("approval_rule")):
+    if not in_review and not sends_settled(
+        settled["state"], settled.get("approval_rule")
+    ):
         return None
     line = await settled_line(
         session, settled, tz=str(row.get("tz") or "UTC"), at=utcnow()
