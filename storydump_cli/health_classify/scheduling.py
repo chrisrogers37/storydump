@@ -28,8 +28,8 @@ UNREACHABLE = "unreachable"
 WORKER_DOWN = "worker-down"
 
 #: Neither axis can answer. The cursor has no population AND the worker has left
-#: no proof of life — a fresh database, or an app older than this classifier that
-#: does not serve the axis at all. **Deliberately not `NO_SIGNAL`**: that one
+#: no proof of life — a fresh database where no system job has ever finished.
+#: **Deliberately not `NO_SIGNAL`**: that one
 #: carries a positive fact (the worker is provably alive, only the cursor is
 #: blind), and collapsing the two would hide the strictly worse state inside the
 #: better-understood one.
@@ -116,9 +116,8 @@ def _worker_state(data: dict, *, stale_s: int, overdue_s: int) -> tuple[str, str
     """(state, detail) for the worker axis — `absent` when it is not served.
 
     Same strictness as the cursor axis: a block that is PRESENT but mistyped is
-    `invalid`, never healthy. An ABSENT block is a different fact — an app older
-    than this classifier — and is not an instrument fault, so it is reported as its
-    own value and the caller decides what it means alongside the other axis.
+    `invalid`, never healthy. An ABSENT block gets its own value so its detail
+    says which fault it is; `classify` treats both as a broken instrument.
     """
     if _WORKER not in data:
         return "absent", "the endpoint does not serve a worker block"
@@ -192,7 +191,11 @@ def classify(
     worker, worker_detail = _worker_state(
         data, stale_s=worker_stale_s, overdue_s=worker_overdue_s
     )
-    if worker == "invalid":
+    if worker in ("invalid", "absent"):
+        # The route always serves the worker block (a test holds it to these
+        # fields), so a reading without one is a broken instrument too. Read as
+        # anything milder, it would drop the worker axis without a word, and with
+        # a destination active the cursor axis alone would answer HEALTHY.
         return Verdict(UNREACHABLE, worker_detail)
     if worker == "down":
         # FIRST, and above every cursor reading. A dead worker explains a
@@ -204,7 +207,7 @@ def classify(
     if active == 0:
         # A common case, not an edge: an estate with no active destinations.
         # `stalled: 0` here is true and meaningless.
-        if worker in ("absent", "unknown"):
+        if worker == "unknown":
             return Verdict(
                 WORKER_UNKNOWN,
                 f"no active destinations exist, and {worker_detail}",

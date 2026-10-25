@@ -20,8 +20,8 @@ T = 600
 
 #: A worker axis that is provably alive — what a current app serves (#1120).
 #: Kept as the DEFAULT so the cursor-axis tests below go on testing the cursor:
-#: without it every empty-estate case would answer `WORKER_UNKNOWN`, which is
-#: correct for a payload lacking the axis and is covered by its own test.
+#: without it every case would answer `UNREACHABLE`, which is correct for a
+#: payload lacking the worker block and is covered by its own test.
 #: The age is a healthy one against the 60 s recurring beat — well inside
 #: `DEFAULT_WORKER_STALE_S`, which is what "provably alive" has to mean here.
 ALIVE_WORKER = {
@@ -33,8 +33,7 @@ ALIVE_WORKER = {
 
 
 def body(stalled=0, active=0, lag=None, worker=ALIVE_WORKER):
-    """The endpoint payload. `worker=None` omits the axis, which is what an app
-    older than this classifier serves."""
+    """The endpoint payload. `worker=None` omits the worker block."""
     data = {"stalled": stalled, "accounts_active": active, "max_lag_seconds": lag}
     if worker is not None:
         data["worker"] = worker
@@ -125,13 +124,17 @@ class TestTheWorkerAxisIsNotAllowedToReadAsHealthyWhenItCannotTell:
     each blind condition gets a state of its own here.
     """
 
-    def test_an_app_that_does_not_serve_the_axis_is_unknown_not_no_signal(self):
-        """A classifier newer than the app. The axis is simply absent, and reading
-        that as `NO_SIGNAL` would silently lose the coverage this axis
-        adds — failing toward good news at exactly the moment of a deploy."""
-        v = classify(200, body(active=0, worker=None), threshold_s=T)
-        assert v.state == WORKER_UNKNOWN
-        assert v.state not in (HEALTHY, NO_SIGNAL)
+    @pytest.mark.parametrize("active", [0, 1, 5])
+    def test_a_reading_without_the_worker_block_is_unreachable_never_healthy(
+        self, active
+    ):
+        """The route always serves the block, so a reading without it is a broken
+        instrument. With a destination active, the cursor axis alone would
+        answer `HEALTHY` and the worker axis would be gone without a word;
+        with none, `WORKER_UNKNOWN` would page nobody."""
+        v = classify(200, body(active=active, lag=0, worker=None), threshold_s=T)
+        assert v.state == UNREACHABLE
+        assert v.detail == "the endpoint does not serve a worker block"
 
     def test_a_database_where_nothing_has_ever_run_is_unknown(self):
         """No baseline and no backlog. Genuinely unknowable — and the reading

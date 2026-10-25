@@ -22,4 +22,5 @@ Guides for using, developing and operating Storydump.
 - [Instagram source gate, run in isolation](operations/instagram-source-isolated-gate.md) — the contributor recipe for the full-composition gate
 - [Meta callback endpoints](operations/meta-callback-endpoints.md) — the deauthorize and data-deletion callbacks
 - [Retention policy](operations/retention-policy.md) — which data a scheduled sweep deletes (only rate counters) and which accumulates
+- [Scheduling monitor](operations/scheduling-monitor.md) — the poller that pages when scheduling or the worker stops, and how it is deployed
 - [Schema cutover](operations/schema-cutover.md) — where production's database lives since 2026-10-17, and the in-place procedure
