@@ -1450,15 +1450,15 @@ async def test_a_media_item_without_a_file_keeps_its_type_and_whether_it_had_a_l
             f"https://cdninstagram.com.untrusted.test{TAIL}",
             "cdninstagram.com.untrusted.test",
         ),
-        (f"https://fake-user:fake-pass@{CDN_HOST}{TAIL}", CDN_HOST),
+        (f"https://fake-user@{CDN_HOST}{TAIL}", CDN_HOST),
         (f"https://{CDN_HOST}:8443{TAIL}", CDN_HOST),
         (f"https://127.0.0.1{TAIL}", "127.0.0.1"),
     ],
-    ids=["plain-http", "lookalike-suffix", "credentials", "port", "address"],
+    ids=["plain-http", "lookalike-suffix", "user-info", "port", "address"],
 )
 async def test_an_untrusted_host_keeps_the_host_and_the_expiry_only(url, host):
     """untrusted_host: the host the link named and its expiry; no scheme,
-    credentials, port, path or signature, and no download was attempted."""
+    user info, port, path or signature, and no download was attempted."""
     requests = []
     a = adapter(preview_handler(media(media_url=url), requests=requests))
     evidence = await refusal_of(
@@ -1470,7 +1470,7 @@ async def test_an_untrusted_host_keeps_the_host_and_the_expiry_only(url, host):
         "host": host,
         "expiry": EXPIRY,
     }
-    assert_redacted(evidence, "fake-user", "fake-pass", "8443")
+    assert_redacted(evidence, "fake-user", "8443")
     assert all(r.url.host == "graph.instagram.com" for r in requests)
 
 

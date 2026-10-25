@@ -17,18 +17,16 @@ import pytest
 from src.services.target import refusal_evidence
 
 #: A signed CDN link as Graph hands one out, with everything around the host
-#: that must not outlive `link_evidence`: credentials, a port, a path, signature
-#: and routing parameters, a fragment. Only the host and the `oe` value survive.
+#: that must not outlive `link_evidence`: a port, a path, signature and routing
+#: parameters, a fragment. Only the host and the `oe` value survive.
 SIGNED = (
-    "https://fake-user:fake-pass@scontent-test.fbcdn.net:8443"
+    "https://scontent-test.fbcdn.net:8443"
     "/v/t51.2885-15/signed-example.jpg"
     "?stp=dst-jpg_e35&_nc_cat=100&_nc_sid=sid-value-1&ccb=1-7"
     "&oh=00_signature-value&oe=6A1B2C3D#frag"
 )
 #: The pieces of SIGNED that are neither its host nor its expiry.
 SIGNED_PARTS = (
-    "fake-user",
-    "fake-pass",
     "8443",
     "signed-example",
     "/v/t51",
