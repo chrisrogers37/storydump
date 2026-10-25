@@ -130,9 +130,12 @@ surface every workspace has. A workspace with no Telegram binding gets no card
 and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
 (`prompt_rendering.py:39`) — the outcome line and a repeat tap's answer read the same table.
 
-**Every approval card's keyboard is the sender's to render**.
-`prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to a card or an
-edit of one once the row's pacing has passed (`outbox._with_the_storys_keyboard`
+**Every approval card's keyboard is the sender's to render**, and it reaches a
+chat only as an edit of a message whose id the ledger holds: a card is sent
+with no keyboard, and settling its send queues the edit that brings one
+(`outbox._edit_sent_card`), so a copy a lost answer left behind has no
+buttons. `prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to an
+edit of a card once the row's pacing has passed (`outbox._with_the_storys_keyboard`
 over `prompts.card_facts`, one read of the story and its item). No outbox door
 takes a keyboard, so no caller picks one, and a rejected card loses its
 buttons because it is rejected. ⚙️ **Configure** is on every card for the
@@ -208,17 +211,24 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   predecessor is recovered by whoever holds the binding's lease — to
   `ambiguous`, never a blind resend.
 - Ambiguity is per kind: `notification` / `ack` retry once, then fail;
-  `approval_prompt`, `invitation` and `prompt_supersede` resend (`RESEND_KINDS`,
-  `:119`), a prompt at most three times (`MAX_PROMPT_RESENDS`, `:200`). Two live cards for one intent are
-  tolerable; a duplicate notification is bounded at one.
+  `approval_prompt` and `invitation` resend at most three times
+  (`RESEND_KINDS`, `MAX_PROMPT_RESENDS`); a `prompt_supersede` resends until
+  Telegram confirms it, for at most `EDIT_RESEND_HORIZON_SECONDS`. Each lost
+  answer waits `AMBIGUOUS_RESOLVE_AFTER_SECONDS` times its attempts
+  (`fn_sender_sweep` mints the sender on the same schedule).
+  A card's resend leaves no second live card, since a card leaves without its
+  keyboard; what a lost answer can leave is one inert copy, which no tap
+  reaches. A duplicate notification is bounded at one.
 - **Edits go supersede-then-send**, never edit-in-place on an ambiguous ref. A
   flip writes `prompt_supersede` rows for every known card of the intent in
-  every binding (`supersede_all`, `:588`); that paced edit writes the outcome
+  every binding (`supersede_all`, `:610`); that paced edit writes the outcome
   line with the story's keyboard as the sender claims it (⚙️ Configure alone on
   a settled card, or none for a rejected story or a removed item) — one Telegram
   message per tap per binding. The route edits a card only for Configure's menu
-  (`edit_markup`). A card the ledger never learned (a resend's twin) is adopted
-  when it is tapped (`adopt_card`, `:782`).
+  (`edit_markup`). A card with buttons the ledger never learned is adopted
+  when it is tapped, and a tapped card whose newest edit did not land is
+  edited again (`adopt_card`). "Message to edit not found" fails the edit
+  after one call: the message is gone.
 - Pacing is two `rate_counters` scopes, `tg_chat` per binding and `tg_global`.
   Over budget is a deferral (the row stays `pending`), and a 429 writes the
   provider's `retry_after` as a durable hold — never an in-task sleep.

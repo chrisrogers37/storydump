@@ -165,6 +165,8 @@ class SendReceipt(str):
 
 
 _NOT_MODIFIED = "message is not modified"
+#: Telegram's answer to an edit of a message that no longer exists.
+_EDIT_GONE = "message to edit not found"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
 
 
@@ -392,10 +394,11 @@ class TelegramTransport:
         A row without an outcome edits the keyboard alone. If the
         combined edit is refused (a caption Telegram will not take), the
         keyboard still lands by the type-agnostic `editMessageReplyMarkup` —
-        the call that must land. Only a definitive refusal takes the fallback:
-        a 429, a 5xx or a transport failure escapes, and the
-        outbox settles it (paced, or ambiguous → resent under the prompt cap →
-        failed). A refusal of the fallback escapes too, and fails the row."""
+        the call that must land. Only a definitive refusal takes the fallback,
+        and not one saying the message is gone: a 429, a 5xx or a transport
+        failure escapes, and the outbox settles it (paced, or ambiguous →
+        resent until confirmed). A refusal of the fallback escapes too, and
+        fails the row."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
@@ -421,6 +424,10 @@ class TelegramTransport:
                 )
                 return SendReceipt(ref, sent_as="edit")
             except TelegramRefused as exc:
+                if _EDIT_GONE in str(exc):
+                    # The message is gone (deleted from the chat): no edit can
+                    # land on it, so the keyboard-only call is not made.
+                    raise
                 logger.warning(
                     "%s refused for a supersede (%s); stripping the keyboard alone",
                     method,

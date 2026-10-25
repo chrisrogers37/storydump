@@ -45,7 +45,7 @@ def test_built_wheel_contains_migrations_manifest_and_ddl(tmp_path):
         "from importlib.resources import files; "
         "p=files('scripts').joinpath('migrations'); "
         "assert p.joinpath('adoption_manifest.json').is_file(); "
-        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')]) == 4"
+        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')]) == 5"
     )
     subprocess.run(
         [sys.executable, "-c", isolated_import, str(wheels[0])],
