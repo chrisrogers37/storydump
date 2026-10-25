@@ -106,9 +106,11 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   Never name it by `request.url`, `scope["path"]`, the scope itself or the
   query. `tests/src/api/test_log_redaction.py` reads `src/` as written and
   fails on a logging call or an exception message whose arguments name a
-  `.url`, a raw target key of a scope, a whole scope (a method of it other
-  than `.get` included) or a credential parameter by its own name; a value
-  first bound to a variable is not followed. A new secret travels in a header
+  `.url`, a raw target key of a scope or of the request (a mapping over its
+  scope), a whole scope (a method of it other than `.get` included), the
+  request through `.items()`, `.values()` or `dict()`, or a credential
+  parameter by its own name; a value first bound to a variable is not
+  followed. A new secret travels in a header
   or the body; a route that must carry one in its path joins
   `CREDENTIAL_PATH_PREFIXES`. Even redacted, do not run the API at
   `--log-level trace` (or `UVICORN_LOG_LEVEL=trace`) on real traffic: it logs

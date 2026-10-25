@@ -7,7 +7,8 @@ classified, every credential in a path is masked, and every app line that
 names a request names its route template (classified values filled in) or its
 masked path before routing. A syntactic ratchet over `src/` fails on a logging
 call or an exception message whose arguments name a URL (`.url`,
-`.query_params`, `.path_params`), a raw target key of a scope, a whole scope,
+`.query_params`, `.path_params`), a raw target key of a scope or of the request
+(a mapping over its scope), a whole scope, the request spread into a mapping,
 or a credential parameter by its own name, and on code outside the masks that
 reads a raw request target. It does not follow a value through a variable into
 a message.
@@ -264,16 +265,27 @@ def _is_scope_key(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value in _SCOPE_KEYS
 
 
+def _is_request(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "request"
+
+
+def _reads_as_a_scope(node: ast.AST) -> bool:
+    """A scope, or a `request`: a Starlette `Request` is a mapping over its
+    scope, so `request["path"]` reads the scope's own key."""
+    return _is_scope(node) or _is_request(node)
+
+
 def _reads_raw_target(node: ast.AST) -> bool:
     """`scope["path"]`, `scope.get("query_string")`, `request.scope["raw_path"]`,
-    and `request.url`, `request.query_params` or `request.path_params`."""
-    if isinstance(node, ast.Subscript) and _is_scope(node.value):
+    `request["path"]` and `request.get("query_string")`, and `request.url`,
+    `request.query_params` or `request.path_params`."""
+    if isinstance(node, ast.Subscript) and _reads_as_a_scope(node.value):
         return _is_scope_key(node.slice)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "get"
-        and _is_scope(node.func.value)
+        and _reads_as_a_scope(node.func.value)
         and node.args
     ):
         return _is_scope_key(node.args[0])
@@ -301,20 +313,29 @@ def _printed(part: ast.AST):
     (`CREDENTIAL_PARAMS`), and a scope used whole. A scope indexed or read
     from (`scope["type"]`, `scope.get("client")`) is not used whole, and
     neither is one handed straight to `loggable_path`; one whose method other
-    than `.get` is called (`scope.items()`, `request.scope.copy()`) is."""
-    held, whole = set(), set()
+    than `.get` is called (`scope.items()`, `request.scope.copy()`) is. A
+    `request` prints its scope through `.items()`, `.values()` or `dict()`;
+    its attributes and its own repr do not."""
+    held, whole, spread = set(), set(), set()
     for node in ast.walk(part):
         if isinstance(node, ast.Call):
-            if _callee(node) == "loggable_path":
+            callee = _callee(node)
+            if callee == "loggable_path":
                 held.update(id(arg) for arg in node.args)
-            elif isinstance(node.func, ast.Attribute) and node.func.attr != "get":
+            elif isinstance(node.func, ast.Attribute) and callee != "get":
                 whole.add(id(node.func.value))
+                if callee in ("items", "values"):
+                    spread.add(id(node.func.value))
+            if isinstance(node.func, ast.Name) and callee == "dict":
+                spread.update(id(arg) for arg in node.args)
         if isinstance(node, (ast.Subscript, ast.Attribute)):
             held.add(id(node.value))
     for node in ast.walk(part):
         credential = isinstance(node, ast.Name) and node.id in CREDENTIAL_PARAMS
         used_whole = id(node) not in held or id(node) in whole
-        if _names_a_url(node) or credential or (_is_scope(node) and used_whole):
+        scope_whole = _is_scope(node) and used_whole
+        request_spread = _is_request(node) and id(node) in spread
+        if _names_a_url(node) or credential or scope_whole or request_spread:
             yield node
 
 
@@ -469,3 +490,27 @@ class TestNoLogLineCarriesARequestTarget:
             (6, "leak", "scope"),
             (7, "leak", "request.scope"),
         ]
+
+    def test_the_ratchet_sees_the_request_read_as_its_scope(self):
+        """A Starlette `Request` is a mapping over its scope, so indexing it, its
+        `.get`, its `.items()` and `.values()`, and `dict(request)` print what
+        the scope holds. Its attributes (`request.method`), a key that holds no
+        target (`request["type"]`) and the request itself, whose repr names
+        only its class, do not."""
+        planted = ast.parse(
+            "def leak(request):\n"
+            "    logger.info('%s', request['path'])\n"
+            "    logger.info('%s', request.get('query_string'))\n"
+            "    logger.info('%s', dict(request))\n"
+            "    logger.info('%s', request.items())\n"
+            "    logger.info('%s', list(request.values()))\n"
+            "    logger.info('%s %s %s', request.method, request['type'], request)\n"
+        )
+        assert sorted(_message_hits(planted)) == [
+            (2, "leak", "request['path']"),
+            (3, "leak", "request.get('query_string')"),
+            (4, "leak", "request"),
+            (5, "leak", "request"),
+            (6, "leak", "request"),
+        ]
+        assert sorted(_raw_reads(planted)) == [(2, "leak"), (3, "leak")]
