@@ -300,17 +300,21 @@ def _printed(part: ast.AST):
     or a raw target (`_names_a_url`), a credential parameter by its own name
     (`CREDENTIAL_PARAMS`), and a scope used whole. A scope indexed or read
     from (`scope["type"]`, `scope.get("client")`) is not used whole, and
-    neither is one handed straight to `loggable_path`."""
-    held = set()
+    neither is one handed straight to `loggable_path`; one whose method other
+    than `.get` is called (`scope.items()`, `request.scope.copy()`) is."""
+    held, whole = set(), set()
     for node in ast.walk(part):
+        if isinstance(node, ast.Call):
+            if _callee(node) == "loggable_path":
+                held.update(id(arg) for arg in node.args)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr != "get":
+                whole.add(id(node.func.value))
         if isinstance(node, (ast.Subscript, ast.Attribute)):
             held.add(id(node.value))
-        elif isinstance(node, ast.Call) and _callee(node) == "loggable_path":
-            held.update(id(arg) for arg in node.args)
     for node in ast.walk(part):
         credential = isinstance(node, ast.Name) and node.id in CREDENTIAL_PARAMS
-        whole_scope = _is_scope(node) and id(node) not in held
-        if _names_a_url(node) or credential or whole_scope:
+        used_whole = id(node) not in held or id(node) in whole
+        if _names_a_url(node) or credential or (_is_scope(node) and used_whole):
             yield node
 
 
@@ -446,17 +450,22 @@ class TestNoLogLineCarriesARequestTarget:
         ]
 
     def test_the_ratchet_sees_a_whole_scope_in_a_message(self):
-        """A scope printed whole prints its path, raw path and query string. Read
-        from (`scope["type"]`, `scope.get("client")`) or handed to
-        `loggable_path`, it is not."""
+        """A scope printed whole prints its path, raw path and query string, and
+        so does one printed through a method (`scope.items()`,
+        `request.scope.copy()`). Read from (`scope["type"]`,
+        `scope.get("client")`) or handed to `loggable_path`, it is not."""
         planted = ast.parse(
             "def leak(request, scope):\n"
             "    logger.info('request %s', request.scope)\n"
             "    raise ValueError(f'refused {scope}')\n"
             "    logger.info('refused %s', loggable_path(request.scope))\n"
             "    logger.info('a %s from %s', scope['type'], scope.get('client'))\n"
+            "    logger.info('scope %s', scope.items())\n"
+            "    logger.info('request %s', request.scope.copy())\n"
         )
         assert sorted(_message_hits(planted)) == [
             (2, "leak", "request.scope"),
             (3, "leak", "scope"),
+            (6, "leak", "scope"),
+            (7, "leak", "request.scope"),
         ]
