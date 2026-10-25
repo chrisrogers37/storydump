@@ -95,7 +95,7 @@ logger = setup_logger()
 
 #: The HTTP libraries' loggers, and the level each is pinned at. httpx logs
 #: every request at INFO with its whole URL ("HTTP Request: GET <url> ..."),
-#: and a provider URL carries a secret: the bot token in a Telegram path
+#: and a provider URL carries a secret, such as the bot token in a Telegram path
 #: (`src/channels/telegram_transport.py`), a client secret or an access token
 #: in an OAuth or Graph query (`ig_login_oauth.py`, `credential_lifecycle.py`).
 #: httpcore logs at DEBUG. The worker's root logger sits at `WORKER_LOG_LEVEL`
