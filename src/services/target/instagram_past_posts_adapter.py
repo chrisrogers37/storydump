@@ -37,7 +37,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from src.services.target import egress, vocabulary
+from src.services.target import egress, refusal_evidence, vocabulary
 from src.services.target.media_adapters import (
     MediaCredentialDead,
     MediaRetryableError,
@@ -194,6 +194,39 @@ def identity(media_id: str) -> str:
     Each carousel child uses its own media id as its item identity.
     """
     return f"{PROVIDER}:media:{_media_id(media_id)}"
+
+
+@dataclass(frozen=True)
+class _Ownership:
+    """Whether a media item's owner is this account, and the test that decided.
+
+    `match` holds the comparison's outcomes as flags, never an id, so a refusal
+    can say which test failed without recording whose media it was.
+    """
+
+    ok: bool
+    test: str
+    match: dict = field(default_factory=dict)
+
+
+def _graph_refusal(response, error, url: str, token: str) -> dict:
+    """What Graph said when it refused a read, as refusal evidence.
+
+    Its numbers, its scrubbed text and the request's path. The query and the
+    headers are never read, so neither the fields asked for nor the token can
+    reach the record.
+    """
+    error = error if isinstance(error, dict) else {}
+    return refusal_evidence.evidence(
+        "graph_error",
+        http_status=response.status_code,
+        code=refusal_evidence.whole(error.get("code")),
+        error_subcode=refusal_evidence.whole(error.get("error_subcode")),
+        type=refusal_evidence.short(error.get("type")),
+        message=refusal_evidence.scrub_text(error.get("message"), secrets=(token,)),
+        fbtrace_id=refusal_evidence.short(error.get("fbtrace_id")),
+        path=refusal_evidence.graph_path(url),
+    )
 
 
 def _media_id(value) -> str:
@@ -436,7 +469,12 @@ class InstagramPastPostsAdapter:
                 )
             ):
                 raise _CaptionUnsupported("caption_field_unsupported")
-            raise MediaTerminalError("Instagram media is unavailable to this account")
+            raise refusal_evidence.attach(
+                MediaTerminalError("Instagram media is unavailable to this account"),
+                _graph_refusal(
+                    response, error, f"{self._base}/{path}", turn.access.token
+                ),
+            )
         return body
 
     def _checkpoint(self, checkpoint):
@@ -688,7 +726,7 @@ class InstagramPastPostsAdapter:
         if parent.get("id") != mid:
             raise MediaRetryableError("Instagram parent identity changed")
         ts = _timestamp(parent.get("timestamp"))
-        if not await self._owned_by_account(parent.get("owner"), turn):
+        if not (await self._ownership(parent.get("owner"), turn)).ok:
             raise MediaTerminalError("Instagram media belongs to another account")
         observation, diagnostic = await self._observe(
             parent, ts, turn, enrichment=(state, diagnostic)
@@ -715,7 +753,7 @@ class InstagramPastPostsAdapter:
                     or _timestamp(row.get("timestamp")) != cp["pending_at"]
                 ):
                     raise MediaRetryableError("Instagram continuation identity changed")
-                if not await self._owned_by_account(row.get("owner"), turn):
+                if not (await self._ownership(row.get("owner"), turn)).ok:
                     raise MediaTerminalError(
                         "Instagram media ownership could not be established"
                     )
@@ -1056,9 +1094,16 @@ class InstagramPastPostsAdapter:
         for part in parts:
             if part.get("id") == selected_asset_id:
                 return part
+        facts = dict(children=len(parts), complete=complete)
         if complete:
-            raise MediaSelectedAssetGone()
-        raise MediaSelectedAssetChanged()
+            raise refusal_evidence.attach(
+                MediaSelectedAssetGone(),
+                refusal_evidence.evidence("slide_gone", **facts),
+            )
+        raise refusal_evidence.attach(
+            MediaSelectedAssetChanged(),
+            refusal_evidence.evidence("slide_changed", **facts),
+        )
 
     async def fetch_bytes(
         self,
@@ -1088,24 +1133,43 @@ class InstagramPastPostsAdapter:
             if type(max_bytes) is not int or max_bytes <= 0:
                 raise MediaTerminalError("media byte cap must be positive")
             turn = await self._turn(source_id, workspace_id)
+            # Every link status the CDN answered, so a second refusal keeps the first.
+            link_statuses = []
             for attempt in range(2):
                 parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
-                owner = parent.get("owner")
-                if not await self._owned_by_account(owner, turn):
-                    raise MediaTerminalError(
-                        "Instagram media ownership could not be established"
+                ownership = await self._ownership(parent.get("owner"), turn)
+                if not ownership.ok:
+                    raise refusal_evidence.attach(
+                        MediaTerminalError(
+                            "Instagram media ownership could not be established"
+                        ),
+                        refusal_evidence.evidence(
+                            "ownership_unproven",
+                            test=ownership.test,
+                            match=dict(ownership.match),
+                        ),
                     )
                 if parent.get("id") != mid:
-                    raise MediaTerminalError(
-                        "Instagram returned a different media item"
+                    raise refusal_evidence.attach(
+                        MediaTerminalError("Instagram returned a different media item"),
+                        refusal_evidence.evidence(
+                            "identity_mismatch", id_matches=False
+                        ),
                     )
                 parts, complete = await self._children(parent, turn)
                 part = self._selected_part(parts, complete, selected_asset_id)
                 kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
                 url = part.get("media_url")
                 if kind is None or not isinstance(url, str) or not url:
-                    raise MediaTerminalError(
-                        "Instagram does not provide this media file"
+                    raise refusal_evidence.attach(
+                        MediaTerminalError(
+                            "Instagram does not provide this media file"
+                        ),
+                        refusal_evidence.evidence(
+                            "no_media_link",
+                            media_type=refusal_evidence.short(part.get("media_type")),
+                            has_link=isinstance(url, str) and bool(url),
+                        ),
                     )
                 policy = self._download_policy(url, max_bytes)
                 try:
@@ -1118,28 +1182,57 @@ class InstagramPastPostsAdapter:
                         policy=policy,
                         admission=turn.guard(graph=False),
                     )
-                except egress.ResponseTooLarge:
-                    raise MediaTerminalError(
-                        "Instagram media exceeds the byte cap"
+                except egress.ResponseTooLarge as exc:
+                    raise refusal_evidence.attach(
+                        MediaTerminalError("Instagram media exceeds the byte cap"),
+                        refusal_evidence.evidence(
+                            "over_byte_cap",
+                            cap=exc.cap,
+                            received=exc.received,
+                            host=refusal_evidence.link_evidence(url)["host"],
+                        ),
                     ) from None
                 except egress.EgressBudgetExhausted:
                     raise MediaRetryableError(
                         "Instagram download budget exhausted"
                     ) from None
-                if response.status_code in _EXPIRED_LINK and attempt == 0:
-                    continue
+                link = refusal_evidence.link_evidence(url)
                 if response.status_code in _EXPIRED_LINK:
-                    raise MediaTerminalError("Instagram media file is unavailable")
+                    link_statuses.append(response.status_code)
+                    if attempt == 0:
+                        continue
+                    raise refusal_evidence.attach(
+                        MediaTerminalError("Instagram media file is unavailable"),
+                        refusal_evidence.evidence(
+                            "cdn_refused", statuses=list(link_statuses), **link
+                        ),
+                    )
                 if response.is_error:
-                    raise MediaRetryableError("Instagram media download failed")
+                    raise refusal_evidence.attach(
+                        MediaRetryableError("Instagram media download failed"),
+                        refusal_evidence.evidence(
+                            "cdn_error",
+                            statuses=[*link_statuses, response.status_code],
+                            **link,
+                        ),
+                    )
                 mime = response.headers.get("content-type", "").split(";")[0].lower()
                 expected = {
                     "image": {"image/jpeg"},
                     "video": {"video/mp4", "video/quicktime"},
                 }
                 if mime not in expected[kind] or not response.content:
-                    raise MediaTerminalError(
-                        "Instagram returned unsupported media bytes"
+                    raise refusal_evidence.attach(
+                        MediaTerminalError(
+                            "Instagram returned unsupported media bytes"
+                        ),
+                        refusal_evidence.evidence(
+                            "wrong_bytes",
+                            content_type=refusal_evidence.short(mime),
+                            length=len(response.content),
+                            http_status=response.status_code,
+                            host=link["host"],
+                        ),
                     )
                 # This is a byte fetch, not video eligibility. Ingest activation
                 # must validate duration/codec before admitting video candidates.
@@ -1205,7 +1298,7 @@ class InstagramPastPostsAdapter:
             and not known_owner
         ):
             raise MediaTerminalError("Instagram preview needs a third Graph request")
-        if not await self._owned_by_account(owner, turn, policy=policy):
+        if not (await self._ownership(owner, turn, policy=policy)).ok:
             raise MediaTerminalError(
                 "Instagram media ownership could not be established"
             )
@@ -1248,35 +1341,47 @@ class InstagramPastPostsAdapter:
             raise MediaTerminalError("Instagram returned unsupported preview bytes")
         return response.content
 
-    async def _owned_by_account(
+    async def _ownership(
         self, owner, turn: _Turn, *, policy: Optional[egress.EgressPolicy] = None
-    ) -> bool:
+    ) -> _Ownership:
         access = turn.access
         if not isinstance(owner, dict):
-            return False
+            return _Ownership(False, "no_owner")
         owner_id = owner.get("id")
         if not isinstance(owner_id, str) or not _ID.fullmatch(owner_id):
-            return False
+            return _Ownership(False, "malformed_owner_id")
         if owner_id == access.account_ref:
-            return True
+            return _Ownership(True, "account", {"account_matches": True})
         # Instagram Login can return the app-scoped `id` as media owner,
         # while OAuth stores the account's `user_id`. The id the current
         # authorization verified is the proof, and no read is needed for it.
         if access.app_scoped_id is not None:
-            return owner_id == access.app_scoped_id
+            matches = owner_id == access.app_scoped_id
+            return _Ownership(
+                matches,
+                "app_scoped_id",
+                {"account_matches": False, "app_scoped_id_matches": matches},
+            )
         # None is recorded: prove the mapping with this SAME token, once for the
         # whole turn; a username or a merely readable post is no proof.
         if turn.profile is None:
             if turn.profile_read:
                 # The turn's one read failed and was not repeated.
-                return False
+                return _Ownership(False, "profile_read_failed")
             turn.profile_read = True
             turn.profile = await self._graph(
                 "me", turn, {"fields": "id,user_id"}, policy=policy
             )
-        return (
-            str(turn.profile.get("user_id")) == access.account_ref
-            and turn.profile.get("id") == owner_id
+        user_matches = str(turn.profile.get("user_id")) == access.account_ref
+        id_matches = turn.profile.get("id") == owner_id
+        return _Ownership(
+            user_matches and id_matches,
+            "profile",
+            {
+                "account_matches": False,
+                "profile_user_id_matches": user_matches,
+                "profile_id_matches": id_matches,
+            },
         )
 
     def _download_policy(self, url: str, max_bytes: int) -> egress.EgressPolicy:
@@ -1296,7 +1401,12 @@ class InstagramPastPostsAdapter:
         except ValueError:
             valid = False
         if not valid:
-            raise MediaTerminalError("Instagram returned an untrusted media host")
+            raise refusal_evidence.attach(
+                MediaTerminalError("Instagram returned an untrusted media host"),
+                refusal_evidence.evidence(
+                    "untrusted_host", **refusal_evidence.link_evidence(url)
+                ),
+            )
         return replace(
             self._policy,
             allowed_hosts=frozenset({host}),
