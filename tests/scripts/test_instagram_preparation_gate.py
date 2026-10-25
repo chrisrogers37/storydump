@@ -11,7 +11,13 @@ import pytest
 from PIL import Image
 from sqlalchemy import text
 
-from src.services.target import egress, media_adapters, media_validation, source_policy
+from src.services.target import (
+    egress,
+    media_adapters,
+    media_validation,
+    refusal_evidence,
+    source_policy,
+)
 from src.services.target import source_read_admission as admission
 from src.services.target.instagram_past_posts_adapter import (
     PastPostsAccess,
@@ -543,6 +549,247 @@ async def test_transient_selected_failure_preserves_metadata_and_permits_retry(
         and (await proof(past_posts_engine, origin, intent))["validation_state"]
         == "supported"
     )
+
+
+#: The turn's counts as an adapter reports them before a refusal. Each is
+#: distinct, so a count recorded under another name fails.
+TURN = {
+    "graph_attempts": 2,
+    "observed_parents": 1,
+    "source_fence_drop": 3,
+    "listed_parents": 4,
+    "cdn_attempts": 5,
+}
+
+
+def refusing(error):
+    """A preparation whose adapter reports `TURN`, then raises `error`."""
+    from src.services.target.instagram_preparation import (
+        PastPostsPreparationPorts,
+        SelectedPreparation,
+    )
+
+    class RefusingAdapter:
+        async def fetch_bytes(self, *args, **kwargs):
+            kwargs["on_counters"](media_adapters.MediaTurnCounters(**TURN))
+            raise error
+
+    async def prepare(capture, config):
+        return RefusingAdapter()
+
+    return SelectedPreparation(
+        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+    )
+
+
+def no_media_link():
+    """A terminal refusal carrying the evidence of a part with no link."""
+    return refusal_evidence.attach(
+        media_adapters.MediaTerminalError("synthetic"),
+        refusal_evidence.evidence("no_media_link", media_type="IMAGE", has_link=False),
+    )
+
+
+class SyntheticRefusal(media_adapters.MediaTerminalError):
+    """A terminal refusal raised with no evidence attached."""
+
+
+async def test_terminal_refusal_records_its_evidence_with_the_turn_counters(
+    past_posts_engine, origin
+):
+    """A terminal fetch refusal's evidence lands, with the turn's counters, under
+    the asset's `validation_capture -> 'refusal'` beside its usual keys and on
+    the pending it raises. The reason stays `asset_unavailable`, so the story
+    reads as unavailable exactly as before, and no proof is granted."""
+    src, item, intent = await selected(past_posts_engine, origin)
+    prepared = refusing(no_media_link())
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    refusal = {
+        "v": 1,
+        "kind": "no_media_link",
+        "media_type": "IMAGE",
+        "has_link": False,
+        "counters": TURN,
+    }
+    assert err.value.reason == "asset_unavailable" and err.value.evidence == refusal
+    row = await proof(past_posts_engine, origin, intent)
+    assert row["validation_capture"] == {
+        "generation_id": src["generation_id"],
+        "observation_revision": 1,
+        "selected_asset_id": "123",
+        "state": "validation_pending",
+        "reason": "asset_unavailable",
+        "refusal": refusal,
+    }
+    assert (
+        row["validation_state"] == "pending" and row["validation_fingerprint"] is None
+    )
+    async with obs.uow(past_posts_engine, origin) as conn:
+        verdict = await selection.verdict(conn, origin, src, intent=intent)
+    assert verdict["reason"] == "asset_unavailable" and not verdict["suitable"]
+
+
+@pytest.mark.parametrize(
+    "error_type", [media_adapters.MediaTerminalError, SyntheticRefusal]
+)
+async def test_terminal_refusal_without_evidence_records_its_error_class(
+    past_posts_engine, origin, error_type
+):
+    """A terminal refusal that carries no evidence is recorded as `unrecorded`
+    naming the error's own class, so a refusal without evidence is still told
+    from no refusal; the turn's counters ride with it."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    prepared = refusing(error_type("synthetic"))
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    refusal = {
+        "v": 1,
+        "kind": "unrecorded",
+        "error": error_type.__name__,
+        "counters": TURN,
+    }
+    assert err.value.evidence == refusal
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert capture["reason"] == "asset_unavailable" and capture["refusal"] == refusal
+
+
+async def test_retryable_refusal_records_its_evidence_under_download_pending(
+    past_posts_engine, origin
+):
+    """A retryable fetch refusal's evidence lands in the asset's
+    `validation_capture` under `download_pending`, and the original error is
+    raised again. `download_pending` does not latch the story."""
+    src, item, intent = await selected(past_posts_engine, origin)
+    refused = refusal_evidence.attach(
+        media_adapters.MediaRetryableError("synthetic"),
+        refusal_evidence.evidence(
+            "cdn_error",
+            statuses=[503],
+            host="scontent-test.cdninstagram.com",
+            expiry="1900000000",
+        ),
+    )
+    prepared = refusing(refused)
+    with pytest.raises(media_adapters.MediaRetryableError) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value is refused
+    row = await proof(past_posts_engine, origin, intent)
+    assert row["validation_capture"] == {
+        "generation_id": src["generation_id"],
+        "observation_revision": 1,
+        "selected_asset_id": "123",
+        "state": "validation_pending",
+        "reason": "download_pending",
+        "refusal": {
+            "v": 1,
+            "kind": "cdn_error",
+            "statuses": [503],
+            "host": "scontent-test.cdninstagram.com",
+            "expiry": "1900000000",
+            "counters": TURN,
+        },
+    }
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
+async def test_slide_gone_refusal_carries_its_evidence_and_the_indexed_slide_count(
+    past_posts_engine, origin
+):
+    """A slide judged gone retires its asset, which deletes the row that would
+    hold the refusal, so the evidence rides on the pending alone: the adapter's
+    facts, the turn's counters and the slide count the index recorded, to set
+    against the children the read returned."""
+    from src.services.target.instagram_catalog import PastPostsAsset
+
+    src, item, intent = await selected(past_posts_engine, origin)
+    await obs.observe(
+        past_posts_engine,
+        origin,
+        src,
+        replace(
+            obs.bundle(attribution="not_detected"),
+            assets=(
+                PastPostsAsset(selected_asset_id="123", media_kind="image", position=1),
+                PastPostsAsset(selected_asset_id="456", media_kind="image", position=2),
+            ),
+            slide_count=2,
+        ),
+    )
+    prepared = refusing(
+        refusal_evidence.attach(
+            media_adapters.MediaSelectedAssetGone(),
+            refusal_evidence.evidence("slide_gone", children=1, complete=True),
+        )
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "asset_unavailable"
+    assert err.value.evidence == {
+        "v": 1,
+        "kind": "slide_gone",
+        "children": 1,
+        "complete": True,
+        "counters": TURN,
+        "slide_count": 2,
+    }
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (
+            await conn.scalar(
+                text("SELECT state FROM media_items WHERE id=:id"),
+                {"id": item.media_item_id},
+            )
+            == "removed"
+        )
+        assert (
+            await conn.scalar(
+                text(
+                    "SELECT count(*) FROM instagram_media_assets WHERE media_item_id=:id"
+                ),
+                {"id": item.media_item_id},
+            )
+            == 0
+        )
+    assert (await proof(past_posts_engine, origin, intent))[
+        "validation_capture"
+    ] is None
+
+
+async def test_reobservation_clears_a_recorded_refusal(past_posts_engine, origin):
+    """A refusal belongs to the observation it refused: the next observation of
+    the post clears it with the rest of `validation_capture`, and the story is
+    eligible again."""
+    src, item, intent = await selected(past_posts_engine, origin)
+    prepared = refusing(no_media_link())
+    with pytest.raises(source_policy.MediaAdmissionPending):
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert (
+        "refusal"
+        in (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    )
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))[
+            "reason"
+        ] == "asset_unavailable"
+    await obs.observe(
+        past_posts_engine, origin, src, obs.bundle(attribution="not_detected")
+    )
+    assert (await proof(past_posts_engine, origin, intent))[
+        "validation_capture"
+    ] is None
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
 
 
 async def test_cancel_requested_before_validation_cas_refuses_selected_bytes(

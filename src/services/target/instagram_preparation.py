@@ -76,16 +76,16 @@ FOR UPDATE OF m,i
 def _refusal(exc, counters, selected) -> dict:
     """A refused fetch's evidence (`refusal_evidence`), with the turn's counters.
 
-    A slide judged gone or changed also carries the slide count the index
-    recorded, to set against the children the read returned. A refusal raised
-    with no evidence names its error class, so it is never mistaken for none.
+    A slide judged gone also carries the slide count the index recorded, to set
+    against the children the read returned. A refusal raised with no evidence
+    names its error class, so it is never mistaken for none.
     """
     facts = dict(
         refusal_evidence.of(exc)
         or refusal_evidence.evidence("unrecorded", error=type(exc).__name__)
     )
     facts["counters"] = asdict(counters)
-    if facts["kind"] in ("slide_gone", "slide_changed"):
+    if facts["kind"] == "slide_gone":
         facts["slide_count"] = selected.subject.get("slide_count")
     return facts
 
