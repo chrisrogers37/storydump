@@ -178,8 +178,8 @@ class TestWhatALogLinePrintsOfARequest:
             ),
             # A token segment of any shape: one that is empty once its
             # parameters are set aside (`;<T>`, printed `%3B<T>`, and `.;<T>`;
-            # Starlette routes the first to the accept handler), a dot-dot, or a
-            # segment before it.
+            # Starlette routes each of them to the accept handler), a dot-dot,
+            # or a segment before it.
             (
                 f"/api/v1/invitations/;{FAKE_TOKEN}/accept",
                 "/api/v1/invitations/<redacted>",
@@ -254,6 +254,13 @@ class TestWhatALogLinePrintsOfARequest:
             # a misdirected invitation link.
             (f"/join/{FAKE_TOKEN}", "/join/<redacted>"),
             (f"/join/{FAKE_TOKEN}/start", "/join/<redacted>"),
+            # The first prefix in the path decides: what follows it is masked
+            # whole, a later prefix included, whichever prefix comes first.
+            (f"/join/{FAKE_TOKEN}/api/v1/invitations/x", "/join/<redacted>"),
+            (
+                f"/api/v1/invitations/{FAKE_TOKEN}/api/v1/invitations/x",
+                "/api/v1/invitations/<redacted>",
+            ),
         ],
     )
     def test_a_target_prints_without_its_query_or_its_credential(self, target, printed):
