@@ -124,7 +124,7 @@ logger.exception("sender-job sweep failed; retrying on cadence")
 ## Security patterns
 
 - CORS admits ONE origin, `settings.web_app_origin`, with credentials; with no
-  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:793`).
+  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:795`).
 - `TRUSTED_PROXY_HOSTS` is a network list and never `"*"`: the wildcard makes
   every IP-keyed control caller-partitionable (`src/config/settings.py:300`).
 - No existence oracle: a non-member's workspace is 404; a rejected webhook

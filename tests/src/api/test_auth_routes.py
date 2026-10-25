@@ -234,32 +234,14 @@ class TestCallback:
         ],
     )
     def test_a_callback_that_consumes_nothing_says_so_without_the_query(
-        self, client, configured, counter, query, says
+        self, client, configured, counter, app_lines, query, says
     ):
         """The access log prints no query string (`src/utils/logger.py`), so
         these exits name themselves; what the provider sent stays out."""
-        import logging
-
-        from src.utils.logger import logger as app_logger
-
-        lines: list[str] = []
-
-        class _Grab(logging.Handler):
-            def emit(self, record):
-                lines.append(record.getMessage())
-
-        handler = _Grab(level=logging.INFO)
-        previous = app_logger.level
-        app_logger.setLevel(logging.INFO)
-        app_logger.addHandler(handler)
-        try:
-            resp = client.get(f"/auth/google/callback?{query}", follow_redirects=False)
-        finally:
-            app_logger.removeHandler(handler)
-            app_logger.setLevel(previous)
+        resp = client.get(f"/auth/google/callback?{query}", follow_redirects=False)
         assert resp.status_code == 302
-        assert says in lines, lines
-        assert [line for line in lines if "fake-" in line] == [], lines
+        assert says in app_lines, app_lines
+        assert [line for line in app_lines if "fake-" in line] == [], app_lines
 
     def test_a_state_without_its_cookie_is_refused(
         self, client, configured, counter, state_store
@@ -1047,38 +1029,22 @@ class TestInstagramCallback:
             == f"{FRONT}/auth/error?reason={reason}&flow=instagram"
         )
 
-    def test_a_refused_return_says_so_without_the_query(self, client, instagram):
+    def test_a_refused_return_says_so_without_the_query(
+        self, client, instagram, app_lines
+    ):
         """The access log prints no query string (`src/utils/logger.py`), so
         this exit names itself; what the provider sent stays out."""
-        import logging
-
-        from src.utils.logger import logger as app_logger
-
-        lines: list[str] = []
-
-        class _Grab(logging.Handler):
-            def emit(self, record):
-                lines.append(record.getMessage())
-
-        handler = _Grab(level=logging.INFO)
-        previous = app_logger.level
-        app_logger.setLevel(logging.INFO)
-        app_logger.addHandler(handler)
-        try:
-            resp = client.get(
-                f"{self.URL}?error=access_denied&state=fake-state-0000",
-                follow_redirects=False,
-            )
-        finally:
-            app_logger.removeHandler(handler)
-            app_logger.setLevel(previous)
+        resp = client.get(
+            f"{self.URL}?error=access_denied&state=fake-state-0000",
+            follow_redirects=False,
+        )
         assert resp.status_code == 302
         says = (
             "instagram connect: the provider returned error=access_denied;"
             " nothing was consumed"
         )
-        assert says in lines, lines
-        assert [line for line in lines if "fake-" in line] == [], lines
+        assert says in app_lines, app_lines
+        assert [line for line in app_lines if "fake-" in line] == [], app_lines
 
     def test_a_state_minted_for_another_leg_is_refused_by_name(
         self, client, instagram, state_row, browser

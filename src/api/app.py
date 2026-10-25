@@ -442,6 +442,12 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
+def _log_refusal(request: Request, exc: Exception) -> None:
+    """The line a refusal answered with its own status leaves: the method,
+    the route the request matched (`loggable_path`) and the refusal."""
+    logger.info("refused %s %s: %s", request.method, loggable_path(request.scope), exc)
+
+
 def _busy(reason: str) -> JSONResponse:
     """The answer to load, not a fault: a 503 naming *reason*, which the
     caller retries after a second."""
@@ -501,9 +507,7 @@ def _mapped(table: dict, content=_reason_detail, *, log: bool = True):
         if status is None:
             return _unmapped(request, exc)
         if log:
-            logger.info(
-                "refused %s %s: %s", request.method, loggable_path(request.scope), exc
-            )
+            _log_refusal(request, exc)
         return JSONResponse(status_code=status, content=content(exc, status))
 
     return handler
@@ -626,9 +630,7 @@ def _register_handlers(app: FastAPI) -> None:
         # The web's one code carrier is `reason` (`target-api.ts::readError`),
         # matched as `[a-z0-9_]+` — so the refusal travels as
         # `invalid_mix_<reason>`, not in `detail`.
-        logger.info(
-            "refused %s %s: %s", request.method, loggable_path(request.scope), exc
-        )
+        _log_refusal(request, exc)
         return JSONResponse(
             status_code=400,
             content={

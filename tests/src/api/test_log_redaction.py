@@ -10,7 +10,6 @@ URL or a raw request target.
 """
 
 import ast
-import logging
 import re
 from pathlib import Path
 
@@ -53,30 +52,6 @@ def _templates(app) -> list[str]:
 
 def _parameters(app) -> set[str]:
     return {name for path in _templates(app) for name in _PARAM.findall(path)}
-
-
-@pytest.fixture
-def app_lines():
-    """Every line the app logger emits at INFO or above, as its message. The
-    logger does not propagate (`src/utils/logger.py`), so the handler sits on
-    it, held at INFO whatever `LOG_LEVEL` this run has (CI sets DEBUG)."""
-    from src.utils.logger import logger as app_logger
-
-    lines: list[str] = []
-
-    class _Grab(logging.Handler):
-        def emit(self, record):
-            lines.append(record.getMessage())
-
-    handler = _Grab(level=logging.INFO)
-    previous = app_logger.level
-    app_logger.setLevel(logging.INFO)
-    app_logger.addHandler(handler)
-    try:
-        yield lines
-    finally:
-        app_logger.removeHandler(handler)
-        app_logger.setLevel(previous)
 
 
 class TestEveryCredentialInAPathIsMasked:
