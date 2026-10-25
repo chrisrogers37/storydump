@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlsplit
@@ -203,6 +204,30 @@ def signed_in(app):
     app.dependency_overrides[current_principal] = lambda: PRINCIPAL
     yield PRINCIPAL
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def app_lines():
+    """Every line the app logger emits at INFO or above, as its message. The
+    logger does not propagate (`src/utils/logger.py`), so the handler sits on
+    it, held at INFO whatever `LOG_LEVEL` this run has (CI sets DEBUG)."""
+    from src.utils.logger import logger as app_logger
+
+    lines: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Grab(level=logging.INFO)
+    previous = app_logger.level
+    app_logger.setLevel(logging.INFO)
+    app_logger.addHandler(handler)
+    try:
+        yield lines
+    finally:
+        app_logger.removeHandler(handler)
+        app_logger.setLevel(previous)
 
 
 @pytest.fixture
