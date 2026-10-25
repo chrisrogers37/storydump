@@ -91,22 +91,28 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   that embeds a token is redacted before it reaches an exception or a log line
   (`TelegramTransport.redact`); a provider's error body is summarised by status,
   not quoted.
-- uvicorn's access line and the app's own refusal lines print no query string,
-  and mask the segment after a `CREDENTIAL_PATH_PREFIXES` prefix wherever a
-  path they print carries one. `src/utils/logger.py` puts `AccessLogRedactor`
-  on `uvicorn.access` and on the trace-level `uvicorn.asgi`, which print
-  `?<redacted>` and that masked path (the trace line no raw path either). An
-  application line names a request by `loggable_path(request.scope)`: its route
-  template, with only `LOGGABLE_PATH_PARAMS` values filled in, or before
-  routing its masked path. Never name it by `request.url`, `scope["path"]`, the
-  scope itself or the query. `tests/src/api/test_log_redaction.py` reads `src/`
-  as written and fails on a logging call or an exception message whose
-  arguments name a `.url`, a raw target key of a scope, a whole scope or a
-  credential parameter by its own name; a value first bound to a variable is
-  not followed. A new secret travels in a header or the body; a route that
-  must carry one in its path joins `CREDENTIAL_PATH_PREFIXES`. Even redacted,
-  do not run the API at `--log-level trace` (or `UVICORN_LOG_LEVEL=trace`) on
-  real traffic: it logs every ASGI message of every request.
+- uvicorn's access and trace lines and the app's own refusal lines print no
+  query string, and wherever a path they print carries a
+  `CREDENTIAL_PATH_PREFIXES` prefix (`/api/v1/invitations/`, `/join/`), under a
+  root path, after a doubled slash, in an absolute-form target or in any
+  letter case, everything after it prints as one `<redacted>`. A token reaches
+  them only in a path that carries neither prefix before it.
+  `src/utils/logger.py` puts `AccessLogRedactor` on `uvicorn.access` and on the
+  trace-level `uvicorn.asgi`: the access line prints `?<redacted>` and the
+  masked path; the trace line prints the masked `path`, and `raw_path` and
+  `query_string` as `<redacted>`. An application line names a request by
+  `loggable_path(request.scope)`: its route template, with only
+  `LOGGABLE_PATH_PARAMS` values filled in, or before routing its masked path.
+  Never name it by `request.url`, `scope["path"]`, the scope itself or the
+  query. `tests/src/api/test_log_redaction.py` reads `src/` as written and
+  fails on a logging call or an exception message whose arguments name a
+  `.url`, a raw target key of a scope, a whole scope (a method of it other
+  than `.get` included) or a credential parameter by its own name; a value
+  first bound to a variable is not followed. A new secret travels in a header
+  or the body; a route that must carry one in its path joins
+  `CREDENTIAL_PATH_PREFIXES`. Even redacted, do not run the API at
+  `--log-level trace` (or `UVICORN_LOG_LEVEL=trace`) on real traffic: it logs
+  every ASGI message of every request.
 - httpx and httpcore log at WARNING (`LIBRARY_LOG_LEVELS`, set at import):
   httpx's INFO line prints the whole outbound URL, and a provider URL carries a
   secret. Never lower them to see requests; log the call's outcome yourself.
