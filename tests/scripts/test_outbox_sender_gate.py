@@ -2361,6 +2361,40 @@ class TestACardIsRenderedAgainAtClaimTime:
         assert _state(outbox_db, row_id)[0] == "superseded"
 
     @pytest.mark.asyncio
+    async def test_a_story_parked_before_its_card_went_out_gets_its_review_card(
+        self, outbox_db
+    ):
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                "parked",
+                state="review_required",
+            )["intent"]
+        )
+        row_id = self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["payload"])
+            return "tg-review"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is not None and result["state"] == "sent"
+        assert len(sent) == 1, "the parked story's card goes out once"
+        assert sent[0]["outcome_text"].startswith("👀 Needs review")
+        tokens = [
+            b.get("callback_data")
+            for r in sent[0]["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert f"v1:giveup:{intent}" in tokens and f"v1:post:{intent}" not in tokens
+        assert _state(outbox_db, row_id)[0] == "superseded", (
+            "a card sent with its line is recorded settled, its ref kept"
+        )
+
+    @pytest.mark.asyncio
     async def test_a_card_for_a_live_slot_carries_the_workspaces_current_buttons(
         self, outbox_db
     ):

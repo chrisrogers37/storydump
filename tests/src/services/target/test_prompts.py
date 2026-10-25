@@ -614,6 +614,34 @@ class TestARendersAgainForAResend:
         assert await prompts.rerender_prompt(s, intent_id=INTENT) is None
 
     @pytest.mark.asyncio
+    async def test_a_story_parked_before_its_card_went_out_gets_its_review_card(
+        self,
+    ):
+        at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        s = self._Session(
+            {
+                **self.LIVE,
+                "state": "review_required",
+                "source_provider": "instagram_past_posts",
+            },
+            settled=self._settled("review_required", None, at=at),
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload is not None, "a parked story still gets its card"
+        assert "media" not in payload, "a review card asks for no past-posts bytes"
+        assert payload["outcome_text"].startswith("👀 Needs review")
+        tokens = [
+            b.get("callback_data")
+            for r in payload["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert f"v1:giveup:{INTENT}" in tokens
+        assert f"v1:post:{INTENT}" not in tokens
+        assert not any("has_login" in sql for sql, _ in s.sql), (
+            "a parked story asks no approval rule and no media admission"
+        )
+
+    @pytest.mark.asyncio
     async def test_a_prompt_still_pending_is_live(self):
         s = self._Session(
             {
