@@ -680,8 +680,7 @@ class TestSchedulingHealthIsASecondSurface:
         This is both directions: a key added here is published to anyone, and a
         key dropped here is lost to the classifier. Most missing keys read as
         `unreachable` and page someone, but not all: the scheduling classifier
-        reads a missing `max_lag_seconds` as null and a missing `worker` block
-        as absent (healthy, or worker-unknown), so for those two this test is
+        reads a missing `max_lag_seconds` as null, so for that one this test is
         the only guard."""
         from storydump_cli.health_classify import posting as pm, scheduling as sm
 
