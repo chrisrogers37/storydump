@@ -72,6 +72,20 @@ separate runtime connection string. Row-level security binds tenant work to
 The owner login applies schema changes. The API's operating details report
 `db_role`, and `src.worker.run` logs the worker's database role at boot.
 
+**The direct host, never the pooled one.** Neon gives each endpoint two
+hosts: the direct one (`ep-<id>.<region>.aws.neon.tech`) and a pooled one
+whose first label ends in `-pooler` (PgBouncer in transaction mode). Use the
+direct host in every database URL. The worker's clock election and the
+migration runner's lock are session-scoped advisory locks; through a
+transaction pooler the server session, and the lock, can outlive the process
+that took it, so after a handover no worker becomes the clock, and the next
+deploy's runner waits on a lock no process is using: a pooled server session
+holds it. The worker refuses to boot
+(exit 2) when `TARGET_DATABASE_URL` names a `-pooler` host, names no host, or
+cannot be read; the runner refuses to run where it connected to a `-pooler`
+host. The API takes no session-scoped lock and is not refused; give it the
+direct host all the same.
+
 ### Build the schema on a fresh database
 
 As the database owner, build the schema from the models and the SQL files in
@@ -148,7 +162,7 @@ commands.
 | Key | Value | Effect |
 |---|---|---|
 | `buildCommand` | `pip install -r requirements.txt && pip install -e .` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
-| `preDeployCommand` | `python -m scripts.migration_runner apply` | applies ordinary pending migrations and reports manual cutover steps as owed; the runner's advisory lock serializes the two services, and a failing migration aborts the deploy with the old version still serving |
+| `preDeployCommand` | `python -m scripts.migration_runner apply` | applies ordinary pending migrations and reports manual cutover steps as owed; the runner's advisory lock serializes the two services (the second waits at most five minutes, trying the lock with no transaction open, and names the holder, then fails the deploy), and a failing migration aborts the deploy with the old version still serving |
 | `healthcheckPath` | `/health` | both services answer it (below) |
 | `restartPolicyType` | `ON_FAILURE`, 10 retries | |
 | `drainingSeconds` | `60` | the old deployment gets 60 s after SIGTERM |
@@ -196,8 +210,8 @@ reads. Variables are per service on Railway.
 
 | Variable | Description | Example |
 |---|---|---|
-| `DATABASE_URL` | The database-OWNER connection string the pre-deploy migration runner applies with | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
-| `TARGET_DATABASE_URL` | The runtime login. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `DATABASE_URL` | The database-OWNER connection string the pre-deploy migration runner applies with; the endpoint's direct host (no `-pooler`) | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_DATABASE_URL` | The runtime login. The endpoint's direct host, written in the URL: the worker refuses a `-pooler` host and a URL that names no host. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
 | `TARGET_TELEGRAM_BOT_TOKEN` | The one bot. The worker sends with it; the API registers the webhook and answers taps with it. Without it the worker runs with its Telegram channel parked | `123456:ABC-DEF1234ghIkl` |
 | `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @. A token whose bot is not this one parks the channel too | `storydump_app_bot` |
 | `ENCRYPTION_KEY` | Fernet key for the stored OAuth credentials (`ENCRYPTION_KEYS`, newest first, for rotation) — the SAME key on both services. Neither boots without a valid one: the deploy fails its health check and the previous deploy keeps serving | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
@@ -461,10 +475,13 @@ rate- or quota-limited.
 | Problem | Solution |
 |---------|----------|
 | The worker exits at boot with `FATAL: TARGET_DATABASE_URL is unset` | Set it on the `worker` service (`src/worker.py`). |
+| The worker exits at boot with `FATAL: TARGET_DATABASE_URL names a pooled database endpoint`, `names no host` or `is not a connection URL the worker can read` | The owner sets the `worker` service's `TARGET_DATABASE_URL` to the endpoint's direct host, written in the URL (the same host without `-pooler`), with any `@ / ? # %` in the password percent-encoded. The previous deployment keeps serving until then. |
+| A deploy fails in the pre-deploy step with `names a pooled database endpoint` | The owner sets `DATABASE_URL` to the endpoint's direct host, then redeploys. |
+| A deploy fails in the pre-deploy step with `the runner lock was still held after 300s` | The waiting pre-deploy holds no transaction while it waits, so it never blocked the other one. The other service's pre-deploy may still be applying. Once it has ended (`storydump deploys` shows both services), the owner redeploys the service that failed; its pre-deploy finds nothing pending. If no deploy is running, the holder the message names is a session left open (a terminal, a hung run): the owner ends it (`pg_terminate_backend(<pid>)`, as the database owner), then redeploys. |
 | Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; the operating details show `target_database: false`. |
 | A deploy fails in the pre-deploy step | A migration failed, or `DATABASE_URL` is missing or is not the owner. The old version keeps serving; fix forward with a new file. |
 | Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
-| Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
+| Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. Do not switch to the `-pooler` host: the worker and the migration runner refuse it. |
 | No cards arrive in the group | `storydump health` reports the webhook and scheduling; `storydump outbox --since 3h` shows what is owed or lost on the chats; verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`. Check the worker's log for a parked channel. |
 | Taps on a card do nothing | `storydump webhook status`: the registration must include `callback_query`, and the door must accept the secret. |
 | A deploy fails its health check, and its log shows `FATAL: the credential key ring cannot load` (worker) or `Refusing to start` (API) — e.g. `ENCRYPTION_KEY not configured` | `ENCRYPTION_KEY` is unset on that service or not a Fernet key, or `ENCRYPTION_KEYS` (which overrides it) holds a bad entry; the message names which. Set the key the other service holds — a NEW key cannot read the stored credentials. Only on a first install, generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |

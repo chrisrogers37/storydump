@@ -23,32 +23,18 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from src.services.target import oauth_states
-from tests.src.conftest import MALFORMED_KEY, leaks
+from tests.src.conftest import (
+    MALFORMED_KEY,
+    _nothing_past_the_refusal_may_run,
+    _WentPastTheRefusal,
+    leaks,
+)
 
 DATABASE_URL = "postgresql://nobody@localhost:1/nothing"
 
 #: The remedy both roots name, because the tempting one — generate a key — boots
 #: and then cannot read a single stored credential.
 REMEDY = "the key the stored credentials were encrypted with"
-
-
-class _WentPastTheRefusal(Exception):
-    pass
-
-
-def _nothing_past_the_refusal_may_run(monkeypatch, worker) -> None:
-    """The tests' own safety, as the database-URL refusal's tests do it
-    (`tests/src/test_legacy_settings_gone.py`): under the failure these exist
-    to catch, `worker.main()` would build an engine and run a live worker
-    inside pytest. Everything past the refusal stops the test instead — by
-    raising, so the working-key control can see it was reached."""
-
-    def refuse(*_args, **_kwargs):
-        raise _WentPastTheRefusal("the worker went past its refusal and tried to boot")
-
-    monkeypatch.setattr(worker.unit_of_work, "create_engine", refuse)
-    monkeypatch.setattr(worker, "compose", refuse)
-    monkeypatch.setattr(worker.asyncio, "run", refuse)
 
 
 class TestTheWorkerRefusesToBoot:

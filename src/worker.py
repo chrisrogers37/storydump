@@ -23,10 +23,11 @@ SECURITY DEFINER functions provide bounded system reads before a tenant is
 known. The owner login is reserved for schema changes.
 
 Configuration the worker cannot run on at all refuses to BOOT instead
-(:func:`main`): no database URL, a credential key ring that cannot load, a lane
-concurrency the pool cannot hold. Parking the ring's kinds would be possible and
-worse — a parked worker passes the health check and replaces a working deploy
-with one that cannot read a single credential; refusing keeps the old one.
+(:func:`main`): no database URL, or one that names a pooled host, no host, or
+cannot be read; a credential key ring that cannot load; a lane concurrency the
+pool cannot hold. Parking the ring's kinds would be possible and worse — a
+parked worker passes the health check and replaces a working deploy with one
+that cannot read a single credential; refusing keeps the old one.
 """
 
 from __future__ import annotations
@@ -1113,6 +1114,17 @@ def main() -> None:
             f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",
             file=sys.stderr,
         )
+        raise SystemExit(2)
+    # A URL the worker cannot hold a session-scoped lock through, refused as
+    # the absence is, before anything connects. The clock's election is a
+    # session-scoped advisory lock (`ClockElection`): through a transaction
+    # pooler the server session outlives this process and keeps the lock, and
+    # after a handover no worker becomes the clock (no slots, no recurring
+    # jobs). By name, never the value: the URL carries a password, and its
+    # host the endpoint's id.
+    refusal = unit_of_work.engine_url_refusal(url)
+    if refusal is not None:
+        print(f"FATAL: {refusal} Refusing to boot.", file=sys.stderr)
         raise SystemExit(2)
     # The key ring, before anything connects or binds. Built lazily, a missing
     # or malformed key booted a worker that answered its health check and then

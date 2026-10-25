@@ -598,7 +598,14 @@ storydump burst --since 3h --watch
 ```bash
 railway logs --service worker | tail -50
 # `FATAL: TARGET_DATABASE_URL is unset` — set it on the worker (exit 2)
-# a failed pre-deploy step — a migration failed, or DATABASE_URL is not the owner
+# `FATAL: TARGET_DATABASE_URL names a pooled database endpoint`, `names no host`
+#   or `is not a connection URL the worker can read` — give it the endpoint's
+#   direct host, written in the URL (exit 2)
+# `FATAL: the credential key ring cannot load` — set the key the API service
+#   holds, never a newly generated one (exit 2)
+# a failed pre-deploy step — a migration failed; DATABASE_URL is missing, not the
+#   owner, names a pooled host or cannot be read; or another run held the
+#   runner lock past five minutes. The runner's last lines on stderr name the cause
 ```
 
 ### Bot Not Responding

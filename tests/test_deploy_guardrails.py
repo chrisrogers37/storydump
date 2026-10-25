@@ -14,6 +14,9 @@ What the guard pins:
    particular, where a `release:` process would be a second, un-runbooked route.
 3. **The predicate can fail** — a guard that has only ever passed is a guard
    nobody has proven reads anything.
+4. **The runner's import closure.** It runs before the app boots, so from
+   `src` it loads `src/config/db_url.py` alone (standard library only), and
+   no framework, async driver or settings module at all.
 
 No database, no fixtures, no corpus, deliberately: this must stay
 readable when the migration suites cannot run at all.
@@ -23,6 +26,10 @@ same change and say why in the runbook, so a reviewer sees both halves at
 once.
 """
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -111,3 +118,42 @@ def test_per_service_dashboard_start_commands_are_required():
     assert f"| `worker` | `{processes['worker']}` |" in section
     assert f"| `storydump` | `{processes['web']}` |" in section
     assert "required" in section.lower()
+
+
+#: What importing the predeploy runner may load from `src`: the one
+#: standard-library module holding the pooled-host predicate it shares with the
+#: worker, and the two empty packages above it.
+RUNNER_SRC_CLOSURE = {"src", "src.config", "src.config.db_url"}
+
+#: Nothing of the application's runtime may ride along.
+RUNNER_FORBIDDEN = {
+    "sqlalchemy",
+    "asyncpg",
+    "pydantic",
+    "pydantic_settings",
+    "fastapi",
+    "httpx",
+}
+
+
+def test_the_predeploy_runner_loads_one_stdlib_module_from_src():
+    """A fresh interpreter, because this one has imported half the tree
+    already (the CLI's boundary test reasons the same way)."""
+    script = (
+        "import json, sys\n"
+        "import scripts.migration_runner\n"
+        "print(json.dumps(sorted(sys.modules)))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    loaded = set(json.loads(proc.stdout.strip().splitlines()[-1]))
+    from_src = {m for m in loaded if m == "src" or m.startswith("src.")}
+    assert from_src == RUNNER_SRC_CLOSURE, sorted(from_src)
+    assert not {m.split(".")[0] for m in loaded} & RUNNER_FORBIDDEN
