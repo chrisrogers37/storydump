@@ -79,9 +79,9 @@ logger.warning("reconcile poll for intent %s: %s", intent_id, type(exc).__name__
 logger.exception("sender-job sweep failed; retrying on cadence")
 ```
 
-- A module logger and `%`-style arguments, not f-strings: 1 of the 285
+- A module logger and `%`-style arguments, not f-strings: 1 of the 287
   `logger.<level>(…)` calls under `src/` and `storydump_cli/` passes an
-  f-string (`src/api/app.py:666`, measured 2026-10-20).
+  f-string (`src/api/app.py:689`, measured 2026-10-24).
   `src/utils/logger.py`'s shared `logger` is what the API routes import; either logger is in use, the
   argument style is the convention.
 - A deliberate swallow logs with `logger.exception` every time, naming what was
@@ -124,7 +124,7 @@ logger.exception("sender-job sweep failed; retrying on cadence")
 ## Security patterns
 
 - CORS admits ONE origin, `settings.web_app_origin`, with credentials; with no
-  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:795`).
+  origin configured none is admitted. Never `"*"` (`_cors_origins`, `src/api/app.py:803`).
 - `TRUSTED_PROXY_HOSTS` is a network list and never `"*"`: the wildcard makes
   every IP-keyed control caller-partitionable (`src/config/settings.py:300`).
 - No existence oracle: a non-member's workspace is 404; a rejected webhook

@@ -14,6 +14,7 @@ a message.
 """
 
 import ast
+import logging
 import re
 from pathlib import Path
 
@@ -163,6 +164,44 @@ class TestTheAppsLinesNameTheRoute:
         expected = f"{says} /_test/{{token}}/probe"
         assert any(expected in line for line in app_lines), app_lines
         assert [line for line in app_lines if FAKE_TOKEN in line] == []
+
+    @pytest.mark.parametrize(
+        "refusal, caller",
+        [
+            (lambda: TokenRefused("session_required", "a probe"), "handler"),
+            (lambda: MixInvalid("bad_ratio"), "_mix"),
+        ],
+        ids=["mapped", "mix"],
+    )
+    def test_a_refusal_line_names_the_handler_that_logged_it(
+        self, app, client, refusal, caller
+    ):
+        """Both handlers log through one helper, so its caller fields (the
+        file handler prints `%(filename)s:%(lineno)d`) must name the handler
+        that refused, not the helper."""
+        from src.utils.logger import logger as app_logger
+
+        async def probe(token: str):
+            raise refusal()
+
+        app.add_api_route("/_test/{token}/probe", probe)
+        records: list[logging.LogRecord] = []
+
+        class _Grab(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        grab = _Grab(level=logging.INFO)
+        previous = app_logger.level
+        app_logger.setLevel(logging.INFO)
+        app_logger.addHandler(grab)
+        try:
+            client.get(f"/_test/{FAKE_TOKEN}/probe")
+        finally:
+            app_logger.removeHandler(grab)
+            app_logger.setLevel(previous)
+        refused = [r for r in records if r.getMessage().startswith("refused GET")]
+        assert [(r.filename, r.funcName) for r in refused] == [("app.py", caller)]
 
     def test_an_over_limit_body_is_refused_by_its_masked_path(
         self, monkeypatch, app_lines

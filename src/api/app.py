@@ -444,8 +444,16 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
 
 def _log_refusal(request: Request, exc: Exception) -> None:
     """The line a refusal answered with its own status leaves: the method,
-    the route the request matched (`loggable_path`) and the refusal."""
-    logger.info("refused %s %s: %s", request.method, loggable_path(request.scope), exc)
+    the route the request matched (`loggable_path`) and the refusal. Logged
+    from the caller's frame (`stacklevel=2`), so the file handler's
+    `%(filename)s:%(lineno)d` names the handler that refused."""
+    logger.info(
+        "refused %s %s: %s",
+        request.method,
+        loggable_path(request.scope),
+        exc,
+        stacklevel=2,
+    )
 
 
 def _busy(reason: str) -> JSONResponse:
