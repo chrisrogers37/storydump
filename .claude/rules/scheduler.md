@@ -223,6 +223,25 @@ be written. Only the empty library's notice, where nothing was minted, parks a
   publish, then ONE terminal transaction (`posted`, the counters, the recent
   lock, `finalize_job`). Each permit is a `provider_operations` row committed
   BEFORE the provider call; every checkpoint re-asserts the lease.
+- **The frame is judged before the container permit.** Once the transit
+  store's readiness probe sees the story frame serve, what it read (the
+  frame's size and, for a video, its head to the end of `moov`) is held to
+  Meta's story spec by `media_validation.judge_derivation`. A breach parks
+  the story `review_required` at once, with no container call, the check and
+  what it measured as its refusal (`last_error -> 'error' -> 'refusal'`).
+  Where `moov` sits, edit lists and the audio channel count are recorded but
+  refuse only with their `REFUSE_*` switches. Everything read rides the
+  probe's observation onto the container permit, with the encoding the frame
+  was derived with.
+- **A refusal of a checked file is a drift, recorded and told.** When Meta
+  refuses a container or a publish and the refusal ends the story (a dead
+  container with status `ERROR`, or any create or publish error that parks or
+  fails it, except a dead token and throttling, `NOT_ABOUT_THE_FILE`), its
+  `spec_drift`, our facts beside Meta's answer, goes on the permit, or beside
+  a dead container's reason in `last_error`. After the run the operators get
+  one direct message per Meta answer per day (`WorkerDeps.ops_notice`,
+  `src/channels/telegram_ops_notice.py`, latched by the `rate_counters` scope
+  `ops_notice`); a worker without the bot or `OPS_USER_IDS` logs it instead.
 - **Only the cadence spends the daily cap.** A planned story
   (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
   stamps its `cap_consumed_on` without a debit, and the refunds return nothing

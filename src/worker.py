@@ -51,6 +51,7 @@ from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_retry,
     credential_lifecycle,
     drive_credentials,
     email_sender,
@@ -115,6 +116,58 @@ def _precheck_from_env(env):
     # and a canary that is armed must be visible in the deploy log.
     logger.info("usage pre-check armed (ttl=%ds)", int(DEFAULT_TTL_SECONDS))
     return UsagePrecheck()
+
+
+async def _claim_ops_notice(engine, key: str, window_seconds: int) -> bool:
+    """The ops notice's latch: True for the first claim of *key* in the
+    current window, in a transaction of its own (`rate_counters`)."""
+    from src.channels import telegram_ops_notice
+    from src.services.target import rate_counters
+    from src.utils.datetime_utils import utcnow
+
+    window = rate_counters.window_start(utcnow(), window_seconds)
+    async with engine.begin() as conn:
+        claimed = await rate_counters.increment(
+            conn,
+            scope=telegram_ops_notice.SCOPE,
+            key=key,
+            window_start=window,
+            limit=1,
+        )
+    return claimed is not None
+
+
+def _ops_notice_from(engine, transport, config):
+    """`WorkerDeps.ops_notice`, or None, saying once at startup which setting
+    is missing. It writes to the people in `OPS_USER_IDS`
+    (`settings.ops_user_ids`, as the API reads them) who have linked
+    Telegram, read afresh for each notice."""
+    from src.channels import telegram_ops_notice
+    from src.services.target import identity
+
+    operators = settings.ops_user_ids
+    window_seconds = config.ops_notice_window_seconds
+    send_text = getattr(transport, "send_text", None)
+    missing = [
+        name
+        for name, value in ((reg.TOKEN_VAR, send_text), ("OPS_USER_IDS", operators))
+        if not value
+    ]
+    if missing:
+        logger.warning(
+            "ops notice: off, not set: %s; what it would say is logged instead",
+            ", ".join(missing),
+        )
+        return None
+
+    async def recipients():
+        async with engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    async def claim(key):
+        return await _claim_ops_notice(engine, key, window_seconds)
+
+    return telegram_ops_notice.OpsNotice(send_text, recipients, claim)
 
 
 def _transit_from_env(env):
@@ -389,6 +442,7 @@ def compose(
         poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         precheck=_precheck_from_env(env),
+        ops_notice=_ops_notice_from(engine, transport, config),
         adapters=adapters or {},
         mix_conversion_evidence=conversion_evidence,
         engine=engine,
@@ -1185,7 +1239,9 @@ def main() -> None:
     # The past-posts source first: the approval card's media fetch needs its coordinator.
     # None (and one `off (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
-    past_posts = past_posts_composition.build_worker(engine=engine, env=env)
+    past_posts = past_posts_composition.build_worker(
+        engine=engine, env=env, retry=past_posts_retry.Retry.from_config(config)
+    )
     if token:
         from src.channels.telegram_transport import transport_from_env
 

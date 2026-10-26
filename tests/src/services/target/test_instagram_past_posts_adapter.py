@@ -24,6 +24,7 @@ from src.services.target.media_adapters import (
     MediaGraphResponseTooLarge,
     MediaSourceFenceDrop,
     MediaTerminalError,
+    MediaTurnBudgetExhausted,
     redacted_error,
 )
 
@@ -47,7 +48,15 @@ def post(mid, ts, **extra):
     }
 
 
-def adapter(handler, *, size=2, access_calls=None, now=1000, app_scoped_id=None):
+def adapter(
+    handler,
+    *,
+    size=2,
+    access_calls=None,
+    now=1000,
+    app_scoped_id=None,
+    graph_limit=None,
+):
     async def access(source_id, *, workspace_id):
         if access_calls is not None:
             access_calls.append((source_id, workspace_id))
@@ -73,6 +82,7 @@ def adapter(handler, *, size=2, access_calls=None, now=1000, app_scoped_id=None)
         page_size=size,
         clock=lambda: now,
         policy=EgressPolicy().without(enforce_private_address_block=False),
+        graph_limit=graph_limit,
     )
 
 
@@ -80,14 +90,14 @@ async def listing(a, cp=None):
     return await a.list_changes({"v": 1}, cp, source_id=SOURCE, workspace_id=WS)
 
 
-async def fetch(a, ref="1", cap=100, **options):
+async def fetch(a, ref="1", cap=100, **kwargs):
     return await a.fetch_bytes(
         {"v": 1},
         ref,
         source_id=SOURCE,
         workspace_id=WS,
         max_bytes=cap,
-        **options,
+        **kwargs,
     )
 
 
@@ -714,7 +724,8 @@ def preview_handler(
     parent, *, child=None, profile=None, cdn=None, requests=None, paging=None
 ):
     """Graph answers for one parent, its first child and the token's profile;
-    the CDN answers *cdn* (default a JPEG). Every request is recorded."""
+    the CDN answers *cdn* (default a JPEG). *parent* and *child* may instead
+    be callables that answer each request. Every request is recorded."""
 
     def handler(req):
         if requests is not None:
@@ -725,10 +736,14 @@ def preview_handler(
             if req.url.path.endswith("/me"):
                 return httpx.Response(200, json=profile)
             if req.url.path.endswith("/children"):
+                if callable(child):
+                    return child(req)
                 body = {"data": child if isinstance(child, list) else [child]}
                 if paging is not None:
                     body["paging"] = paging
                 return httpx.Response(200, json=body)
+            if callable(parent):
+                return parent(req)
             return httpx.Response(200, json=parent)
         assert "authorization" not in req.headers, "the token never reaches the CDN"
         assert "access_token" not in req.url.params
@@ -854,6 +869,274 @@ async def test_missing_selected_slide_uses_completeness_to_classify(paging, erro
         await preview(a, selected="11")
     assert len(requests) == 2
     assert isinstance(redacted_error(error()), error)
+
+
+# A fetch whose children read lacks the selected slide reads the parent and
+# its children again. The slide is gone only when both reads are complete,
+# list the same slides and hold fewer slides than the index recorded, and the
+# parent still answers; anything else is a change to revalidate.
+
+GRAPH_PARENT = ("graph.instagram.com", "/v26.0/1")
+GRAPH_CHILDREN = ("graph.instagram.com", "/v26.0/1/children")
+SLIDE_FILE = ("scontent-child.cdninstagram.com", "/first.jpg")
+
+
+def slides(*ids):
+    return [{"id": mid, "media_type": "IMAGE", "media_url": CHILD_URL} for mid in ids]
+
+
+def cursor(after):
+    return {
+        "next": "https://ignored.example/never-followed",
+        "cursors": {"after": after},
+    }
+
+
+def carousel_reads(*reads, requests, reread=None):
+    """`preview_handler` for carousel 1 whose children requests answer, in
+    turn, the next of `reads`: its slides, or a (slides, paging) pair. A parent
+    read after the first answers `reread` when it is given."""
+    answers = iter(reads)
+    parents = []
+
+    def parent(req):
+        parents.append(req)
+        if reread is not None and len(parents) > 1:
+            return reread
+        return httpx.Response(200, json=media(media_type="CAROUSEL_ALBUM"))
+
+    def children(req):
+        read = next(answers)
+        data, paging = read if isinstance(read, tuple) else (read, None)
+        body = {"data": data} if paging is None else {"data": data, "paging": paging}
+        return httpx.Response(200, json=body)
+
+    return preview_handler(parent, child=children, requests=requests)
+
+
+async def test_a_slide_one_read_lacks_is_fetched_from_a_second_read():
+    """An empty children answer is never proof: the parent and its children are
+    read again, and the slide the second read lists is downloaded. Both
+    children reads are Graph attempts of the turn."""
+    requests, counters = [], []
+    a = adapter(carousel_reads([], slides("11", "12"), requests=requests))
+    data, _, mime = await fetch(a, selected_asset_id="11", on_counters=counters.append)
+    assert (data, mime) == (JPEG, "image/jpeg")
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2 + [SLIDE_FILE]
+    assert (counters[0].graph_attempts, counters[0].cdn_attempts) == (4, 1)
+
+
+async def test_a_slide_two_agreeing_reads_lack_is_gone_while_its_parent_answers():
+    """Two complete reads list the same two slides, one fewer than the index
+    recorded, and the parent answered the second read: the slide left. Nothing
+    is downloaded."""
+    requests, counters = [], []
+    a = adapter(
+        carousel_reads(slides("12", "13"), slides("13", "12"), requests=requests)
+    )
+    evidence = await refusal_of(
+        fetch(
+            a,
+            selected_asset_id="11",
+            expected_slide_count=3,
+            on_counters=counters.append,
+        ),
+        MediaSelectedAssetGone,
+        "selected_asset_gone",
+    )
+    assert evidence == {"v": 1, "kind": "slide_gone", "children": 2, "complete": True}
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2
+    assert (counters[0].graph_attempts, counters[0].cdn_attempts) == (4, 0)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (slides("12", "13"), slides("12", "13"), 2),
+        ([], [], 2),
+        (slides("12", "13"), slides("12", "14"), 4),
+        (slides("12"), slides("12"), None),
+    ],
+    ids=["as-many-as-indexed", "empty", "disagree", "no-indexed-count"],
+)
+async def test_a_slide_two_reads_lack_without_proof_is_a_change(
+    first, second, expected
+):
+    """Short of proof, a slide both reads lack is a change to revalidate, never
+    a removal: reads that list as many slides as the index recorded, empty
+    reads, reads that list different slides, and any read of a post with no
+    indexed slide count."""
+    requests = []
+    a = adapter(carousel_reads(first, second, requests=requests))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=expected),
+        MediaSelectedAssetChanged,
+        "selected_asset_changed",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "slide_changed",
+        "children": len(second),
+        "complete": True,
+    }
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2
+
+
+async def test_a_parent_that_stops_answering_is_refused_as_the_parent():
+    """The parent's second read is part of the proof. When Graph refuses it,
+    the refusal is the parent's own, with its evidence, and no slide is
+    judged."""
+    refused = httpx.Response(
+        400,
+        json={
+            "error": {
+                "message": "Unsupported get request.",
+                "type": "GraphMethodException",
+                "code": 100,
+                "error_subcode": 33,
+            }
+        },
+    )
+    requests = []
+    a = adapter(carousel_reads(slides("12"), requests=requests, reread=refused))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=2),
+        MediaTerminalError,
+        "Instagram media is unavailable to this account",
+    )
+    assert (evidence["kind"], evidence["code"], evidence["path"]) == (
+        "graph_error",
+        100,
+        GRAPH_PARENT[1],
+    )
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_PARENT]
+
+
+async def test_the_fetch_follows_the_children_cursor_to_the_selected_slide():
+    """A children page with a cursor is followed, asking for the same fields
+    and limit after it, and the slide on the next page is downloaded."""
+    requests = []
+    a = adapter(
+        carousel_reads(
+            (slides("12"), cursor("page-2")), slides("11"), requests=requests
+        )
+    )
+    data, _, _ = await fetch(a, selected_asset_id="11")
+    assert data == JPEG
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_CHILDREN, SLIDE_FILE]
+    first, following = requests[1].url.params, requests[2].url.params
+    assert "after" not in first
+    assert dict(following) == {**dict(first), "after": "page-2"}
+
+
+async def test_the_fetch_stops_paging_at_the_page_that_lists_the_slide():
+    """Pages after the one that lists the selected slide are never read, so a
+    page the fetch did not need cannot refuse it."""
+    requests = []
+    unreadable = [{"id": "not-a-media-id", "media_type": "IMAGE"}]
+    a = adapter(
+        carousel_reads(
+            (slides("12", "11"), cursor("page-2")), unreadable, requests=requests
+        )
+    )
+    data, _, _ = await fetch(a, selected_asset_id="11")
+    assert data == JPEG
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, SLIDE_FILE]
+
+
+async def test_children_pages_past_the_slide_limit_are_refused():
+    """A carousel holds at most CAROUSEL_SLIDE_LIMIT slides: pages that add up
+    to more are an incomplete answer to retry, not a change of slide."""
+    limit = past_posts.CAROUSEL_SLIDE_LIMIT
+    ids = [str(100 + i) for i in range(limit + 1)]
+    a = adapter(
+        carousel_reads(
+            (slides(*ids[: limit - 5]), cursor("page-2")),
+            slides(*ids[limit - 5 :]),
+            requests=[],
+        )
+    )
+    with pytest.raises(MediaRetryableError) as caught:
+        await fetch(a, selected_asset_id="11")
+    assert type(caught.value) is MediaRetryableError
+    assert str(caught.value) == "Instagram children response is incomplete"
+
+
+@pytest.mark.parametrize(
+    "make_pages",
+    [
+        lambda: [(slides("12"), {"next": "https://ignored.example/never-followed"})],
+        lambda: [(slides("12"), cursor(""))],
+        lambda: [(slides("12"), cursor("x" * (past_posts.MAX_CURSOR_CHARACTERS + 1)))],
+        lambda: [([], cursor("page-2"))],
+        lambda: [
+            (
+                slides(*(str(100 + i) for i in range(past_posts.CAROUSEL_SLIDE_LIMIT))),
+                cursor("page-2"),
+            )
+        ],
+        lambda: [
+            (slides("12"), cursor("a")),
+            (slides("13"), cursor("b")),
+            (slides("14"), cursor("a")),
+        ],
+    ],
+    ids=[
+        "no-cursor",
+        "empty-cursor",
+        "long-cursor",
+        "after-an-empty-page",
+        "after-a-full-carousel",
+        "seen-before",
+    ],
+)
+async def test_a_cursor_the_fetch_cannot_follow_ends_the_read_incomplete(make_pages):
+    """Each of these ends the read incomplete before the page that would list
+    the slide. The slide is then a change, and an incomplete read takes no
+    second read."""
+    pages = make_pages()
+    requests = []
+    a = adapter(carousel_reads(*pages, slides("11"), requests=requests))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=3),
+        MediaSelectedAssetChanged,
+        "selected_asset_changed",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "slide_changed",
+        "children": sum(len(listed) for listed, _ in pages),
+        "complete": False,
+    }
+    assert hosts(requests) == [GRAPH_PARENT] + [GRAPH_CHILDREN] * len(pages)
+
+
+async def test_the_preview_reads_one_children_page():
+    """The preview keeps its two Graph requests: it never follows a children
+    cursor, so a slide past its first page is a change there."""
+    requests = []
+    a = adapter(
+        carousel_reads(
+            (slides("12"), cursor("page-2")), slides("11"), requests=requests
+        )
+    )
+    with pytest.raises(MediaSelectedAssetChanged):
+        await preview(a, selected="11")
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN]
+
+
+async def test_the_second_read_is_spent_from_the_turns_graph_budget():
+    """Each extra read is one of the turn's Graph attempts: with three allowed,
+    the proof's second children read is refused as the turn's budget, never
+    sent, and no slide is judged."""
+    requests = []
+    a = adapter(
+        carousel_reads(slides("12"), slides("12"), requests=requests), graph_limit=3
+    )
+    with pytest.raises(MediaTurnBudgetExhausted) as caught:
+        await fetch(a, selected_asset_id="11", expected_slide_count=2)
+    assert caught.value.reason == "graph_attempt_budget"
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_PARENT]
 
 
 async def test_verified_app_scoped_owner_previews_carousel_without_me_lookup():
@@ -1409,6 +1692,7 @@ async def test_a_missing_slide_keeps_the_slide_count_and_whether_it_was_complete
             workspace_id=WS,
             max_bytes=100,
             selected_asset_id=asked,
+            expected_slide_count=len(slides),
         ),
         error,
         message,

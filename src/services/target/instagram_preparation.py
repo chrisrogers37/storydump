@@ -17,6 +17,7 @@ from src.services.target import (
     instagram_catalog,
     media_adapters,
     media_validation,
+    past_posts_retry,
     readers,
     refusal_evidence,
     source_policy,
@@ -44,6 +45,9 @@ class PastPostsPreparationPorts:
     capability: PastPostsCapability
     prepare_adapter: Callable[[admission.SourceReadCapture, dict], Awaitable[Any]]
     tombstone_keys: TombstoneKeys = field(repr=False)
+    #: How a refused fetch that proves nothing is tried again (`WorkerConfig`'s
+    #: `past_posts_retry_*`).
+    retry: past_posts_retry.Retry = past_posts_retry.ONCE
 
 
 @dataclass(frozen=True)
@@ -60,7 +64,8 @@ SELECT i.id AS intent_id,i.state AS intent_state,i.cancel_requested,
  m.id AS media_item_id,m.source_id,m.state AS media_item_state,m.media_kind,s.config,s.origin_ig_account_id,
  x.parent_media_id,x.data_generation_id,x.observation_revision,a.validation_fingerprint AS current_fingerprint,
  pol.revision AS policy_revision,
- a.asset_media_id AS selected_asset_id,x.slide_count
+ a.asset_media_id AS selected_asset_id,x.slide_count,
+ a.validation_capture AS current_capture,clock_timestamp() AS db_now
 FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
 JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
 LEFT JOIN instagram_media_assets a ON a.workspace_id=m.workspace_id AND a.source_id=m.source_id AND a.media_item_id=m.id
@@ -71,6 +76,30 @@ LEFT JOIN instagram_source_policies pol ON pol.workspace_id=s.workspace_id AND p
 WHERE i.workspace_id=:ws AND i.id=:id AND s.provider='instagram_past_posts'
 FOR UPDATE OF m,i
 """
+
+
+def _tried(generation_id, subject):
+    """The failed tries the slide's capture counted for this observation."""
+    return past_posts_retry.from_capture(
+        subject["current_capture"],
+        (generation_id, subject["observation_revision"], subject["selected_asset_id"]),
+    )
+
+
+def _unsuitable(verdict, subject):
+    """The pending for a story its suitability verdict refuses. A slide parked
+    by an earlier refusal keeps that refusal on its capture, so whichever caller
+    meets the latch, its park says why."""
+    reason = verdict["reason"] if verdict else "asset_unavailable"
+    capture = subject["current_capture"]
+    latched = (
+        reason == "asset_unavailable"
+        and isinstance(capture, dict)
+        and capture.get("reason") == "asset_unavailable"
+    )
+    return source_policy.MediaAdmissionPending(
+        reason, evidence=capture.get("refusal") if latched else None
+    )
 
 
 def _refusal(exc, counters, selected) -> dict:
@@ -90,19 +119,40 @@ def _refusal(exc, counters, selected) -> dict:
     return facts
 
 
+def _local_validation(validation, counters, **decided) -> dict:
+    """A validation result as evidence: its state, what *decided* it, the byte
+    count, the matrix version and the turn's counters. One shape for a refusal
+    and a pass."""
+    return refusal_evidence.evidence(
+        "local_validation",
+        state=validation.state,
+        **decided,
+        bytes=validation.evidence.get("bytes"),
+        matrix_version=validation.matrix_version,
+        counters=asdict(counters),
+    )
+
+
 def _validation_refusal(validation, counters) -> dict | None:
     """A result that is not supported, as refusal evidence: the check that
     decided it and the values it measured, with the turn's counters."""
     if validation.state == "supported" or not validation.failed_check:
         return None
-    return refusal_evidence.evidence(
-        "local_validation",
-        state=validation.state,
+    return _local_validation(
+        validation,
+        counters,
         check=validation.failed_check["check"],
         measured=dict(validation.failed_check["measured"]),
-        bytes=validation.evidence.get("bytes"),
-        matrix_version=validation.matrix_version,
-        counters=asdict(counters),
+    )
+
+
+def _validation_pass(validation, counters) -> dict | None:
+    """A supported result, as evidence in a refusal's shape: each check it
+    passed with what it measured and the bound it held."""
+    if validation.state != "supported":
+        return None
+    return _local_validation(
+        validation, counters, checks=[dict(check) for check in validation.passed_checks]
     )
 
 
@@ -123,6 +173,14 @@ class SelectedPreparation:
                 or subject["cancel_requested"]
             ):
                 raise source_policy.MediaAdmissionPending("asset_unavailable")
+            if past_posts_retry.waiting(
+                _tried(str(subject["data_generation_id"]), subject), subject["db_now"]
+            ):
+                # The slide's next try is still ahead: the story waits, before any
+                # source read, Graph request or download.
+                raise source_policy.MediaAdmissionPending(
+                    "past_posts_revalidation_required"
+                )
             capture = await admission.capture_source_read(
                 conn,
                 workspace_id=ws,
@@ -175,9 +233,7 @@ class SelectedPreparation:
                 context=context,
             )
             if candidate is None or not candidate["suitable"]:
-                raise source_policy.MediaAdmissionPending(
-                    candidate["reason"] if candidate else "asset_unavailable"
-                )
+                raise _unsuitable(candidate, subject)
             if provenance is None:
                 await conn.execute(
                     text("""
@@ -250,14 +306,23 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 source_id=selected.capture.source_id,
                 workspace_id=selected.capture.workspace_id,
                 selected_asset_id=selected.subject["selected_asset_id"],
+                expected_slide_count=selected.subject["slide_count"],
                 max_bytes=media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"][
                     selected.subject["media_kind"]
                 ],
                 on_counters=observe,
                 on_evidence=observe_fetch,
             )
-        except media_adapters.MediaSelectedAssetChanged:
-            # A truncated children read cannot prove the selected slide left.
+        except media_adapters.MediaSelectedAssetChanged as exc:
+            # A truncated children read cannot prove the selected slide left: it
+            # is tried again after a wait, and parks once its tries are spent.
+            refusal = _refusal(exc, counters, selected)
+            if await self._land(
+                engine, workspace_id, intent_id, selected, None, refusal=refusal
+            ):
+                raise source_policy.MediaAdmissionPending(
+                    "asset_unavailable", evidence=refusal
+                ) from None
             raise source_policy.MediaAdmissionPending(
                 "past_posts_revalidation_required"
             ) from None
@@ -318,6 +383,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected,
             validation,
             refusal=refusal,
+            passed=_validation_pass(validation, counters),
             fetch=None
             if fetched is None
             else {**fetched, "counters": asdict(counters)},
@@ -418,8 +484,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         *,
         reason=None,
         refusal=None,
+        passed=None,
         fetch=None,
     ):
+        """Record the fetch's outcome on the slide's capture. A refusal with no
+        `reason` is the retry rule's to decide (`past_posts_retry`): True when
+        it parks the story, else the capture keeps the attempt and the time of
+        the next try."""
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
         async with unit_of_work(engine, str(ws), actor_kind="worker").begin() as conn:
@@ -483,10 +554,19 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 context=context,
             )
             if not verdict or not verdict["suitable"]:
-                raise source_policy.MediaAdmissionPending(
-                    verdict["reason"] if verdict else "asset_unavailable"
-                )
+                raise _unsuitable(verdict, subject)
             state = validation.state if validation else "validation_pending"
+            decision = None
+            if validation is None and reason is None:
+                # Decided under the row locks, on the capture and the clock read
+                # now, so two refusals of one story count one after the other.
+                decision = past_posts_retry.decide(
+                    refusal,
+                    _tried(selected.capture.generation_id, subject),
+                    subject["db_now"],
+                    self.ports.retry,
+                )
+                reason = "asset_unavailable" if decision.park else "download_pending"
             evidence = dict(
                 generation_id=selected.capture.generation_id,
                 observation_revision=subject["observation_revision"],
@@ -494,8 +574,14 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 state=state,
                 reason=validation.reason if validation else reason,
             )
+            if decision is not None:
+                evidence["attempt"] = decision.attempt
+                if not decision.park:
+                    evidence["next_attempt_at"] = decision.next_attempt_at.isoformat()
             if refusal is not None:
                 evidence["refusal"] = refusal
+            if passed is not None:
+                evidence["passed"] = passed
             # What the fetch that got these bytes read (`refusal_evidence`, kind
             # "fetched"), whatever the validation then found.
             if fetch is not None:
@@ -556,3 +642,4 @@ WHERE workspace_id=:ws AND intent_id=:id
                         policy=verdict["policy_revision"],
                     ),
                 )
+        return decision is not None and decision.park

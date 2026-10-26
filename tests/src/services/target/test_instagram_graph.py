@@ -4,11 +4,14 @@ ONCE, and that the token never leaks."""
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
 
+from src.services.target import egress
+from src.services.target.egress import EgressRefused
 from src.services.target.ig_credentials import IgCredentialDead
 from src.services.target.instagram_graph import (
     OAUTH_ERROR_CODE,
@@ -20,6 +23,7 @@ from src.services.target.meta_adapter import (
     MetaRetryableError,
     MetaTerminalError,
 )
+from tests.src.services.target.conftest import SIGNED, SIGNED_PARTS
 
 TOKEN = "IGQVJsecretTOKENvalue"
 REF = "17841400000000001"
@@ -123,6 +127,29 @@ class TestWhatItSends:
             ("POST", f"/v21.0/{REF}/media_publish"),
             ("GET", f"/v21.0/{REF}/content_publishing_limit"),
         ]
+
+    async def test_a_dead_container_carries_metas_own_reason(self):
+        """Meta's `status` text is its only answer for a container it would
+        not process: it rides on the status, scrubbed for the ledger."""
+
+        def handler(request):
+            code = request.url.path.rsplit("/", 1)[-1]
+            if code == "live":
+                return httpx.Response(200, json={"status_code": "IN_PROGRESS"})
+            return httpx.Response(
+                200,
+                json={
+                    "status_code": "ERROR",
+                    "status": f"Error: upload failed with error code 2207026 {TOKEN}",
+                },
+            )
+
+        a = _adapter(handler)
+        dead = await a.container_status("dead", provider_account_ref=REF)
+        assert dead == "ERROR"
+        assert dead.reason == "Error: upload failed with error code 2207026 <token>"
+        live = await a.container_status("live", provider_account_ref=REF)
+        assert live == "IN_PROGRESS" and live.reason is None
 
     async def test_the_workspace_reaches_the_token_reader(self):
         reads = []
@@ -332,18 +359,21 @@ class TestTheLedgerKeepsMetasWord:
     @pytest.mark.asyncio
     async def test_metas_text_is_capped_and_scrubbed_before_the_ledger(self):
         """NUL would make PostgreSQL refuse the jsonb inside the retry's own
-        transaction; a signed Cloudinary url does not expire; a
-        message is bounded like `last_error`'s."""
-        from src.services.target.instagram_graph import LEDGER_TEXT_MAX
+        transaction; a signed Cloudinary url does not expire, inside a link or
+        out of one; a message is bounded like `last_error`'s."""
+        from src.services.target.refusal_evidence import TEXT_LIMIT
 
-        long_msg = "x" * (LEDGER_TEXT_MAX + 200)
+        long_msg = "x" * (TEXT_LIMIT + 200)
 
         def handler(request):
             return httpx.Response(
                 400,
                 json={
                     "error": {
-                        "message": f"bad\x00url https://h/image/authenticated/s--AbC12_-x--/v1/f.jpg {TOKEN}",
+                        "message": (
+                            "bad\x00url https://h/image/authenticated/s--AbC12_-x--/v1/f.jpg"
+                            f" or h/image/authenticated/s--DeF34_-y--/v1/f.jpg {TOKEN}"
+                        ),
                         "code": 9004,
                         "error_subcode": "2207052",
                         "error_user_msg": long_msg,
@@ -359,10 +389,13 @@ class TestTheLedgerKeepsMetasWord:
             )
         exc = info.value
         assert exc.subcode == 2207052, "a decimal string subcode still types"
-        assert "\x00" not in str(exc) and "s--AbC12_-x--" not in str(exc)
-        assert "s--<SIG>--" in str(exc) and TOKEN not in str(exc)
-        assert exc.detail["error_user_msg"] == "x" * LEDGER_TEXT_MAX
-        assert exc.detail["fbtrace_id"] == "trace<TOKEN>"
+        assert "\x00" not in str(exc) and TOKEN not in str(exc)
+        assert "s--AbC12_-x--" not in str(exc) and "s--DeF34_-y--" not in str(exc)
+        assert "badurl <link h> or h/image/authenticated/s--<SIG>--/v1/f.jpg" in str(
+            exc
+        )
+        assert exc.detail["error_user_msg"] == "x" * TEXT_LIMIT
+        assert exc.detail["fbtrace_id"] == "trace<token>"
         assert exc.detail["is_transient"] is True
 
     def test_a_subcode_is_an_int_or_a_decimal_string_never_a_bool(self):
@@ -372,3 +405,92 @@ class TestTheLedgerKeepsMetasWord:
         assert _subcode_of("2207052") == 2207052
         assert _subcode_of(True) is None
         assert _subcode_of("abc") is None and _subcode_of(None) is None
+
+
+#: Provider text holding what the scrub keeps out beyond the configured token:
+#: a token parameter, whatever value it carries, and a signed provider file
+#: link (`SIGNED`), said as its host alone.
+PROVIDER_TEXT = f"refused access_token=IGQ-another-fake-token for {SIGNED} {TOKEN}"
+SCRUBBED = "refused access_token=<token> for <link scontent-test.fbcdn.net> <token>"
+#: What reaches no ledger field and no log line: the other token's value,
+#: every piece of the link but its host (its expiry too), and the token.
+KEPT_OUT = ("IGQ-another-fake-token", *SIGNED_PARTS, "6A1B2C3D", TOKEN)
+
+
+def _kept_out(text) -> list:
+    """The parts of `KEPT_OUT` that *text* still holds."""
+    return [part for part in KEPT_OUT if part in str(text)]
+
+
+class TestEveryTextTheAdapterWritesIsScrubbed:
+    """Every text the adapter hands the ledger, and a dead container's log
+    line, passes the one provider-text scrub (`refusal_evidence.scrub_text`):
+    a token parameter loses its value whatever it holds, and a signed link is
+    said as its host alone."""
+
+    async def test_every_text_field_of_an_error_answer(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": PROVIDER_TEXT,
+                        "code": 9004,
+                        "error_user_title": PROVIDER_TEXT,
+                        "error_user_msg": PROVIDER_TEXT,
+                        "fbtrace_id": PROVIDER_TEXT,
+                    }
+                },
+            )
+
+        with pytest.raises(MetaTerminalError) as info:
+            await _adapter(handler).create_container(
+                REF, media_url="u", media_kind="image"
+            )
+        exc = info.value
+        for field in ("error_user_title", "error_user_msg", "fbtrace_id"):
+            assert exc.detail[field] == SCRUBBED, field
+        assert SCRUBBED in str(exc)
+        assert _kept_out(exc) == [] and _kept_out(exc.detail) == []
+
+    async def test_a_dead_containers_status_and_its_log_line(self, caplog):
+        def handler(request):
+            return httpx.Response(
+                200, json={"status_code": "ERROR", "status": PROVIDER_TEXT}
+            )
+
+        name = "src.services.target.instagram_graph"
+        with caplog.at_level(logging.WARNING, logger=name):
+            dead = await _adapter(handler).container_status(
+                "dead", provider_account_ref=REF
+            )
+        assert dead == "ERROR" and dead.reason == SCRUBBED
+        logged = [r.getMessage() for r in caplog.records if r.name == name]
+        assert len(logged) == 1 and SCRUBBED in logged[0]
+        assert _kept_out(logged) == []
+
+    @pytest.mark.parametrize("answer", ["transport-fault", "server-error"])
+    async def test_a_lost_answers_text(self, answer):
+        def handler(request):
+            if answer == "transport-fault":
+                raise httpx.ConnectError(PROVIDER_TEXT)
+            return httpx.Response(
+                503, json={"error": {"message": PROVIDER_TEXT, "code": 2}}
+            )
+
+        with pytest.raises(MetaLostResponse) as info:
+            await _adapter(handler).publish(REF, "ctr-1")
+        assert SCRUBBED in str(info.value) and _kept_out(info.value) == []
+
+    async def test_a_refused_egress_text(self, monkeypatch):
+        async def refused(*args, **kwargs):
+            raise EgressRefused(PROVIDER_TEXT)
+
+        def handler(request):  # pragma: no cover — the floor never calls it
+            raise AssertionError("refused calls do not reach the transport")
+
+        monkeypatch.setattr(egress, "request", refused)
+        with pytest.raises(MetaRetryableError) as info:
+            await _adapter(handler).publish(REF, "ctr-1")
+        assert info.value.code == 0
+        assert SCRUBBED in str(info.value) and _kept_out(info.value) == []
