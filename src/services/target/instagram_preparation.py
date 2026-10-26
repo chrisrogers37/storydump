@@ -106,6 +106,25 @@ def _validation_refusal(validation, counters) -> dict | None:
     )
 
 
+def _validation_pass(validation, counters) -> dict | None:
+    """A supported result, as evidence in a refusal's shape: each check it
+    passed with what it measured and the bound it held, and the turn's
+    counters."""
+    if validation.state != "supported":
+        return None
+    return refusal_evidence.evidence(
+        "local_validation",
+        state=validation.state,
+        checks=[
+            {"check": check["check"], "measured": dict(check["measured"])}
+            for check in validation.passed_checks
+        ],
+        bytes=validation.evidence.get("bytes"),
+        matrix_version=validation.matrix_version,
+        counters=asdict(counters),
+    )
+
+
 class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
@@ -306,7 +325,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         )
         refusal = _validation_refusal(validation, counters)
         await self._land(
-            engine, workspace_id, intent_id, selected, validation, refusal=refusal
+            engine,
+            workspace_id,
+            intent_id,
+            selected,
+            validation,
+            refusal=refusal,
+            passed=_validation_pass(validation, counters),
         )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
@@ -395,7 +420,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 )
 
     async def _land(
-        self, engine, ws, iid, selected, validation, *, reason=None, refusal=None
+        self,
+        engine,
+        ws,
+        iid,
+        selected,
+        validation,
+        *,
+        reason=None,
+        refusal=None,
+        passed=None,
     ):
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
@@ -473,6 +507,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if refusal is not None:
                 evidence["refusal"] = refusal
+            if passed is not None:
+                evidence["passed"] = passed
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,

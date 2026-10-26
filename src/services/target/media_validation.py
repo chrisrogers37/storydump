@@ -67,6 +67,48 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
 )
 
 
+def _bounds(check: str, kind: str) -> dict:
+    """The bounds *check* holds a *kind* of file to, as the matrix states them:
+    recorded beside what the check measured, so a record says what it was
+    judged against without anyone reading the matrix again."""
+    if check == "byte_limit":
+        return {"cap": SUPPORTED_MEDIA_MATRIX["byte_caps"][kind]}
+    if check == "duration":
+        shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
+        return {"min_seconds": shortest, "max_seconds": longest}
+    if check == "fps":
+        lowest, highest = SUPPORTED_MEDIA_MATRIX["fps"]
+        return {"min_fps": lowest, "max_fps": highest}
+    return {}
+
+
+def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
+    """Each check a supported file passed that holds it to a bound: what it
+    measured, from the evidence, and the bound (`_bounds`). A video whose
+    probe states no frame rate (`inspect_video_facts` records "unstated") was
+    not judged on one."""
+    checks = [("byte_limit", {"bytes": evidence["bytes"]})]
+    if kind == "video":
+        duration = {"duration_seconds": evidence.get("duration_seconds")}
+        if evidence.get("trimmed_to_seconds") is not None:
+            duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
+        checks.append(("duration", duration))
+        if evidence.get("fps") not in (None, "unstated"):
+            checks.append(("fps", {"fps": evidence["fps"]}))
+    return tuple(
+        MappingProxyType(
+            {
+                "check": check,
+                "measured": {
+                    key: _measured_value(value)
+                    for key, value in {**measured, **_bounds(check, kind)}.items()
+                },
+            }
+        )
+        for check, measured in checks
+    )
+
+
 @dataclass(frozen=True)
 class ValidationInput:
     data: bytes = field(repr=False)
@@ -139,16 +181,44 @@ class ValidationResult:
     matrix_version: str = MATRIX_VERSION
     evidence_version: int = EVIDENCE_VERSION
     #: For a result that is not supported: the check that decided it and the
-    #: values it measured (`{"check", "measured"}`). Not part of the fingerprint.
+    #: values it measured, with the bounds it held them to (`{"check",
+    #: "measured"}`). Not part of the fingerprint.
     failed_check: Mapping[str, object] | None = None
+    #: For a supported result: each check it passed that holds a file to a
+    #: bound, in `failed_check`'s shape (`_passed`). Not part of the
+    #: fingerprint.
+    passed_checks: tuple[Mapping[str, object], ...] = ()
 
 
 class ValidationPending(Exception):
     """Closed safe diagnostic, never the raw tool exception."""
 
 
+#: Every check a file can be refused by: the closed set `UnsupportedMedia`
+#: carries, which the refusal sentences (`refusal_evidence`) are held to.
+UNSUPPORTED_CHECKS = frozenset(
+    {
+        "byte_limit",
+        "duration",
+        "external_reference",
+        "fps",
+        "image_format",
+        "malformed_container",
+        "malformed_image",
+        "malformed_video",
+        "stream_topology",
+        "video_codec",
+    }
+)
+
+
 class UnsupportedMedia(Exception):
-    pass
+    """A file refused by one check, named from `UNSUPPORTED_CHECKS`."""
+
+    def __init__(self, check: str):
+        if check not in UNSUPPORTED_CHECKS:
+            raise ValueError(f"not a check in UNSUPPORTED_CHECKS: {check!r}")
+        super().__init__(check)
 
 
 #: Bounds on a measured value kept as text, and on a list of them.
@@ -533,11 +603,17 @@ async def validate_media(
             "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
         )
         reason = str(exc)
+        measured = {**getattr(exc, "measured", {}), **_bounds(reason, source.kind)}
         failed_check = MappingProxyType(
-            {"check": reason, "measured": dict(getattr(exc, "measured", {}))}
+            {
+                "check": reason,
+                "measured": {k: _measured_value(v) for k, v in measured.items()},
+            }
         )
+        passed_checks = ()
     else:
         failed_check = None
+        passed_checks = _passed(source.kind, evidence)
     fingerprint_data = {
         "kind": source.kind,
         "generation": source.source_generation,
@@ -561,6 +637,7 @@ async def validate_media(
         fingerprint,
         MappingProxyType(evidence),
         failed_check=failed_check,
+        passed_checks=passed_checks,
     )
 
 

@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import io
 import json
+import re
 import struct
 import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -886,10 +888,16 @@ async def test_a_check_that_read_no_value_carries_an_empty_measured(
 
 
 async def test_a_supported_result_has_no_failed_check():
-    """A result that is supported has no `failed_check`."""
-    result = await v.validate_media(request(image_bytes()))
+    """A result that is supported has no `failed_check`, and an image passed
+    the one check that holds it to a bound, its size."""
+    data = image_bytes()
+    result = await v.validate_media(request(data))
     assert result.state == "supported"
     assert result.failed_check is None
+    cap = v.SUPPORTED_MEDIA_MATRIX["byte_caps"]["image"]
+    assert [dict(check) for check in result.passed_checks] == [
+        {"check": "byte_limit", "measured": {"bytes": len(data), "cap": cap}}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -989,3 +997,122 @@ async def test_fingerprint_does_not_move_with_what_the_check_measured(monkeypatc
     first, second = results
     assert dict(first.failed_check) != dict(second.failed_check)
     assert first.fingerprint == second.fingerprint
+
+
+def answer_the_probe_with(monkeypatch, facts):
+    """`validate_media`'s video probe answering with ffprobe's *facts*, judged
+    by the real `inspect_video_facts`, so no probe tool runs."""
+
+    async def probe(*args):
+        return v.inspect_video_facts(facts)
+
+    monkeypatch.setattr(v, "_validate_video", probe)
+
+
+async def test_a_supported_video_records_each_check_it_passed_with_its_bounds(
+    monkeypatch, tmp_path
+):
+    """A supported file says what it passed: each check that holds it to a
+    bound, with the value it measured and the bound the matrix sets."""
+    answer_the_probe_with(monkeypatch, probe_facts(duration="12.5", fps="30/1"))
+    data = movie()
+    result = await v.validate_media(
+        request(data, "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    matrix = v.SUPPORTED_MEDIA_MATRIX
+    assert (result.state, result.failed_check) == ("supported", None)
+    assert [dict(check) for check in result.passed_checks] == [
+        {
+            "check": "byte_limit",
+            "measured": {"bytes": len(data), "cap": matrix["byte_caps"]["video"]},
+        },
+        {
+            "check": "duration",
+            "measured": {
+                "duration_seconds": "25/2",
+                "min_seconds": matrix["duration_seconds"][0],
+                "max_seconds": matrix["duration_seconds"][1],
+            },
+        },
+        {
+            "check": "fps",
+            "measured": {
+                "fps": "30",
+                "min_fps": matrix["fps"][0],
+                "max_fps": matrix["fps"][1],
+            },
+        },
+    ]
+    assert result.evidence["duration_seconds"] == "25/2"
+    assert result.evidence["fps"] == "30"
+
+
+async def test_a_video_whose_probe_states_no_frame_rate_passed_no_fps_check(
+    monkeypatch, tmp_path
+):
+    """A frame rate the probe does not state is not judged, so it is not
+    recorded as passed."""
+    answer_the_probe_with(monkeypatch, probe_facts(fps="0/0"))
+    result = await v.validate_media(
+        request(movie(), "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    assert result.state == "supported"
+    assert [check["check"] for check in result.passed_checks] == [
+        "byte_limit",
+        "duration",
+    ]
+
+
+@pytest.mark.parametrize(
+    "facts,check,bounds,unit",
+    [
+        (probe_facts(duration="2"), "duration", ("min_seconds", "max_seconds"), " s"),
+        (probe_facts(fps="120/1"), "fps", ("min_fps", "max_fps"), ""),
+    ],
+    ids=["duration", "fps"],
+)
+async def test_a_refused_timing_records_its_bounds_and_reads_with_them(
+    monkeypatch, tmp_path, facts, check, bounds, unit
+):
+    """A refused duration or frame rate records the bounds it was held to
+    beside the value, and its sentence says those bounds: a bound renamed on
+    either side fails here."""
+    answer_the_probe_with(monkeypatch, facts)
+    result = await v.validate_media(
+        request(movie(), "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    low, high = v.SUPPORTED_MEDIA_MATRIX[
+        "duration_seconds" if check == "duration" else "fps"
+    ]
+    measured = dict(result.failed_check["measured"])
+    assert (result.reason, measured[bounds[0]], measured[bounds[1]]) == (
+        check,
+        low,
+        high,
+    )
+    assert result.passed_checks == ()
+    sentence = refusal_evidence.plain(
+        refusal_evidence.evidence(
+            "local_validation", state="unsupported", check=check, measured=measured
+        )
+    )
+    assert sentence.endswith(f"; stories take {low} to {high}{unit}"), sentence
+
+
+def test_a_refusal_names_a_check_of_the_closed_set():
+    """A refusal carries a check from `UNSUPPORTED_CHECKS`, or the validator
+    fails loudly: the refusal sentences are held to that set."""
+    assert str(v.UnsupportedMedia("duration")) == "duration"
+    with pytest.raises(ValueError, match="made_up_check"):
+        v.UnsupportedMedia("made_up_check")
+
+
+def test_the_closed_set_is_every_check_the_validator_names():
+    """Every check the validator refuses a file by is in the closed set, and
+    the set names no check the validator has dropped."""
+    source = Path(v.__file__).read_text(encoding="utf-8")
+    named = set(re.findall(r'UnsupportedMedia\(\s*"([a-z_]+)"', source))
+    assert named == v.UNSUPPORTED_CHECKS
