@@ -179,6 +179,11 @@ def _owner(world, sql: str, params=()):
     return fetch_one(world["stream"], sql, params)
 
 
+#: The cursor `_make_due` back-dates an account to, as a query of the
+#: account's id and an instant: one minute before the instant.
+_BACKDATE = "SELECT CAST(%(at)s AS timestamptz) - interval '1 minute'"
+
+
 def _make_due(world, account_id: str) -> None:
     """Back-date the cursor so the next tick finds this account due.
 
@@ -195,9 +200,8 @@ def _make_due(world, account_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
             cur.execute(
-                "UPDATE ig_accounts SET next_slot_at = now() - interval '1 minute'"
-                " WHERE id = %s",
-                (account_id,),
+                f"UPDATE ig_accounts SET next_slot_at = ({_BACKDATE}) WHERE id = %(id)s",
+                {"id": account_id, "at": "now"},
             )
         conn.commit()
     finally:
@@ -334,6 +338,52 @@ class TestADestinationIsScheduledIntoExistence:
         )
         assert row[0] is None
         assert tick(world) == 0
+
+
+#: The instants the back-date is checked at: the two CI runs that failed
+#: (14:00:15 and 14:00:45 UTC, in the minute after the fixture workspace's
+#: first slot of the day), that slot, the second before it, the day's other
+#: slots, and times outside the posting window.
+BACKDATE_INSTANTS = [
+    "2026-10-26T13:59:59Z",
+    "2026-10-26T14:00:00Z",
+    "2026-10-26T14:00:15Z",
+    "2026-10-26T14:00:45Z",
+    "2026-10-26T16:30:00Z",
+    "2026-10-26T18:00:30Z",
+    "2026-10-26T22:00:00Z",
+    "2026-10-27T02:00:00Z",
+    "2026-10-27T09:00:00Z",
+]
+
+
+class TestTheBackdateIsPlannedOnce:
+    @pytest.mark.parametrize("at", BACKDATE_INSTANTS)
+    def test_a_tick_at_the_instant_plans_the_backdate_once(self, world, at):
+        """`_make_due` must leave a cursor that one tick plans and then moves
+        past the instant: due at the instant, with its next slot after it. A
+        cursor whose next slot is already due is planned again by the next
+        tick. The clock is the database's, so the instants are checked on the
+        slot arithmetic the tick uses (`fn_next_slot`, with the fixture
+        workspace's settings)."""
+        row = _owner(
+            world,
+            f"WITH backdate(at) AS ({_BACKDATE})"
+            " SELECT backdate.at <= CAST(%(at)s AS timestamptz),"
+            "        fn_next_slot(backdate.at, COALESCE(a.tz, w.tz),"
+            "                     COALESCE(a.posting_hours_start, w.posting_hours_start),"
+            "                     COALESCE(a.posting_hours_end, w.posting_hours_end),"
+            "                     COALESCE(a.posts_per_day, w.posts_per_day))"
+            "          > CAST(%(at)s AS timestamptz)"
+            "   FROM backdate, ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+            "  WHERE a.id = %(id)s",
+            {"id": str(world["a"]["iga"]), "at": at},
+        )
+        assert row[0] is True, "the back-date is not due at the instant"
+        assert row[1] is True, (
+            "the back-date's next slot is due at the instant too, so a second"
+            " tick would plan the account again"
+        )
 
 
 class TestDestinationsAreIdempotentAndTenantBound:
