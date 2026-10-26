@@ -1,10 +1,13 @@
 """Bounded local validation: no provider, database, or production activation."""
 
 import asyncio
+import hashlib
 import io
+import json
 import struct
 import sys
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -241,13 +244,15 @@ def video_facts(
     }
 
 
-def facts_result(**kwargs):
+def facts_result(*, limits=None, mutate=None, **kwargs):
     facts, formats = video_facts(**kwargs)
+    if mutate:
+        mutate(facts, formats)
     return v.inspect_video_facts(
         facts,
         formats,
         v.ContainerEvidence(None, media_extents=((0, 100),)),
-        v.ValidationLimits(),
+        limits or v.ValidationLimits(),
     )
 
 
@@ -665,3 +670,463 @@ async def test_repeated_cancellation_during_finally_finishes_reaping(
     assert spawned[0].returncode is not None
     assert list(tmp_path.iterdir()) == [executable]
     assert cancellation_seen == [("first-cancellation",)]
+
+
+def refusal_of(error, **kwargs):
+    """The `error` that `inspect_video_facts` raises for the facts
+    `facts_result` builds from `kwargs`."""
+    with pytest.raises(error) as raised:
+        facts_result(**kwargs)
+    return raised.value
+
+
+def assert_plain(value):
+    """`value` is what the JSON record keeps: None, a boolean, a whole number,
+    text of at most 64 characters, a list of at most 32 of those, or a mapping
+    of those keyed by text. Bytes are none of them."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert isinstance(key, str), key
+            assert_plain(item)
+    elif isinstance(value, list):
+        assert len(value) <= 32
+        for item in value:
+            assert_plain(item)
+    elif isinstance(value, str):
+        assert len(value) <= 64
+    else:
+        assert value is None or type(value) in (bool, int), repr(value)
+
+
+def interlace_first_frame(facts, formats):
+    facts["frames"][0]["interlaced_frame"] = 1
+
+
+def subsample_first_frame_444(facts, formats):
+    facts["frames"][0]["pix_fmt"] = "yuv444p"
+    formats["yuv444p"] = (0, 0)
+
+
+def stretch_every_frame(facts, formats):
+    for frame in facts["frames"]:
+        frame["sample_aspect_ratio"] = "1:2"
+
+
+def stray_fourth_packet(facts, formats):
+    facts["packets"][3]["pos"] = "500"
+
+
+def mp3_audio(facts, formats):
+    facts["streams"][1]["codec_name"] = "mp3"
+
+
+def second_audio_stream(facts, formats):
+    facts["streams"].append({**facts["streams"][1], "index": 2})
+
+
+def unnamed_video_codec(facts, formats):
+    del facts["streams"][0]["codec_name"]
+
+
+#: Every refusal `inspect_video_facts` makes after reading values: the error it
+#: raises, the check it names, how its facts are built, and the values it measured.
+VIDEO_REFUSALS = [
+    pytest.param(
+        v.UnsupportedMedia,
+        "video_codec",
+        {"codec": "vp9"},
+        {"video_codec": "vp9"},
+        id="video_codec",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "video_codec",
+        {"mutate": unnamed_video_codec},
+        {"video_codec": None},
+        id="video_codec_unnamed",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "video_codec",
+        {"codec": "x" * 300},
+        {"video_codec": "x" * 64},
+        id="video_codec_text_bound",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "width",
+        {"width": 1921, "height": 1080},
+        {"width": 1921, "height": 1080},
+        id="width",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "aspect",
+        {"width": 1001, "height": 100},
+        {
+            "width": 1001,
+            "height": 100,
+            "sample_aspect_ratio": "1",
+            "aspect": "1001/100",
+        },
+        id="aspect",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "aspect",
+        {"width": 100, "height": 1000, "mutate": stretch_every_frame},
+        {
+            "width": 100,
+            "height": 1000,
+            "sample_aspect_ratio": "1/2",
+            "aspect": "1/20",
+        },
+        id="aspect_with_sample_aspect_ratio",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "interlaced",
+        {"mutate": interlace_first_frame},
+        {"width": 320, "height": 568},
+        id="interlaced",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "chroma_subsampling",
+        {"mutate": subsample_first_frame_444},
+        {"pix_fmt": "yuv444p"},
+        id="chroma_subsampling",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "duration",
+        {"count": 89, "fps": 30},
+        {"duration_seconds": "89/30", "fps": "30", "video_frames": 89},
+        id="duration",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "fps",
+        {"count": 671, "fps": 22},
+        {"duration_seconds": "61/2", "fps": "22", "video_frames": 671},
+        id="fps",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "packet_outside_media",
+        {"mutate": stray_fourth_packet},
+        {"packet_pos": 500, "packet_size": 1},
+        id="packet_outside_media",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "audio_codec",
+        {"audio": True, "mutate": mp3_audio},
+        {"audio_codec": "mp3"},
+        id="audio_codec",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "audio_sample_rate",
+        {"audio": True, "sample_rate": 48001},
+        {"sample_rate": 48001},
+        id="audio_sample_rate",
+    ),
+    pytest.param(
+        v.UnsupportedMedia,
+        "audio_channels",
+        {"audio": True, "channels": 3},
+        {"channels": 3},
+        id="audio_channels",
+    ),
+    pytest.param(
+        v.ValidationPending,
+        "stream_topology",
+        {"audio": True, "mutate": second_audio_stream},
+        {"streams": 3, "video_streams": 1, "audio_streams": 2},
+        id="stream_topology",
+    ),
+    pytest.param(
+        v.ValidationPending,
+        "pixel_budget",
+        {"limits": v.ValidationLimits(pixels=100_000)},
+        {"width": 320, "height": 568, "pixel_limit": 100_000},
+        id="pixel_budget",
+    ),
+]
+
+
+@pytest.mark.parametrize("error,check,build,measured", VIDEO_REFUSALS)
+def test_video_check_carries_the_values_it_read(error, check, build, measured):
+    """A video check that read values refuses with exactly those values as
+    `exc.measured`: whole numbers stay numbers, a ratio is its exact text, any
+    other value is text cut to 64 characters, and a field the probe left out
+    stays None."""
+    raised = refusal_of(error, **build)
+    assert str(raised) == check
+    assert raised.measured == measured
+    assert_plain(raised.measured)
+
+
+#: Every refusal `inspect_container` makes: the bytes, the limits (None for the
+#: defaults), the reason, whether it is pending, and the values it measured.
+CONTAINER_REFUSALS = [
+    pytest.param(
+        movie(edits=True),
+        None,
+        "edit_list",
+        False,
+        {"boxes": ["ftyp", "moov"], "box_count": 13, "sample_codecs": ["avc1"]},
+        id="edit_list",
+    ),
+    pytest.param(
+        movie(late=True),
+        None,
+        "moov_not_front",
+        False,
+        {
+            "boxes": ["ftyp", "mdat", "moov"],
+            "box_count": 12,
+            "sample_codecs": ["avc1"],
+        },
+        id="moov_not_front",
+    ),
+    pytest.param(
+        movie().replace(b"avc1", b"vp09"),
+        None,
+        "video_codec",
+        False,
+        {
+            "boxes": ["ftyp", "moov", "mdat"],
+            "box_count": 12,
+            "sample_codecs": ["vp09"],
+        },
+        id="video_codec",
+    ),
+    pytest.param(
+        movie()[:-1],
+        None,
+        "malformed_container",
+        False,
+        {"boxes": ["ftyp", "moov"], "box_count": 12, "sample_codecs": ["avc1"]},
+        id="malformed_container",
+    ),
+    pytest.param(
+        movie(external=True),
+        None,
+        "external_reference",
+        False,
+        {"boxes": ["ftyp", "moov"], "box_count": 8, "sample_codecs": []},
+        id="external_reference",
+    ),
+    pytest.param(
+        movie(fragmented=True),
+        None,
+        "container_evidence_incomplete",
+        True,
+        {
+            "boxes": ["ftyp", "moov", "mdat", "moof"],
+            "box_count": 13,
+            "sample_codecs": ["avc1"],
+        },
+        id="container_evidence_incomplete",
+    ),
+    pytest.param(
+        movie(),
+        v.ValidationLimits(boxes=2),
+        "container_budget",
+        True,
+        {"boxes": ["ftyp", "moov"], "box_count": 3, "sample_codecs": []},
+        id="container_budget",
+    ),
+    pytest.param(
+        b"".join(box(b"free") for _ in range(40)) + movie(late=True),
+        None,
+        "moov_not_front",
+        False,
+        {"boxes": ["free"] * 32, "box_count": 52, "sample_codecs": ["avc1"]},
+        id="boxes_are_bounded",
+    ),
+]
+
+
+@pytest.mark.parametrize("data,limits,reason,pending,measured", CONTAINER_REFUSALS)
+def test_container_refusal_carries_the_boxes_it_walked(
+    data, limits, reason, pending, measured
+):
+    """A refused container measures the top-level box kinds walked up to the
+    refusal, in file order and at most 32 of them; the number of boxes counted
+    at any depth, which the bound on the list does not cap; and the sample
+    codecs read so far. An unsupported refusal and a pending one carry the
+    same."""
+    checked = v.inspect_container(data, limits)
+    assert (checked.reason, checked.pending) == (reason, pending)
+    assert checked.measured == measured
+    assert_plain(checked.measured)
+
+
+def test_clean_container_measures_nothing():
+    """A container that passes carries an empty `measured`."""
+    checked = v.inspect_container(movie())
+    assert checked.reason is None
+    assert checked.measured == {}
+
+
+@pytest.mark.parametrize("data,limits,reason,pending,measured", CONTAINER_REFUSALS)
+async def test_container_refusal_is_the_failed_check_of_the_result(
+    data, limits, reason, pending, measured, tmp_path
+):
+    """What a container refusal measured is the `failed_check` of the result,
+    under the refusal's reason, for an unsupported result and a pending one."""
+    limits = replace(
+        limits or v.ValidationLimits(),
+        ffprobe="/missing/tool",
+        temporary_root=str(tmp_path),
+    )
+    result = await v.validate_media(request(data, "video"), limits=limits)
+    assert result.state == ("validation_pending" if pending else "unsupported")
+    assert result.reason == reason
+    assert result.failed_check == {"check": reason, "measured": measured}
+
+
+@pytest.mark.parametrize("kind,cap", [("image", 8_000_000), ("video", 40_000_000)])
+async def test_byte_limit_measures_the_bytes_and_the_cap(kind, cap):
+    """Bytes over the cap are refused with their count and the cap as
+    `measured`."""
+    result = await v.validate_media(request(bytes(cap + 1), kind))
+    assert result.failed_check == {
+        "check": "byte_limit",
+        "measured": {"bytes": cap + 1, "cap": cap},
+    }
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "BMP"])
+async def test_image_format_measures_the_detected_format(fmt):
+    """An image that is not a JPEG is refused with the format found in its
+    bytes as `measured`."""
+    result = await v.validate_media(request(image_bytes(fmt)))
+    assert result.failed_check == {
+        "check": "image_format",
+        "measured": {"format": fmt},
+    }
+
+
+@pytest.mark.parametrize(
+    "data,kind,reason",
+    [(b"garbage", "image", "malformed_image"), (movie(), "video", "tool_unavailable")],
+    ids=["malformed_image", "tool_unavailable"],
+)
+async def test_a_check_that_read_no_value_carries_an_empty_measured(
+    data, kind, reason, tmp_path
+):
+    """A check that read no value still names itself: its `failed_check` has
+    the check and an empty `measured`."""
+    limits = v.ValidationLimits(ffprobe="/missing/tool", temporary_root=str(tmp_path))
+    result = await v.validate_media(request(data, kind), limits=limits)
+    assert result.failed_check == {"check": reason, "measured": {}}
+
+
+async def test_a_supported_result_has_no_failed_check():
+    """A result that is supported has no `failed_check`."""
+    result = await v.validate_media(request(image_bytes()))
+    assert result.state == "supported"
+    assert result.failed_check is None
+
+
+@pytest.mark.parametrize(
+    "reported,measured",
+    [
+        (
+            {"format": "F" * 300, "widths": list(range(40))},
+            {"format": "F" * 64, "widths": list(range(32))},
+        ),
+        ("not a mapping", {}),
+    ],
+    ids=["bounded", "not_a_mapping"],
+)
+async def test_worker_measured_values_are_bounded_again(
+    reported, measured, monkeypatch, tmp_path
+):
+    """The values the image worker reports are kept as any measured value is,
+    text cut to 64 characters and lists to 32 items, and a `measured` that is
+    not a mapping is dropped: the worker decoded hostile bytes, so its report
+    is not trusted to be bounded."""
+
+    async def worker(*args):
+        document = json.dumps({"unsupported": "image_format", "measured": reported})
+        return SimpleNamespace(returncode=0, stdout=document.encode(), stderr=b"")
+
+    monkeypatch.setattr(v, "run_bounded", worker)
+    result = await v.validate_media(
+        request(image_bytes()), limits=v.ValidationLimits(temporary_root=str(tmp_path))
+    )
+    assert result.failed_check == {"check": "image_format", "measured": measured}
+
+
+async def test_failed_check_is_plain_json(tmp_path):
+    """A result's `failed_check`, taken as a plain mapping, survives
+    `json.dumps` and reads back equal, whether the values it measured are
+    numbers or lists of text. (The result holds it as a read-only mapping;
+    `dict(...)` is what the record takes.)"""
+    limits = v.ValidationLimits(ffprobe="/missing/tool", temporary_root=str(tmp_path))
+    for data, kind in ((bytes(8_000_001), "image"), (movie(edits=True), "video")):
+        result = await v.validate_media(request(data, kind), limits=limits)
+        failed = dict(result.failed_check)
+        assert failed["measured"], "a check that measured nothing proves nothing here"
+        assert json.loads(json.dumps(failed)) == failed
+        assert_plain(failed)
+
+
+@pytest.mark.parametrize(
+    "data", [image_bytes(), b"garbage"], ids=["supported", "refused"]
+)
+async def test_fingerprint_is_the_documented_digest_with_or_without_a_failed_check(
+    data,
+):
+    """A result's fingerprint is the SHA-256 of the sorted, compact JSON of its
+    captured identity, the matrix and evidence versions, its state, its reason
+    and its evidence, and of nothing else: a result that carries a
+    `failed_check` is fingerprinted exactly as one that does not."""
+    source = request(data)
+    result = await v.validate_media(source)
+    assert (result.failed_check is None) == (result.state == "supported")
+    documented = {
+        "kind": source.kind,
+        "generation": source.source_generation,
+        "revision": source.observation_revision,
+        "asset": source.selected_asset_id,
+        "matrix": v.MATRIX_VERSION,
+        "evidence_version": v.EVIDENCE_VERSION,
+        "state": result.state,
+        "reason": result.reason,
+        "evidence": dict(result.evidence),
+    }
+    digest = hashlib.sha256(
+        json.dumps(documented, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert result.fingerprint == digest
+
+
+def refused_container(boxes):
+    """An `inspect_container` that refuses every container, measuring `boxes`."""
+
+    def inspect(data, limits=None):
+        return v.ContainerEvidence(
+            "edit_list",
+            measured={"boxes": boxes, "box_count": len(boxes), "sample_codecs": []},
+        )
+
+    return inspect
+
+
+async def test_fingerprint_does_not_move_with_what_the_check_measured(monkeypatch):
+    """Two results for the same bytes whose checks measured different values
+    carry different `failed_check`s and the same fingerprint."""
+    source = request(movie(), "video")
+    results = []
+    for boxes in (["ftyp"], ["ftyp", "moov", "mdat"]):
+        monkeypatch.setattr(v, "inspect_container", refused_container(boxes))
+        results.append(await v.validate_media(source))
+    first, second = results
+    assert dict(first.failed_check) != dict(second.failed_check)
+    assert first.fingerprint == second.fingerprint

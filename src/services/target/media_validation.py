@@ -149,6 +149,9 @@ class ValidationResult:
     evidence: Mapping[str, object]
     matrix_version: str = MATRIX_VERSION
     evidence_version: int = EVIDENCE_VERSION
+    #: For a result that is not supported: the check that decided it and the
+    #: values it measured (`{"check", "measured"}`). Not part of the fingerprint.
+    failed_check: Mapping[str, object] | None = None
 
 
 class ValidationPending(Exception):
@@ -157,6 +160,33 @@ class ValidationPending(Exception):
 
 class UnsupportedMedia(Exception):
     pass
+
+
+#: Bounds on a measured value kept as text, and on a list of them.
+_MEASURED_TEXT = 64
+_MEASURED_ITEMS = 32
+
+
+def _measured_value(value):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_measured_value(item) for item in value[:_MEASURED_ITEMS]]
+    # Printable text only: a box kind or a codec name read from the file can
+    # carry NUL, which jsonb refuses, or other control characters.
+    text = "".join(c if c.isprintable() else "?" for c in str(value))
+    return text[:_MEASURED_TEXT]
+
+
+def _measured(exc: Exception, **values) -> Exception:
+    """`exc` carrying the values that decided it, as `exc.measured`.
+
+    Whole numbers stay numbers; a Fraction is kept as its exact text and any
+    other value as bounded text. These are the parsed facts a check read,
+    never the tool's raw output.
+    """
+    exc.measured = {key: _measured_value(value) for key, value in values.items()}
+    return exc
 
 
 @dataclass(frozen=True)
@@ -287,6 +317,8 @@ class ContainerEvidence:
     pending: bool = False
     media_extents: tuple[tuple[int, int], ...] = ()
     sample_codecs: tuple[str, ...] = ()
+    #: For a refusal: the box list and the sample codecs walked so far.
+    measured: Mapping[str, object] = field(default_factory=dict)
 
 
 def inspect_container(
@@ -388,10 +420,18 @@ def inspect_container(
         return ContainerEvidence(
             None, media_extents=tuple(extents), sample_codecs=tuple(codecs)
         )
-    except UnsupportedMedia as exc:
-        return ContainerEvidence(str(exc))
-    except ValidationPending as exc:
-        return ContainerEvidence(str(exc), pending=True)
+    except (UnsupportedMedia, ValidationPending) as exc:
+        measured = {
+            "boxes": [kind.decode("ascii", errors="replace") for kind, _, _ in top],
+            "box_count": count,
+            "sample_codecs": codecs,
+            **getattr(exc, "measured", {}),
+        }
+        return ContainerEvidence(
+            str(exc),
+            pending=isinstance(exc, ValidationPending),
+            measured=_measured(exc, **measured).measured,
+        )
 
 
 def _image_worker(path, pixels):
@@ -409,9 +449,10 @@ def _image_worker(path, pixels):
                 try:
                     with Image.open(path) as other:
                         other.verify()
+                        found = other.format
                 except (UnidentifiedImageError, OSError, ValueError):
                     raise UnsupportedMedia("malformed_image") from None
-                raise UnsupportedMedia("image_format")
+                raise _measured(UnsupportedMedia("image_format"), format=found)
             with Image.open(path, formats=["JPEG"]) as image:
                 if image.width * image.height > pixels:
                     raise ValidationPending("pixel_budget")
@@ -438,10 +479,16 @@ def _image_worker(path, pixels):
     except (Image.DecompressionBombWarning, Image.DecompressionBombError):
         print(json.dumps({"pending": "pixel_budget"}))
     except ValidationPending as exc:
-        print(json.dumps({"pending": str(exc)}))
+        print(
+            json.dumps({"pending": str(exc), "measured": getattr(exc, "measured", {})})
+        )
     except (UnsupportedMedia, UnidentifiedImageError, OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, UnsupportedMedia) else "malformed_image"
-        print(json.dumps({"unsupported": reason}))
+        print(
+            json.dumps(
+                {"unsupported": reason, "measured": getattr(exc, "measured", {})}
+            )
+        )
 
 
 async def validate_media(
@@ -453,15 +500,21 @@ async def validate_media(
         evidence["sha256"] = hashlib.sha256(source.data).hexdigest()
     state, reason = "supported", "validated"
     try:
-        if len(source.data) > SUPPORTED_MEDIA_MATRIX["byte_caps"][source.kind]:
-            raise UnsupportedMedia("byte_limit")
+        cap = SUPPORTED_MEDIA_MATRIX["byte_caps"][source.kind]
+        if len(source.data) > cap:
+            raise _measured(
+                UnsupportedMedia("byte_limit"), bytes=len(source.data), cap=cap
+            )
         deadline = asyncio.get_running_loop().time() + limits.wall_seconds
         container = None
         if source.kind == "video":
             container = inspect_container(source.data, limits)
             if container.reason:
-                raise (ValidationPending if container.pending else UnsupportedMedia)(
-                    container.reason
+                raise _measured(
+                    (ValidationPending if container.pending else UnsupportedMedia)(
+                        container.reason
+                    ),
+                    **container.measured,
                 )
         with tempfile.TemporaryDirectory(
             prefix="media-validation-", dir=limits.temporary_root
@@ -484,20 +537,28 @@ async def validate_media(
                     facts = json.loads(output.stdout)
                 except (ValueError, UnicodeError):
                     raise ValidationPending("incomplete_evidence") from None
+                measured = facts.pop("measured", None)
+                measured = measured if isinstance(measured, dict) else {}
                 if "pending" in facts:
-                    raise ValidationPending(facts["pending"])
+                    raise _measured(ValidationPending(facts["pending"]), **measured)
                 if "unsupported" in facts:
-                    raise UnsupportedMedia(facts["unsupported"])
+                    raise _measured(UnsupportedMedia(facts["unsupported"]), **measured)
                 evidence.update(facts)
             else:
                 evidence.update(
                     await _validate_video(local, container, limits, directory, deadline)
                 )
                 raise ValidationPending("needs_spec_evidence")
-    except UnsupportedMedia as exc:
-        state, reason = "unsupported", str(exc)
-    except ValidationPending as exc:
-        state, reason = "validation_pending", str(exc)
+    except (UnsupportedMedia, ValidationPending) as exc:
+        state = (
+            "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
+        )
+        reason = str(exc)
+        failed_check = MappingProxyType(
+            {"check": reason, "measured": dict(getattr(exc, "measured", {}))}
+        )
+    else:
+        failed_check = None
     fingerprint_data = {
         "kind": source.kind,
         "generation": source.source_generation,
@@ -520,6 +581,7 @@ async def validate_media(
         source.selected_asset_id,
         fingerprint,
         MappingProxyType(evidence),
+        failed_check=failed_check,
     )
 
 
@@ -547,10 +609,17 @@ def inspect_video_facts(facts, formats, container, limits):
     videos = [s for s in streams if s.get("codec_type") == "video"]
     audios = [s for s in streams if s.get("codec_type") == "audio"]
     if len(videos) != 1 or len(audios) > 1 or len(streams) != len(videos) + len(audios):
-        raise ValidationPending("stream_topology")
+        raise _measured(
+            ValidationPending("stream_topology"),
+            streams=len(streams),
+            video_streams=len(videos),
+            audio_streams=len(audios),
+        )
     video = videos[0]
     if video.get("codec_name") not in ("h264", "hevc"):
-        raise UnsupportedMedia("video_codec")
+        raise _measured(
+            UnsupportedMedia("video_codec"), video_codec=video.get("codec_name")
+        )
     if video.get("side_data_list"):
         raise ValidationPending("transform_evidence_incomplete")
     index = _integer(video.get("index"))
@@ -587,21 +656,34 @@ def inspect_video_facts(facts, formats, container, limits):
         if width <= 0 or height <= 0:
             raise ValidationPending("incomplete_evidence")
         if width > 1920:
-            raise UnsupportedMedia("width")
+            raise _measured(UnsupportedMedia("width"), width=width, height=height)
         if width * height > limits.pixels:
-            raise ValidationPending("pixel_budget")
+            raise _measured(
+                ValidationPending("pixel_budget"),
+                width=width,
+                height=height,
+                pixel_limit=limits.pixels,
+            )
         sar = _ratio(frame.get("sample_aspect_ratio"))
         aspect = Fraction(width, height) * sar
         if not Fraction(1, 10) <= aspect <= 10:
-            raise UnsupportedMedia("aspect")
+            raise _measured(
+                UnsupportedMedia("aspect"),
+                width=width,
+                height=height,
+                sample_aspect_ratio=sar,
+                aspect=aspect,
+            )
         dimensions.add((width, height, sar))
         if _integer(frame.get("interlaced_frame")) != 0:
-            raise UnsupportedMedia("interlaced")
+            raise _measured(UnsupportedMedia("interlaced"), width=width, height=height)
         pix = formats.get(frame.get("pix_fmt"))
         if pix is None:
             raise ValidationPending("color_evidence_incomplete")
         if pix != (1, 1):
-            raise UnsupportedMedia("chroma_subsampling")
+            raise _measured(
+                UnsupportedMedia("chroma_subsampling"), pix_fmt=frame.get("pix_fmt")
+            )
         timestamps.append((_integer(frame.get("pts")), _integer(frame.get("duration"))))
     if len(dimensions) != 1:
         raise ValidationPending("geometry_evidence_incomplete")
@@ -615,10 +697,11 @@ def inspect_video_facts(facts, formats, container, limits):
         raise ValidationPending("timing_evidence_incomplete")
     duration = (timestamps[-1][0] + tick - timestamps[0][0]) * time_base
     fps = 1 / (tick * time_base)
+    timing = dict(duration_seconds=duration, fps=fps, video_frames=len(frames))
     if not 3 <= duration <= 60:
-        raise UnsupportedMedia("duration")
+        raise _measured(UnsupportedMedia("duration"), **timing)
     if not 23 <= fps <= 60:
-        raise UnsupportedMedia("fps")
+        raise _measured(UnsupportedMedia("fps"), **timing)
     if _integer(video.get("duration_ts")) * time_base != duration:
         raise ValidationPending("timing_evidence_incomplete")
     packet_timings = sorted(
@@ -634,16 +717,28 @@ def inspect_video_facts(facts, formats, container, limits):
         if size <= 0 or not any(
             start <= pos and pos + size <= end for start, end in container.media_extents
         ):
-            raise UnsupportedMedia("packet_outside_media")
+            raise _measured(
+                UnsupportedMedia("packet_outside_media"),
+                packet_pos=pos,
+                packet_size=size,
+            )
     audio_evidence = "absent_spec_interpretation_unproven"
     if audios:
         audio = audios[0]
         if audio.get("codec_name") != "aac":
-            raise UnsupportedMedia("audio_codec")
+            raise _measured(
+                UnsupportedMedia("audio_codec"), audio_codec=audio.get("codec_name")
+            )
         if _integer(audio.get("sample_rate")) > 48000:
-            raise UnsupportedMedia("audio_sample_rate")
+            raise _measured(
+                UnsupportedMedia("audio_sample_rate"),
+                sample_rate=_integer(audio.get("sample_rate")),
+            )
         if _integer(audio.get("channels")) not in (1, 2):
-            raise UnsupportedMedia("audio_channels")
+            raise _measured(
+                UnsupportedMedia("audio_channels"),
+                channels=_integer(audio.get("channels")),
+            )
         audio_evidence = "unproven"
     width, height, sar = next(iter(dimensions))
     return {
