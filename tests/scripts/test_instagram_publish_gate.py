@@ -746,7 +746,10 @@ async def test_committed_publish_prevents_restaging_and_another_upload(
 async def test_bound_early_card_content_failure_parks_review(
     past_posts_engine, origin, live_state, failure
 ):
-    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    # A gone slide is proved against the indexed slide count: a carousel.
+    src, item, intent = await preparation.selected(
+        past_posts_engine, origin, carousel=failure == "gone"
+    )
     selected, calls = preparation.service(
         past_posts_engine,
         origin,
@@ -1023,7 +1026,10 @@ async def test_early_card_failure_cannot_cross_captured_version(
     from src.services.target import source_policy
     from src.services.target.source_read_admission import SourceReadRefused
 
-    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    # A carousel, so the slide the reads lack is proved gone: a content failure.
+    src, item, intent = await preparation.selected(
+        past_posts_engine, origin, carousel=True
+    )
     selected, calls = preparation.service(
         past_posts_engine, origin, changed_child="456"
     )
@@ -1096,7 +1102,7 @@ async def test_early_card_failure_cannot_cross_captured_version(
         and str(p["selection_generation_id"]) == src["generation_id"]
         and p["selection_observation_revision"] == 1
     )
-    assert calls == ["graph.instagram.com"] * 2
+    assert calls == ["graph.instagram.com"] * 4
 
 
 @pytest.mark.parametrize("during_preparation", [False, True])

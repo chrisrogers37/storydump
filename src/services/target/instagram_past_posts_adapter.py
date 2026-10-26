@@ -63,6 +63,8 @@ MAX_OBSERVED_PARENTS = 100
 CHECKPOINT_VERSION = 2
 ATTRIBUTION_DETECTOR_VERSION = 1
 MAX_CAPTION_CHARACTERS = 8192
+#: A Graph paging cursor longer than this is not followed.
+MAX_CURSOR_CHARACTERS = 4096
 CAROUSEL_SLIDE_LIMIT = 20
 # Stay comfortably below Meta's recommended six-month query interval. A window
 # that lands nothing is skipped by one probe (`_skip_gap`), and the walk ends at
@@ -256,6 +258,26 @@ def _timestamp(value) -> int:
 
 def _count(value) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
+
+
+def _slide(parts, selected_asset_id):
+    """The selected part of one read, or None when the read lacks it."""
+    if selected_asset_id is None:
+        return parts[0] if parts else {}
+    return next((p for p in parts if p.get("id") == selected_asset_id), None)
+
+
+def _missing_slide(parts, complete, *, gone):
+    """The refusal for a selected slide a read lacks, with that read's facts."""
+    error, kind = (
+        (MediaSelectedAssetGone, "slide_gone")
+        if gone
+        else (MediaSelectedAssetChanged, "slide_changed")
+    )
+    return refusal_evidence.attach(
+        error(),
+        refusal_evidence.evidence(kind, children=len(parts), complete=complete),
+    )
 
 
 def _media_type(value) -> str:
@@ -835,7 +857,7 @@ class InstagramPastPostsAdapter:
                 if (
                     not isinstance(after, str)
                     or not after
-                    or len(after) > 4096
+                    or len(after) > MAX_CURSOR_CHARACTERS
                     or after in cursors_seen
                 ):
                     raise MediaRetryableError("Instagram pagination made no progress")
@@ -943,32 +965,61 @@ class InstagramPastPostsAdapter:
         *,
         fields: str = "id,media_type,media_url",
         policy: Optional[egress.EgressPolicy] = None,
+        seek: Optional[str] = None,
     ) -> tuple[tuple[dict, ...], bool]:
+        """A post's parts and whether the read listed all of them.
+
+        A carousel's children are one Graph page or, to `seek` a slide, the
+        pages Graph's `after` cursor leads to until that slide is listed or
+        the list ends, up to CAROUSEL_SLIDE_LIMIT slides; each page is one of
+        the turn's Graph requests. A cursor that is missing, seen before or
+        longer than MAX_CURSOR_CHARACTERS ends the read incomplete, as do a
+        cursor after an empty page and one left after a full carousel.
+        """
         if _media_type(row.get("media_type")) != "CAROUSEL_ALBUM":
             return (row,), True
-        children = await self._graph(
-            f"{_media_id(row.get('id'))}/children",
-            turn,
-            {"fields": fields, "limit": CAROUSEL_SLIDE_LIMIT},
-            policy=policy,
-        )
-        data = children.get("data")
-        if not isinstance(data, list) or len(data) > CAROUSEL_SLIDE_LIMIT:
-            raise MediaRetryableError("Instagram children response is incomplete")
-        for child in data:
-            if not isinstance(child, dict):
-                raise MediaRetryableError("Instagram child response is incomplete")
-            try:
-                _media_id(child.get("id"))
-            except MediaTerminalError as exc:
-                raise MediaRetryableError(
-                    "Instagram child identity is incomplete"
-                ) from exc
-            _media_type(child.get("media_type"))
-        paging = children.get("paging") or {}
-        if not isinstance(paging, dict):
-            raise MediaRetryableError("Instagram children paging is invalid")
-        return tuple(data), not bool(paging.get("next"))
+        path = f"{_media_id(row.get('id'))}/children"
+        params = {"fields": fields, "limit": CAROUSEL_SLIDE_LIMIT}
+        parts, cursors_seen = [], set()
+        while True:
+            children = await self._graph(path, turn, params, policy=policy)
+            data = children.get("data")
+            if (
+                not isinstance(data, list)
+                or len(parts) + len(data) > CAROUSEL_SLIDE_LIMIT
+            ):
+                raise MediaRetryableError("Instagram children response is incomplete")
+            for child in data:
+                if not isinstance(child, dict):
+                    raise MediaRetryableError("Instagram child response is incomplete")
+                try:
+                    _media_id(child.get("id"))
+                except MediaTerminalError as exc:
+                    raise MediaRetryableError(
+                        "Instagram child identity is incomplete"
+                    ) from exc
+                _media_type(child.get("media_type"))
+            parts.extend(data)
+            paging = children.get("paging") or {}
+            if not isinstance(paging, dict):
+                raise MediaRetryableError("Instagram children paging is invalid")
+            if not paging.get("next"):
+                return tuple(parts), True
+            if seek is None or _slide(data, seek) is not None:
+                return tuple(parts), False
+            cursors = paging.get("cursors") or {}
+            after = cursors.get("after") if isinstance(cursors, dict) else None
+            if (
+                not data
+                or len(parts) == CAROUSEL_SLIDE_LIMIT
+                or not isinstance(after, str)
+                or not after
+                or len(after) > MAX_CURSOR_CHARACTERS
+                or after in cursors_seen
+            ):
+                return tuple(parts), False
+            cursors_seen.add(after)
+            params = {**params, "after": after}
 
     async def _observe(
         self,
@@ -1087,23 +1138,58 @@ class InstagramPastPostsAdapter:
             },
         }
 
-    @staticmethod
-    def _selected_part(parts, complete, selected_asset_id):
-        if selected_asset_id is None:
-            return parts[0] if parts else {}
-        for part in parts:
-            if part.get("id") == selected_asset_id:
-                return part
-        facts = dict(children=len(parts), complete=complete)
-        if complete:
+    async def _owned_parent(self, mid: str, turn: _Turn) -> dict:
+        """Post `mid` as Graph returns it now: owned by this account, same id."""
+        parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
+        ownership = await self._ownership(parent.get("owner"), turn)
+        if not ownership.ok:
             raise refusal_evidence.attach(
-                MediaSelectedAssetGone(),
-                refusal_evidence.evidence("slide_gone", **facts),
+                MediaTerminalError(
+                    "Instagram media ownership could not be established"
+                ),
+                refusal_evidence.evidence(
+                    "ownership_unproven",
+                    test=ownership.test,
+                    match=dict(ownership.match),
+                ),
             )
-        raise refusal_evidence.attach(
-            MediaSelectedAssetChanged(),
-            refusal_evidence.evidence("slide_changed", **facts),
+        if parent.get("id") != mid:
+            raise refusal_evidence.attach(
+                MediaTerminalError("Instagram returned a different media item"),
+                refusal_evidence.evidence("identity_mismatch", id_matches=False),
+            )
+        return parent
+
+    async def _current_slide(
+        self, mid, turn, selected_asset_id, expected_slide_count
+    ) -> dict:
+        """The selected part of post `mid` as Graph lists it now, or why it
+        cannot be fetched.
+
+        One read that lacks the slide proves nothing, so a complete one is
+        followed by a second, fresh read of the parent and its children. The
+        slide is gone only when that read is complete too, lists the same
+        slides as the first, and holds fewer slides than the index recorded
+        (`expected_slide_count`). An empty list is never proof, and the parent
+        must have answered the second read. Anything else, an incomplete read
+        included, is a change to revalidate.
+        """
+        listed = []
+        for _ in range(2):
+            parent = await self._owned_parent(mid, turn)
+            parts, complete = await self._children(parent, turn, seek=selected_asset_id)
+            part = _slide(parts, selected_asset_id)
+            if part is not None:
+                return part
+            if not complete:
+                raise _missing_slide(parts, complete, gone=False)
+            listed.append({p.get("id") for p in parts})
+        gone = (
+            expected_slide_count is not None
+            and 0 < len(parts) < expected_slide_count
+            and listed[0] == listed[1]
         )
+        raise _missing_slide(parts, True, gone=gone)
 
     async def fetch_bytes(
         self,
@@ -1114,6 +1200,7 @@ class InstagramPastPostsAdapter:
         workspace_id: str,
         max_bytes: int,
         selected_asset_id: Optional[str] = None,
+        expected_slide_count: Optional[int] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
         """Fetch current bytes; bound validation/effect callers supply selection.
@@ -1122,6 +1209,9 @@ class InstagramPastPostsAdapter:
         captured selected_asset_id. Freshly changed carousel bytes cannot
         inherit the previous child's evidence. No consumer is wired here. A
         preview is :meth:`fetch_preview`, never this full fetch.
+        expected_slide_count is the slide count the index recorded for the
+        post, None for a single post or when none was recorded: a selected
+        slide the reads lack is judged gone only against it (`_current_slide`).
         on_counters is a synchronous local observer (no I/O), called once even
         on failure/cancellation. Observer exceptions cannot alter read outcomes.
         """
@@ -1136,28 +1226,9 @@ class InstagramPastPostsAdapter:
             # Every link status the CDN answered, so a second refusal keeps the first.
             link_statuses = []
             for attempt in range(2):
-                parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
-                ownership = await self._ownership(parent.get("owner"), turn)
-                if not ownership.ok:
-                    raise refusal_evidence.attach(
-                        MediaTerminalError(
-                            "Instagram media ownership could not be established"
-                        ),
-                        refusal_evidence.evidence(
-                            "ownership_unproven",
-                            test=ownership.test,
-                            match=dict(ownership.match),
-                        ),
-                    )
-                if parent.get("id") != mid:
-                    raise refusal_evidence.attach(
-                        MediaTerminalError("Instagram returned a different media item"),
-                        refusal_evidence.evidence(
-                            "identity_mismatch", id_matches=False
-                        ),
-                    )
-                parts, complete = await self._children(parent, turn)
-                part = self._selected_part(parts, complete, selected_asset_id)
+                part = await self._current_slide(
+                    mid, turn, selected_asset_id, expected_slide_count
+                )
                 kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
                 url = part.get("media_url")
                 if kind is None or not isinstance(url, str) or not url:
@@ -1305,7 +1376,11 @@ class InstagramPastPostsAdapter:
         parts, complete = await self._children(
             parent, turn, fields=_PREVIEW_CHILD_FIELDS, policy=policy
         )
-        part = self._selected_part(parts, complete, selected_asset_id)
+        part = _slide(parts, selected_asset_id)
+        if part is None:
+            # A preview judges its one page: it refuses, and nothing retires
+            # on its refusal. Only the fetch retires a slide (`_current_slide`).
+            raise _missing_slide(parts, complete, gone=complete)
         field = {"IMAGE": "media_url", "VIDEO": "thumbnail_url"}.get(
             part.get("media_type")
         )
