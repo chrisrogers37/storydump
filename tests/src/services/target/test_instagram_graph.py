@@ -124,6 +124,29 @@ class TestWhatItSends:
             ("GET", f"/v21.0/{REF}/content_publishing_limit"),
         ]
 
+    async def test_a_dead_container_carries_metas_own_reason(self):
+        """Meta's `status` text is its only answer for a container it would
+        not process: it rides on the status, scrubbed for the ledger."""
+
+        def handler(request):
+            code = request.url.path.rsplit("/", 1)[-1]
+            if code == "live":
+                return httpx.Response(200, json={"status_code": "IN_PROGRESS"})
+            return httpx.Response(
+                200,
+                json={
+                    "status_code": "ERROR",
+                    "status": f"Error: upload failed with error code 2207026 {TOKEN}",
+                },
+            )
+
+        a = _adapter(handler)
+        dead = await a.container_status("dead", provider_account_ref=REF)
+        assert dead == "ERROR"
+        assert dead.reason == "Error: upload failed with error code 2207026 <TOKEN>"
+        live = await a.container_status("live", provider_account_ref=REF)
+        assert live == "IN_PROGRESS" and live.reason is None
+
     async def test_the_workspace_reaches_the_token_reader(self):
         reads = []
 

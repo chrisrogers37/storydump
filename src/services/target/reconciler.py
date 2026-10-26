@@ -401,7 +401,12 @@ async def reconcile_intent(
     stubbed evidence, as the permit-rail gate requires, in both modes.
     """
     trail = list(trail or [])
-    trail.append({"status_code": status_code, "check": checks + 1})
+    seen = {"status_code": status_code, "check": checks + 1}
+    # A dead container's own reason, when the poll carried one
+    # (`instagram_graph.ContainerStatus`).
+    if getattr(status_code, "reason", None):
+        seen["status"] = status_code.reason
+    trail.append(seen)
     verdict = classify(status_code, mode)
 
     if verdict == POSITIVE:
