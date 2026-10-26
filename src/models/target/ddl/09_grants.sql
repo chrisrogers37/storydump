@@ -416,9 +416,9 @@ GRANT EXECUTE ON FUNCTION fn_signup_claim(text) TO svc_ingress;
 
 REVOKE ALL ON FUNCTION trg_users_consume_admission() FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid) TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid) TO svc_ingress, svc_worker;
 
 REVOKE ALL ON FUNCTION fn_source_read_authority(uuid, uuid, boolean) FROM PUBLIC;
 
@@ -454,9 +454,9 @@ REVOKE ALL ON FUNCTION fn_mix_conversion_jobs(integer, text, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_mix_conversion_jobs(integer, text, text) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid, boolean) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean) TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid, boolean) TO svc_ingress, svc_worker;
 
 REVOKE ALL ON FUNCTION fn_selected_preparation_due(integer) FROM PUBLIC;
 

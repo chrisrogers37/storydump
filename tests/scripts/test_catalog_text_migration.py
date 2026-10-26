@@ -59,8 +59,10 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 
 
 def test_replaced_functions_are_exact_schema_definitions():
-    """Every function 001 defines is the schema's text, unless 003 replaced it
-    when it renamed what that text names; every one 003 defines is too."""
+    """Every function 001 defines is the schema's text unless 003 replaced it
+    when it renamed what that text names; every function 003 or a later
+    migration defines is the schema's text unless a later migration defines it
+    again."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
@@ -74,7 +76,17 @@ def test_replaced_functions_are_exact_schema_definitions():
         if (name, text) not in schema
     }
     assert replaced <= {name for name, _ in rename}
-    assert all(definition in schema for definition in rename)
+    migrations = [m for m in discover_migrations(MIGRATIONS_DIR) if m.version >= 3]
+    for index, current in enumerate(migrations):
+        superseded = {
+            name
+            for later in migrations[index + 1 :]
+            for name, _ in _definitions(later.sql)
+        }
+        assert all(
+            definition in schema or definition[0] in superseded
+            for definition in _definitions(current.sql)
+        ), current.version
 
 
 @pytest.fixture(scope="module")
@@ -438,6 +450,7 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         3,
         4,
         5,
+        7,
     ]
 
     assert fetch_all(
@@ -462,6 +475,7 @@ def test_base_with_catalog_refresh_equals_current_code(
         3,
         4,
         5,
+        7,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)

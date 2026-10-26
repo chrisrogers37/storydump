@@ -1,0 +1,3 @@
+### Changed
+
+- **A stored refusal of a past post's file counts only while the rules that refused it are the current ones.** `fn_source_asset_suitability` takes the validator's matrix version (`p_matrix_version`, after `p_past_posts_enabled`) and honours a stored `unsupported` verdict only when the slide's validation capture is stamped with it; an older or unstamped verdict leaves the slide a candidate again, `validation_pending` in strict mode, so the next story prepared from it fetches and judges the file again. The catalog's own `unsupported_media` exclusion is unchanged. Migration `007_suitability_matrix_version.sql` replaces both overloads of the function with the new signatures.

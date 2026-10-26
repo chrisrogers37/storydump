@@ -6,7 +6,7 @@ from decimal import Decimal
 import json
 import pytest
 from sqlalchemy import text
-from src.services.target import category_mix, source_policy
+from src.services.target import category_mix, media_validation, source_policy
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.test_source_suitability_gate import activate
@@ -1058,12 +1058,25 @@ async def test_database_refuses_incoherent_unsupported_byte_proof(
                     )
                 )
         assert (await verdict(conn, origin, src))["suitable"]
-        await conn.execute(
-            text(
-                "UPDATE instagram_media_assets SET validation_state='unsupported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='synthetic',validated_at=now()"
-            )
-        )
+        await obs.stamp_refusal(conn, origin, item, media_validation.MATRIX_VERSION)
         assert (await verdict(conn, origin, src))["reason"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "version", ["instagram-story-older", None], ids=["older", "unstamped"]
+)
+async def test_a_stored_refusal_from_another_matrix_version_is_a_candidate_again(
+    past_posts_engine, origin, version
+):
+    """A stored refusal stamped with an older matrix version, or with none, is
+    a candidate again, `validation_pending` in strict mode."""
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await obs.stamp_refusal(conn, origin, item, version)
+        candidate = await verdict(conn, origin, src)
+        strict = await verdict(conn, origin, src, strict=True)
+    assert candidate["suitable"]
+    assert strict["reason"] == "validation_pending"
 
 
 async def test_pool_rejects_supplied_expired_context_even_before_conversion(

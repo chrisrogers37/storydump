@@ -1425,9 +1425,12 @@ END; $$;
 -- canonical retained locks. Drive is workspace-wide. Existing-intent context
 -- excludes only its own matching live intent; lock facts do not override base
 -- suitability or the database duplicate INSERT arbiter.
+-- A stored unsupported verdict counts only while its capture is stamped with
+-- p_matrix_version, the matrix the validator runs now; an older or unstamped one
+-- is judged again.
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean, p_matrix_version text,
   p_source_id uuid DEFAULT NULL, p_media_item_id uuid DEFAULT NULL,
   p_existing_intent_id uuid DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
@@ -1438,8 +1441,8 @@ RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
 LANGUAGE sql STABLE SECURITY INVOKER
 SET search_path=pg_catalog,public,pg_temp AS $$
  SELECT * FROM fn_source_asset_suitability(p_workspace_id,p_destination_id,
-  p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_source_id,
-  p_media_item_id,p_existing_intent_id,true)
+  p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_matrix_version,
+  p_source_id,p_media_item_id,p_existing_intent_id,true)
 $$;
 
 -- Internal current source-read facts only; no item, age, attribution, credit
@@ -1829,7 +1832,7 @@ END $$;
 
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean, p_matrix_version text,
   p_source_id uuid, p_media_item_id uuid,
   p_existing_intent_id uuid, p_require_validation boolean)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
@@ -1896,11 +1899,12 @@ WITH source_facts AS (
       WHEN a.availability IS NOT NULL AND a.availability<>'available' THEN 'unavailable'
       WHEN m.id IS NOT NULL AND m.state<>'available' THEN 'unavailable'
       WHEN s.carousel_slides='first' AND a.position>1 THEN 'slide_not_first'
-      WHEN a.validation_state='unsupported' OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
+      WHEN (a.validation_state='unsupported' AND a.validation_capture->>'matrix_version'=p_matrix_version) OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id
-        AND a.validation_capture->>'state'='unsupported' THEN 'unsupported'
+        AND a.validation_capture->>'state'='unsupported'
+        AND a.validation_capture->>'matrix_version'=p_matrix_version THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id
