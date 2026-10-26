@@ -82,31 +82,26 @@ def _bounds(check: str, kind: str) -> dict:
     return {}
 
 
-def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
-    """Each check a supported file passed that holds it to a bound: what it
-    measured, from the evidence, and the bound (`_bounds`). A video whose
-    probe states no frame rate (`inspect_video_facts` records "unstated") was
-    not judged on one."""
-    checks = [("byte_limit", {"bytes": evidence["bytes"]})]
-    if kind == "video":
-        duration = {"duration_seconds": evidence.get("duration_seconds")}
-        if evidence.get("trimmed_to_seconds") is not None:
-            duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
-        checks.append(("duration", duration))
-        if evidence.get("fps") not in (None, "unstated"):
-            checks.append(("fps", {"fps": evidence["fps"]}))
-    return tuple(
-        MappingProxyType(
-            {
-                "check": check,
-                "measured": {
-                    key: _measured_value(value)
-                    for key, value in {**measured, **_bounds(check, kind)}.items()
-                },
-            }
-        )
-        for check, measured in checks
+def _check_record(check: str, kind: str, measured: Mapping[str, object]) -> Mapping:
+    """One check's record, `{"check", "measured"}`: what it measured and the
+    bounds it holds a *kind* of file to (`_bounds`). The shape of a refusal's
+    `failed_check` and of each of a supported result's `passed_checks`."""
+    return MappingProxyType(
+        {"check": check, "measured": {**measured, **_bounds(check, kind)}}
     )
+
+
+def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
+    """Each check a supported file passed that holds it to a bound, recorded
+    from the evidence. A video whose probe states no frame rate was not judged
+    on one."""
+    checks = [_check_record("byte_limit", kind, {"bytes": evidence["bytes"]})]
+    if kind == "video":
+        duration = {"duration_seconds": evidence["duration_seconds"]}
+        checks.append(_check_record("duration", kind, duration))
+        if _positive_fraction(evidence["fps"]) is not None:
+            checks.append(_check_record("fps", kind, {"fps": evidence["fps"]}))
+    return tuple(checks)
 
 
 @dataclass(frozen=True)
@@ -185,7 +180,7 @@ class ValidationResult:
     #: "measured"}`). Not part of the fingerprint.
     failed_check: Mapping[str, object] | None = None
     #: For a supported result: each check it passed that holds a file to a
-    #: bound, in `failed_check`'s shape (`_passed`). Not part of the
+    #: bound, in `failed_check`'s shape (`_check_record`). Not part of the
     #: fingerprint.
     passed_checks: tuple[Mapping[str, object], ...] = ()
 
@@ -603,13 +598,7 @@ async def validate_media(
             "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
         )
         reason = str(exc)
-        measured = {**getattr(exc, "measured", {}), **_bounds(reason, source.kind)}
-        failed_check = MappingProxyType(
-            {
-                "check": reason,
-                "measured": {k: _measured_value(v) for k, v in measured.items()},
-            }
-        )
+        failed_check = _check_record(reason, source.kind, getattr(exc, "measured", {}))
         passed_checks = ()
     else:
         failed_check = None

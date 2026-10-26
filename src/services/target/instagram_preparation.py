@@ -90,38 +90,40 @@ def _refusal(exc, counters, selected) -> dict:
     return facts
 
 
-def _validation_refusal(validation, counters) -> dict | None:
-    """A result that is not supported, as refusal evidence: the check that
-    decided it and the values it measured, with the turn's counters."""
-    if validation.state == "supported" or not validation.failed_check:
-        return None
+def _local_validation(validation, counters, **decided) -> dict:
+    """A validation result as evidence: its state, what *decided* it, the byte
+    count, the matrix version and the turn's counters. One shape for a refusal
+    and a pass."""
     return refusal_evidence.evidence(
         "local_validation",
         state=validation.state,
-        check=validation.failed_check["check"],
-        measured=dict(validation.failed_check["measured"]),
+        **decided,
         bytes=validation.evidence.get("bytes"),
         matrix_version=validation.matrix_version,
         counters=asdict(counters),
     )
 
 
+def _validation_refusal(validation, counters) -> dict | None:
+    """A result that is not supported, as refusal evidence: the check that
+    decided it and the values it measured, with the turn's counters."""
+    if validation.state == "supported" or not validation.failed_check:
+        return None
+    return _local_validation(
+        validation,
+        counters,
+        check=validation.failed_check["check"],
+        measured=dict(validation.failed_check["measured"]),
+    )
+
+
 def _validation_pass(validation, counters) -> dict | None:
     """A supported result, as evidence in a refusal's shape: each check it
-    passed with what it measured and the bound it held, and the turn's
-    counters."""
+    passed with what it measured and the bound it held."""
     if validation.state != "supported":
         return None
-    return refusal_evidence.evidence(
-        "local_validation",
-        state=validation.state,
-        checks=[
-            {"check": check["check"], "measured": dict(check["measured"])}
-            for check in validation.passed_checks
-        ],
-        bytes=validation.evidence.get("bytes"),
-        matrix_version=validation.matrix_version,
-        counters=asdict(counters),
+    return _local_validation(
+        validation, counters, checks=[dict(check) for check in validation.passed_checks]
     )
 
 

@@ -785,13 +785,9 @@ def test_container_refusal_carries_the_boxes_it_walked(
 UNREAD = ("a stream", "another format", "?", "None")
 
 
-def assert_reads_with_what_it_measured(check, measured):
-    """The card's sentence for a refusal the validator raised is its check's
-    own, built from the values the check recorded: never the sentence for a
-    check without words, and never a placeholder for a value it did not find.
-    A measured value renamed on either side fails here, where the sentence
-    table's own cases, built by hand, would not."""
-    sentence = refusal_evidence.plain(
+def sentence_of(check, measured):
+    """The card's sentence for a refusal by *check* that recorded *measured*."""
+    return refusal_evidence.plain(
         refusal_evidence.evidence(
             "local_validation",
             state="unsupported",
@@ -799,6 +795,15 @@ def assert_reads_with_what_it_measured(check, measured):
             measured=dict(measured),
         )
     )
+
+
+def assert_reads_with_what_it_measured(check, measured):
+    """The card's sentence for a refusal the validator raised is its check's
+    own, built from the values the check recorded: never the sentence for a
+    check without words, and never a placeholder for a value it did not find.
+    A measured value renamed on either side fails here, where the sentence
+    table's own cases, built by hand, would not."""
+    sentence = sentence_of(check, measured)
     assert f"the {check} check" not in sentence, sentence
     assert not any(word in sentence for word in UNREAD), sentence
 
@@ -999,14 +1004,20 @@ async def test_fingerprint_does_not_move_with_what_the_check_measured(monkeypatc
     assert first.fingerprint == second.fingerprint
 
 
-def answer_the_probe_with(monkeypatch, facts):
-    """`validate_media`'s video probe answering with ffprobe's *facts*, judged
-    by the real `inspect_video_facts`, so no probe tool runs."""
+async def validated_video(monkeypatch, tmp_path, facts, data=None):
+    """`validate_media` on a video whose probe answers with ffprobe's *facts*:
+    the bounded run is faked, and the real `_validate_video` reads the answer."""
 
     async def probe(*args):
-        return v.inspect_video_facts(facts)
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps(facts).encode(), stderr=b""
+        )
 
-    monkeypatch.setattr(v, "_validate_video", probe)
+    monkeypatch.setattr(v, "run_bounded", probe)
+    return await v.validate_media(
+        request(movie() if data is None else data, "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
 
 
 async def test_a_supported_video_records_each_check_it_passed_with_its_bounds(
@@ -1014,12 +1025,9 @@ async def test_a_supported_video_records_each_check_it_passed_with_its_bounds(
 ):
     """A supported file says what it passed: each check that holds it to a
     bound, with the value it measured and the bound the matrix sets."""
-    answer_the_probe_with(monkeypatch, probe_facts(duration="12.5", fps="30/1"))
     data = movie()
-    result = await v.validate_media(
-        request(data, "video"),
-        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
-    )
+    facts = probe_facts(duration="12.5", fps="30/1")
+    result = await validated_video(monkeypatch, tmp_path, facts, data)
     matrix = v.SUPPORTED_MEDIA_MATRIX
     assert (result.state, result.failed_check) == ("supported", None)
     assert [dict(check) for check in result.passed_checks] == [
@@ -1044,8 +1052,10 @@ async def test_a_supported_video_records_each_check_it_passed_with_its_bounds(
             },
         },
     ]
-    assert result.evidence["duration_seconds"] == "25/2"
-    assert result.evidence["fps"] == "30"
+    assert (result.evidence["duration_seconds"], result.evidence["fps"]) == (
+        "25/2",
+        "30",
+    )
 
 
 async def test_a_video_whose_probe_states_no_frame_rate_passed_no_fps_check(
@@ -1053,11 +1063,7 @@ async def test_a_video_whose_probe_states_no_frame_rate_passed_no_fps_check(
 ):
     """A frame rate the probe does not state is not judged, so it is not
     recorded as passed."""
-    answer_the_probe_with(monkeypatch, probe_facts(fps="0/0"))
-    result = await v.validate_media(
-        request(movie(), "video"),
-        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
-    )
+    result = await validated_video(monkeypatch, tmp_path, probe_facts(fps="0/0"))
     assert result.state == "supported"
     assert [check["check"] for check in result.passed_checks] == [
         "byte_limit",
@@ -1066,39 +1072,36 @@ async def test_a_video_whose_probe_states_no_frame_rate_passed_no_fps_check(
 
 
 @pytest.mark.parametrize(
-    "facts,check,bounds,unit",
+    "facts,check,key,low_name,high_name,unit",
     [
-        (probe_facts(duration="2"), "duration", ("min_seconds", "max_seconds"), " s"),
-        (probe_facts(fps="120/1"), "fps", ("min_fps", "max_fps"), ""),
+        (
+            probe_facts(duration="2"),
+            "duration",
+            "duration_seconds",
+            "min_seconds",
+            "max_seconds",
+            " s",
+        ),
+        (probe_facts(fps="120/1"), "fps", "fps", "min_fps", "max_fps", ""),
     ],
     ids=["duration", "fps"],
 )
 async def test_a_refused_timing_records_its_bounds_and_reads_with_them(
-    monkeypatch, tmp_path, facts, check, bounds, unit
+    monkeypatch, tmp_path, facts, check, key, low_name, high_name, unit
 ):
     """A refused duration or frame rate records the bounds it was held to
     beside the value, and its sentence says those bounds: a bound renamed on
     either side fails here."""
-    answer_the_probe_with(monkeypatch, facts)
-    result = await v.validate_media(
-        request(movie(), "video"),
-        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
-    )
-    low, high = v.SUPPORTED_MEDIA_MATRIX[
-        "duration_seconds" if check == "duration" else "fps"
-    ]
-    measured = dict(result.failed_check["measured"])
-    assert (result.reason, measured[bounds[0]], measured[bounds[1]]) == (
+    result = await validated_video(monkeypatch, tmp_path, facts)
+    low, high = v.SUPPORTED_MEDIA_MATRIX[key]
+    measured = result.failed_check["measured"]
+    assert (result.reason, measured[low_name], measured[high_name]) == (
         check,
         low,
         high,
     )
     assert result.passed_checks == ()
-    sentence = refusal_evidence.plain(
-        refusal_evidence.evidence(
-            "local_validation", state="unsupported", check=check, measured=measured
-        )
-    )
+    sentence = sentence_of(check, measured)
     assert sentence.endswith(f"; stories take {low} to {high}{unit}"), sentence
 
 
