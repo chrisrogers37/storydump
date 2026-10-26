@@ -764,6 +764,34 @@ async def test_unsupported_bytes_record_the_failed_check_with_what_it_measured(
     assert verdict["reason"] == "unsupported" and not verdict["suitable"]
 
 
+async def test_supported_bytes_record_each_check_they_passed_with_what_it_measured(
+    past_posts_engine, origin
+):
+    """Bytes that pass land what they passed, in a refusal's shape (the state,
+    each check with the values it measured and the bound it held, the byte
+    count, the matrix version and the turn's counters), under the asset's
+    `validation_capture -> 'passed'`, and no refusal."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    content = jpeg()
+    await serving(content).selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    cap = media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"]["image"]
+    assert capture["state"] == "supported" and "refusal" not in capture
+    assert capture["passed"] == {
+        "v": 1,
+        "kind": "local_validation",
+        "state": "supported",
+        "checks": [
+            {"check": "byte_limit", "measured": {"bytes": len(content), "cap": cap}}
+        ],
+        "bytes": len(content),
+        "matrix_version": media_validation.MATRIX_VERSION,
+        "counters": TURN,
+    }
+
+
 async def test_slide_gone_refusal_carries_its_evidence_and_the_indexed_slide_count(
     past_posts_engine, origin
 ):
