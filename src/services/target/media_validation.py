@@ -1037,6 +1037,20 @@ def _aac_config(data: bytes, start: int, end: int) -> tuple:
     return rate, _AAC_CHANNELS.get(field(4))
 
 
+def derivation_limits(media_kind: str) -> dict:
+    """The matrix's limits a story derivation of *media_kind* is held to
+    (`judge_derivation`): its size and, for a video, its audio's."""
+    matrix = SUPPORTED_MEDIA_MATRIX
+    if media_kind != "video":
+        return {"bytes": matrix["provider_image_bytes"]}
+    return {
+        "bytes": matrix["provider_video_bytes"],
+        "audio_codec": matrix["audio_codec"],
+        "audio_hz": matrix["audio_hz"],
+        "audio_channels": matrix["audio_channels"],
+    }
+
+
 def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
     """Raise `UnsupportedMedia` for a story derivation that breaks a line of
     Meta's the matrix holds, from what the transit store's readiness probe
@@ -1045,13 +1059,12 @@ def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
     probe did not read is left to Meta's answer to the container call."""
     if not observation:
         return
-    matrix = SUPPORTED_MEDIA_MATRIX
-    limit = matrix[
-        "provider_video_bytes" if media_kind == "video" else "provider_image_bytes"
-    ]
+    limits = derivation_limits(media_kind)
     size = observation.get("length")
-    if isinstance(size, int) and size > limit:
-        raise _measured(UnsupportedMedia("derivation_bytes"), bytes=size, limit=limit)
+    if isinstance(size, int) and size > limits["bytes"]:
+        raise _measured(
+            UnsupportedMedia("derivation_bytes"), bytes=size, limit=limits["bytes"]
+        )
     container = observation.get("container") or {}
     if REFUSE_MOOV_POSITION and container.get("moov_first") is False:
         raise _measured(
@@ -1071,16 +1084,16 @@ def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
         if (
             REFUSE_AUDIO_CHANNELS
             and isinstance(channels, int)
-            and channels > matrix["audio_channels"]
+            and channels > limits["audio_channels"]
         ):
             raise _measured(
                 UnsupportedMedia("derivation_audio_channels"),
                 channels=channels,
-                limit=matrix["audio_channels"],
+                limit=limits["audio_channels"],
             )
-        if isinstance(hz, int) and hz > matrix["audio_hz"]:
+        if isinstance(hz, int) and hz > limits["audio_hz"]:
             raise _measured(
                 UnsupportedMedia("derivation_audio_rate"),
                 hz=hz,
-                limit=matrix["audio_hz"],
+                limit=limits["audio_hz"],
             )
