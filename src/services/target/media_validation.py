@@ -826,6 +826,11 @@ def _closed_decoder(line: bytes) -> bool:
     return b"codec (" in line and b"not on whitelist" in line
 
 
+#: ffmpeg's line for a message logged again at once ("Last message repeated
+#: N times"): it adds nothing to the line it repeats.
+_REPEATED = b"last message repeated"
+
+
 class _ClosedDecoder(Exception):
     """The probe stopped at a decoder `-codec_whitelist` keeps closed, and at
     nothing else (`_closed_decoder`): ffprobe ends when it cannot open one."""
@@ -841,7 +846,7 @@ def _probe_succeeded(output):
     stderr = output.stderr.lower()
     closed = False
     if b"not on whitelist" in stderr:
-        lines = stderr.splitlines()
+        lines = [line for line in stderr.splitlines() if _REPEATED not in line]
         kept = [line for line in lines if not _closed_decoder(line)]
         closed, stderr = len(kept) < len(lines), b"\n".join(kept)
     if not stderr:

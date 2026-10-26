@@ -903,6 +903,13 @@ CLOSED = b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n"
         (1, CLOSED, "supported", "validated", {"closed_decoders": ["mp4v"]}),
         (
             1,
+            CLOSED + b"    Last message repeated 1 times\n" + CLOSED,
+            "supported",
+            "validated",
+            {"closed_decoders": ["mp4v"]},
+        ),
+        (
+            1,
             CLOSED + b"moov atom truncated\n",
             "validation_pending",
             "probe_incomplete",
@@ -916,7 +923,13 @@ CLOSED = b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n"
             None,
         ),
     ],
-    ids=["a-closed-decoder", "stopped-at-it", "and-another-line", "a-closed-protocol"],
+    ids=[
+        "a-closed-decoder",
+        "stopped-at-it",
+        "stopped-at-it-as-ffprobe-says-it",
+        "and-another-line",
+        "a-closed-protocol",
+    ],
 )
 async def test_a_decoder_the_whitelist_keeps_closed_is_not_a_fault_of_the_file(
     monkeypatch, tmp_path, returncode, stderr, state, reason, skipped
