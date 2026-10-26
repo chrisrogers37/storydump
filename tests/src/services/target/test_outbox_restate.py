@@ -1,5 +1,6 @@
 """The restate-by-ref door, and its everywhere form for the review
-resolutions; the sender's claim of a card and of its edit.
+resolutions; the review card a parked story gets in a chat that holds no
+card of it; the sender's claim of a card and of its edit.
 
 `restate_cards` reaches a card the tap already superseded (by ref, any settled
 state). `restate_everywhere` is the executor's door: every active Telegram
@@ -137,6 +138,93 @@ class TestRestateEverywhere:
         assert "'prompt_supersede'" in sql
         assert params == {"ws": "ws", "i": "i", "o": "✅ Posted by Sam"}
         assert "reply_markup" not in sql
+
+
+CARD = {"v": 2, "text": "📸 card", "outcome_text": "👀 Needs review"}
+
+
+class TestTheChatsWithoutACard:
+    """`chats_without_card`: the push bindings holding no card of a story,
+    in one statement."""
+
+    async def test_a_card_counts_once_it_reached_the_chat_or_may_still(self):
+        s = _Session([("b1",), ("b2",)])
+        chats = await outbox.chats_without_card(s, workspace_id="ws", intent_id="i")
+        assert chats == ["b1", "b2"] and len(s.sql) == 1, "one round trip"
+        sql, params = s.sql[0]
+        assert "FROM channel_bindings b" in sql and "NOT EXISTS" in sql
+        assert "kind = 'approval_prompt'" in sql
+        assert "external_message_ref IS NOT NULL" in sql
+        assert "('pending', 'sending', 'ambiguous')" in sql
+        assert params == {"ws": "ws", "i": "i"}
+
+
+class TestThePromptForAParkedStory:
+    """`prompts.prompt_review`, the park's courtesy (`tell_review`): the
+    review card goes to every chat that holds no card of the story, and is
+    rendered only when one does."""
+
+    @pytest.fixture
+    def doors(self, monkeypatch):
+        from src.services.target import prompts
+
+        seen = {"chats": ["b1", "b2"], "rendered": 0, "written": []}
+
+        async def chats_without_card(session, *, workspace_id, intent_id):
+            return seen["chats"]
+
+        async def rerender_prompt(session, *, intent_id):
+            seen["rendered"] += 1
+            return CARD
+
+        async def enqueue(session, **kw):
+            seen["written"].append(kw)
+            return "ob-new"
+
+        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
+        monkeypatch.setattr(prompts, "rerender_prompt", rerender_prompt)
+        monkeypatch.setattr(outbox, "enqueue", enqueue)
+        return prompts, seen
+
+    async def test_each_chat_without_a_card_gets_the_review_card(self, doors):
+        prompts, seen = doors
+        n = await prompts.prompt_review(None, workspace_id="ws", intent_id="i")
+        assert n == 2 and seen["rendered"] == 1, "rendered once"
+        assert [
+            (w["binding_id"], w["kind"], w["payload"]) for w in seen["written"]
+        ] == [
+            ("b1", "approval_prompt", CARD),
+            ("b2", "approval_prompt", CARD),
+        ]
+        assert {w["intent_id"] for w in seen["written"]} == {"i"}
+
+    async def test_no_chat_without_a_card_renders_and_writes_nothing(self, doors):
+        prompts, seen = doors
+        seen["chats"] = []
+        assert await prompts.prompt_review(None, workspace_id="ws", intent_id="i") == 0
+        assert seen["rendered"] == 0 and seen["written"] == []
+
+    async def test_the_park_gives_its_cards_after_the_restate_and_notice(
+        self, monkeypatch
+    ):
+        from src.services.target import prompts, publish_pipeline
+
+        order = []
+
+        async def restate_and_notify(session, **kw):
+            order.append(("courtesy", kw["state"]))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            order.append(("cards", intent_id))
+            return 1
+
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", restate_and_notify)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        await publish_pipeline.tell_review(
+            _Session([]), workspace_id="ws", intent_id="i", tz="UTC", notice="n"
+        )
+        assert order == [("courtesy", "review_required"), ("cards", "i")]
 
 
 class TestACardLandingOnAMovedIntentIsEditedAtOnce:
