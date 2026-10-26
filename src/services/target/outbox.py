@@ -1070,6 +1070,34 @@ async def restate_cards(
     return len(seen)
 
 
+async def chats_without_card(
+    session, *, workspace_id: str, intent_id: str
+) -> list[str]:
+    """The push bindings (`bindings.DELIVERABLE_BINDING_WHERE`) that hold no
+    card of *intent_id*: no `approval_prompt` row that reached the chat (it
+    has a message ref) or may still reach it (pending, sending, ambiguous).
+    A card retired or failed before it was sent left the chat nothing. These
+    are the chats a parked story's review card is owed to
+    (`prompts.prompt_review`). In the caller's transaction."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT b.id FROM channel_bindings b"
+                f" WHERE b.workspace_id = :ws AND {bindings.deliverable_binding_where('b')}"
+                "   AND NOT EXISTS (SELECT 1 FROM channel_outbox o"
+                "     WHERE o.workspace_id = b.workspace_id AND o.binding_id = b.id"
+                "       AND o.intent_id = CAST(:i AS uuid)"
+                "       AND o.kind = 'approval_prompt'"
+                "       AND (o.external_message_ref IS NOT NULL"
+                "            OR o.state IN ('pending', 'sending', 'ambiguous')))"
+                " ORDER BY b.id"
+            ),
+            {"ws": workspace_id, "i": intent_id},
+        )
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
 def _needs_refresh(row: dict) -> bool:
     """Whether a claimed row is rendered again before the send: every
     `approval_prompt` with an intent (a card is minted on the assumption it

@@ -173,6 +173,31 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
         )
 
 
+async def prompt_review(session, *, workspace_id: str, intent_id: str) -> int:
+    """A parked story's review card in every chat that holds no card of it,
+    in the CALLER's transaction: the card as it is now (`rerender_prompt`),
+    one `approval_prompt` row per such binding, as `prompt_intent` writes a
+    story's first card. The sender renders it again at claim. Returns the
+    rows written. The park's flip holds the story's row, so no other writer
+    adds its card between the read and the write."""
+    chats = await outbox.chats_without_card(
+        session, workspace_id=workspace_id, intent_id=intent_id
+    )
+    card = await rerender_prompt(session, intent_id=intent_id) if chats else None
+    if card is None:
+        return 0
+    for binding_id in chats:
+        await outbox.enqueue(
+            session,
+            workspace_id=workspace_id,
+            binding_id=binding_id,
+            kind="approval_prompt",
+            payload=card,
+            intent_id=intent_id,
+        )
+    return len(chats)
+
+
 #: Everything a card is rendered from — the one spelling for the prompt sweep
 #: and for a card rendered again at send time; each caller adds its WHERE.
 _CARD_SELECT = (
