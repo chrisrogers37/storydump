@@ -101,6 +101,7 @@ def service(
     returned=None,
     changed_child=None,
     truncated=False,
+    retry=ONCE,
 ):
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
@@ -166,7 +167,9 @@ def service(
         )
 
     return SelectedPreparation(
-        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+        PastPostsPreparationPorts(
+            foundation.capability(), prepare, obs.keys(), retry=retry
+        )
     ), calls
 
 
@@ -1169,9 +1172,12 @@ async def test_remote_changed_first_asset_is_coherent_unavailable_without_cdn(
 async def test_truncated_children_missing_selected_slide_defers_without_cdn(
     past_posts_engine, origin
 ):
+    """A truncated children read cannot prove the selected slide left: the story
+    waits for its next try with the read's `slide_changed` evidence, and nothing
+    is retired."""
     src, item, intent = await selected(past_posts_engine, origin)
     prepared, calls = service(
-        past_posts_engine, origin, changed_child="456", truncated=True
+        past_posts_engine, origin, changed_child="456", truncated=True, retry=RETRY
     )
     with pytest.raises(source_policy.MediaAdmissionPending) as error:
         await prepared.fetch_selected(
@@ -1179,8 +1185,12 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
     assert error.value.reason == "past_posts_revalidation_required"
     assert calls == ["graph.instagram.com"] * 2
-    row = await proof(past_posts_engine, origin, intent)
-    assert row["validation_capture"] is None
+    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
+    assert (capture["reason"], capture["attempt"]) == ("download_pending", 1)
+    assert {
+        key: capture["refusal"][key] for key in ("kind", "children", "complete")
+    } == {"kind": "slide_changed", "children": 1, "complete": False}
+    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(

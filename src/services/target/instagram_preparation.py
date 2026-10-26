@@ -279,8 +279,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 ],
                 on_counters=observe,
             )
-        except media_adapters.MediaSelectedAssetChanged:
-            # A truncated children read cannot prove the selected slide left.
+        except media_adapters.MediaSelectedAssetChanged as exc:
+            # A truncated children read cannot prove the selected slide left:
+            # like any refusal that proves nothing, it waits for its next try.
+            await self._failure(
+                engine,
+                workspace_id,
+                intent_id,
+                selected,
+                _refusal(exc, counters, selected),
+            )
             raise source_policy.MediaAdmissionPending(
                 "past_posts_revalidation_required"
             ) from None
