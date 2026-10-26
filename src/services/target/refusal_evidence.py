@@ -117,7 +117,7 @@ def _count(value) -> str:
 def _seconds(value) -> str:
     """A measured Fraction's text as a short decimal, or the text as it is."""
     try:
-        return f"{float(Fraction(str(value))):.1f}".rstrip("0").rstrip(".")
+        return f"{float(Fraction(str(value))):.2f}".rstrip("0").rstrip(".")
     except (ValueError, ZeroDivisionError):
         return str(value)
 
@@ -171,8 +171,14 @@ def plain(refusal) -> Optional[str]:
 
     For the story's review card and its notice, which are private chat text:
     Instagram's code and message, or the check that failed and its value.
-    None when the evidence says nothing more than the generic notice.
+    None when the evidence says nothing more than the generic notice. The
+    sentence carries no closing period; the caller ends it.
     """
+    sentence = _plain(refusal)
+    return sentence.rstrip(" .") if sentence else None
+
+
+def _plain(refusal) -> Optional[str]:
     if not isinstance(refusal, dict):
         return None
     kind = refusal.get("kind")
@@ -221,6 +227,8 @@ def plain(refusal) -> Optional[str]:
         )
     if kind == "local_validation":
         check = refusal.get("check")
+        if not check:
+            return None
         measured = refusal.get("measured") or {}
         render = _CHECKS.get(check)
         if render is not None:

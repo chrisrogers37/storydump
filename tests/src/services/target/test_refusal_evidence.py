@@ -5,6 +5,11 @@ provider text without the token or any link, a signed link as its host and
 expiry, a Graph request as its path. These tests pin each function's redaction
 and bounds on its own; `test_instagram_past_posts_adapter.py` pins what each
 kind of refusal records through the adapter.
+
+`plain` is the other direction: the one sentence a story's review card and its
+park notice say of a refusal, from the facts the record holds. Its sentences are
+pinned whole, one per kind of fetch refusal and per local-validation check, with
+the park notice built from them.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import traceback
 
 import pytest
 
-from src.services.target import refusal_evidence
+from src.services.target import instagram_publish, refusal_evidence
 
 #: A signed CDN link as Graph hands one out, with everything around the host
 #: that must not outlive `link_evidence`: a port, a path, signature and routing
@@ -399,3 +404,549 @@ def test_whole_keeps_a_whole_number(value):
 def test_whole_drops_anything_that_is_not_a_whole_number(value):
     """Text, floats and bools (an int subclass) are not whole numbers."""
     assert refusal_evidence.whole(value) is None
+
+
+# --- plain ---------------------------------------------------------------------
+
+#: What the turn records beside every refusal's own facts. `plain` never reads it.
+COUNTERS = {
+    "graph_attempts": 2,
+    "observed_parents": 1,
+    "source_fence_drop": 0,
+    "listed_parents": 0,
+    "cdn_attempts": 1,
+}
+#: What a container check measures: the boxes read and the sample codecs found.
+CONTAINER = {
+    "boxes": ["ftyp", "moov", "mdat"],
+    "box_count": 3,
+    "sample_codecs": ["avc1", "mp4a"],
+}
+ASKED = "17890000000000003"
+HOST = "scontent-test.fbcdn.net"
+EXPIRY = "6A1B2C3D"
+
+
+def fetch_refusal(kind, **facts):
+    """A refused fetch's evidence as the adapter and the preparation record it:
+    the kind, its facts, and the turn's counters."""
+    return refusal_evidence.evidence(kind, counters=dict(COUNTERS), **facts)
+
+
+def validation_refusal(check, **measured):
+    """A failed local check's evidence as the preparation records it: the check,
+    what it measured, the bytes judged, the matrix and the turn's counters."""
+    return refusal_evidence.evidence(
+        "local_validation",
+        state="unsupported",
+        check=check,
+        measured=measured,
+        bytes=1_048_576,
+        matrix_version="matrix-test",
+        counters=dict(COUNTERS),
+    )
+
+
+#: One refusal of each kind of fetch, and the sentence it reads as. The record's
+#: other fields (host, expiry, path, trace id, counters) sit beside the facts and
+#: are not said.
+FETCH_SENTENCES = [
+    pytest.param(
+        fetch_refusal(
+            "graph_error",
+            http_status=400,
+            code=100,
+            error_subcode=33,
+            type="GraphMethodException",
+            message="Unsupported get request.",
+            fbtrace_id="AbC123fakeTrace",
+            path=f"/v26.0/{ASKED}",
+        ),
+        (
+            "Instagram refused the read (HTTP 400, code 100/33,"
+            " GraphMethodException): Unsupported get request"
+        ),
+        id="graph-error",
+    ),
+    pytest.param(
+        fetch_refusal(
+            "graph_error",
+            http_status=403,
+            code=24,
+            error_subcode=None,
+            type="OAuthException",
+            message="Media not found",
+            fbtrace_id=None,
+            path=f"/v26.0/{ASKED}/children",
+        ),
+        (
+            "Instagram refused the read (HTTP 403, code 24, OAuthException):"
+            " Media not found"
+        ),
+        id="graph-error-without-a-subcode",
+    ),
+    pytest.param(
+        fetch_refusal(
+            "graph_error",
+            http_status=404,
+            code=None,
+            error_subcode=None,
+            type=None,
+            message=None,
+            fbtrace_id=None,
+            path=f"/v26.0/{ASKED}",
+        ),
+        "Instagram refused the read (HTTP 404)",
+        id="graph-error-status-only",
+    ),
+    pytest.param(
+        fetch_refusal(
+            "ownership_unproven",
+            test="app_scoped_id",
+            match={"account_matches": False, "app_scoped_id_matches": False},
+        ),
+        "Instagram did not show this post as the connected account's",
+        id="ownership-unproven",
+    ),
+    pytest.param(
+        fetch_refusal("identity_mismatch", id_matches=False),
+        "Instagram returned a different post than the one indexed",
+        id="identity-mismatch",
+    ),
+    pytest.param(
+        fetch_refusal("slide_gone", children=2, complete=True, slide_count=4),
+        (
+            "the chosen slide is no longer in the post: Instagram listed 2 slide(s)"
+            " of the 4 indexed"
+        ),
+        id="slide-gone",
+    ),
+    pytest.param(
+        fetch_refusal("slide_gone", children=0, complete=True, slide_count=3),
+        (
+            "the chosen slide is no longer in the post: Instagram listed 0 slide(s)"
+            " of the 3 indexed"
+        ),
+        id="slide-gone-none-left",
+    ),
+    pytest.param(
+        fetch_refusal("slide_gone", children=1, complete=True, slide_count=None),
+        "the chosen slide is no longer in the post: Instagram listed 1 slide(s)",
+        id="slide-gone-without-an-indexed-count",
+    ),
+    pytest.param(
+        fetch_refusal("no_media_link", media_type="VIDEO", has_link=False),
+        "Instagram gave no file link for this video",
+        id="no-media-link",
+    ),
+    pytest.param(
+        fetch_refusal("no_media_link", media_type=None, has_link=False),
+        "Instagram gave no file link for this media",
+        id="no-media-link-without-a-type",
+    ),
+    pytest.param(
+        fetch_refusal("untrusted_host", host="cdn.untrusted.example", expiry=None),
+        "Instagram's file link points to an untrusted host (cdn.untrusted.example)",
+        id="untrusted-host",
+    ),
+    pytest.param(
+        fetch_refusal("untrusted_host", host=None, expiry=None),
+        "Instagram's file link points to an untrusted host (unknown)",
+        id="untrusted-host-unparsed",
+    ),
+    pytest.param(
+        fetch_refusal("over_byte_cap", cap=40000000, received=40000003, host=HOST),
+        (
+            "this file is over the 40,000,000-byte limit"
+            " (stopped after 40,000,003 bytes)"
+        ),
+        id="over-byte-cap",
+    ),
+    pytest.param(
+        fetch_refusal("cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY),
+        "Instagram's file server refused the link twice (HTTP 403/404)",
+        id="cdn-refused",
+    ),
+    pytest.param(
+        fetch_refusal("cdn_error", statuses=[403, 502], host=HOST, expiry=EXPIRY),
+        "Instagram's file server failed (HTTP 403/502)",
+        id="cdn-error-after-a-refusal",
+    ),
+    pytest.param(
+        fetch_refusal("cdn_error", statuses=[500], host=HOST, expiry=None),
+        "Instagram's file server failed (HTTP 500)",
+        id="cdn-error",
+    ),
+    pytest.param(
+        fetch_refusal("cdn_error", statuses=[], host=HOST, expiry=None),
+        "Instagram's file server failed (HTTP ?)",
+        id="cdn-error-with-no-status-recorded",
+    ),
+    pytest.param(
+        fetch_refusal(
+            "wrong_bytes",
+            content_type="text/html",
+            length=1532,
+            http_status=200,
+            host=HOST,
+        ),
+        (
+            "Instagram served text/html (1,532 bytes)"
+            " instead of a story's image or video"
+        ),
+        id="wrong-bytes",
+    ),
+    pytest.param(
+        fetch_refusal(
+            "wrong_bytes", content_type="", length=0, http_status=200, host=HOST
+        ),
+        (
+            "Instagram served no content type (0 bytes)"
+            " instead of a story's image or video"
+        ),
+        id="wrong-bytes-empty",
+    ),
+]
+
+#: One local-validation refusal per `_CHECKS` entry, and a second where an entry
+#: reads its measurements differently: (check, what it measured, the sentence).
+CHECK_CASES = [
+    pytest.param("edit_list", CONTAINER, "this video has an edit list", id="edit_list"),
+    pytest.param(
+        "moov_not_front",
+        CONTAINER,
+        "this video's index comes after its media",
+        id="moov_not_front",
+    ),
+    pytest.param(
+        "duration",
+        {"duration_seconds": "145/2", "fps": "30/1", "video_frames": 2175},
+        "this video is 72.5 s long; stories take 3 to 60 s",
+        id="duration",
+    ),
+    pytest.param(
+        "duration",
+        {"duration_seconds": "2", "fps": "30/1", "video_frames": 60},
+        "this video is 2 s long; stories take 3 to 60 s",
+        id="duration-whole-seconds",
+    ),
+    pytest.param(
+        "duration",
+        {"duration_seconds": "7/3", "fps": "30/1", "video_frames": 70},
+        "this video is 2.33 s long; stories take 3 to 60 s",
+        id="duration-to-a-hundredth",
+    ),
+    pytest.param(
+        "fps",
+        {"duration_seconds": "10", "fps": "20/1", "video_frames": 200},
+        "this video runs at 20 fps; stories take 23 to 60",
+        id="fps",
+    ),
+    pytest.param(
+        "fps",
+        {"duration_seconds": "10", "fps": "121/2", "video_frames": 605},
+        "this video runs at 60.5 fps; stories take 23 to 60",
+        id="fps-fractional",
+    ),
+    pytest.param(
+        "fps",
+        {"duration_seconds": "10", "fps": "15000/1001", "video_frames": 150},
+        "this video runs at 14.99 fps; stories take 23 to 60",
+        id="fps-ntsc",
+    ),
+    pytest.param(
+        "width",
+        {"width": 2160, "height": 3840},
+        "this video is 2160 px wide; stories take up to 1920",
+        id="width",
+    ),
+    pytest.param(
+        "aspect",
+        {"width": 100, "height": 1500, "sample_aspect_ratio": "1", "aspect": "1/15"},
+        "this video's aspect ratio (1/15) is outside what stories take",
+        id="aspect",
+    ),
+    pytest.param(
+        "interlaced",
+        {"width": 1080, "height": 1920},
+        "this video is interlaced",
+        id="interlaced",
+    ),
+    pytest.param(
+        "chroma_subsampling",
+        {"pix_fmt": "yuv444p"},
+        "this video's pixel format (yuv444p) is not 4:2:0",
+        id="chroma_subsampling",
+    ),
+    pytest.param(
+        "video_codec",
+        {"video_codec": "vp9"},
+        "this video's codec (vp9) is not H.264 or HEVC",
+        id="video_codec",
+    ),
+    pytest.param(
+        "video_codec",
+        {**CONTAINER, "sample_codecs": ["vp09", "mp4a"]},
+        "this video's codec (vp09, mp4a) is not H.264 or HEVC",
+        id="video_codec-from-the-container",
+    ),
+    pytest.param(
+        "video_codec",
+        {"video_codec": None},
+        "this video's codec (unknown) is not H.264 or HEVC",
+        id="video_codec-unnamed",
+    ),
+    pytest.param(
+        "audio_codec",
+        {"audio_codec": "mp3"},
+        "this video's audio (mp3) is not AAC",
+        id="audio_codec",
+    ),
+    pytest.param(
+        "audio_sample_rate",
+        {"sample_rate": 96000},
+        "this video's audio runs at 96,000 Hz; stories take up to 48,000",
+        id="audio_sample_rate",
+    ),
+    pytest.param(
+        "audio_channels",
+        {"channels": 6},
+        "this video's audio has 6 channels; stories take 1 or 2",
+        id="audio_channels",
+    ),
+    pytest.param(
+        "image_format",
+        {"format": "PNG"},
+        "this image is PNG, not a JPEG",
+        id="image_format",
+    ),
+    pytest.param(
+        "image_format",
+        {"format": None},
+        "this image is another format, not a JPEG",
+        id="image_format-unnamed",
+    ),
+    pytest.param(
+        "malformed_image",
+        {},
+        "this image is damaged or not an image",
+        id="malformed_image",
+    ),
+    pytest.param(
+        "malformed_container",
+        CONTAINER,
+        "this video file is damaged",
+        id="malformed_container",
+    ),
+    pytest.param(
+        "byte_limit",
+        {"bytes": 52428801, "cap": 52428800},
+        "this file is 52,428,801 bytes; the limit is 52,428,800",
+        id="byte_limit",
+    ),
+]
+
+#: What carries no sentence: no record, a record that is not one, a refusal
+#: recorded without evidence, and a kind `plain` has no words for.
+NO_SENTENCE = [
+    pytest.param(None, id="none"),
+    pytest.param("local_validation", id="text"),
+    pytest.param(["kind", "local_validation"], id="list"),
+    pytest.param(7, id="number"),
+    pytest.param({}, id="no-kind"),
+    pytest.param({"v": 1, "kind": None}, id="null-kind"),
+    pytest.param(
+        fetch_refusal("unrecorded", error="MediaTerminalError"), id="unrecorded"
+    ),
+    pytest.param(fetch_refusal("no_such_kind", reason="unmapped"), id="unknown-kind"),
+]
+
+#: Every kind `plain` speaks of: those with a case above, and local validation.
+KINDS = sorted(
+    {case.values[0]["kind"] for case in FETCH_SENTENCES} | {"local_validation"}
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal,sentence", FETCH_SENTENCES)
+def test_plain_says_why_each_kind_of_fetch_was_refused(refusal, sentence):
+    """One sentence per refusal, from its facts alone: the record's host, expiry,
+    path, trace id and counters are not in it."""
+    assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("check,measured,sentence", CHECK_CASES)
+def test_plain_says_what_each_local_validation_check_found(check, measured, sentence):
+    """The check that failed and the value it measured, in one sentence. The rest
+    of what was measured (boxes, dimensions, frame counts) and the record's
+    bookkeeping are not in it."""
+    assert refusal_evidence.plain(validation_refusal(check, **measured)) == sentence
+
+
+@pytest.mark.unit
+def test_every_check_the_table_has_words_for_has_a_case_above():
+    """A check added to `_CHECKS` without a case in `CHECK_CASES` fails here, so
+    no entry of the table goes unpinned."""
+    assert {case.values[0] for case in CHECK_CASES} == set(refusal_evidence._CHECKS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value", ["N/A", "0/0"], ids=["not-a-number", "zero-denominator"]
+)
+def test_plain_keeps_a_timing_it_cannot_read_as_a_number_as_the_text_it_is(value):
+    """A duration or a frame rate that is not a fraction (ffprobe's `N/A` and
+    `0/0`) is said as it was recorded: not dropped, and not an error."""
+    duration = validation_refusal("duration", duration_seconds=value)
+    fps = validation_refusal("fps", fps=value)
+    assert refusal_evidence.plain(duration) == (
+        f"this video is {value} s long; stories take 3 to 60 s"
+    )
+    assert refusal_evidence.plain(fps) == (
+        f"this video runs at {value} fps; stories take 23 to 60"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [None, "40000000", 40000000.0, True, [40000000]],
+    ids=["none", "text", "float", "bool", "list"],
+)
+def test_plain_says_a_question_mark_for_a_count_that_is_not_a_whole_number(value):
+    """A count held as anything but a whole number reads as ?, so a field that is
+    not a number never reaches the sentence as itself."""
+    refusal = fetch_refusal("over_byte_cap", cap=value, received=value, host=HOST)
+    assert refusal_evidence.plain(refusal) == (
+        "this file is over the ?-byte limit (stopped after ? bytes)"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal", NO_SENTENCE)
+def test_plain_is_none_when_the_record_says_nothing_more(refusal):
+    """The generic notice is all there is to say of no record, of a record that
+    is not one, of a refusal recorded without evidence (`unrecorded`) and of a
+    kind `plain` has no words for."""
+    assert refusal_evidence.plain(refusal) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "refusal,sentence",
+    [
+        pytest.param(
+            validation_refusal("packet_outside_media", packet_pos=12, packet_size=34),
+            (
+                "this file failed the packet_outside_media check"
+                " (packet_pos 12, packet_size 34)"
+            ),
+            id="with-measurements",
+        ),
+        pytest.param(
+            validation_refusal("packet_outside_media"),
+            "this file failed the packet_outside_media check",
+            id="nothing-measured",
+        ),
+        pytest.param(
+            {"v": 1, "kind": "local_validation", "check": "packet_outside_media"},
+            "this file failed the packet_outside_media check",
+            id="no-measured-field",
+        ),
+    ],
+)
+def test_plain_names_a_check_it_has_no_words_for_and_what_it_measured(
+    refusal, sentence
+):
+    """A check outside the table is named with each value it measured, so a new
+    check's refusal is still said before anyone writes its sentence."""
+    assert "packet_outside_media" not in refusal_evidence._CHECKS, (
+        "this case needs a check the table lacks"
+    )
+    assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", KINDS)
+def test_plain_does_not_raise_on_a_refusal_missing_its_fields(kind):
+    """A record holding only its kind still answers, with a sentence or None and
+    never an error: the card and the notice are built on the answer."""
+    sentence = refusal_evidence.plain({"kind": kind})
+    assert sentence is None or isinstance(sentence, str)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("check", sorted(refusal_evidence._CHECKS))
+def test_plain_does_not_raise_on_a_check_that_measured_nothing(check):
+    """Each entry of the table copes with a measurement that is absent, null or
+    empty."""
+    for record in ({}, {"measured": None}, {"measured": {}}):
+        refusal = {"v": 1, "kind": "local_validation", "check": check, **record}
+        sentence = refusal_evidence.plain(refusal)
+        assert sentence is None or isinstance(sentence, str), record
+
+
+# --- the park notice -----------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "evidence,notice",
+    [
+        pytest.param(
+            validation_refusal("edit_list", **CONTAINER),
+            (
+                "This story from your Instagram past posts could not be prepared."
+                " Refused: this video has an edit list. Open the Queue to review it."
+            ),
+            id="local-validation",
+        ),
+        pytest.param(
+            fetch_refusal("over_byte_cap", cap=40000000, received=40000003, host=HOST),
+            (
+                "This story from your Instagram past posts could not be prepared."
+                " Refused: this file is over the 40,000,000-byte limit"
+                " (stopped after 40,000,003 bytes). Open the Queue to review it."
+            ),
+            id="over-byte-cap",
+        ),
+        pytest.param(
+            fetch_refusal(
+                "ownership_unproven",
+                test="app_scoped_id",
+                match={"account_matches": False, "app_scoped_id_matches": False},
+            ),
+            (
+                "This story from your Instagram past posts could not be prepared."
+                " Refused: Instagram did not show this post as the connected"
+                " account's. Open the Queue to review it."
+            ),
+            id="ownership-unproven",
+        ),
+    ],
+)
+def test_the_park_notice_says_why_when_the_refusal_does(evidence, notice):
+    """A story parked for a refused fetch is told why, in the refusal's own
+    sentence, between what happened and where to review it."""
+    assert instagram_publish._park_notice(evidence) == notice
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("evidence", NO_SENTENCE)
+def test_the_park_notice_is_the_generic_one_when_the_record_says_nothing_more(
+    evidence,
+):
+    """No evidence, evidence that is not a record, an unrecorded refusal and a
+    kind with no sentence all park with the generic notice."""
+    assert instagram_publish._park_notice(evidence) == instagram_publish.PARK_NOTICE
+
+
+@pytest.mark.unit
+def test_the_generic_park_notice_keeps_its_words():
+    """The notice a story parks with when nothing more is known: it claims no
+    reason."""
+    assert instagram_publish.PARK_NOTICE == (
+        "This story from your Instagram past posts has selected content that is"
+        " unavailable or changed. Open the Queue to review it."
+    )

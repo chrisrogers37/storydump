@@ -2412,6 +2412,59 @@ class TestACardIsRenderedAgainAtClaimTime:
         )
 
     @pytest.mark.asyncio
+    async def test_a_parked_storys_card_says_why_it_was_refused(self, outbox_db):
+        """A story parked for a refused past-posts fetch holds the refusal in
+        `last_error -> 'error' -> 'refusal'`, and the review card it is sent as
+        says it in words on a second line: the settlement's read, the render and
+        the send agree, against the real column and the worker's own login."""
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                f"refused-{uuid.uuid4().hex[:6]}",
+                state="review_required",
+            )["intent"]
+        )
+        recorded = _owner_exec(
+            outbox_db,
+            "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+            (
+                json.dumps(
+                    {
+                        "v": 1,
+                        "error": {
+                            "type": "PastPostsEffectRefused",
+                            "reason": "past_posts_content_unavailable",
+                            "message": "past_posts_content_unavailable",
+                            "refusal": {
+                                "v": 1,
+                                "kind": "local_validation",
+                                "check": "edit_list",
+                                "measured": {},
+                            },
+                        },
+                    }
+                ),
+                intent,
+            ),
+        )
+        assert recorded == 1, "the refusal was recorded on the parked story"
+        self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["payload"])
+            return "tg-refused"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is not None and result["state"] == "sent"
+        assert len(sent) == 1, "the parked story's card goes out once"
+        line = sent[0]["outcome_text"]
+        assert line.startswith("👀 Needs review")
+        assert line.endswith("\nRefused: this video has an edit list.")
+
+    @pytest.mark.asyncio
     async def test_a_card_for_a_live_slot_goes_out_fresh_and_without_a_keyboard(
         self, outbox_db
     ):
