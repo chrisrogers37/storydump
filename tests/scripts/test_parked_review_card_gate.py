@@ -4,7 +4,7 @@ chat that holds no card of it, beside the notice, under real tenant roles."""
 import pytest
 from sqlalchemy import text
 
-from src.services.target import instagram_publish, refusal_evidence
+from src.services.target import instagram_publish, refusal_evidence, source_policy
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -86,6 +86,36 @@ async def test_a_parked_storys_review_card_and_notice_say_why_it_was_refused(
     (notice,) = [r[3] for r in rows if r[1] == "notification"]
     assert f"Refused: {sentence}." in str(notice)
     assert "unavailable or changed" not in str(notice)
+
+
+async def test_a_park_with_no_refusal_evidence_says_its_admission_reason(
+    past_posts_engine, origin, sync_conn
+):
+    """A preparation that is not admitted for a reason it carries no evidence
+    for (the chosen post was removed) parks the story, and the notice says that
+    reason, never that no reason was recorded."""
+    _bind(sync_conn, origin["ws"])
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    selected, _ = preparation.service(past_posts_engine, origin)
+    await selected.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+
+    async def refuse(**kwargs):
+        raise source_policy.MediaAdmissionPending("asset_unavailable")
+
+    c = instagram_publish.PastPostsPipeline(
+        capability=foundation.capability(),
+        fetch_selected=selected.fetch_selected,
+        prepare_selected=refuse,
+    )
+    await c.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    (notice,) = [
+        r[3] for r in _outbox_rows(sync_conn, intent) if r[1] == "notification"
+    ]
+    assert "Refused: the chosen post is no longer available." in str(notice)
 
 
 @pytest.mark.parametrize(

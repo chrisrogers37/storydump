@@ -227,6 +227,104 @@ class TestThePromptForAParkedStory:
         assert order == [("courtesy", "review_required"), ("cards", "i")]
 
 
+class TestTheReviewRestateSaysWhy:
+    """`publish_pipeline._restate_and_notify`, the restate a poison and every
+    park send: a story in review has its cards restated with its line and,
+    under it, why it was refused, from the refusal its `last_error` records
+    (`intent_ledger.settlement`), as the card rendered again says."""
+
+    AT = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+    IN_REVIEW = "👀 Needs review · 2026-09-12 13:02 UTC"
+    DEAD = {
+        "v": 1,
+        "kind": "container_dead",
+        "status_code": "ERROR",
+        "status": "Error: Media upload has failed with error code 2207026",
+    }
+
+    @pytest.fixture
+    def doors(self, monkeypatch):
+        from src.services.target import intent_ledger, prompts, publish_pipeline
+
+        seen = {
+            "refusal": None,
+            "bindings": ["b1", "b2"],
+            "reads": [],
+            "lines": [],
+            "notices": [],
+        }
+
+        async def settlement(session, *, workspace_id, intent_id):
+            seen["reads"].append((workspace_id, intent_id))
+            return {"state": "review_required", "refusal": seen["refusal"]}
+
+        async def push_bindings(session, workspace_id):
+            return seen["bindings"]
+
+        async def restate_cards(
+            session, *, workspace_id, binding_id, intent_id, outcome_text
+        ):
+            seen["lines"].append((binding_id, outcome_text))
+            return 1
+
+        async def fanout_notification(
+            session, *, workspace_id, bindings, text, intent_id
+        ):
+            seen["notices"].append(text)
+
+        monkeypatch.setattr(intent_ledger, "settlement", settlement)
+        monkeypatch.setattr(prompts, "push_bindings", push_bindings)
+        monkeypatch.setattr(outbox, "restate_cards", restate_cards)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+        return publish_pipeline, seen
+
+    async def _restate(self, publish_pipeline, state):
+        return await publish_pipeline._restate_and_notify(
+            None,
+            workspace_id="ws",
+            intent_id="i",
+            state=state,
+            at=self.AT,
+            tz="UTC",
+            notice="n",
+        )
+
+    async def test_a_dead_containers_cards_say_why_it_was_refused(self, doors):
+        publish_pipeline, seen = doors
+        seen["refusal"] = self.DEAD
+        assert await self._restate(publish_pipeline, "review_required") == 2
+        line = (
+            f"{self.IN_REVIEW}\nRefused: Instagram could not process this story's"
+            " media (ERROR): Error: Media upload has failed with error code 2207026."
+        )
+        assert seen["lines"] == [("b1", line), ("b2", line)]
+        assert seen["reads"] == [("ws", "i")], "one read, under the story's tenant"
+        assert seen["notices"] == ["n"]
+
+    async def test_a_story_in_review_whose_refusal_says_nothing_keeps_its_line(
+        self, doors
+    ):
+        publish_pipeline, seen = doors
+        await self._restate(publish_pipeline, "review_required")
+        assert seen["lines"] == [("b1", self.IN_REVIEW), ("b2", self.IN_REVIEW)]
+
+    async def test_any_other_states_line_reads_no_refusal(self, doors):
+        from src.services.target import prompts
+
+        publish_pipeline, seen = doors
+        seen["refusal"] = self.DEAD
+        await self._restate(publish_pipeline, "posted")
+        line = prompts.outcome_line("posted", by=None, at=self.AT, tz="UTC")
+        assert seen["reads"] == [] and seen["lines"][0] == ("b1", line)
+
+    async def test_a_workspace_no_chat_can_hear_reads_no_refusal(self, doors):
+        """No push binding: no card to restate, so the refusal is not read."""
+        publish_pipeline, seen = doors
+        seen["refusal"], seen["bindings"] = self.DEAD, []
+        assert await self._restate(publish_pipeline, "review_required") == 0
+        assert seen["reads"] == [] and seen["lines"] == []
+
+
 class TestACardLandingOnAMovedIntentIsEditedAtOnce:
     """`_edit_sent_card` (after a send): a card whose intent moved while it
     was in flight is edited at once. The edit picks no keyboard: the sender
