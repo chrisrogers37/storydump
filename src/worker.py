@@ -51,6 +51,7 @@ from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_retry,
     credential_lifecycle,
     drive_credentials,
     email_sender,
@@ -1185,7 +1186,12 @@ def main() -> None:
     # The past-posts source first: the approval card's media fetch needs its coordinator.
     # None (and one `off (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
-    past_posts = past_posts_composition.build_worker(engine=engine, env=env)
+    past_posts = past_posts_composition.build_worker(
+        engine=engine,
+        env=env,
+        retry=past_posts_retry.Retry.from_config(config),
+        download_seconds=config.past_posts_download_seconds,
+    )
     if token:
         from src.channels.telegram_transport import transport_from_env
 

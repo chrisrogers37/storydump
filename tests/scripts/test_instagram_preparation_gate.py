@@ -1,7 +1,7 @@
 """Selected-only preparation through actual tenant roles, real local JPEG proof."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
 import uuid
@@ -23,6 +23,7 @@ from src.services.target.instagram_past_posts_adapter import (
     PastPostsAccess,
     InstagramPastPostsAdapter,
 )
+from src.services.target.past_posts_retry import Retry
 from src.services.target.unit_of_work import in_transaction
 from tests.scripts import test_candidate_selection_gate as selection
 from tests.scripts import test_instagram_observations_gate as obs
@@ -535,8 +536,11 @@ async def test_transient_selected_failure_preserves_metadata_and_permits_retry(
     async def prepare(capture, config):
         return TransientAdapter()
 
+    # The next try is due at once, so the second preparation fetches.
     transient = SelectedPreparation(
-        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+        PastPostsPreparationPorts(
+            foundation.capability(), prepare, obs.keys(), retry=AT_ONCE
+        )
     )
     with pytest.raises(media_adapters.MediaRetryableError):
         await transient.selected_prepare(
@@ -566,10 +570,15 @@ TURN = {
     "listed_parents": 4,
     "cdn_attempts": 5,
 }
+#: Tries again after 30 s, up to three tries; and tries again at once.
+RETRY = Retry(attempts=3, base_seconds=30, cap_seconds=900)
+AT_ONCE = Retry(attempts=8, base_seconds=0, cap_seconds=0)
 
 
-def refusing(error):
-    """A preparation whose adapter reports `TURN`, then raises `error`."""
+def refusing(error, *, retry=None, download_seconds=None, asked=None):
+    """A preparation whose adapter reports `TURN`, then raises `error`. *retry*
+    and *download_seconds* are its ports' numbers (None: one try, the adapter's
+    own budget); *asked*, a list, gets each fetch's keyword arguments."""
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
         SelectedPreparation,
@@ -577,6 +586,8 @@ def refusing(error):
 
     class RefusingAdapter:
         async def fetch_bytes(self, *args, **kwargs):
+            if asked is not None:
+                asked.append(kwargs)
             kwargs["on_counters"](media_adapters.MediaTurnCounters(**TURN))
             raise error
 
@@ -584,8 +595,36 @@ def refusing(error):
         return RefusingAdapter()
 
     return SelectedPreparation(
-        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+        PastPostsPreparationPorts(
+            foundation.capability(),
+            prepare,
+            obs.keys(),
+            retry=retry,
+            download_seconds=download_seconds or {},
+        )
     )
+
+
+def refused(kind, error=media_adapters.MediaTerminalError, **facts):
+    """An `error` carrying the evidence of `kind`."""
+    return refusal_evidence.attach(
+        error("synthetic"), refusal_evidence.evidence(kind, **facts)
+    )
+
+
+#: The CDN refused the link twice: a refusal that proves nothing.
+CDN_404 = dict(
+    statuses=[404, 404], host="scontent-test.cdninstagram.com", expiry="1900000000"
+)
+
+
+async def next_try(engine, chain, intent):
+    """The slide's capture without its next try, that next try, and the
+    database's clock now."""
+    capture = dict((await proof(engine, chain, intent))["validation_capture"])
+    async with obs.uow(engine, chain) as conn:
+        now = await conn.scalar(text("SELECT clock_timestamp()"))
+    return capture, datetime.fromisoformat(capture.pop("next_attempt_at")), now
 
 
 def serving(content):
@@ -626,8 +665,9 @@ async def test_terminal_refusal_records_its_evidence_with_the_turn_counters(
 ):
     """A terminal fetch refusal's evidence lands, with the turn's counters, under
     the asset's `validation_capture -> 'refusal'` beside its usual keys and on
-    the pending it raises. The reason stays `asset_unavailable`, so the story
-    reads as unavailable exactly as before, and no proof is granted."""
+    the pending it raises. With no retry configured its one try is spent, so
+    the reason is `asset_unavailable` and the story reads as unavailable, with
+    the attempt it parked on; no proof is granted."""
     src, item, intent = await selected(past_posts_engine, origin)
     prepared = refusing(no_media_link())
     with pytest.raises(source_policy.MediaAdmissionPending) as err:
@@ -649,6 +689,7 @@ async def test_terminal_refusal_records_its_evidence_with_the_turn_counters(
         "selected_asset_id": "123",
         "state": "validation_pending",
         "reason": "asset_unavailable",
+        "attempt": 1,
         "refusal": refusal,
     }
     assert (
@@ -689,8 +730,9 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
     past_posts_engine, origin
 ):
     """A retryable fetch refusal's evidence lands in the asset's
-    `validation_capture` under `download_pending`, and the original error is
-    raised again. `download_pending` does not latch the story."""
+    `validation_capture` under `download_pending`, with its attempt and the
+    time of the next try, and the original error is raised again.
+    `download_pending` does not latch the story."""
     src, item, intent = await selected(past_posts_engine, origin)
     refused = refusal_evidence.attach(
         media_adapters.MediaRetryableError("synthetic"),
@@ -701,19 +743,21 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
             expiry="1900000000",
         ),
     )
-    prepared = refusing(refused)
+    prepared = refusing(refused, retry=RETRY)
     with pytest.raises(media_adapters.MediaRetryableError) as err:
         await prepared.selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert err.value is refused
-    row = await proof(past_posts_engine, origin, intent)
-    assert row["validation_capture"] == {
+    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
+    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
+    assert capture == {
         "generation_id": src["generation_id"],
         "observation_revision": 1,
         "selected_asset_id": "123",
         "state": "validation_pending",
         "reason": "download_pending",
+        "attempt": 1,
         "refusal": {
             "v": 1,
             "kind": "cdn_error",
@@ -725,6 +769,150 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
     }
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
+async def test_an_unproven_refusal_waits_for_its_next_try_and_is_not_parked(
+    past_posts_engine, origin
+):
+    """A terminal refusal that proves nothing (the CDN refused the link twice)
+    records `download_pending` with its class, the attempt and the time of the
+    next try, and the story waits: no `asset_unavailable`, so nothing latches."""
+    src, _, intent = await selected(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await refusing(refused("cdn_refused", **CDN_404), retry=RETRY).selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "past_posts_revalidation_required"
+    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
+    assert capture == {
+        "generation_id": src["generation_id"],
+        "observation_revision": 1,
+        "selected_asset_id": "123",
+        "state": "validation_pending",
+        "reason": "download_pending",
+        "attempt": 1,
+        "refusal": {"v": 1, "kind": "cdn_refused", **CDN_404, "counters": TURN},
+    }
+    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
+async def test_a_story_inside_its_wait_is_deferred_without_a_fetch(
+    past_posts_engine, origin
+):
+    """Before its next try a story waits for revalidation and nothing is read:
+    no Graph request, no download."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending):
+        await refusing(refused("cdn_refused", **CDN_404), retry=RETRY).selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    prepared, calls = service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "past_posts_revalidation_required" and calls == []
+
+
+async def test_the_last_try_parks_the_story_with_its_refusal(past_posts_engine, origin):
+    """Once its tries are spent the story parks `asset_unavailable` with the
+    last refusal, whatever the earlier ones were."""
+    src, _, intent = await selected(past_posts_engine, origin)
+    twice = Retry(attempts=2, base_seconds=0, cap_seconds=0)
+    with pytest.raises(source_policy.MediaAdmissionPending) as first:
+        await refusing(refused("cdn_refused", **CDN_404), retry=twice).selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    facts = dict(http_status=500, code=1, error_subcode=None)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await refusing(refused("graph_error", **facts), retry=twice).selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    last = {"v": 1, "kind": "graph_error", **facts, "counters": TURN}
+    assert first.value.reason == "past_posts_revalidation_required"
+    assert err.value.reason == "asset_unavailable" and err.value.evidence == last
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert (capture["reason"], capture["attempt"], capture["refusal"]) == (
+        "asset_unavailable",
+        2,
+        last,
+    )
+    assert "next_attempt_at" not in capture
+    async with obs.uow(past_posts_engine, origin) as conn:
+        verdict = await selection.verdict(conn, origin, src, intent=intent)
+    assert verdict["reason"] == "asset_unavailable" and not verdict["suitable"]
+
+
+@pytest.mark.parametrize(
+    "kind,facts",
+    [
+        ("graph_error", dict(http_status=400, code=100, error_subcode=33)),
+        (
+            "over_byte_cap",
+            dict(cap=100, received=200, host="scontent-test.cdninstagram.com"),
+        ),
+    ],
+    ids=["graph-says-it-does-not-exist", "a-named-byte-bound"],
+)
+async def test_a_proven_refusal_parks_the_story_at_once(
+    past_posts_engine, origin, kind, facts
+):
+    """Graph's own "does not exist" and a named byte bound answer every try the
+    same, so the first parks the story with its evidence."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await refusing(refused(kind, **facts), retry=RETRY).selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "asset_unavailable"
+    assert err.value.evidence == {"v": 1, "kind": kind, **facts, "counters": TURN}
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert (capture["reason"], capture["attempt"]) == ("asset_unavailable", 1)
+
+
+@pytest.mark.parametrize("missing", [1, 3], ids=["before-the-fetch", "as-it-lands"])
+async def test_a_story_with_no_verdict_waits_for_revalidation(
+    past_posts_engine, origin, monkeypatch, missing
+):
+    """No verdict is not a refusal: before the fetch, or as its bytes land, the
+    story waits for revalidation and is never parked unavailable."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    real, reads = source_policy.intent_suitability, []
+
+    async def verdict(*args, **kwargs):
+        reads.append(kwargs.get("intent_id"))
+        return None if len(reads) == missing else await real(*args, **kwargs)
+
+    monkeypatch.setattr(source_policy, "intent_suitability", verdict)
+    prepared, calls = service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "past_posts_revalidation_required"
+    assert len(calls) == (0 if missing == 1 else 2)
+
+
+async def test_the_fetch_runs_under_the_download_budget_of_its_kind(
+    past_posts_engine, origin
+):
+    """The fetch is asked for the wall budget configured for the slide's kind
+    (`WorkerConfig.past_posts_download_seconds`)."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    asked = []
+    prepared = refusing(
+        refused("cdn_refused", **CDN_404),
+        retry=RETRY,
+        download_seconds={"image": 90.0, "video": 240.0},
+        asked=asked,
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending):
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert [kwargs.get("download_budget_s") for kwargs in asked] == [90.0]
 
 
 async def test_unsupported_bytes_record_the_failed_check_with_what_it_measured(

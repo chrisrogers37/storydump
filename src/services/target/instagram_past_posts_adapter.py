@@ -37,7 +37,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from src.services.target import egress, refusal_evidence, vocabulary
+from src.services.target import egress, past_posts_retry, refusal_evidence, vocabulary
 from src.services.target.media_adapters import (
     MediaCredentialDead,
     MediaRetryableError,
@@ -83,6 +83,9 @@ _EXPIRED_LINK = frozenset({401, 403, 404, 410})
 PREVIEW_GRAPH_REQUESTS = 2
 PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 PREVIEW_BUDGET_S = 8.0
+#: A download's wall budget when the caller names none (`WorkerConfig`'s
+#: `past_posts_download_seconds` names one per kind).
+DEFAULT_DOWNLOAD_SECONDS = 120.0
 _PREVIEW_FIELDS = _FETCH_FIELDS + ",thumbnail_url"
 _PREVIEW_CHILD_FIELDS = "id,media_type,media_url,thumbnail_url"
 
@@ -684,8 +687,14 @@ class InstagramPastPostsAdapter:
                     deferred.append(mid)
                     diagnostics.append("parent_read_retry_pending")
                     break
-                except MediaTerminalError:
-                    failed.append(mid)
+                except MediaTerminalError as exc:
+                    if past_posts_retry.proves_gone(refusal_evidence.of(exc)):
+                        failed.append(mid)
+                    else:
+                        # One answer that does not prove the post gone retires
+                        # none of its slides: the parent is read again later.
+                        deferred.append(mid)
+                        diagnostics.append("parent_read_unproven")
                     continue
                 observations.append(observation)
                 candidates.extend(
@@ -1114,6 +1123,7 @@ class InstagramPastPostsAdapter:
         workspace_id: str,
         max_bytes: int,
         selected_asset_id: Optional[str] = None,
+        download_budget_s: Optional[float] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
         """Fetch current bytes; bound validation/effect callers supply selection.
@@ -1122,6 +1132,8 @@ class InstagramPastPostsAdapter:
         captured selected_asset_id. Freshly changed carousel bytes cannot
         inherit the previous child's evidence. No consumer is wired here. A
         preview is :meth:`fetch_preview`, never this full fetch.
+        download_budget_s is the download's wall budget, DEFAULT_DOWNLOAD_SECONDS
+        when None; a download it cuts off names it in the refusal's evidence.
         on_counters is a synchronous local observer (no I/O), called once even
         on failure/cancellation. Observer exceptions cannot alter read outcomes.
         """
@@ -1171,7 +1183,7 @@ class InstagramPastPostsAdapter:
                             has_link=isinstance(url, str) and bool(url),
                         ),
                     )
-                policy = self._download_policy(url, max_bytes)
+                policy = self._download_policy(url, max_bytes, download_budget_s)
                 try:
                     # Never forward the Instagram token to the CDN.
                     self._require_plain_client()
@@ -1193,8 +1205,13 @@ class InstagramPastPostsAdapter:
                         ),
                     ) from None
                 except egress.EgressBudgetExhausted:
-                    raise MediaRetryableError(
-                        "Instagram download budget exhausted"
+                    raise refusal_evidence.attach(
+                        MediaRetryableError("Instagram download budget exhausted"),
+                        refusal_evidence.evidence(
+                            "download_budget_spent",
+                            seconds=policy.total_budget_s,
+                            host=refusal_evidence.link_evidence(url)["host"],
+                        ),
                     ) from None
                 link = refusal_evidence.link_evidence(url)
                 if response.status_code in _EXPIRED_LINK:
@@ -1384,7 +1401,9 @@ class InstagramPastPostsAdapter:
             },
         )
 
-    def _download_policy(self, url: str, max_bytes: int) -> egress.EgressPolicy:
+    def _download_policy(
+        self, url: str, max_bytes: int, budget_s: Optional[float] = None
+    ) -> egress.EgressPolicy:
         try:
             parsed = urlsplit(url)
             host = parsed.hostname or ""
@@ -1412,5 +1431,5 @@ class InstagramPastPostsAdapter:
             allowed_hosts=frozenset({host}),
             max_response_bytes=max_bytes,
             timeout_class="upload",
-            total_budget_s=120,
+            total_budget_s=DEFAULT_DOWNLOAD_SECONDS if budget_s is None else budget_s,
         )

@@ -1574,3 +1574,80 @@ async def test_unsupported_bytes_keep_their_type_length_status_and_host(
         "host": CDN_HOST,
     }
     assert_redacted(evidence, "BODY-MARKER")
+
+
+# --- the download's wall budget -----------------------------------------------------
+
+
+def cdn_policies(monkeypatch, *, spend=False):
+    """The policy of every CDN download through the one egress door; *spend*
+    makes each CDN download spend its budget instead of being answered."""
+    policies = []
+    real = past_posts.egress.request
+
+    async def request(client, method, url, *args, **kwargs):
+        if CDN_HOST in str(url):
+            policies.append(kwargs["policy"])
+            if spend:
+                raise past_posts.egress.EgressBudgetExhausted("spent")
+        return await real(client, method, url, *args, **kwargs)
+
+    monkeypatch.setattr(past_posts.egress, "request", request)
+    return policies
+
+
+def video():
+    return httpx.Response(
+        200, content=b"\x00\x00\x00\x18ftypmp42", headers={"content-type": "video/mp4"}
+    )
+
+
+async def fetch_video(a, budget):
+    return await a.fetch_bytes(
+        {"v": 1},
+        "1",
+        source_id=SOURCE,
+        workspace_id=WS,
+        max_bytes=100,
+        download_budget_s=budget,
+    )
+
+
+@pytest.mark.parametrize("budget", [240.0, None], ids=["named", "unnamed"])
+async def test_a_download_runs_under_the_wall_budget_its_caller_names(
+    monkeypatch, budget
+):
+    """A video's download runs under the budget its caller names
+    (`WorkerConfig.past_posts_download_seconds`), else the adapter's own."""
+    expected = past_posts.DEFAULT_DOWNLOAD_SECONDS if budget is None else budget
+    policies = cdn_policies(monkeypatch)
+    a = adapter(
+        preview_handler(
+            media(media_type="VIDEO", media_url=SIGNED_URL),
+            cdn=lambda req: video(),
+        )
+    )
+    data, _, _ = await fetch_video(a, budget)
+    assert data == video().content
+    assert [policy.total_budget_s for policy in policies] == [expected]
+
+
+async def test_a_download_its_budget_cuts_off_names_the_budget_and_the_host(
+    monkeypatch,
+):
+    """download_budget_spent, retryable: the wall budget the download ran under
+    and the link's host, so the refusal names the bound it met."""
+    cdn_policies(monkeypatch, spend=True)
+    a = adapter(preview_handler(media(media_type="VIDEO", media_url=SIGNED_URL)))
+    evidence = await refusal_of(
+        fetch_video(a, 240.0),
+        MediaRetryableError,
+        "Instagram download budget exhausted",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "download_budget_spent",
+        "seconds": 240.0,
+        "host": CDN_HOST,
+    }
+    assert_redacted(evidence)

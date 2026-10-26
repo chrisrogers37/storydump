@@ -971,6 +971,40 @@ class TestTheConversionRunIsReadOnce:
         assert handed["compose"]["conversion_evidence"] is record
 
 
+class TestThePastPostsSourceTakesTheConfiguredNumbers:
+    def test_main_hands_it_the_retry_and_the_download_budgets(
+        self, ring_env, monkeypatch
+    ):
+        """A selected post's fetch is tried again, and downloads, under
+        `WorkerConfig`'s numbers."""
+        import src.worker as worker
+        from cryptography.fernet import Fernet
+
+        from src.services.target.past_posts_retry import Retry
+
+        handed = {}
+
+        def build_worker(**kwargs):
+            handed.update(kwargs)
+
+        ring_env(key=Fernet.generate_key().decode())
+        monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
+        monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setattr(
+            worker, "_conversion_evidence", lambda env: _a_conversion_record()
+        )
+        monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
+        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
+        monkeypatch.setattr(worker, "compose", lambda **kwargs: "app")
+        monkeypatch.setattr(worker, "run", lambda app: app)
+        monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
+        worker.main()
+        config = WorkerConfig()
+        assert handed["retry"] == Retry.from_config(config)
+        assert handed["download_seconds"] == config.past_posts_download_seconds
+        assert config.past_posts_download_seconds == {"image": 120.0, "video": 240.0}
+
+
 class TestTheReconcilerPollIsWired:
     """Production does not run `poll=None` — the ambiguous
     ladder asks Meta for the container's status through the Graph adapter."""
