@@ -1169,6 +1169,31 @@ async def post_past_posts_card(engine, chain, intent, *, via="api"):
         )
 
 
+async def test_a_trimmed_video_says_so_on_its_card(past_posts_engine, origin):
+    """The card reads a past-posts video's trim from its selected slide's
+    validation evidence, through the story's provenance."""
+    from src.services.target import prompts
+
+    _, _, intent, _, _ = await approved_past_posts_card(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        changed = await conn.execute(
+            text(
+                "UPDATE instagram_media_assets a SET validation_capture="
+                "a.validation_capture||jsonb_build_object('evidence',"
+                "COALESCE(a.validation_capture->'evidence','{}'::jsonb)"
+                '||\'{"trimmed_to_seconds":"60"}\'::jsonb)'
+                " FROM instagram_intent_provenance p"
+                " WHERE p.workspace_id=a.workspace_id AND p.intent_id=CAST(:id AS uuid)"
+                " AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id"
+                " AND a.asset_media_id=p.selected_asset_identity"
+            ),
+            {"id": intent},
+        )
+        assert changed.rowcount == 1
+        card = await prompts.rerender_prompt(conn, intent_id=intent)
+    assert "✂️ Trimmed to 60 s" in card["text"]
+
+
 @pytest.mark.parametrize("via", ["api", "dry_run"])
 async def test_posted_rule_past_posts_card_sends_text_outcome_without_selected_fetch(
     past_posts_engine, origin, via

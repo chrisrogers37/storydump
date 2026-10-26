@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1329,8 +1330,6 @@ class TestClosedSetsTrackTheSchema:
             for c in MediaItem.__table_args__
             if getattr(c, "name", None) == "ck_media_kind"
         )
-        import re
-
         allowed = set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
         assert allowed == set(_RESOURCE_TYPES)
 
@@ -1380,11 +1379,12 @@ class TestTheStoryFrame:
             "gravity": "center",
         }
 
-    def test_a_video_is_padded_with_cloudinarys_blurred_background(self):
+    def test_a_video_is_trimmed_padded_then_encoded_to_the_story(self):
         from src.services.target.transit import story_transformation
 
         chain = story_transformation(f"ws/{WS}/clip1", media_kind="video")
         assert chain == [
+            {"duration": 60},
             {"crop": "limit", "width": 1080, "height": 1920},
             {
                 "crop": "pad",
@@ -1392,7 +1392,25 @@ class TestTheStoryFrame:
                 "height": 1920,
                 "background": "blurred:2000:15",
             },
+            {
+                "video_codec": "h264:high:4.2",
+                "audio_codec": "aac",
+                "audio_frequency": 48000,
+                "fps": "23-60",
+                "bit_rate": 13_000_000,
+            },
         ]
+
+    def test_the_codec_level_holds_the_story_frame_at_the_top_frame_rate(self):
+        """H.264 Annex A, level 4.2: at most 8,704 macroblocks a frame and
+        522,240 a second."""
+        from src.services.target import media_validation
+        from src.services.target.transit import STORY_HEIGHT, STORY_WIDTH
+
+        matrix = media_validation.SUPPORTED_MEDIA_MATRIX
+        assert matrix["video_codec"] == ("h264", "high", "4.2")
+        frame = -(-STORY_WIDTH // 16) * -(-STORY_HEIGHT // 16)
+        assert frame <= 8_704 and frame * matrix["fps"][1] <= 522_240
 
     def test_delivery_url_carries_the_frame(self):
         sdk = RecordingSdk()
@@ -1448,7 +1466,11 @@ class TestTheStoryFrame:
             api_key="k",
             api_secret="s",
         )
-        assert "/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/" in url
+        steps = re.search(r"/s--[^/]+--/(.+?)/(?:v\d+/)?ws/", url).group(1)
+        assert steps == (
+            "du_60/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/"
+            "ac_aac,af_48000,br_13000000,fps_23-60,vc_h264:high:4.2"
+        ), "every step, in order, and no named transformation"
         assert url.endswith(".mp4") and "/video/authenticated/" in url
 
     def test_delivery_is_in_the_format_meta_accepts(self):

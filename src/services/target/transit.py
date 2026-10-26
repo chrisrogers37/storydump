@@ -80,7 +80,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Optional
 
 from src.exceptions.base import StorydumpError
-from src.services.target import egress
+from src.services.target import egress, media_validation
 from src.services.target.egress import TIMEOUT_CLASSES
 from src.utils.datetime_utils import ensure_utc, ms_since, parse_iso_timestamp
 
@@ -225,19 +225,32 @@ def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dic
     left and right for one taller than 9:16 (`c_pad` never crops). The asset
     is `authenticated`, so the layer names it as such and the whole signed
     URL authorises the layer (Cloudinary: an authenticated layer needs the
-    signed URL, no separate signature). A video takes Cloudinary's own
-    blurred-background padding.
+    signed URL, no separate signature). A video is trimmed to the longest
+    story first, so nothing past it is framed or encoded, then takes
+    Cloudinary's own blurred-background padding, then is encoded to the story
+    spec, all from the validation matrix (`media_validation.story_video_encoding`).
+    Every step is a dict, so the SDK never renders a named transformation.
     """
     if media_kind not in STORY_FORMATS:
         raise ValueError(f"unknown media_kind {media_kind!r}")
     if media_kind == "video":
+        encoding = media_validation.story_video_encoding()
+        slowest, fastest = encoding["fps"]
         return [
+            {"duration": encoding["longest_seconds"]},
             {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
             {
                 "crop": "pad",
                 "width": STORY_WIDTH,
                 "height": STORY_HEIGHT,
                 "background": f"blurred:{STORY_BLUR}:15",
+            },
+            {
+                "video_codec": ":".join(encoding["video_codec"]),
+                "audio_codec": encoding["audio_codec"],
+                "audio_frequency": encoding["audio_hz"],
+                "fps": f"{slowest}-{fastest}",
+                "bit_rate": encoding["video_bits_per_second"],
             },
         ]
     underlay = "authenticated:" + transit_asset_ref.replace("/", ":")
