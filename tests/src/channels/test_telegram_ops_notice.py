@@ -7,6 +7,7 @@ import pytest
 
 from src.channels.telegram_ops_notice import OpsNotice
 from src.channels.telegram_transport import TelegramRefused
+from tests.src.channels.test_telegram_waitlist_ping import _to
 
 ONE, TWO = "424242", "535353"
 
@@ -24,15 +25,6 @@ class _Sends:
             raise TelegramRefused("Forbidden: bot was blocked by the user")
         self.sent.append((chat, text))
         return "1"
-
-
-def _to(*chats):
-    """A recipients read that answers *chats*."""
-
-    async def read():
-        return list(chats)
-
-    return read
 
 
 class _Latch:
@@ -55,9 +47,9 @@ async def _fails(*_):
 async def test_a_notice_goes_to_every_linked_operator_once_per_key():
     sends = _Sends()
     notice = OpsNotice(sends, _to(ONE, TWO), _Latch())
-    assert await notice("spec_drift:9004/2207052", "first") is True
-    assert await notice("spec_drift:9004/2207052", "again") is False
-    assert await notice("spec_drift:36003/None", "other") is True
+    await notice("spec_drift:9004/2207052", "first")
+    await notice("spec_drift:9004/2207052", "again")
+    await notice("spec_drift:36003/None", "other")
     assert sends.sent == [
         (ONE, "first"),
         (TWO, "first"),
@@ -71,7 +63,7 @@ async def test_nothing_is_claimed_while_no_operator_has_linked_telegram(caplog):
     operator links still goes."""
     sends, latch = _Sends(), _Latch()
     with caplog.at_level(logging.WARNING):
-        assert await OpsNotice(sends, _to(), latch)("k", "text") is False
+        await OpsNotice(sends, _to(), latch)("k", "text")
     assert latch.claims == [] and sends.sent == []
     assert "no one in OPS_USER_IDS has linked Telegram" in caplog.text
 
@@ -79,7 +71,7 @@ async def test_nothing_is_claimed_while_no_operator_has_linked_telegram(caplog):
 async def test_a_refused_send_is_logged_and_the_next_operator_still_gets_it(caplog):
     sends = _Sends(refuse={ONE})
     with caplog.at_level(logging.ERROR):
-        assert await OpsNotice(sends, _to(ONE, TWO), _Latch())("k", "text") is True
+        await OpsNotice(sends, _to(ONE, TWO), _Latch())("k", "text")
     assert sends.sent == [(TWO, "text")]
     assert "not sent to one operator: Forbidden" in caplog.text
     assert ONE not in caplog.text, "no chat id in a log line"
@@ -94,5 +86,5 @@ async def test_a_notice_whose_read_fails_is_logged_and_never_raised(broken, capl
         _fails if broken == "claim" else _Latch(),
     )
     with caplog.at_level(logging.ERROR):
-        assert await notice("k", "text") is False
+        await notice("k", "text")
     assert sends.sent == [] and "NOT SENT" in caplog.text

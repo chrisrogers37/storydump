@@ -117,19 +117,35 @@ def _precheck_from_env(env):
     return UsagePrecheck()
 
 
-def _ops_notice_from_env(engine, env, transport, config):
-    """The operators' notice (`telegram_ops_notice.OpsNotice`), or None,
-    saying once at startup which setting is missing, so a notice nobody got is
-    explained in the log. It writes to the people in `OPS_USER_IDS` who have
-    linked Telegram, read afresh for each notice, and its latch is one
-    `rate_counters` row per key and window."""
-    from datetime import datetime, timezone
-
+async def _claim_ops_notice(engine, key: str, window_seconds: int) -> bool:
+    """The ops notice's latch: True for the first claim of *key* in the
+    current window, in a transaction of its own (`rate_counters`)."""
     from src.channels import telegram_ops_notice
-    from src.config.settings import parse_ops_user_ids
-    from src.services.target import identity, rate_counters
+    from src.services.target import rate_counters
+    from src.utils.datetime_utils import utcnow
 
-    operators = parse_ops_user_ids(env.get("OPS_USER_IDS", ""))[0]
+    window = rate_counters.window_start(utcnow(), window_seconds)
+    async with engine.begin() as conn:
+        claimed = await rate_counters.increment(
+            conn,
+            scope=telegram_ops_notice.SCOPE,
+            key=key,
+            window_start=window,
+            limit=1,
+        )
+    return claimed is not None
+
+
+def _ops_notice_from(engine, transport, config):
+    """`WorkerDeps.ops_notice`, or None, saying once at startup which setting
+    is missing. It writes to the people in `OPS_USER_IDS`
+    (`settings.ops_user_ids`, as the API reads them) who have linked
+    Telegram, read afresh for each notice."""
+    from src.channels import telegram_ops_notice
+    from src.services.target import identity
+
+    operators = settings.ops_user_ids
+    window_seconds = config.ops_notice_window_seconds
     send_text = getattr(transport, "send_text", None)
     missing = [
         name
@@ -148,18 +164,7 @@ def _ops_notice_from_env(engine, env, transport, config):
             return await identity.telegram_ids_for(conn, operators)
 
     async def claim(key):
-        window = rate_counters.window_start(
-            datetime.now(timezone.utc), config.ops_notice_window_seconds
-        )
-        async with engine.begin() as conn:
-            claimed = await rate_counters.increment(
-                conn,
-                scope=telegram_ops_notice.SCOPE,
-                key=key,
-                window_start=window,
-                limit=1,
-            )
-        return claimed is not None
+        return await _claim_ops_notice(engine, key, window_seconds)
 
     return telegram_ops_notice.OpsNotice(send_text, recipients, claim)
 
@@ -436,7 +441,7 @@ def compose(
         poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         precheck=_precheck_from_env(env),
-        ops_notice=_ops_notice_from_env(engine, env, transport, config),
+        ops_notice=_ops_notice_from(engine, transport, config),
         adapters=adapters or {},
         mix_conversion_evidence=conversion_evidence,
         engine=engine,

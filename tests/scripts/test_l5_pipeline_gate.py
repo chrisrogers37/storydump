@@ -3988,7 +3988,6 @@ class _Told:
 
     async def __call__(self, key, text):
         self.told.append((key, text))
-        return True
 
 
 class TestARefusalOfACheckedFileIsRecordedAndTold:
@@ -4026,11 +4025,12 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         assert outcome == POISONED
         drift = self._container_permit(pipe_db, intent)["response"]["spec_drift"]
         assert drift["meta"] == {
+            "type": "MetaRetryableError",
             "code": 36003,
             "subcode": 2207009,
             "message": "meta error 36003/2207009: The aspect ratio is not supported.",
             "fbtrace_id": "trace-1",
-        }
+        }, "the reason as last_error records it"
         assert drift["ours"]["length"] == 137673
         assert drift["ours"]["limits"] == {"bytes": 8_000_000}
         assert [key for key, _ in told.told] == ["spec_drift:36003/2207009"]
@@ -4086,23 +4086,23 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         )
         assert outcome == POISONED
         error = _intent_row(pipe_db, intent)["last_error"]["error"]
-        assert error["spec_drift"]["meta"] == {"status": "ERROR", "reason": reason}
+        meta = error["spec_drift"]["meta"]
+        assert (meta["type"], meta["status_code"], meta["status"]) == (
+            "ContainerDead",
+            "ERROR",
+            reason,
+        )
         assert error["spec_drift"]["ours"]["length"] == 137673
         assert [key for key, _ in told.told] == ["spec_drift:container:ERROR"]
 
     def test_the_latch_claims_a_key_once_a_window_under_the_worker_login(self, pipe_db):
-        """The `ops_notice` scope is one `rate_counters` admits, and its first
-        claim in a window is the only one that wins."""
-        from src.channels.telegram_ops_notice import SCOPE
-        from src.services.target import rate_counters
+        """The ops notice's latch (`worker._claim_ops_notice`): its
+        `rate_counters` scope is one the table admits, and the first claim of a
+        key in a window is the only one that wins."""
+        from src.worker import _claim_ops_notice
 
-        window = rate_counters.window_start(datetime.now(timezone.utc), 86400)
         key = f"spec_drift:test/{uuid.uuid4()}"
-
-        async def claim():
-            async with pipe_db["engine"].begin() as conn:
-                return await rate_counters.increment(
-                    conn, scope=SCOPE, key=key, window_start=window, limit=1
-                )
-
-        assert [_run(claim()), _run(claim())] == [1, None]
+        claims = [
+            _run(_claim_ops_notice(pipe_db["engine"], key, 86400)) for _ in range(2)
+        ]
+        assert claims == [True, False]

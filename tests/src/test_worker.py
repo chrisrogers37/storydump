@@ -8,6 +8,7 @@ and the heartbeat/lease numbers agreeing.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -1272,48 +1273,54 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
 _OPERATOR = "00000000-0000-4000-8000-000000000001"
 
 
-class _Bot:
-    """A transport with the operator-facing `send_text` the ops notice uses."""
+async def _send_text(chat_id, text, *, reply_markup=None):
+    return "1"
 
-    async def send_text(self, chat_id, text, *, reply_markup=None):
-        return "1"
+
+def _Bot():
+    """A transport with the operator-facing `send_text` the ops notice uses."""
+    return SimpleNamespace(send_text=_send_text)
 
 
 class TestTheOpsNoticeIsComposedFromTheBotAndTheOperators:
     """The operators' notice (`telegram_ops_notice`) needs the bot and
-    `OPS_USER_IDS`. Without either, the seam is None and the deploy log says
-    which is missing once, so a refusal nobody was told of is explained."""
+    `OPS_USER_IDS`, read through settings as the API reads them. Without
+    either, the seam is None and the deploy log says which is missing once,
+    so a refusal nobody was told of is explained."""
 
-    def _compose(self, env, transport):
+    def _compose(self, monkeypatch, operators, transport):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "OPS_USER_IDS", operators)
         return compose(
             engine=object(),
             config=WorkerConfig(),
-            env=env,
+            env={},
             transport=transport,
             adapters={"gdrive": object()},
         )
 
-    def test_the_bot_and_the_operators_compose_it(self):
+    def test_the_bot_and_the_operators_compose_it(self, monkeypatch):
         from src.channels.telegram_ops_notice import OpsNotice
 
-        app = self._compose({"OPS_USER_IDS": _OPERATOR}, _Bot())
+        app = self._compose(monkeypatch, _OPERATOR, _Bot())
         assert isinstance(app.deps.ops_notice, OpsNotice)
 
     @pytest.mark.parametrize(
-        "env,transport,missing",
+        "operators,transport,missing",
         [
-            ({}, _Bot(), "OPS_USER_IDS"),
-            ({"OPS_USER_IDS": _OPERATOR}, None, "TARGET_TELEGRAM_BOT_TOKEN"),
+            ("", _Bot(), "OPS_USER_IDS"),
+            (_OPERATOR, None, "TARGET_TELEGRAM_BOT_TOKEN"),
         ],
         ids=["no-operators", "no-bot"],
     )
     def test_without_either_it_is_off_and_says_which(
-        self, env, transport, missing, caplog
+        self, monkeypatch, operators, transport, missing, caplog
     ):
         import logging
 
         with caplog.at_level(logging.WARNING, logger="target.worker"):
-            app = self._compose(env, transport)
+            app = self._compose(monkeypatch, operators, transport)
         assert app.deps.ops_notice is None
         assert any(
             "ops notice: off" in r.getMessage() and missing in r.getMessage()
