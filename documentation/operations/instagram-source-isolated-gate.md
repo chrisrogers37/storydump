@@ -67,10 +67,10 @@ selected is therefore known in advance. Every token, id and URL is synthetic.
 - **`psql` 15 on the `PATH`**, if you will run more than this gate. The gate's own
   fixtures bootstrap the roles and replay the migration stream through `psycopg2`,
   but the wider database-gated suites apply files through `psql`.
-- **`ffprobe` and `ffmpeg` 7.1**, for the validator's own suites on the same
-  machine. The video validator pins its evidence to 7.1 and answers another version
-  with `tool_version_unproven`. This gate selects an image, which is decoded by
-  Pillow in a resource-bounded subprocess, so none of its scenes calls them.
+- **`ffprobe` and `ffmpeg`**, for the validator's own suites on the same machine:
+  the video validator reads `ffprobe`'s JSON, and its suites write their stimuli with
+  `ffmpeg`. This gate selects an image, which is decoded by Pillow in a
+  resource-bounded subprocess, so none of its scenes calls them.
 - **A checkout with no `.env`.** The guard refuses to start when the working
   directory or the rootdir holds one, because settings would load it on import.
 - **One run at a time per cluster.** The suite takes a cluster-wide advisory lock;

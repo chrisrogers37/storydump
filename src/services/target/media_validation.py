@@ -2,13 +2,19 @@
 
 Matrix source: Meta IG User /media.
 https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/media
-FFmpeg parser interface: deployment Nixpkgs archive / FFmpeg 7.1.
+FFmpeg interface: ffprobe's JSON stream and format entries.
 
 Resource limits/private cwd are NOT a filesystem sandbox. MOV external-track
 references are refused before using explicit disabled dref/path options. No
 network, transformations, captions, URLs or raw decoder diagnostics are retained.
-Video bitrate semantics/conformance remain unproven, so a video that passes
-every probe stays `validation_pending` (`needs_spec_evidence`).
+
+Meta never receives a video's source file. It fetches the transit store's
+story derivation of it (`transit.story_transformation`, delivered as MP4 in the
+story frame), so a video is judged only on what the derivation keeps from it:
+its size, a well-formed self-contained container, a video stream the probe can
+open, its duration and its frame rate. The source's container layout (edit
+lists, where `moov` sits), its encoding settings and its audio settings are the
+derivation's to set, and are not judged here.
 """
 
 from __future__ import annotations
@@ -17,7 +23,6 @@ import asyncio
 import hashlib
 import json
 import math
-import re
 import subprocess
 import os
 import resource
@@ -34,7 +39,7 @@ from typing import Literal, Mapping
 
 from .vocabulary import PUBLISH_MAX_BYTES
 
-MATRIX_VERSION = "instagram-story-2026-10-11-v1"
+MATRIX_VERSION = "instagram-story-2026-10-25-v2"
 EVIDENCE_VERSION = 1
 SUPPORTED_MEDIA_MATRIX = MappingProxyType(
     {
@@ -51,25 +56,12 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
         ),
         "image": ("JPEG", "sRGB; provider converts other color spaces"),
         "video": (
-            "MOV/MP4",
-            "h264/hevc",
-            "progressive",
-            "closed GOP",
-            "4:2:0",
-            "front moov",
-            "no edit lists",
+            "MOV/MP4, well formed and self-contained",
+            "a video stream the probe can open: H.264 or HEVC, with AAC audio",
+            "delivered to Meta as the transit store's story derivation",
         ),
         "duration_seconds": (3, 60),
         "fps": (23, 60),
-        "width": 1920,
-        "aspect": ("1/10", "10"),
-        "audio": (
-            "AAC",
-            "sample rate <=48000Hz",
-            "mono/stereo",
-            "128kbps interpretation unproven",
-        ),
-        "video_bitrate": "VBR <=25000000 bits/s: measurement and coded-stream conformance unproven",
         "provider_video_bytes": 100_000_000,
     }
 )
@@ -107,11 +99,9 @@ class ValidationLimits:
     memory_bytes: int = 768 * 1024 * 1024
     output_bytes: int = 32 * 1024 * 1024
     pixels: int = 8_000_000
-    frames: int = 10_000
     boxes: int = 20_000
     depth: int = 12
     ffprobe: str = "ffprobe"
-    ffmpeg: str = "ffmpeg"
     temporary_root: str | None = None
 
     def __post_init__(self):
@@ -121,7 +111,6 @@ class ValidationLimits:
             "memory_bytes": 768 * 1024 * 1024,
             "output_bytes": 32 * 1024 * 1024,
             "pixels": 8_000_000,
-            "frames": 10_000,
             "boxes": 20_000,
             "depth": 12,
         }
@@ -315,8 +304,6 @@ async def run_bounded(argv, limits, cwd, deadline):
 class ContainerEvidence:
     reason: str | None
     pending: bool = False
-    media_extents: tuple[tuple[int, int], ...] = ()
-    sample_codecs: tuple[str, ...] = ()
     #: For a refusal: the box list and the sample codecs walked so far.
     measured: Mapping[str, object] = field(default_factory=dict)
 
@@ -329,7 +316,6 @@ def inspect_container(
     count = 0
     top = []
     tracks = []
-    extents = []
     codecs = []
     pending = False
 
@@ -354,18 +340,14 @@ def inspect_container(
                 size = end - start
             if size < header or size > end - start:
                 raise UnsupportedMedia("malformed_container")
-            yield kind, start, start + header, start + size
+            yield kind, start + header, start + size
             start += size
 
     def walk(start, end, depth, track=None):
         nonlocal pending
-        for kind, offset, payload, finish in boxes(start, end, depth):
+        for kind, payload, finish in boxes(start, end, depth):
             if depth == 0:
-                top.append((kind, offset, finish))
-            if kind == b"mdat" and depth == 0:
-                extents.append((payload, finish))
-            if kind == b"elst":
-                raise UnsupportedMedia("edit_list")
+                top.append(kind)
             if kind in (b"cmov", b"moof", b"mvex"):
                 pending = True
             if kind == b"trak":
@@ -381,7 +363,7 @@ def inspect_container(
                 entries = list(boxes(payload + 8, finish, depth + 1))
                 if len(entries) != n:
                     raise UnsupportedMedia("malformed_container")
-                for entry, _, content, end_entry in entries:
+                for entry, content, end_entry in entries:
                     if kind == b"dref":
                         if end_entry - content < 4:
                             raise UnsupportedMedia("malformed_container")
@@ -399,12 +381,8 @@ def inspect_container(
 
     try:
         walk(0, len(data), 0)
-        moovs = [b for b in top if b[0] == b"moov"]
-        mdats = [b for b in top if b[0] == b"mdat"]
-        if len(moovs) != 1 or not mdats:
+        if top.count(b"moov") != 1 or b"mdat" not in top:
             raise ValidationPending("container_evidence_incomplete")
-        if moovs[0][2] > mdats[0][1]:
-            raise UnsupportedMedia("moov_not_front")
         for track in tracks:
             if not track["indices"] or not track["refs"]:
                 pending = True
@@ -413,16 +391,16 @@ def inspect_container(
                     pending = True
         if not tracks or pending:
             raise ValidationPending("container_evidence_incomplete")
+        # The decoders the probe may open on untrusted bytes (`_PROBE_CODECS`):
+        # a stream outside them is refused here rather than left to the probe.
         if any(
             codec not in ("avc1", "avc3", "hvc1", "hev1", "mp4a") for codec in codecs
         ):
             raise UnsupportedMedia("video_codec")
-        return ContainerEvidence(
-            None, media_extents=tuple(extents), sample_codecs=tuple(codecs)
-        )
+        return ContainerEvidence(None)
     except (UnsupportedMedia, ValidationPending) as exc:
         measured = {
-            "boxes": [kind.decode("ascii", errors="replace") for kind, _, _ in top],
+            "boxes": [kind.decode("ascii", errors="replace") for kind in top],
             "box_count": count,
             "sample_codecs": codecs,
             **getattr(exc, "measured", {}),
@@ -506,7 +484,6 @@ async def validate_media(
                 UnsupportedMedia("byte_limit"), bytes=len(source.data), cap=cap
             )
         deadline = asyncio.get_running_loop().time() + limits.wall_seconds
-        container = None
         if source.kind == "video":
             container = inspect_container(source.data, limits)
             if container.reason:
@@ -546,9 +523,8 @@ async def validate_media(
                 evidence.update(facts)
             else:
                 evidence.update(
-                    await _validate_video(local, container, limits, directory, deadline)
+                    await _validate_video(local, limits, directory, deadline)
                 )
-                raise ValidationPending("needs_spec_evidence")
     except (UnsupportedMedia, ValidationPending) as exc:
         state = (
             "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
@@ -585,260 +561,65 @@ async def validate_media(
     )
 
 
-def _integer(value):
-    if isinstance(value, bool):
-        raise ValidationPending("incomplete_evidence")
+def _positive_fraction(value):
+    """A probe's number (`12.5`, `30000/1001`) as an exact Fraction, or None
+    where it states none: absent, `N/A`, `0/0` or not positive."""
     try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ValidationPending("incomplete_evidence") from None
+        number = Fraction(str(value))
+    except (ValueError, ZeroDivisionError):
+        return None
+    return number if number > 0 else None
 
 
-def _ratio(value):
-    try:
-        ratio = Fraction(str(value).replace(":", "/"))
-        if ratio <= 0:
-            raise ValueError
-        return ratio
-    except (ValueError, ZeroDivisionError, TypeError):
-        raise ValidationPending("incomplete_evidence") from None
-
-
-def inspect_video_facts(facts, formats, container, limits):
+def inspect_video_facts(facts):
+    """What the story derivation keeps of a video: its video stream (the first,
+    as the derivation takes it), the stream's duration (else the container's)
+    and its frame rate. A frame rate the probe does not state is not judged;
+    one outside the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
-    audios = [s for s in streams if s.get("codec_type") == "audio"]
-    if len(videos) != 1 or len(audios) > 1 or len(streams) != len(videos) + len(audios):
+    if not videos:
         raise _measured(
-            ValidationPending("stream_topology"),
-            streams=len(streams),
-            video_streams=len(videos),
-            audio_streams=len(audios),
+            UnsupportedMedia("stream_topology"), streams=len(streams), video_streams=0
         )
     video = videos[0]
-    if video.get("codec_name") not in ("h264", "hevc"):
-        raise _measured(
-            UnsupportedMedia("video_codec"), video_codec=video.get("codec_name")
-        )
-    if video.get("side_data_list"):
-        raise ValidationPending("transform_evidence_incomplete")
-    index = _integer(video.get("index"))
-    frames = [f for f in facts.get("frames", []) if f.get("stream_index") == index]
-    packets = [p for p in facts.get("packets", []) if p.get("stream_index") == index]
-    # show_entries emits interleaved packets_and_frames in FFmpeg 7.1.
-    if "packets_and_frames" in facts:
-        frames = [
-            f
-            for f in facts["packets_and_frames"]
-            if f.get("type") == "frame" and f.get("stream_index") == index
-        ]
-        packets = [
-            p
-            for p in facts["packets_and_frames"]
-            if p.get("type") == "packet" and p.get("stream_index") == index
-        ]
-    if (
-        not frames
-        or len(frames) != _integer(video.get("nb_frames"))
-        or len(packets) != len(frames)
-    ):
-        raise ValidationPending("incomplete_evidence")
-    if (
-        len(frames) > limits.frames
-        or len(facts.get("packets_and_frames", [])) > limits.frames * 4
-    ):
-        raise ValidationPending("frame_budget")
-    time_base = _ratio(video.get("time_base"))
-    timestamps = []
-    dimensions = set()
-    for frame in frames:
-        width, height = _integer(frame.get("width")), _integer(frame.get("height"))
-        if width <= 0 or height <= 0:
-            raise ValidationPending("incomplete_evidence")
-        if width > 1920:
-            raise _measured(UnsupportedMedia("width"), width=width, height=height)
-        if width * height > limits.pixels:
-            raise _measured(
-                ValidationPending("pixel_budget"),
-                width=width,
-                height=height,
-                pixel_limit=limits.pixels,
-            )
-        sar = _ratio(frame.get("sample_aspect_ratio"))
-        aspect = Fraction(width, height) * sar
-        if not Fraction(1, 10) <= aspect <= 10:
-            raise _measured(
-                UnsupportedMedia("aspect"),
-                width=width,
-                height=height,
-                sample_aspect_ratio=sar,
-                aspect=aspect,
-            )
-        dimensions.add((width, height, sar))
-        if _integer(frame.get("interlaced_frame")) != 0:
-            raise _measured(UnsupportedMedia("interlaced"), width=width, height=height)
-        pix = formats.get(frame.get("pix_fmt"))
-        if pix is None:
-            raise ValidationPending("color_evidence_incomplete")
-        if pix != (1, 1):
-            raise _measured(
-                UnsupportedMedia("chroma_subsampling"), pix_fmt=frame.get("pix_fmt")
-            )
-        timestamps.append((_integer(frame.get("pts")), _integer(frame.get("duration"))))
-    if len(dimensions) != 1:
-        raise ValidationPending("geometry_evidence_incomplete")
-    timestamps.sort()
-    durations = {duration for _, duration in timestamps}
-    if len(durations) != 1 or next(iter(durations)) <= 0:
+    duration = _positive_fraction(video.get("duration")) or _positive_fraction(
+        facts.get("format", {}).get("duration")
+    )
+    if duration is None:
         raise ValidationPending("timing_evidence_incomplete")
-    tick = next(iter(durations))
-    if any(b[0] - a[0] != tick for a, b in zip(timestamps, timestamps[1:])):
-        # No undocumented interpretation of VFR or discontinuities.
-        raise ValidationPending("timing_evidence_incomplete")
-    duration = (timestamps[-1][0] + tick - timestamps[0][0]) * time_base
-    fps = 1 / (tick * time_base)
-    timing = dict(duration_seconds=duration, fps=fps, video_frames=len(frames))
-    if not 3 <= duration <= 60:
+    fps = _positive_fraction(video.get("avg_frame_rate"))
+    timing = dict(duration_seconds=duration, fps=fps)
+    shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
+    if not shortest <= duration <= longest:
         raise _measured(UnsupportedMedia("duration"), **timing)
-    if not 23 <= fps <= 60:
+    slowest, fastest = SUPPORTED_MEDIA_MATRIX["fps"]
+    if fps is not None and not slowest <= fps <= fastest:
         raise _measured(UnsupportedMedia("fps"), **timing)
-    if _integer(video.get("duration_ts")) * time_base != duration:
-        raise ValidationPending("timing_evidence_incomplete")
-    packet_timings = sorted(
-        (_integer(p.get("pts")), _integer(p.get("duration"))) for p in packets
-    )
-    if packet_timings != timestamps:
-        raise ValidationPending("timing_evidence_incomplete")
-    all_packets = facts.get("packets", []) or [
-        p for p in facts.get("packets_and_frames", []) if p.get("type") == "packet"
-    ]
-    for packet in all_packets:
-        pos, size = _integer(packet.get("pos")), _integer(packet.get("size"))
-        if size <= 0 or not any(
-            start <= pos and pos + size <= end for start, end in container.media_extents
-        ):
-            raise _measured(
-                UnsupportedMedia("packet_outside_media"),
-                packet_pos=pos,
-                packet_size=size,
-            )
-    audio_evidence = "absent_spec_interpretation_unproven"
-    if audios:
-        audio = audios[0]
-        if audio.get("codec_name") != "aac":
-            raise _measured(
-                UnsupportedMedia("audio_codec"), audio_codec=audio.get("codec_name")
-            )
-        if _integer(audio.get("sample_rate")) > 48000:
-            raise _measured(
-                UnsupportedMedia("audio_sample_rate"),
-                sample_rate=_integer(audio.get("sample_rate")),
-            )
-        if _integer(audio.get("channels")) not in (1, 2):
-            raise _measured(
-                UnsupportedMedia("audio_channels"),
-                channels=_integer(audio.get("channels")),
-            )
-        audio_evidence = "unproven"
-    width, height, sar = next(iter(dimensions))
     return {
-        "codec": video["codec_name"],
-        "video_frames": len(frames),
-        "width": width,
-        "height": height,
-        "sample_aspect_ratio": str(sar),
+        "codec": video.get("codec_name"),
+        "width": video.get("width"),
+        "height": video.get("height"),
         "duration_seconds": str(duration),
-        "fps": str(fps),
-        "progressive": True,
-        "chroma": "4:2:0",
-        "video_bitrate": "unproven",
-        "audio_bitrate": audio_evidence,
-        "container": "front_moov_no_edits_self_contained",
-        "average_video_bps_diagnostic_only": str(
-            Fraction(sum(_integer(p.get("size")) for p in packets) * 8, 1) / duration
-        ),
+        "fps": "unstated" if fps is None else str(fps),
+        "audio": any(s.get("codec_type") == "audio" for s in streams),
     }
 
 
-def inspect_headers(trace, codec, packet_count):
-    # Pin textual syntax to FFmpeg 7.1; validate all packets, not just extradata.
-    packet_sections = re.split(r"\[trace_headers @ [^]]+\] Packet:", trace)[1:]
-    if len(packet_sections) != packet_count:
-        raise ValidationPending("header_evidence_incomplete")
-    idr_types = (5,) if codec == "h264" else (19, 20)
-    slices = []
-    for number, section in enumerate(packet_sections):
-        types = [
-            int(n) for n in re.findall(r"\bnal_unit_type\s+[01]+ = (\d+)", section)
-        ]
-        if codec == "h264" and any(
-            n not in (1, 5, 6, 7, 8, 9, 10, 11, 12) for n in types
-        ):
-            raise ValidationPending("header_evidence_incomplete")
-        actual_slices = (
-            [n for n in types if n in (1, 5)]
-            if codec == "h264"
-            else [n for n in types if n < 32]
-        )
-        if not actual_slices:
-            raise ValidationPending("header_evidence_incomplete")
-        intra = [int(n) for n in re.findall(r"\bslice_type\s+[01]+ = (\d+)", section)]
-        is_intra = (
-            any(n % 5 in (2, 4) for n in intra)
-            if codec == "h264"
-            else any(n == 2 for n in intra)
-        )
-        if (number == 0 or "key frame" in section.splitlines()[0] or is_intra) and any(
-            n not in idr_types for n in actual_slices
-        ):
-            raise ValidationPending("closed_gop_unproven")
-        slices.extend(actual_slices)
-    if codec == "hevc" and any(
-        int(n) != 0 for n in re.findall(r"\bnuh_layer_id\s+[01]+ = (\d+)", trace)
-    ):
-        raise ValidationPending("header_evidence_incomplete")
-    evidence = {
-        "closed_gop": "idr_starts_proven",
-        "header_packets": packet_count,
-        "bitrate_conformance": "unproven",
-    }
-
-    # Retain declarations as declarations only. Changes/multiple schedules are unknown.
-    def values(name):
-        return [
-            int(n)
-            for n in re.findall(r"\b" + re.escape(name) + r"\s+[01]+ = (\d+)", trace)
-        ]
-
-    nal_hrd = values("nal_hrd_parameters_present_flag")
-    vcl_hrd = values("vcl_hrd_parameters_present_flag")
-    if not nal_hrd or any(n != 1 for n in nal_hrd) or any(n != 0 for n in vcl_hrd):
-        return evidence
-    scales, rates = values("bit_rate_scale"), values("bit_rate_value_minus1[0]")
-    cpb_scales, cpbs, modes = (
-        values("cpb_size_scale"),
-        values("cpb_size_value_minus1[0]"),
-        values("cbr_flag[0]"),
-    )
-    if scales and rates and len(set(scales)) == len(set(rates)) == 1:
-        evidence["declared_nal_hrd_max_bps"] = (rates[0] + 1) * 2 ** (6 + scales[0])
-    if cpb_scales and cpbs and len(set(cpb_scales)) == len(set(cpbs)) == 1:
-        evidence["declared_cpb_bits"] = (cpbs[0] + 1) * 2 ** (4 + cpb_scales[0])
-    if modes and len(set(modes)) == 1:
-        evidence["declared_hrd_schedule"] = (
-            "intermittent" if modes[0] == 0 else "continuous"
-        )
-    return evidence
+#: The decoders the probe may open on untrusted bytes. The container walker
+#: refuses a sample entry outside them before the probe runs.
+_PROBE_CODECS = "h264,hevc,aac"
 
 
-def _tool_success(output, *, decode=False):
-    if output.returncode == 0:
-        return
+def _probe_succeeded(output):
+    """Return when the probe ran clean. Words that establish malformed bytes
+    refuse the file; a resource or capability failure leaves it pending."""
     if output.returncode < 0:
         raise ValidationPending("resource_budget")
+    if output.returncode == 0 and not output.stderr:
+        return
     stderr = output.stderr.lower()
-    # These errors establish malformed bytes; resource/capability failures do not.
-    if decode and any(
+    if any(
         word in stderr
         for word in (
             b"corrupt",
@@ -848,64 +629,25 @@ def _tool_success(output, *, decode=False):
         )
     ):
         raise UnsupportedMedia("malformed_video")
-    raise ValidationPending("decoder_unavailable" if decode else "probe_incomplete")
+    raise ValidationPending("probe_incomplete")
 
 
-async def _validate_video(local, container, limits, directory, deadline):
-    versions = []
-    for tool in (limits.ffprobe, limits.ffmpeg):
-        output = await run_bounded([tool, "-version"], limits, directory, deadline)
-        _tool_success(output)
-        version = (
-            output.stdout.decode("utf-8", errors="replace").splitlines()[0]
-            if output.stdout
-            else ""
-        )
-        if not re.match(r"(ffprobe|ffmpeg) version 7\.1(?: |$)", version):
-            raise ValidationPending("tool_version_unproven")
-        versions.append("7.1")
-    pixels = await run_bounded(
-        [
-            limits.ffprobe,
-            "-v",
-            "error",
-            "-show_pixel_formats",
-            "-show_entries",
-            "pixel_format=name,log2_chroma_w,log2_chroma_h",
-            "-of",
-            "json",
-        ],
-        limits,
-        directory,
-        deadline,
-    )
-    _tool_success(pixels)
-    try:
-        formats = {
-            p["name"]: (p.get("log2_chroma_w"), p.get("log2_chroma_h"))
-            for p in json.loads(pixels.stdout)["pixel_formats"]
-        }
-    except (ValueError, KeyError, TypeError):
-        raise ValidationPending("incomplete_evidence") from None
-    input_options = [
-        "-f",
-        "mov",
-        "-protocol_whitelist",
-        "file",
-        "-enable_drefs",
-        "0",
-        "-use_absolute_path",
-        "0",
-        "-codec_whitelist",
-        "h264,hevc,aac",
-    ]
-    entries = "stream=index,codec_type,codec_name,width,height,time_base,duration_ts,nb_frames,sample_rate,channels,sample_aspect_ratio:stream_side_data=side_data_type,rotation,displaymatrix:packet=stream_index,pts,duration,pos,size:frame=stream_index,pts,duration,width,height,pix_fmt,sample_aspect_ratio,interlaced_frame"
+async def _validate_video(local, limits, directory, deadline):
     output = await run_bounded(
         [
             limits.ffprobe,
             "-v",
             "error",
-            *input_options,
+            "-f",
+            "mov",
+            "-protocol_whitelist",
+            "file",
+            "-enable_drefs",
+            "0",
+            "-use_absolute_path",
+            "0",
+            "-codec_whitelist",
+            _PROBE_CODECS,
             "-threads",
             "1",
             "-err_detect",
@@ -914,12 +656,8 @@ async def _validate_video(local, container, limits, directory, deadline):
             "3",
             "-max_pixels",
             str(limits.pixels),
-            "-probesize",
-            "40000000",
-            "-analyzeduration",
-            "61000000",
             "-show_entries",
-            entries,
+            "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,duration",
             "-of",
             "json",
             str(local),
@@ -928,150 +666,8 @@ async def _validate_video(local, container, limits, directory, deadline):
         directory,
         deadline,
     )
-    _tool_success(output)
-    if output.stderr:
-        raise ValidationPending("probe_incomplete")
+    _probe_succeeded(output)
     try:
-        facts = json.loads(output.stdout)
-        evidence = inspect_video_facts(facts, formats, container, limits)
-    except (ValueError, TypeError, KeyError):
+        return inspect_video_facts(json.loads(output.stdout))
+    except (ValueError, TypeError, AttributeError):
         raise ValidationPending("incomplete_evidence") from None
-    audio = any(s.get("codec_type") == "audio" for s in facts["streams"])
-    decode_command = [
-        limits.ffmpeg,
-        "-hide_banner",
-        "-nostdin",
-        "-nostats",
-        "-loglevel",
-        "info",
-        "-xerror",
-        "-max_error_rate",
-        "0",
-        "-filter_threads",
-        "1",
-        *input_options,
-        "-threads",
-        "1",
-        "-err_detect",
-        "explode",
-        "-max_pixels",
-        str(limits.pixels),
-        "-noautorotate",
-        "-i",
-        str(local),
-    ]
-    # Separate full passes prevent concurrent showinfo/ashowinfo log fragments
-    # interleaving. Each track is decoded completely under the SAME deadline.
-    decode = await run_bounded(
-        [
-            *decode_command,
-            "-map",
-            "0:v:0",
-            "-vf",
-            "showinfo",
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "null",
-            "-",
-        ],
-        limits,
-        directory,
-        deadline,
-    )
-    _tool_success(decode, decode=True)
-    decoded = decode.stderr.decode("utf-8", errors="replace")
-    video_frames = re.findall(
-        r"\[Parsed_showinfo_[^]]+\] n:\s*\d+.*?fmt:(\S+).*?s:(\d+)x(\d+).*?i:(\S+)",
-        decoded,
-    )
-    if len(video_frames) != evidence["video_frames"]:
-        raise ValidationPending("decode_evidence_incomplete")
-    for fmt, width, height, interlace in video_frames:
-        if (
-            formats.get(fmt) != (1, 1)
-            or int(width) != evidence["width"]
-            or int(height) != evidence["height"]
-            or interlace != "P"
-        ):
-            raise ValidationPending("decode_evidence_incomplete")
-    if audio:
-        audio_decode = await run_bounded(
-            [*decode_command, "-map", "0:a:0", "-af", "ashowinfo", "-f", "null", "-"],
-            limits,
-            directory,
-            deadline,
-        )
-        _tool_success(audio_decode, decode=True)
-        decoded_audio = audio_decode.stderr.decode("utf-8", errors="replace")
-        audio_frames = re.findall(
-            r"\[Parsed_ashowinfo_[^]]+\] n:\d+.*?channels:(\d+).*?rate:(\d+)",
-            decoded_audio,
-        )
-        audio_index = next(
-            s["index"] for s in facts["streams"] if s.get("codec_type") == "audio"
-        )
-        decoded_audio_count = sum(
-            1 for f in facts.get("frames", []) if f.get("stream_index") == audio_index
-        )
-        if "packets_and_frames" in facts:
-            decoded_audio_count = sum(
-                1
-                for f in facts["packets_and_frames"]
-                if f.get("type") == "frame" and f.get("stream_index") == audio_index
-            )
-        if not audio_frames or len(audio_frames) != decoded_audio_count:
-            raise ValidationPending("audio_evidence_incomplete")
-        for channels, rate in audio_frames:
-            if int(channels) not in (1, 2):
-                raise UnsupportedMedia("audio_channels")
-            if int(rate) > 48000:
-                raise UnsupportedMedia("audio_sample_rate")
-    headers = await run_bounded(
-        [
-            limits.ffmpeg,
-            "-hide_banner",
-            "-nostdin",
-            "-nostats",
-            "-loglevel",
-            "info",
-            "-xerror",
-            *input_options,
-            "-i",
-            str(local),
-            "-map",
-            "0:v:0",
-            "-c:v",
-            "copy",
-            "-bsf:v",
-            "trace_headers",
-            "-f",
-            "null",
-            "-",
-        ],
-        limits,
-        directory,
-        deadline,
-    )
-    _tool_success(headers)
-    evidence.update(
-        inspect_headers(
-            headers.stderr.decode("utf-8", errors="replace"),
-            evidence["codec"],
-            evidence["video_frames"],
-        )
-    )
-    evidence.update(
-        {
-            "decode": "complete",
-            "tool_versions": tuple(versions),
-            "unmet_predicates": (
-                "maximum_video_bitrate_definition",
-                "whole_stream_bitrate_conformance",
-                "audio_bitrate_interpretation"
-                if audio
-                else "silent_audio_interpretation",
-            ),
-        }
-    )
-    return evidence
