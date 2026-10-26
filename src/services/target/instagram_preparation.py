@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, Mapping
 import json
+import logging
 
 from sqlalchemy import text
 
@@ -27,6 +28,8 @@ from src.services.target import source_read_admission as admission
 from src.services.target.instagram_sources import PastPostsCapability
 from src.services.target.instagram_catalog import TombstoneKeys
 from src.services.target.unit_of_work import unit_of_work
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -614,4 +617,14 @@ WHERE workspace_id=:ws AND intent_id=:id
                         policy=verdict["policy_revision"],
                     ),
                 )
+        if park is not None:
+            # One line per refused try, once it has landed: the story, what
+            # refused it and which try it was. Never a link or a token.
+            logger.info(
+                "past-posts file of story %s refused (%s) on try %d: %s",
+                iid,
+                refusal.get("kind") if isinstance(refusal, dict) else None,
+                selected.attempt,
+                "parked for review" if park else "tried again later",
+            )
         return bool(park)

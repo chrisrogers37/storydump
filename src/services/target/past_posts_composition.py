@@ -220,7 +220,7 @@ def build_worker(
     env: Mapping[str, str],
     client: Optional[httpx.AsyncClient] = None,
     policy: Optional[egress.EgressPolicy] = None,
-    retry: past_posts_retry.Retry = past_posts_retry.ONCE,
+    retry: past_posts_retry.Retry,
     download_seconds: Mapping[str, float] = MappingProxyType({}),
 ) -> Optional[WorkerPastPosts]:
     """The worker's past-posts source, or None. Logs the activation line either way.
@@ -228,7 +228,8 @@ def build_worker(
     *client* and *policy* are the test seams (a mock transport and a policy that
     allows its host); production passes neither. *retry* and *download_seconds*
     are `WorkerConfig`'s numbers for a selected post's fetch
-    (`instagram_preparation.PastPostsPreparationPorts`)."""
+    (`instagram_preparation.PastPostsPreparationPorts`). *retry* has no default,
+    so no builder can forget it and park a slide on its first refusal."""
     activation = past_posts_activation.resolve(env, release_sha=env.get(RELEASE_VAR))
     logger.info(activation.log_line)
     capability = activation.capability

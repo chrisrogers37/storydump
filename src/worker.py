@@ -1248,10 +1248,14 @@ def main() -> None:
     # The past-posts source first: the approval card's media fetch needs its coordinator.
     # None (and one `off (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
+    # A ladder whose tries cannot all start inside the late window refuses to
+    # boot, as an oversubscribed pool does.
+    retry = past_posts_retry.Retry.from_config(config)
+    past_posts_retry.assert_fits(retry, config.planned_late_seconds)
     past_posts = past_posts_composition.build_worker(
         engine=engine,
         env=env,
-        retry=past_posts_retry.Retry.from_config(config),
+        retry=retry,
         download_seconds=config.past_posts_download_seconds,
     )
     if token:

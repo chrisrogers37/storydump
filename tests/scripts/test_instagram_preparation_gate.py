@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
 import json
+import logging
 import uuid
 
 import httpx
@@ -788,6 +789,29 @@ async def test_an_unproven_refusal_is_not_parked_and_says_what_refused_it(
     }
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
+async def test_a_refused_try_logs_its_story_what_refused_it_and_the_try(
+    past_posts_engine, origin, caplog
+):
+    """Each refused try that lands logs one line: the story, the refusal's kind
+    and which try it was, so a story's retries can be read from the log alone."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    name = "src.services.target.instagram_preparation"
+    with caplog.at_level(logging.INFO, logger=name):
+        with pytest.raises(source_policy.MediaAdmissionPending):
+            await refusing(
+                refused("cdn_refused", **CDN_404), retry=RETRY
+            ).selected_prepare(
+                engine=past_posts_engine,
+                workspace_id=str(origin["ws"]),
+                intent_id=intent,
+                attempt=2,
+            )
+    assert [r.getMessage() for r in caplog.records if r.name == name] == [
+        f"past-posts file of story {intent} refused (cdn_refused) on try 2:"
+        " tried again later"
+    ]
 
 
 async def test_the_try_is_the_attempt_the_prepare_job_hands_it(

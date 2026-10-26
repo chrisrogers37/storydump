@@ -48,6 +48,26 @@ def test_the_default_tries_fit_inside_the_late_window():
     retry = Retry.from_config(config)
     waits = sum(retry.delay(attempt) for attempt in range(1, retry.attempts))
     assert waits < config.planned_late_seconds
+    past_posts_retry.assert_fits(retry, config.planned_late_seconds)
+
+
+@pytest.mark.parametrize(
+    "numbers",
+    [(8, 0, 0), (8, 30, 3600), (2, 3600, 3600)],
+    ids=["no-wait", "waits-past-the-window", "one-wait-past-the-window"],
+)
+def test_a_ladder_that_cannot_fit_the_late_window_is_refused(numbers):
+    """The worker refuses a ladder whose tries would not all start inside the
+    late window, or that would spend them all at once."""
+    attempts, base, cap = numbers
+    with pytest.raises(ValueError):
+        past_posts_retry.assert_fits(
+            Retry(attempts=attempts, base_seconds=base, cap_seconds=cap), 3600
+        )
+
+
+def test_one_try_needs_no_wait():
+    past_posts_retry.assert_fits(past_posts_retry.ONCE, 3600)
 
 
 @pytest.mark.parametrize(
@@ -155,8 +175,22 @@ def test_a_file_instagram_withholds_on_two_reads_parks():
 
 @pytest.mark.parametrize(
     "numbers",
-    [(0, 30, 900), (8, -1, 900), (8, 60, 30)],
-    ids=["no-attempt", "negative-base", "cap-below-base"],
+    [
+        (0, 30, 900),
+        (8, -1, 900),
+        (8, 60, 30),
+        (8, float("nan"), 900),
+        (8, 30, float("nan")),
+        (8, float("inf"), float("inf")),
+    ],
+    ids=[
+        "no-attempt",
+        "negative-base",
+        "cap-below-base",
+        "base-not-a-number",
+        "cap-not-a-number",
+        "infinite",
+    ],
 )
 def test_a_retry_refuses_numbers_that_cannot_bound_it(numbers):
     attempts, base, cap = numbers

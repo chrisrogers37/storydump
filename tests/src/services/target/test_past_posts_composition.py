@@ -25,6 +25,7 @@ import pytest
 from src.api import app as app_module
 from src.services.target import past_posts_activation as aa
 from src.services.target import past_posts_composition as composition
+from src.services.target.past_posts_retry import ONCE
 from src.services.target import (
     jobs,
     scheduler,
@@ -74,6 +75,7 @@ def built(client, **extra):
         engine=object(),
         env=armed(**extra),
         client=client,
+        retry=ONCE,
     )
 
 
@@ -108,7 +110,7 @@ def test_nothing_is_built_without_the_key_ring_and_the_line_names_why(
     caplog, env, reason
 ):
     with caplog.at_level(logging.INFO, logger=composition.logger.name):
-        worker = composition.build_worker(engine=object(), env=env)
+        worker = composition.build_worker(engine=object(), env=env, retry=ONCE)
         api = composition.build_api(engine=object(), env=env)
     assert (worker, api) == (None, None)
     assert [m for m in caplog.messages if m.startswith("instagram past posts")] == [
@@ -122,7 +124,9 @@ def test_the_ring_arms_on_any_release_with_nothing_else_set(caplog, client, rele
     if release is not None:
         env[composition.RELEASE_VAR] = release
     with caplog.at_level(logging.INFO, logger=composition.logger.name):
-        worker = composition.build_worker(engine=object(), env=env, client=client)
+        worker = composition.build_worker(
+            engine=object(), env=env, client=client, retry=ONCE
+        )
     run = aa.release_evidence(release).run_id
     assert worker is not None and worker.evidence == aa.release_evidence(release)
     assert f"instagram past posts: on (run={run})" in caplog.messages
@@ -228,6 +232,7 @@ def test_an_armed_process_with_a_bad_graph_version_refuses_to_compose(client):
         composition.build_worker(
             engine=object(),
             env={"META_GRAPH_VERSION": "latest"},
+            retry=ONCE,
         )
         is None
     )
@@ -251,9 +256,10 @@ async def test_the_access_provider_refuses_a_call_for_another_source_before_any_
 
 def test_the_preparation_tries_again_under_the_numbers_it_is_handed(client):
     """The worker hands `WorkerConfig`'s retry and download budgets to
-    `build_worker`, which hands them to the preparation; handed none, the
-    preparation tries once, under the adapter's own budget."""
-    from src.services.target.past_posts_retry import ONCE, Retry
+    `build_worker`, which hands them to the preparation; handed no budgets, the
+    preparation keeps the adapter's own. The retry has no default: a builder
+    that forgets it is refused."""
+    from src.services.target.past_posts_retry import Retry
 
     retry = Retry(attempts=5, base_seconds=10, cap_seconds=60)
     budgets = {"image": 12.0, "video": 34.0}
@@ -266,8 +272,9 @@ def test_the_preparation_tries_again_under_the_numbers_it_is_handed(client):
     )
     assert past_posts.preparation.ports.retry is retry
     assert past_posts.preparation.ports.download_seconds == budgets
-    default = built(client).preparation.ports
-    assert default.retry is ONCE and not default.download_seconds
+    assert not built(client).preparation.ports.download_seconds
+    with pytest.raises(TypeError):
+        composition.build_worker(engine=object(), env=armed(), client=client)
 
 
 def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):

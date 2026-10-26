@@ -75,6 +75,7 @@ from src.config.settings import settings
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_retry,
     ig_login_oauth,
     jobs,
     media_validation,
@@ -609,6 +610,7 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
                 env=worker_env,
                 client=clients[1],
                 policy=fakes.OFFLINE,
+                retry=past_posts_retry.ONCE,
             )
             assert armed is not None, "the worker's key ring did not arm it"
             adapters = {"gdrive": DriveForbidden()}

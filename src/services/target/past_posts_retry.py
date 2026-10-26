@@ -17,6 +17,7 @@ slide's capture keeps the last refusal (`last_refusal`).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -36,11 +37,14 @@ class Retry:
         if (
             type(self.attempts) is not int
             or self.attempts < 1
+            or not math.isfinite(self.base_seconds)
+            or not math.isfinite(self.cap_seconds)
             or self.base_seconds < 0
             or self.cap_seconds < self.base_seconds
         ):
             raise ValueError(
-                "a retry needs at least one attempt and a cap at or above its base"
+                "a retry needs at least one attempt, and a finite cap at or above"
+                " its base"
             )
 
     @classmethod
@@ -58,6 +62,20 @@ class Retry:
 
 #: One try: its refusal parks the story, whatever it proves.
 ONCE = Retry(attempts=1, base_seconds=0, cap_seconds=0)
+
+
+def assert_fits(retry: Retry, late_seconds: float) -> None:
+    """Refuse a ladder the worker cannot keep: more than one try with no wait
+    spends every try at once, and the waits before the last try must end
+    inside the late window, or the window parks the story first."""
+    if retry.attempts > 1 and retry.base_seconds <= 0:
+        raise ValueError("a retry of more than one try needs a wait between tries")
+    waits = sum(retry.delay(attempt) for attempt in range(1, retry.attempts))
+    if waits >= late_seconds:
+        raise ValueError(
+            f"the retry's waits ({waits:.0f} s) do not fit the late window"
+            f" ({late_seconds} s)"
+        )
 
 
 def _kind(refusal):
