@@ -37,7 +37,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from src.services.target import egress, past_posts_retry, refusal_evidence, vocabulary
+from src.services.target import egress, refusal_evidence, vocabulary
 from src.services.target.media_adapters import (
     MediaCredentialDead,
     MediaRetryableError,
@@ -660,7 +660,8 @@ class InstagramPastPostsAdapter:
 
         Before a request the turn cannot afford, the batch yields: the parent it
         was reading, and every later one, stay queued, and what completed is
-        returned. A parent the provider refused for good is `failed` and the
+        returned. A parent Graph says does not exist is `failed`, and one refused
+        without that proof is `deferred`, its slides untouched; either way the
         batch goes on, so one bad parent cannot starve the rest. A parent whose
         read is retryable is `deferred`, and the batch ends there, so a provider
         that is throttling or failing is not asked again this turn. A first
@@ -688,7 +689,7 @@ class InstagramPastPostsAdapter:
                     diagnostics.append("parent_read_retry_pending")
                     break
                 except MediaTerminalError as exc:
-                    if past_posts_retry.proves_gone(refusal_evidence.of(exc)):
+                    if refusal_evidence.proves_gone(refusal_evidence.of(exc)):
                         failed.append(mid)
                     else:
                         # One answer that does not prove the post gone retires

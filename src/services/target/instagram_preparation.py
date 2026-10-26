@@ -139,6 +139,14 @@ class SelectedPreparation:
                 or subject["cancel_requested"]
             ):
                 raise source_policy.MediaAdmissionPending("asset_unavailable")
+            if past_posts_retry.waiting(
+                _tried(str(subject["data_generation_id"]), subject), subject["db_now"]
+            ):
+                # The slide's next try is still ahead: the story waits, before any
+                # source read, Graph request or download.
+                raise source_policy.MediaAdmissionPending(
+                    "past_posts_revalidation_required"
+                )
             capture = await admission.capture_source_read(
                 conn,
                 workspace_id=ws,
@@ -155,13 +163,6 @@ class SelectedPreparation:
                 not subject["parent_media_id"]
                 or str(subject["data_generation_id"]) != capture.generation_id
             ):
-                raise source_policy.MediaAdmissionPending(
-                    "past_posts_revalidation_required"
-                )
-            if past_posts_retry.waiting(
-                _tried(capture.generation_id, subject), subject["db_now"]
-            ):
-                # The slide's next try is still ahead: the story waits, no fetch.
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
                 )

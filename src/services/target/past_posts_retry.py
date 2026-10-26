@@ -22,10 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Mapping, Optional
 
+from src.services.target.refusal_evidence import proves_gone
 from src.utils.datetime_utils import ensure_utc, parse_iso_timestamp
-
-#: Graph's answer for an object that does not exist: code 100, subcode 33.
-GRAPH_NOT_FOUND = (100, 33)
 
 
 @dataclass(frozen=True)
@@ -90,14 +88,6 @@ class Decision:
 
 def _kind(refusal):
     return refusal.get("kind") if isinstance(refusal, Mapping) else None
-
-
-def proves_gone(refusal) -> bool:
-    """Graph's own answer that the post does not exist."""
-    return (
-        _kind(refusal) == "graph_error"
-        and (refusal.get("code"), refusal.get("error_subcode")) == GRAPH_NOT_FOUND
-    )
 
 
 def _names_a_bound(refusal) -> bool:

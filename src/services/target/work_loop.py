@@ -47,7 +47,6 @@ from src.services.target import (
     past_posts_reconciliation,
     bindings,
     content_runway,
-    instagram_past_posts_adapter,
     jobs,
     offboarding,
     outbox,
@@ -118,13 +117,9 @@ class WorkerConfig:
     past_posts_retry_attempts: int = 8
     past_posts_retry_base_seconds: float = 30.0
     past_posts_retry_cap_seconds: float = 900.0
-    # The wall budget of one past-post download, per kind: an image keeps the
-    # adapter's own, a video twice it.
+    # The wall budget of one past-post download, per kind: a video is larger.
     past_posts_download_seconds: Mapping[str, float] = field(
-        default_factory=lambda: {
-            "image": instagram_past_posts_adapter.DEFAULT_DOWNLOAD_SECONDS,
-            "video": 2 * instagram_past_posts_adapter.DEFAULT_DOWNLOAD_SECONDS,
-        }
+        default_factory=lambda: {"image": 120.0, "video": 240.0}
     )
     status_interval_seconds: float = 60.0  # cadence of the status line
     # The event-loop watchdog (`loop_watchdog`): the loop stamps a beat every
