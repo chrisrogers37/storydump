@@ -114,6 +114,7 @@ from src.services.target import (
     prompts,
     provider_ops,
     publish_cap,
+    refusal_evidence,
 )
 from src.services.target.media_adapters import (
     MediaError,
@@ -1171,6 +1172,8 @@ async def _route_readiness(
         # The container is definitively gone; a NEW one needs a fresh
         # create (and a fresh generation) from the still-valid transit
         # asset — step back, retry on the ladder.
+        status_code = str(ctx.dead_status)
+        status = getattr(ctx.dead_status, "reason", None)
         return await _retry_or_poison(
             uow,
             ctx,
@@ -1184,8 +1187,14 @@ async def _route_readiness(
                     "code": None,
                     "message": "Meta reported the container ERROR or EXPIRED —"
                     " the media at the delivery URL could not be processed",
-                    "status_code": str(ctx.dead_status),
-                    "status": getattr(ctx.dead_status, "reason", None),
+                    "status_code": status_code,
+                    "status": status,
+                    # Why, in Instagram's own status, for the review card's
+                    # line (`prompt_rendering.outcome_line`) should the ladder
+                    # be spent.
+                    "refusal": refusal_evidence.evidence(
+                        "container_dead", status_code=status_code, status=status
+                    ),
                 },
             },
         )
@@ -1977,9 +1986,17 @@ async def _restate_and_notify(
 ) -> int:
     """The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
-    buttons because it is `review_required`."""
-    line = prompts.outcome_line(state, by=None, at=at, tz=tz)
+    buttons because it is `review_required`. Its line says why the story was
+    refused when its refusal says anything, as the card rendered again does
+    (`prompts.settled_line`)."""
     bindings = await prompts.push_bindings(session, workspace_id)
+    refusal = None
+    if bindings and state == "review_required":
+        settled = await intent_ledger.settlement(
+            session, workspace_id=workspace_id, intent_id=intent_id
+        )
+        refusal = settled.get("refusal")
+    line = prompts.outcome_line(state, by=None, at=at, tz=tz, refusal=refusal)
     for binding_id in bindings:
         await outbox.restate_cards(
             session,

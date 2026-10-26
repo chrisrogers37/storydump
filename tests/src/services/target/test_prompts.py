@@ -1069,8 +1069,18 @@ class TestTheSettledLineSaysWhyAStoryWasRefused:
                 "the chosen slide is no longer in the post: Instagram listed"
                 " 2 slide(s) of the 4 indexed",
             ),
+            (
+                {
+                    "v": 1,
+                    "kind": "container_dead",
+                    "status_code": "ERROR",
+                    "status": "Error: Media upload has failed with error code 2207026",
+                },
+                "Instagram could not process this story's media (ERROR): Error: Media"
+                " upload has failed with error code 2207026",
+            ),
         ],
-        ids=["cdn-refused", "slide-gone"],
+        ids=["cdn-refused", "slide-gone", "container-dead"],
     )
     async def test_the_second_line_is_the_refusals_own_sentence(self, refusal, reason):
         line = await self._line(self._settlement("review_required", refusal=refusal))

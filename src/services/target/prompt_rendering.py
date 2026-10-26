@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.services.target import vocabulary
+from src.services.target import refusal_evidence, vocabulary
 from src.services.target.callback_tokens import ACTIONS, token as _token
 from src.utils.datetime_utils import ensure_utc, utcnow
 
@@ -160,16 +160,23 @@ def outcome_line(
     published_via: Optional[str] = None,
     rule: Optional[str] = None,
     series: Optional[str] = None,
+    refusal: Optional[Mapping] = None,
 ) -> str:
     """What a settled card says under its header: the state's word, who, when.
     *rule* is the story's `approval_rule` (`_line_actor`). *series* is what
     became of the story's series when the act ended it (`SERIES_STOPPED`,
-    `SERIES_ENDED`), since the header still says how it repeats."""
+    `SERIES_ENDED`), since the header still says how it repeats. *refusal* is
+    why a story in review was refused (`last_error -> 'error' -> 'refusal'`):
+    a second line in its words (`refusal_evidence.plain`), when they say
+    anything."""
     word = outcome_word(state, published_via)
     by = _line_actor(state, by=by, rule=rule)
     who = f" by {by}" if by else ""
     line = f"{word}{who} · {stamp(at, tz)}"
-    return f"{line} · {series}" if series else line
+    if series:
+        line = f"{line} · {series}"
+    reason = refusal_evidence.plain(refusal)
+    return f"{line}\nRefused: {reason}." if reason else line
 
 
 def _line_actor(state: str, *, by: Optional[str], rule: Optional[str]) -> Optional[str]:

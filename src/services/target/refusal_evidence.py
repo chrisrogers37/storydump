@@ -1,4 +1,5 @@
-"""The evidence a refused past-post fetch keeps, and what it never keeps.
+"""The evidence a refusal keeps, and what it never keeps: a past post's refused
+fetch, and a container Instagram would not process.
 
 A refusal's evidence is one JSON object, `{"v": 1, "kind": <kind>, ...}`: the
 facts in scope where the fetch was refused, so a parked story says why without
@@ -6,7 +7,9 @@ anyone reading the provider again. It is attached to the raised error as its
 `evidence` attribute and lands wherever the refusal is recorded: the asset's
 `validation_capture -> 'refusal'`, the story's `last_error -> 'error' ->
 'refusal'` and the park's audit detail. An error's message stays constant; the
-evidence never reaches a log line or a traceback.
+evidence never reaches a log line or a traceback. A dead container's evidence,
+a `container_dead` refusal, is written by the publish pipeline straight into
+the story's `last_error -> 'error' -> 'refusal'`.
 
 Redacted where it is captured, never later:
 
@@ -14,7 +17,9 @@ Redacted where it is captured, never later:
   request, a response or their headers, and `scrub_text` removes the token and
   any `access_token=` parameter from provider text;
 - a signed media or CDN link keeps only its host and its expiry parameter
-  (`oe`); its path, its signature and every other parameter are dropped;
+  (`oe`); its path, its signature and every other parameter are dropped. In
+  provider text, `scrub_text` says a link as its host alone and masks a
+  delivery signature (`s--…--`) that stands outside one;
 - a Graph request keeps its path, never its query.
 
 Media bytes and raw tool output are never stored.
@@ -42,6 +47,9 @@ _LONG_ID = re.compile(r"\d{15,}")
 _SAID_VALUES = 6
 _SAID_ITEMS = 8
 _LINK = re.compile(r"https?://\S+", re.I)
+#: A delivery signature standing outside a link: the signed delivery url it
+#: comes from does not expire.
+_SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
 
 
 def evidence(kind: str, **facts) -> dict:
@@ -84,15 +92,17 @@ def link_evidence(url) -> dict:
 
 
 def scrub_text(value, *, secrets=()) -> Optional[str]:
-    """Provider text without the token, any token parameter or any link.
+    """Provider text without the token, any token parameter, any link or any
+    delivery signature.
 
     A link becomes `<link host>`, so the text keeps where it pointed and loses
-    what would open it. NUL is dropped (jsonb refuses it) and the result is
-    bounded.
+    what would open it, and a signature outside a link becomes `s--<SIG>--`.
+    NUL is dropped first (jsonb refuses it), so none can split what the scrub
+    matches, and the result is bounded.
     """
     if not isinstance(value, str):
         return None
-    text = value
+    text = value.replace("\x00", "")
     for secret in secrets:
         if secret:
             text = text.replace(secret, "<token>")
@@ -100,7 +110,8 @@ def scrub_text(value, *, secrets=()) -> Optional[str]:
     text = _LINK.sub(
         lambda m: f"<link {link_evidence(m.group(0))['host'] or 'unknown'}>", text
     )
-    return text.replace("\x00", "")[:TEXT_LIMIT]
+    text = _SIGNATURE.sub("s--<SIG>--", text)
+    return text[:TEXT_LIMIT]
 
 
 def short(value) -> Optional[str]:
@@ -116,10 +127,21 @@ def whole(value) -> Optional[int]:
 
 
 def _flat(value) -> str:
-    """A measured value as short text: a list as its first items, comma-joined."""
+    """A measured value as short text: a list as its distinct items, the first
+    few comma-joined, and how many more there are."""
     if isinstance(value, (list, tuple)):
-        return ", ".join(short(item) or "" for item in value[:_SAID_ITEMS])
+        items = list(dict.fromkeys(short(item) or "" for item in value))
+        said = ", ".join(items[:_SAID_ITEMS])
+        more = len(items) - _SAID_ITEMS
+        return f"{said} and {more} more" if more > 0 else said
     return short(value) or ""
+
+
+def _with_words(sentence: str, words) -> str:
+    """*sentence*, then Instagram's own *words* after a colon when it gave any.
+    They may name the object they refer to: the record keeps it, a chat line
+    does not."""
+    return f"{sentence}: {_LONG_ID.sub('<id>', str(words))}" if words else sentence
 
 
 def _count(value) -> str:
@@ -163,12 +185,13 @@ _CHECKS = {
 
 
 def plain(refusal) -> Optional[str]:
-    """One sentence saying why a past post was refused, from its evidence.
+    """One sentence saying why a story was refused, from its evidence.
 
     For the story's review card and its notice, which are private chat text:
-    Instagram's code and message, or the check that failed and its value.
-    None when the evidence says nothing more than the generic notice. The
-    sentence carries no closing period; the caller ends it.
+    Instagram's code and message, its status for a container it would not
+    process, or the check that failed and its value.
+    None when the refusal is not a record. The sentence carries no closing
+    period; the caller ends it.
     """
     try:
         sentence = _plain(refusal)
@@ -199,12 +222,9 @@ def _plain(refusal) -> Optional[str]:
             parts.append(code)
         if refusal.get("type"):
             parts.append(str(refusal["type"]))
-        sentence = f"Instagram refused the read ({', '.join(parts)})"
-        if refusal.get("message"):
-            # The stored message may name the object it refused: the record
-            # keeps it, a chat line does not.
-            sentence += f": {_LONG_ID.sub('<id>', str(refusal['message']))}"
-        return sentence
+        return _with_words(
+            f"Instagram refused the read ({', '.join(parts)})", refusal.get("message")
+        )
     if kind == "ownership_unproven":
         return "Instagram did not show this post as the connected account's"
     if kind == "identity_mismatch":
@@ -241,6 +261,16 @@ def _plain(refusal) -> Optional[str]:
             f" ({_count(refusal.get('children'))} listed), so the chosen slide could"
             " not be confirmed"
         )
+    if kind == "container_dead":
+        code = short(refusal.get("status_code"))
+        what = (
+            "Instagram let this story's media expire before it was posted"
+            if code == "EXPIRED"
+            else "Instagram could not process this story's media"
+        )
+        if code:
+            what += f" ({code})"
+        return _with_words(what, refusal.get("status"))
     if kind == "local_validation":
         check = short(refusal.get("check"))
         measured = refusal.get("measured") or {}

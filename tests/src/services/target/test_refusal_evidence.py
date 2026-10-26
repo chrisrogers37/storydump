@@ -22,30 +22,8 @@ from pathlib import Path
 import pytest
 
 from src.services.target import instagram_publish, refusal_evidence
+from tests.src.services.target.conftest import SIGNED, SIGNED_PARTS
 
-#: A signed CDN link as Graph hands one out, with everything around the host
-#: that must not outlive `link_evidence`: a port, a path, signature and routing
-#: parameters, a fragment. Only the host and the `oe` value survive.
-SIGNED = (
-    "https://scontent-test.fbcdn.net:8443"
-    "/v/t51.2885-15/signed-example.jpg"
-    "?stp=dst-jpg_e35&_nc_cat=100&_nc_sid=sid-value-1&ccb=1-7"
-    "&oh=00_signature-value&oe=6A1B2C3D#frag"
-)
-#: The pieces of SIGNED that are neither its host nor its expiry.
-SIGNED_PARTS = (
-    "8443",
-    "signed-example",
-    "/v/t51",
-    "stp=",
-    "_nc_",
-    "sid-value-1",
-    "ccb=",
-    "oh=",
-    "00_signature-value",
-    "frag",
-    "?",
-)
 SECRET = "EAAB-fake-secret-value"
 
 
@@ -344,6 +322,43 @@ def test_scrub_text_removes_a_secret_before_it_cuts_so_no_prefix_survives():
     scrubbed = refusal_evidence.scrub_text(text, secrets=(SECRET,))
     assert len(scrubbed) == limit
     assert SECRET[:4] not in scrubbed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,scrubbed",
+    [
+        (
+            "res.example/image/authenticated/s--AbC12_-x--/v1/f.jpg",
+            "res.example/image/authenticated/s--<SIG>--/v1/f.jpg",
+        ),
+        ("sig s--AbC12_-x-- and s--DeF34--", "sig s--<SIG>-- and s--<SIG>--"),
+    ],
+    ids=["in-a-bare-path", "several"],
+)
+def test_scrub_text_masks_a_delivery_signature_outside_a_link(text, scrubbed):
+    """A delivery signature standing outside a link is masked: the signed url
+    it comes from does not expire."""
+    assert refusal_evidence.scrub_text(text) == scrubbed
+
+
+@pytest.mark.unit
+def test_scrub_text_masks_a_signature_before_it_cuts_so_no_part_survives():
+    """A signature that straddles the limit is masked whole, then the text is
+    cut: cutting first would leave a signature too short to match."""
+    limit = refusal_evidence.TEXT_LIMIT
+    scrubbed = refusal_evidence.scrub_text("x" * (limit - 6) + "s--AbC12_-x--")
+    assert len(scrubbed) == limit
+    assert "AbC" not in scrubbed
+
+
+@pytest.mark.unit
+def test_scrub_text_drops_nul_before_it_matches_so_none_can_split_a_secret():
+    """A NUL inside the token or a signature would split it past every match,
+    and dropping NUL afterwards would join it again."""
+    split = SECRET[:4] + "\x00" + SECRET[4:]
+    assert refusal_evidence.scrub_text(split, secrets=(SECRET,)) == "<token>"
+    assert refusal_evidence.scrub_text("s--AbC\x0012--") == "s--<SIG>--"
 
 
 @pytest.mark.unit
@@ -721,6 +736,42 @@ CHECK_CASES = [
     ),
 ]
 
+DEAD_STATUS = "Error: Media upload has failed with error code 2207026"
+
+#: A container Instagram would not process, as the publish pipeline records it,
+#: and the sentence it reads as.
+PUBLISH_SENTENCES = [
+    pytest.param(
+        refusal_evidence.evidence(
+            "container_dead", status_code="ERROR", status=DEAD_STATUS
+        ),
+        f"Instagram could not process this story's media (ERROR): {DEAD_STATUS}",
+        id="container-dead",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("container_dead", status_code="ERROR", status=None),
+        "Instagram could not process this story's media (ERROR)",
+        id="container-dead-without-a-status",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("container_dead", status_code="EXPIRED", status=None),
+        "Instagram let this story's media expire before it was posted (EXPIRED)",
+        id="container-expired",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "container_dead",
+            status_code="ERROR",
+            status=f"Error: media {ASKED} could not be fetched.",
+        ),
+        (
+            "Instagram could not process this story's media (ERROR):"
+            " Error: media <id> could not be fetched"
+        ),
+        id="container-dead-naming-an-object",
+    ),
+]
+
 #: What carries no sentence: no record, and a value that is not a record.
 NO_SENTENCE = [
     pytest.param(None, id="none"),
@@ -786,16 +837,34 @@ VALIDATOR_REASONS = set(
 
 #: Every kind `plain` speaks of: those with a case above, and local validation.
 KINDS = sorted(
-    {case.values[0]["kind"] for case in FETCH_SENTENCES} | {"local_validation"}
+    {case.values[0]["kind"] for case in FETCH_SENTENCES + PUBLISH_SENTENCES}
+    | {"local_validation"}
 )
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("refusal,sentence", FETCH_SENTENCES)
-def test_plain_says_why_each_kind_of_fetch_was_refused(refusal, sentence):
+@pytest.mark.parametrize("refusal,sentence", FETCH_SENTENCES + PUBLISH_SENTENCES)
+def test_plain_says_why_each_kind_was_refused(refusal, sentence):
     """One sentence per refusal, from its facts alone: the record's host, expiry,
-    path, trace id and counters are not in it."""
+    path, trace id and counters are not in it, and a dead container is said by
+    its status and Instagram's own words for it."""
     assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+def test_a_list_is_said_once_per_item_and_says_how_many_more_it_holds():
+    """A codec a file carries twice is named once, and a list past the first
+    few items says how many more there are."""
+    twice = validation_refusal("video_codec", refused_codecs=["mp4v", "mp4v", "ac-3"])
+    assert refusal_evidence.plain(twice).startswith(
+        "this video carries mp4v, ac-3, which"
+    )
+    many = validation_refusal(
+        "video_codec", refused_codecs=[f"c{i:02}" for i in range(11)]
+    )
+    assert refusal_evidence.plain(many).startswith(
+        "this video carries c00, c01, c02, c03, c04, c05, c06, c07 and 3 more, which"
+    )
 
 
 @pytest.mark.unit
@@ -871,7 +940,10 @@ def test_the_table_has_words_for_every_reason_the_validator_refuses():
 
 
 @pytest.mark.unit
-def test_a_long_object_id_in_a_provider_message_is_masked():
+@pytest.mark.parametrize(
+    "object_id", [ASKED, "178900000000001"], ids=["a-media-id", "fifteen-digits"]
+)
+def test_a_long_object_id_in_a_provider_message_is_masked(object_id):
     """Instagram echoes the object it refused; a run of 15 or more digits is
     said as <id>, and a shorter number is kept."""
     sentence = refusal_evidence.plain(
@@ -880,10 +952,10 @@ def test_a_long_object_id_in_a_provider_message_is_masked():
             http_status=400,
             code=100,
             error_subcode=33,
-            message="Object with ID '178900000000000001' does not exist (#12345678901234)",
+            message=f"Object with ID '{object_id}' does not exist (#12345678901234)",
         )
     )
-    assert "178900000000000001" not in sentence
+    assert object_id not in sentence
     assert "'<id>'" in sentence and "12345678901234" in sentence
 
 
@@ -1039,3 +1111,39 @@ def test_the_park_notice_says_what_a_record_holds(evidence, sentence):
     notice = instagram_publish._park_notice(evidence)
     assert f"Refused: {sentence}." in notice
     assert "unavailable or changed" not in notice
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "admission_reason,sentence",
+    [
+        ("asset_unavailable", "the chosen post is no longer available"),
+        ("selected_asset_changed", "the chosen post's content changed"),
+        ("unsupported", "the chosen post's media is not one stories take"),
+    ],
+)
+def test_the_park_notice_says_its_admission_reason_when_it_holds_no_evidence(
+    admission_reason, sentence
+):
+    """A park with no refusal evidence still knows why its preparation was not
+    admitted, and says that rather than that no reason was recorded."""
+    assert instagram_publish._park_notice(None, admission_reason) == (
+        "This story from your Instagram past posts could not be prepared."
+        f" Refused: {sentence}. Open the Queue to review it."
+    )
+
+
+@pytest.mark.unit
+def test_the_park_notice_says_its_evidence_before_its_admission_reason():
+    """Evidence with something to say wins: the admission reason is said only
+    when the evidence says nothing."""
+    evidence = validation_refusal("malformed_container", **CONTAINER)
+    notice = instagram_publish._park_notice(evidence, "unsupported")
+    assert "Refused: this video file is damaged." in notice
+
+
+@pytest.mark.unit
+def test_the_park_notice_guesses_no_admission_reason_it_has_no_words_for():
+    """An admission reason the notice has no words for is not guessed at."""
+    notice = instagram_publish._park_notice(None, "made_up_reason")
+    assert "Refused: no reason was recorded." in notice

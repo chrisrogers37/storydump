@@ -81,3 +81,28 @@ class RecordingSender:
 #: RFC 7636 Appendix B: the example code verifier and its S256 challenge.
 APPENDIX_B_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 APPENDIX_B_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+#: A signed CDN link as Graph hands one out, with everything around the host
+#: that must not outlive `refusal_evidence.link_evidence`: a port, a path,
+#: signature and routing parameters, a fragment. Only the host and the `oe`
+#: value survive.
+SIGNED = (
+    "https://scontent-test.fbcdn.net:8443"
+    "/v/t51.2885-15/signed-example.jpg"
+    "?stp=dst-jpg_e35&_nc_cat=100&_nc_sid=sid-value-1&ccb=1-7"
+    "&oh=00_signature-value&oe=6A1B2C3D#frag"
+)
+#: The pieces of SIGNED that are neither its host nor its expiry.
+SIGNED_PARTS = (
+    "8443",
+    "signed-example",
+    "/v/t51",
+    "stp=",
+    "_nc_",
+    "sid-value-1",
+    "ccb=",
+    "oh=",
+    "00_signature-value",
+    "frag",
+    "?",
+)
