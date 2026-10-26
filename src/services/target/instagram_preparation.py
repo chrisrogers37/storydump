@@ -7,7 +7,7 @@ permission: callers reread the shared strict suitability authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable
 import json
 
@@ -18,6 +18,7 @@ from src.services.target import (
     media_adapters,
     media_validation,
     readers,
+    refusal_evidence,
     source_policy,
     vocabulary,
 )
@@ -59,7 +60,7 @@ SELECT i.id AS intent_id,i.state AS intent_state,i.cancel_requested,
  m.id AS media_item_id,m.source_id,m.state AS media_item_state,m.media_kind,s.config,s.origin_ig_account_id,
  x.parent_media_id,x.data_generation_id,x.observation_revision,a.validation_fingerprint AS current_fingerprint,
  pol.revision AS policy_revision,
- a.asset_media_id AS selected_asset_id
+ a.asset_media_id AS selected_asset_id,x.slide_count
 FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
 JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
 LEFT JOIN instagram_media_assets a ON a.workspace_id=m.workspace_id AND a.source_id=m.source_id AND a.media_item_id=m.id
@@ -70,6 +71,23 @@ LEFT JOIN instagram_source_policies pol ON pol.workspace_id=s.workspace_id AND p
 WHERE i.workspace_id=:ws AND i.id=:id AND s.provider='instagram_past_posts'
 FOR UPDATE OF m,i
 """
+
+
+def _refusal(exc, counters, selected) -> dict:
+    """A refused fetch's evidence (`refusal_evidence`), with the turn's counters.
+
+    A slide judged gone also carries the slide count the index recorded, to set
+    against the children the read returned. A refusal raised with no evidence
+    names its error class, so it is never mistaken for none.
+    """
+    facts = dict(
+        refusal_evidence.of(exc)
+        or refusal_evidence.evidence("unrecorded", error=type(exc).__name__)
+    )
+    facts["counters"] = asdict(counters)
+    if facts["kind"] == "slide_gone":
+        facts["slide_count"] = selected.subject.get("slide_count")
+    return facts
 
 
 class SelectedPreparation:
@@ -221,23 +239,44 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             raise source_policy.MediaAdmissionPending(
                 "past_posts_revalidation_required"
             ) from None
-        except media_adapters.MediaSelectedAssetGone:
+        except media_adapters.MediaSelectedAssetGone as exc:
+            # The retirement deletes the asset row, so the story's park is the
+            # only place this refusal's evidence lands.
+            refusal = _refusal(exc, counters, selected)
             await self._retire_gone(engine, workspace_id, intent_id, selected)
-            raise source_policy.MediaAdmissionPending("asset_unavailable") from None
+            raise source_policy.MediaAdmissionPending(
+                "asset_unavailable", evidence=refusal
+            ) from None
         except (
             media_adapters.MediaCredentialDead,
             media_adapters.MediaSourceGone,
             media_adapters.MediaSourceFenceDrop,
         ):
             raise
-        except media_adapters.MediaTerminalError:
+        except media_adapters.MediaTerminalError as exc:
+            refusal = _refusal(exc, counters, selected)
             await self._failure(
-                engine, workspace_id, intent_id, selected, "asset_unavailable"
+                engine,
+                workspace_id,
+                intent_id,
+                selected,
+                "asset_unavailable",
+                refusal=refusal,
             )
-            raise source_policy.MediaAdmissionPending("asset_unavailable") from None
-        except (media_adapters.MediaRetryableError, media_adapters.MediaLostResponse):
+            raise source_policy.MediaAdmissionPending(
+                "asset_unavailable", evidence=refusal
+            ) from None
+        except (
+            media_adapters.MediaRetryableError,
+            media_adapters.MediaLostResponse,
+        ) as exc:
             await self._failure(
-                engine, workspace_id, intent_id, selected, "download_pending"
+                engine,
+                workspace_id,
+                intent_id,
+                selected,
+                "download_pending",
+                refusal=_refusal(exc, counters, selected),
             )
             raise
         validation = await media_validation.validate_media(
@@ -266,8 +305,10 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             counters,
         )
 
-    async def _failure(self, engine, ws, iid, selected, reason):
-        await self._land(engine, ws, iid, selected, None, reason=reason)
+    async def _failure(self, engine, ws, iid, selected, reason, *, refusal=None):
+        await self._land(
+            engine, ws, iid, selected, None, reason=reason, refusal=refusal
+        )
 
     async def _retire_gone(self, engine, ws, iid, selected):
         """Retire one selected asset only under fresh source and item authority.
@@ -333,7 +374,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                     "past_posts_revalidation_required"
                 )
 
-    async def _land(self, engine, ws, iid, selected, validation, *, reason=None):
+    async def _land(
+        self, engine, ws, iid, selected, validation, *, reason=None, refusal=None
+    ):
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
         async with unit_of_work(engine, str(ws), actor_kind="worker").begin() as conn:
@@ -408,6 +451,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 state=state,
                 reason=validation.reason if validation else reason,
             )
+            if refusal is not None:
+                evidence["refusal"] = refusal
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,

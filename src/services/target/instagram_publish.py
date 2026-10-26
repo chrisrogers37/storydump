@@ -375,6 +375,11 @@ class PastPostsPipeline:
                 ):
                     raise
                 state = subject["state"]
+                # The refused fetch's evidence, when there is one, rides with the
+                # reason: `last_error -> 'error' -> 'refusal'` and the audit
+                # detail's `refusal` (`refusal_evidence`). A slide judged gone has
+                # no asset row left to hold it.
+                refusal = {"refusal": exc.evidence} if exc.evidence else {}
                 await conn.execute(
                     text(
                         "UPDATE post_intents SET last_error=CAST(:error AS jsonb) WHERE id=:id"
@@ -388,6 +393,7 @@ class PastPostsPipeline:
                                     "type": "PastPostsEffectRefused",
                                     "reason": reason,
                                     "message": reason,
+                                    **refusal,
                                 },
                             }
                         ),
@@ -401,7 +407,7 @@ class PastPostsPipeline:
                     intent=iid,
                     from_state=state,
                     to_state=state,
-                    detail={"reason": reason},
+                    detail={"reason": reason, **refusal},
                 )
                 tz = await conn.scalar(
                     text("SELECT tz FROM workspaces WHERE id=:ws"), dict(ws=ws)
