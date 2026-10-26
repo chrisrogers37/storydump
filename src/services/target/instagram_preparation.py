@@ -86,6 +86,22 @@ def _tried(generation_id, subject):
     )
 
 
+def _unsuitable(verdict, subject):
+    """The pending for a story its suitability verdict refuses. A slide parked
+    by an earlier refusal keeps that refusal on its capture, so whichever caller
+    meets the latch, its park says why."""
+    reason = verdict["reason"] if verdict else "asset_unavailable"
+    capture = subject["current_capture"]
+    latched = (
+        reason == "asset_unavailable"
+        and isinstance(capture, dict)
+        and capture.get("reason") == "asset_unavailable"
+    )
+    return source_policy.MediaAdmissionPending(
+        reason, evidence=capture.get("refusal") if latched else None
+    )
+
+
 def _refusal(exc, counters, selected) -> dict:
     """A refused fetch's evidence (`refusal_evidence`), with the turn's counters.
 
@@ -196,9 +212,7 @@ class SelectedPreparation:
                 context=context,
             )
             if candidate is None or not candidate["suitable"]:
-                raise source_policy.MediaAdmissionPending(
-                    candidate["reason"] if candidate else "asset_unavailable"
-                )
+                raise _unsuitable(candidate, subject)
             if provenance is None:
                 await conn.execute(
                     text("""
@@ -493,9 +507,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 context=context,
             )
             if not verdict or not verdict["suitable"]:
-                raise source_policy.MediaAdmissionPending(
-                    verdict["reason"] if verdict else "asset_unavailable"
-                )
+                raise _unsuitable(verdict, subject)
             state = validation.state if validation else "validation_pending"
             decision = None
             if validation is None and reason is None:
