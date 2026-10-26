@@ -434,7 +434,11 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
             )
         conn.commit()
 
-    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [3]
+    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [
+        3,
+        4,
+        5,
+    ]
 
     assert fetch_all(
         base_world,
@@ -454,7 +458,11 @@ def test_base_with_catalog_refresh_equals_current_code(
     from scripts.schema_parity import schema_diff, schema_signature
 
     _through_002(base_world)
-    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [3]
+    assert [m.version for m in apply_pending(base_world, MIGRATIONS_DIR).applied] == [
+        3,
+        4,
+        5,
+    ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)
     try:

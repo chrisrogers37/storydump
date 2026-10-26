@@ -162,8 +162,29 @@ class EgressBudgetExhausted(StorydumpError):
     """The one absolute retry budget was spent."""
 
 
+class EgressAnswerLost(StorydumpError):
+    """A request that may have reached the provider lost its answer, under a
+    policy that does not attempt such a request again
+    (`EgressPolicy.retry_after_send`). Whether it took effect is unknown."""
+
+
+#: Failures before any byte of the request left: no connection was made, or
+#: none came free in the pool. Only these are safe to attempt again when a
+#: second attempt could otherwise create a second copy.
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
 class ResponseTooLarge(StorydumpError):
-    """The response exceeded the byte cap and was cut."""
+    """The response exceeded the byte cap and was cut.
+
+    `cap` and `received` are the cap and the bytes read when the read was
+    abandoned, so a caller can keep them as evidence without parsing the message.
+    """
+
+    def __init__(self, message: str = "", *, cap=None, received=None):
+        super().__init__(message)
+        self.cap = cap
+        self.received = received
 
 
 @dataclass(frozen=True)
@@ -173,6 +194,11 @@ class EgressPolicy:
     timeout_class: str = "standard"
     total_budget_s: float = 30.0
     max_attempts: int = 3
+    # Whether a request that may have reached the provider is attempted
+    # again when its answer is lost. A call that CREATES something turns it
+    # off: a second attempt would be a second copy no later call can name, so
+    # only a request that provably never left (`_NEVER_SENT`) is retried.
+    retry_after_send: bool = True
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     allowed_hosts: frozenset = field(default_factory=lambda: DEFAULT_ALLOWED_HOSTS)
     # An adapter may refuse every redirect when it consumes an ephemeral URL.
@@ -325,7 +351,9 @@ async def _read_capped(response: httpx.Response, policy: EgressPolicy) -> bytes:
         if policy.enforce_byte_cap and total > policy.max_response_bytes:
             raise ResponseTooLarge(
                 f"response exceeded the {policy.max_response_bytes}-byte cap "
-                f"after {total} bytes — read abandoned (#857)"
+                f"after {total} bytes — read abandoned (#857)",
+                cap=policy.max_response_bytes,
+                received=total,
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -461,6 +489,11 @@ async def request(
                 )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_exc = exc
+            if not policy.retry_after_send and not isinstance(exc, _NEVER_SENT):
+                raise EgressAnswerLost(
+                    f"the request may have reached the provider and its answer"
+                    f" was lost; not attempted again (#857): {exc!r}"
+                ) from None
             continue
         finally:
             if admission is not None:

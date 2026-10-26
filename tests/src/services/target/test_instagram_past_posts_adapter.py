@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from src.services.target import instagram_past_posts_adapter as past_posts
+from src.services.target import refusal_evidence
 from src.services.target.instagram_catalog import (
     PastPostsAsset,
     PastPostsObservation,
@@ -22,6 +23,7 @@ from src.services.target.media_adapters import (
     MediaGraphResponseTooLarge,
     MediaSourceFenceDrop,
     MediaTerminalError,
+    MediaTurnBudgetExhausted,
     redacted_error,
 )
 
@@ -45,7 +47,15 @@ def post(mid, ts, **extra):
     }
 
 
-def adapter(handler, *, size=2, access_calls=None, now=1000, app_scoped_id=None):
+def adapter(
+    handler,
+    *,
+    size=2,
+    access_calls=None,
+    now=1000,
+    app_scoped_id=None,
+    graph_limit=None,
+):
     async def access(source_id, *, workspace_id):
         if access_calls is not None:
             access_calls.append((source_id, workspace_id))
@@ -71,6 +81,7 @@ def adapter(handler, *, size=2, access_calls=None, now=1000, app_scoped_id=None)
         page_size=size,
         clock=lambda: now,
         policy=EgressPolicy().without(enforce_private_address_block=False),
+        graph_limit=graph_limit,
     )
 
 
@@ -78,13 +89,14 @@ async def listing(a, cp=None):
     return await a.list_changes({"v": 1}, cp, source_id=SOURCE, workspace_id=WS)
 
 
-async def fetch(a, ref="1", cap=100):
+async def fetch(a, ref="1", cap=100, **kwargs):
     return await a.fetch_bytes(
         {"v": 1},
         ref,
         source_id=SOURCE,
         workspace_id=WS,
         max_bytes=cap,
+        **kwargs,
     )
 
 
@@ -711,7 +723,8 @@ def preview_handler(
     parent, *, child=None, profile=None, cdn=None, requests=None, paging=None
 ):
     """Graph answers for one parent, its first child and the token's profile;
-    the CDN answers *cdn* (default a JPEG). Every request is recorded."""
+    the CDN answers *cdn* (default a JPEG). *parent* and *child* may instead
+    be callables that answer each request. Every request is recorded."""
 
     def handler(req):
         if requests is not None:
@@ -722,10 +735,14 @@ def preview_handler(
             if req.url.path.endswith("/me"):
                 return httpx.Response(200, json=profile)
             if req.url.path.endswith("/children"):
+                if callable(child):
+                    return child(req)
                 body = {"data": child if isinstance(child, list) else [child]}
                 if paging is not None:
                     body["paging"] = paging
                 return httpx.Response(200, json=body)
+            if callable(parent):
+                return parent(req)
             return httpx.Response(200, json=parent)
         assert "authorization" not in req.headers, "the token never reaches the CDN"
         assert "access_token" not in req.url.params
@@ -851,6 +868,274 @@ async def test_missing_selected_slide_uses_completeness_to_classify(paging, erro
         await preview(a, selected="11")
     assert len(requests) == 2
     assert isinstance(redacted_error(error()), error)
+
+
+# A fetch whose children read lacks the selected slide reads the parent and
+# its children again. The slide is gone only when both reads are complete,
+# list the same slides and hold fewer slides than the index recorded, and the
+# parent still answers; anything else is a change to revalidate.
+
+GRAPH_PARENT = ("graph.instagram.com", "/v26.0/1")
+GRAPH_CHILDREN = ("graph.instagram.com", "/v26.0/1/children")
+SLIDE_FILE = ("scontent-child.cdninstagram.com", "/first.jpg")
+
+
+def slides(*ids):
+    return [{"id": mid, "media_type": "IMAGE", "media_url": CHILD_URL} for mid in ids]
+
+
+def cursor(after):
+    return {
+        "next": "https://ignored.example/never-followed",
+        "cursors": {"after": after},
+    }
+
+
+def carousel_reads(*reads, requests, reread=None):
+    """`preview_handler` for carousel 1 whose children requests answer, in
+    turn, the next of `reads`: its slides, or a (slides, paging) pair. A parent
+    read after the first answers `reread` when it is given."""
+    answers = iter(reads)
+    parents = []
+
+    def parent(req):
+        parents.append(req)
+        if reread is not None and len(parents) > 1:
+            return reread
+        return httpx.Response(200, json=media(media_type="CAROUSEL_ALBUM"))
+
+    def children(req):
+        read = next(answers)
+        data, paging = read if isinstance(read, tuple) else (read, None)
+        body = {"data": data} if paging is None else {"data": data, "paging": paging}
+        return httpx.Response(200, json=body)
+
+    return preview_handler(parent, child=children, requests=requests)
+
+
+async def test_a_slide_one_read_lacks_is_fetched_from_a_second_read():
+    """An empty children answer is never proof: the parent and its children are
+    read again, and the slide the second read lists is downloaded. Both
+    children reads are Graph attempts of the turn."""
+    requests, counters = [], []
+    a = adapter(carousel_reads([], slides("11", "12"), requests=requests))
+    data, _, mime = await fetch(a, selected_asset_id="11", on_counters=counters.append)
+    assert (data, mime) == (JPEG, "image/jpeg")
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2 + [SLIDE_FILE]
+    assert (counters[0].graph_attempts, counters[0].cdn_attempts) == (4, 1)
+
+
+async def test_a_slide_two_agreeing_reads_lack_is_gone_while_its_parent_answers():
+    """Two complete reads list the same two slides, one fewer than the index
+    recorded, and the parent answered the second read: the slide left. Nothing
+    is downloaded."""
+    requests, counters = [], []
+    a = adapter(
+        carousel_reads(slides("12", "13"), slides("13", "12"), requests=requests)
+    )
+    evidence = await refusal_of(
+        fetch(
+            a,
+            selected_asset_id="11",
+            expected_slide_count=3,
+            on_counters=counters.append,
+        ),
+        MediaSelectedAssetGone,
+        "selected_asset_gone",
+    )
+    assert evidence == {"v": 1, "kind": "slide_gone", "children": 2, "complete": True}
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2
+    assert (counters[0].graph_attempts, counters[0].cdn_attempts) == (4, 0)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (slides("12", "13"), slides("12", "13"), 2),
+        ([], [], 2),
+        (slides("12", "13"), slides("12", "14"), 4),
+        (slides("12"), slides("12"), None),
+    ],
+    ids=["as-many-as-indexed", "empty", "disagree", "no-indexed-count"],
+)
+async def test_a_slide_two_reads_lack_without_proof_is_a_change(
+    first, second, expected
+):
+    """Short of proof, a slide both reads lack is a change to revalidate, never
+    a removal: reads that list as many slides as the index recorded, empty
+    reads, reads that list different slides, and any read of a post with no
+    indexed slide count."""
+    requests = []
+    a = adapter(carousel_reads(first, second, requests=requests))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=expected),
+        MediaSelectedAssetChanged,
+        "selected_asset_changed",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "slide_changed",
+        "children": len(second),
+        "complete": True,
+    }
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN] * 2
+
+
+async def test_a_parent_that_stops_answering_is_refused_as_the_parent():
+    """The parent's second read is part of the proof. When Graph refuses it,
+    the refusal is the parent's own, with its evidence, and no slide is
+    judged."""
+    refused = httpx.Response(
+        400,
+        json={
+            "error": {
+                "message": "Unsupported get request.",
+                "type": "GraphMethodException",
+                "code": 100,
+                "error_subcode": 33,
+            }
+        },
+    )
+    requests = []
+    a = adapter(carousel_reads(slides("12"), requests=requests, reread=refused))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=2),
+        MediaTerminalError,
+        "Instagram media is unavailable to this account",
+    )
+    assert (evidence["kind"], evidence["code"], evidence["path"]) == (
+        "graph_error",
+        100,
+        GRAPH_PARENT[1],
+    )
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_PARENT]
+
+
+async def test_the_fetch_follows_the_children_cursor_to_the_selected_slide():
+    """A children page with a cursor is followed, asking for the same fields
+    and limit after it, and the slide on the next page is downloaded."""
+    requests = []
+    a = adapter(
+        carousel_reads(
+            (slides("12"), cursor("page-2")), slides("11"), requests=requests
+        )
+    )
+    data, _, _ = await fetch(a, selected_asset_id="11")
+    assert data == JPEG
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_CHILDREN, SLIDE_FILE]
+    first, following = requests[1].url.params, requests[2].url.params
+    assert "after" not in first
+    assert dict(following) == {**dict(first), "after": "page-2"}
+
+
+async def test_the_fetch_stops_paging_at_the_page_that_lists_the_slide():
+    """Pages after the one that lists the selected slide are never read, so a
+    page the fetch did not need cannot refuse it."""
+    requests = []
+    unreadable = [{"id": "not-a-media-id", "media_type": "IMAGE"}]
+    a = adapter(
+        carousel_reads(
+            (slides("12", "11"), cursor("page-2")), unreadable, requests=requests
+        )
+    )
+    data, _, _ = await fetch(a, selected_asset_id="11")
+    assert data == JPEG
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, SLIDE_FILE]
+
+
+async def test_children_pages_past_the_slide_limit_are_refused():
+    """A carousel holds at most CAROUSEL_SLIDE_LIMIT slides: pages that add up
+    to more are an incomplete answer to retry, not a change of slide."""
+    limit = past_posts.CAROUSEL_SLIDE_LIMIT
+    ids = [str(100 + i) for i in range(limit + 1)]
+    a = adapter(
+        carousel_reads(
+            (slides(*ids[: limit - 5]), cursor("page-2")),
+            slides(*ids[limit - 5 :]),
+            requests=[],
+        )
+    )
+    with pytest.raises(MediaRetryableError) as caught:
+        await fetch(a, selected_asset_id="11")
+    assert type(caught.value) is MediaRetryableError
+    assert str(caught.value) == "Instagram children response is incomplete"
+
+
+@pytest.mark.parametrize(
+    "make_pages",
+    [
+        lambda: [(slides("12"), {"next": "https://ignored.example/never-followed"})],
+        lambda: [(slides("12"), cursor(""))],
+        lambda: [(slides("12"), cursor("x" * (past_posts.MAX_CURSOR_CHARACTERS + 1)))],
+        lambda: [([], cursor("page-2"))],
+        lambda: [
+            (
+                slides(*(str(100 + i) for i in range(past_posts.CAROUSEL_SLIDE_LIMIT))),
+                cursor("page-2"),
+            )
+        ],
+        lambda: [
+            (slides("12"), cursor("a")),
+            (slides("13"), cursor("b")),
+            (slides("14"), cursor("a")),
+        ],
+    ],
+    ids=[
+        "no-cursor",
+        "empty-cursor",
+        "long-cursor",
+        "after-an-empty-page",
+        "after-a-full-carousel",
+        "seen-before",
+    ],
+)
+async def test_a_cursor_the_fetch_cannot_follow_ends_the_read_incomplete(make_pages):
+    """Each of these ends the read incomplete before the page that would list
+    the slide. The slide is then a change, and an incomplete read takes no
+    second read."""
+    pages = make_pages()
+    requests = []
+    a = adapter(carousel_reads(*pages, slides("11"), requests=requests))
+    evidence = await refusal_of(
+        fetch(a, selected_asset_id="11", expected_slide_count=3),
+        MediaSelectedAssetChanged,
+        "selected_asset_changed",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "slide_changed",
+        "children": sum(len(listed) for listed, _ in pages),
+        "complete": False,
+    }
+    assert hosts(requests) == [GRAPH_PARENT] + [GRAPH_CHILDREN] * len(pages)
+
+
+async def test_the_preview_reads_one_children_page():
+    """The preview keeps its two Graph requests: it never follows a children
+    cursor, so a slide past its first page is a change there."""
+    requests = []
+    a = adapter(
+        carousel_reads(
+            (slides("12"), cursor("page-2")), slides("11"), requests=requests
+        )
+    )
+    with pytest.raises(MediaSelectedAssetChanged):
+        await preview(a, selected="11")
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN]
+
+
+async def test_the_second_read_is_spent_from_the_turns_graph_budget():
+    """Each extra read is one of the turn's Graph attempts: with three allowed,
+    the proof's second children read is refused as the turn's budget, never
+    sent, and no slide is judged."""
+    requests = []
+    a = adapter(
+        carousel_reads(slides("12"), slides("12"), requests=requests), graph_limit=3
+    )
+    with pytest.raises(MediaTurnBudgetExhausted) as caught:
+        await fetch(a, selected_asset_id="11", expected_slide_count=2)
+    assert caught.value.reason == "graph_attempt_budget"
+    assert hosts(requests) == [GRAPH_PARENT, GRAPH_CHILDREN, GRAPH_PARENT]
 
 
 async def test_verified_app_scoped_owner_previews_carousel_without_me_lookup():
@@ -1113,3 +1398,464 @@ def test_graph_timestamps_parse_with_or_without_the_offset_colon(value):
 def test_a_timestamp_without_a_usable_zone_is_refused(value):
     with pytest.raises(MediaRetryableError):
         past_posts._timestamp(value)
+
+
+# --- the evidence a refused fetch keeps -----------------------------------------
+# A refusal raises the class and the constant message it always has, with its
+# facts on `evidence` (`refusal_evidence.of`). Each test below pins one kind: the
+# facts it keeps and, through `assert_redacted`, what no kind keeps.
+
+TOKEN = "token-never-in-url"  # the access token `adapter()` resolves
+FOREIGN = "17890000000000001"  # a media owner that is not ACCOUNT
+OTHER = "17890000000000002"  # an id that is neither ACCOUNT nor FOREIGN
+ASKED = "17890000000000003"  # the media a fetch asks for
+CDN_HOST = "scontent-evidence.cdninstagram.com"
+EXPIRY = "6A1B2C3D"
+TAIL = f"/x.jpg?oh=00_signature-value&oe={EXPIRY}"
+SIGNED_URL = (
+    f"https://{CDN_HOST}/v/t51.2885-15/signed-example.jpg"
+    "?stp=dst-jpg_e35&_nc_cat=100&_nc_sid=sid-value-1&ccb=1-7"
+    f"&oh=00_signature-value&oe={EXPIRY}"
+)
+# What a signed link carries besides its host and expiry: the link itself, its
+# query string and their pieces.
+SIGNATURE = (
+    SIGNED_URL,
+    SIGNED_URL.partition("?")[2],
+    "signed-example",
+    "stp=",
+    "_nc_",
+    "sid-value-1",
+    "ccb=",
+    "oh=",
+    "00_signature-value",
+    "oe=",
+)
+# What a Graph request carries besides its path.
+GRAPH_QUERY = ("fields=", "limit=", past_posts._FETCH_FIELDS)
+
+
+async def refusal_of(call, error, message):
+    """The evidence on the refusal `call` raises: exactly `error`, carrying
+    exactly `message`, which is constant and holds no provider text."""
+    with pytest.raises(error) as caught:
+        await call
+    assert type(caught.value) is error
+    assert str(caught.value) == message
+    found = refusal_evidence.of(caught.value)
+    assert found is not None, "the refusal carries no evidence"
+    return found
+
+
+def assert_redacted(evidence, *also):
+    """`evidence` names no token, no query string, no signature and none of `also`."""
+    encoded = json.dumps(evidence)
+    for fragment in (
+        TOKEN,
+        "access_token",
+        "Bearer",
+        "?",
+        *SIGNATURE,
+        *GRAPH_QUERY,
+        *also,
+    ):
+        assert fragment not in encoded, f"{fragment!r} reached the evidence"
+
+
+@pytest.mark.parametrize(
+    "leg,path",
+    [("parent", f"/v26.0/{ASKED}"), ("children", f"/v26.0/{ASKED}/children")],
+)
+async def test_a_graph_refusal_keeps_its_numbers_a_scrubbed_message_and_the_path(
+    leg, path
+):
+    """graph_error: Graph's status, numbers and trace id; its message with the
+    token, the token parameter and every link removed; and the path of the
+    request it refused, never that request's query."""
+    said = (
+        f"Invalid OAuth access token - Cannot parse access token {TOKEN}. "
+        f"Retry https://graph.instagram.com/v26.0/{ASKED}?fields=id&access_token={TOKEN} "
+        f"or download {SIGNED_URL} instead."
+    )
+
+    def handler(req):
+        assert req.headers["authorization"] == f"Bearer {TOKEN}"
+        if leg == "children" and not req.url.path.endswith("/children"):
+            return httpx.Response(200, json=media(ASKED, media_type="CAROUSEL_ALBUM"))
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": said,
+                    "type": "OAuthException",
+                    "code": 100,
+                    "error_subcode": 33,
+                    "fbtrace_id": "AbC123fakeTrace",
+                }
+            },
+        )
+
+    evidence = await refusal_of(
+        fetch(adapter(handler), ref=ASKED),
+        MediaTerminalError,
+        "Instagram media is unavailable to this account",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "graph_error",
+        "http_status": 400,
+        "code": 100,
+        "error_subcode": 33,
+        "type": "OAuthException",
+        "message": (
+            "Invalid OAuth access token - Cannot parse access token <token>. "
+            "Retry <link graph.instagram.com> or download "
+            f"<link {CDN_HOST}> instead."
+        ),
+        "fbtrace_id": "AbC123fakeTrace",
+        "path": path,
+    }
+    assert_redacted(evidence)
+
+
+async def test_a_graph_refusal_without_an_error_object_keeps_the_status_and_the_path():
+    """graph_error: a reply that is not an error object keeps what the transport
+    knows, the status and the path, and none of the reply's text."""
+    a = adapter(lambda req: httpx.Response(404, json={"error": "plain provider text"}))
+    evidence = await refusal_of(
+        fetch(a, ref=ASKED),
+        MediaTerminalError,
+        "Instagram media is unavailable to this account",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "graph_error",
+        "http_status": 404,
+        "code": None,
+        "error_subcode": None,
+        "type": None,
+        "message": None,
+        "fbtrace_id": None,
+        "path": f"/v26.0/{ASKED}",
+    }
+    assert_redacted(evidence, "plain provider text")
+
+
+@pytest.mark.parametrize(
+    "owner,recorded,profile,which,match",
+    [
+        pytest.param(None, None, None, "no_owner", {}, id="no-owner"),
+        pytest.param(
+            {"id": "not-an-id"}, None, None, "malformed_owner_id", {}, id="malformed-id"
+        ),
+        pytest.param(
+            {"id": int(FOREIGN)}, None, None, "malformed_owner_id", {}, id="numeric-id"
+        ),
+        pytest.param({}, None, None, "malformed_owner_id", {}, id="missing-id"),
+        pytest.param(
+            {"id": FOREIGN},
+            OTHER,
+            None,
+            "app_scoped_id",
+            {"account_matches": False, "app_scoped_id_matches": False},
+            id="recorded-mapping",
+        ),
+        pytest.param(
+            {"id": FOREIGN},
+            None,
+            {"id": FOREIGN, "user_id": OTHER},
+            "profile",
+            {
+                "account_matches": False,
+                "profile_user_id_matches": False,
+                "profile_id_matches": True,
+            },
+            id="profile-user-differs",
+        ),
+        pytest.param(
+            {"id": FOREIGN},
+            None,
+            {"id": OTHER, "user_id": ACCOUNT},
+            "profile",
+            {
+                "account_matches": False,
+                "profile_user_id_matches": True,
+                "profile_id_matches": False,
+            },
+            id="profile-id-differs",
+        ),
+        pytest.param(
+            {"id": FOREIGN},
+            None,
+            {"id": OTHER, "user_id": OTHER},
+            "profile",
+            {
+                "account_matches": False,
+                "profile_user_id_matches": False,
+                "profile_id_matches": False,
+            },
+            id="profile-both-differ",
+        ),
+    ],
+)
+async def test_an_unproven_owner_keeps_which_test_failed_and_flags_never_an_id(
+    owner, recorded, profile, which, match
+):
+    """ownership_unproven: the test that decided and its outcomes as booleans;
+    no owner, account or profile id reaches the record."""
+    a = adapter(
+        preview_handler(media(owner=owner), profile=profile), app_scoped_id=recorded
+    )
+    evidence = await refusal_of(
+        fetch(a),
+        MediaTerminalError,
+        "Instagram media ownership could not be established",
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "ownership_unproven",
+        "test": which,
+        "match": match,
+    }
+    assert all(type(flag) is bool for flag in evidence["match"].values())
+    assert_redacted(evidence, ACCOUNT, FOREIGN, OTHER, "not-an-id")
+
+
+async def test_a_failed_profile_read_is_not_repeated_and_the_verdict_names_it():
+    """ownership_unproven: once a turn's one profile read has failed the owner is
+    unproven by `profile_read_failed`, with no outcome flags and no second read.
+    A failed read ends a fetch, so no fetch reaches this state: the verdict is
+    pinned where it is decided."""
+
+    def no_request(req):
+        raise AssertionError("a second profile read was made")
+
+    turn = past_posts._Turn(
+        past_posts.PastPostsAccess(ACCOUNT, TOKEN), None, 1, 1, profile_read=True
+    )
+    verdict = await adapter(no_request)._ownership({"id": FOREIGN}, turn)
+    assert (verdict.ok, verdict.test, verdict.match) == (
+        False,
+        "profile_read_failed",
+        {},
+    )
+
+
+async def test_a_different_media_item_keeps_that_the_id_differed_and_neither_id():
+    """identity_mismatch: only that the returned id was not the one asked for."""
+    a = adapter(preview_handler(media(OTHER)))
+    evidence = await refusal_of(
+        fetch(a, ref=ASKED),
+        MediaTerminalError,
+        "Instagram returned a different media item",
+    )
+    assert evidence == {"v": 1, "kind": "identity_mismatch", "id_matches": False}
+    assert_redacted(evidence, ASKED, OTHER, ACCOUNT)
+
+
+@pytest.mark.parametrize(
+    "paging,error,message,kind,complete",
+    [
+        (None, MediaSelectedAssetGone, "selected_asset_gone", "slide_gone", True),
+        (
+            {"next": "opaque"},
+            MediaSelectedAssetChanged,
+            "selected_asset_changed",
+            "slide_changed",
+            False,
+        ),
+    ],
+    ids=["gone", "changed"],
+)
+async def test_a_missing_slide_keeps_the_slide_count_and_whether_it_was_complete(
+    paging, error, message, kind, complete
+):
+    """slide_gone and slide_changed: how many slides the read returned and whether
+    that was the whole carousel; no slide id, asked for or listed."""
+    slides = ["17890000000000011", "17890000000000012", "17890000000000013"]
+    asked, *listed = slides
+    children = [
+        {"id": slide, "media_type": "IMAGE", "media_url": SIGNED_URL}
+        for slide in listed
+    ]
+    a = adapter(
+        preview_handler(
+            media(media_type="CAROUSEL_ALBUM"), child=children, paging=paging
+        )
+    )
+    evidence = await refusal_of(
+        a.fetch_bytes(
+            {},
+            "1",
+            source_id=SOURCE,
+            workspace_id=WS,
+            max_bytes=100,
+            selected_asset_id=asked,
+            expected_slide_count=len(slides),
+        ),
+        error,
+        message,
+    )
+    assert evidence == {"v": 1, "kind": kind, "children": 2, "complete": complete}
+    assert_redacted(evidence, *slides)
+
+
+@pytest.mark.parametrize(
+    "extra,media_type,has_link",
+    [
+        ({"media_url": None}, "IMAGE", False),
+        ({"media_url": ""}, "IMAGE", False),
+        ({"media_type": "UNKNOWN", "media_url": SIGNED_URL}, "UNKNOWN", True),
+    ],
+    ids=["no-link", "empty-link", "unsupported-type"],
+)
+async def test_a_media_item_without_a_file_keeps_its_type_and_whether_it_had_a_link(
+    extra, media_type, has_link
+):
+    """no_media_link: the media type and whether a link was present; a link that
+    was present is not recorded at all, not even its host."""
+    a = adapter(preview_handler(media(**extra)))
+    evidence = await refusal_of(
+        fetch(a), MediaTerminalError, "Instagram does not provide this media file"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "no_media_link",
+        "media_type": media_type,
+        "has_link": has_link,
+    }
+    assert_redacted(evidence, CDN_HOST)
+
+
+@pytest.mark.parametrize(
+    "url,host",
+    [
+        (f"http://{CDN_HOST}{TAIL}", CDN_HOST),
+        (
+            f"https://cdninstagram.com.untrusted.test{TAIL}",
+            "cdninstagram.com.untrusted.test",
+        ),
+        (f"https://fake-user@{CDN_HOST}{TAIL}", CDN_HOST),
+        (f"https://{CDN_HOST}:8443{TAIL}", CDN_HOST),
+        (f"https://127.0.0.1{TAIL}", "127.0.0.1"),
+    ],
+    ids=["plain-http", "lookalike-suffix", "user-info", "port", "address"],
+)
+async def test_an_untrusted_host_keeps_the_host_and_the_expiry_only(url, host):
+    """untrusted_host: the host the link named and its expiry; no scheme,
+    user info, port, path or signature, and no download was attempted."""
+    requests = []
+    a = adapter(preview_handler(media(media_url=url), requests=requests))
+    evidence = await refusal_of(
+        fetch(a), MediaTerminalError, "Instagram returned an untrusted media host"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "untrusted_host",
+        "host": host,
+        "expiry": EXPIRY,
+    }
+    assert_redacted(evidence, "fake-user", "8443")
+    assert all(r.url.host == "graph.instagram.com" for r in requests)
+
+
+async def test_an_oversized_download_keeps_the_cap_the_bytes_read_and_the_host():
+    """over_byte_cap: the cap, the bytes read when the read was abandoned (the
+    body arrives whole, so all 200) and the host; no path, parameter or bytes."""
+    body = httpx.Response(
+        200, content=b"x" * 200, headers={"content-type": "image/jpeg"}
+    )
+    a = adapter(preview_handler(media(media_url=SIGNED_URL), cdn=body))
+    evidence = await refusal_of(
+        fetch(a, cap=100), MediaTerminalError, "Instagram media exceeds the byte cap"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "over_byte_cap",
+        "cap": 100,
+        "received": 200,
+        "host": CDN_HOST,
+    }
+    assert_redacted(evidence)
+
+
+async def test_a_refused_download_keeps_the_status_of_both_attempts():
+    """cdn_refused: the status each of the two downloads was answered with, so the
+    second refusal does not hide the first, with the link's host and expiry."""
+    answers = iter([403, 404])
+    requests = []
+    a = adapter(
+        preview_handler(
+            media(media_url=SIGNED_URL),
+            cdn=lambda req: httpx.Response(next(answers)),
+            requests=requests,
+        )
+    )
+    evidence = await refusal_of(
+        fetch(a), MediaTerminalError, "Instagram media file is unavailable"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "cdn_refused",
+        "statuses": [403, 404],
+        "host": CDN_HOST,
+        "expiry": EXPIRY,
+    }
+    assert [r.url.host for r in requests] == ["graph.instagram.com", CDN_HOST] * 2
+    assert_redacted(evidence)
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [[503], [403, 503]],
+    ids=["first-download", "after-an-expired-link"],
+)
+async def test_a_failed_download_keeps_every_status_the_cdn_answered(statuses):
+    """cdn_error, retryable: the statuses of the downloads so far, ending in the
+    failure, with the link's host and expiry."""
+    answers = iter(statuses)
+    a = adapter(
+        preview_handler(
+            media(media_url=SIGNED_URL), cdn=lambda req: httpx.Response(next(answers))
+        )
+    )
+    evidence = await refusal_of(
+        fetch(a), MediaRetryableError, "Instagram media download failed"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "cdn_error",
+        "statuses": statuses,
+        "host": CDN_HOST,
+        "expiry": EXPIRY,
+    }
+    assert_redacted(evidence)
+
+
+@pytest.mark.parametrize(
+    "content_type,body,kept",
+    [
+        ("text/html; charset=utf-8", b"<html>BODY-MARKER</html>", "text/html"),
+        ("image/jpeg", b"", "image/jpeg"),
+    ],
+    ids=["not-an-image", "empty-image"],
+)
+async def test_unsupported_bytes_keep_their_type_length_status_and_host(
+    content_type, body, kept
+):
+    """wrong_bytes: the content type without its parameters, the length, the status
+    and the host; never the bytes."""
+    served = httpx.Response(200, content=body, headers={"content-type": content_type})
+    a = adapter(preview_handler(media(media_url=SIGNED_URL), cdn=served))
+    evidence = await refusal_of(
+        fetch(a), MediaTerminalError, "Instagram returned unsupported media bytes"
+    )
+    assert evidence == {
+        "v": 1,
+        "kind": "wrong_bytes",
+        "content_type": kept,
+        "length": len(body),
+        "http_status": 200,
+        "host": CDN_HOST,
+    }
+    assert_redacted(evidence, "BODY-MARKER")

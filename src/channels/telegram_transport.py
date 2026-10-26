@@ -165,6 +165,8 @@ class SendReceipt(str):
 
 
 _NOT_MODIFIED = "message is not modified"
+#: Telegram's answer to an edit of a message that no longer exists.
+_EDIT_GONE = "message to edit not found"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
 
 
@@ -210,6 +212,11 @@ class TelegramTransport:
         self._fast = _replace(
             self._policy, timeout_class="fast", total_budget_s=2.0, max_attempts=1
         )
+        # A call that CREATES a message is attempted again only when its
+        # request never left: a re-sent message is a second copy no edit can
+        # name, so a lost answer propagates for the outbox's policy. An edit
+        # is idempotent and keeps the floor's retries.
+        self._once = _replace(self._policy, retry_after_send=False)
         self._api_base = api_base
         # `media_fetch(media) -> (bytes, filename, mime)`: how a card's media
         # block becomes bytes to upload (the worker wires the Drive adapter).
@@ -387,10 +394,11 @@ class TelegramTransport:
         A row without an outcome edits the keyboard alone. If the
         combined edit is refused (a caption Telegram will not take), the
         keyboard still lands by the type-agnostic `editMessageReplyMarkup` —
-        the call that must land. Only a definitive refusal takes the fallback:
-        a 429, a 5xx or a transport failure escapes, and the
-        outbox settles it (paced, or ambiguous → resent under the prompt cap →
-        failed). A refusal of the fallback escapes too, and fails the row."""
+        the call that must land. Only a definitive refusal takes the fallback,
+        and not one saying the message is gone: a 429, a 5xx or a transport
+        failure escapes, and the outbox settles it (paced, or ambiguous →
+        resent until confirmed). A refusal of the fallback escapes too, and
+        fails the row."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
@@ -416,6 +424,10 @@ class TelegramTransport:
                 )
                 return SendReceipt(ref, sent_as="edit")
             except TelegramRefused as exc:
+                if _EDIT_GONE in str(exc):
+                    # The message is gone (deleted from the chat): no edit can
+                    # land on it, so the keyboard-only call is not made.
+                    raise
                 logger.warning(
                     "%s refused for a supersede (%s); stripping the keyboard alone",
                     method,
@@ -446,7 +458,7 @@ class TelegramTransport:
         message: dict = {"chat_id": chat_id, "text": text}
         if reply_markup:
             message["reply_markup"] = reply_markup
-        result = await self._call("sendMessage", message)
+        result = await self._call("sendMessage", message, policy=self._once)
         message_id = (result or {}).get("message_id")
         if message_id is None:
             raise TelegramSendError("sendMessage: ok response without a message_id")
@@ -498,14 +510,11 @@ class TelegramTransport:
         if reply_markup:
             data["reply_markup"] = json.dumps(reply_markup)
         files = {part: (filename, content, mime or "application/octet-stream")}
-        # ONE attempt: the floor retries a POST whose answer was lost, and a
-        # re-sent upload is a second card the supersede path cannot see.
-        # A lost answer propagates as ambiguous instead.
+        # Never sent twice, as every message-creating call (`_once`).
         policy = _replace(
-            self._policy,
+            self._once,
             timeout_class="upload",
             total_budget_s=max(self._policy.total_budget_s, _UPLOAD_BUDGET_S),
-            max_attempts=1,
         )
         result = await self._call(method, data=data, files=files, policy=policy)
         message_id = (result or {}).get("message_id")

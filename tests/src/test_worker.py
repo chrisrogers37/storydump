@@ -8,6 +8,7 @@ and the heartbeat/lease numbers agreeing.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -273,15 +274,17 @@ class TestEngineUrlFromEnv:
     def test_plain_postgres_url_gains_the_asyncpg_driver(self):
         from src.services.target.unit_of_work import engine_url_from_env
 
-        url = engine_url_from_env({"TARGET_DATABASE_URL": "postgresql://u:p@h/db"})
-        assert url == "postgresql+asyncpg://u:p@h/db"
+        url = engine_url_from_env(
+            {"TARGET_DATABASE_URL": "postgresql://u:not-a-real-password@h/db"}
+        )
+        assert url == "postgresql+asyncpg://u:not-a-real-password@h/db"
 
     def test_libpq_ssl_params_are_rewritten_for_asyncpg(self):
         from src.services.target.unit_of_work import engine_url_from_env
 
         url = engine_url_from_env(
             {
-                "TARGET_DATABASE_URL": "postgresql://u:p@h/db?sslmode=require&channel_binding=require"
+                "TARGET_DATABASE_URL": "postgresql://u:not-a-real-password@h/db?sslmode=require&channel_binding=require"
             }
         )
         assert "sslmode" not in url and "channel_binding" not in url
@@ -297,6 +300,81 @@ class TestEngineUrlFromEnv:
 
         assert engine_url_from_env({"TARGET_DATABASE_URL": ""}) is None
         assert engine_url_from_env({"TARGET_DATABASE_URL": "   "}) is None
+
+
+class TestAsyncpgUrl:
+    """`unit_of_work.asyncpg_url` renders SQLAlchemy's one reading of a URL
+    for asyncpg, so what the engine reads back is what was written, but for
+    the libpq-only parameters it drops and a repeated parameter, which takes
+    its last value."""
+
+    @staticmethod
+    def _round_trip(url):
+        from sqlalchemy.engine import make_url
+
+        from src.services.target.unit_of_work import asyncpg_url
+
+        return make_url(url), make_url(asyncpg_url(url))
+
+    def test_the_production_shape_keeps_who_connects_where_and_takes_ssl(self):
+        given, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@ep-x.region.aws.neon.tech/db"
+            "?sslmode=require&channel_binding=require"
+        )
+        assert read.drivername == "postgresql+asyncpg"
+        assert dict(read.query) == {"ssl": "require"}
+        for part in ("username", "password", "host", "port", "database"):
+            assert getattr(read, part) == getattr(given, part), part
+
+    def test_an_ssl_parameter_already_there_is_kept(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?ssl=verify-full&sslmode=require"
+        )
+        assert dict(read.query) == {"ssl": "verify-full"}
+
+    def test_a_repeated_host_takes_its_last_value_as_libpq_does(self):
+        _, read = self._round_trip(
+            "postgresql://owner@/db?host=a.invalid:5432&host=b.invalid:5432"
+        )
+        assert read.query["host"] == "b.invalid:5432"
+
+    def test_any_other_repeated_parameter_takes_its_last_value(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?sslmode=disable&sslmode=require&application_name=a&application_name=b"
+        )
+        assert dict(read.query) == {"ssl": "require", "application_name": "b"}
+
+    @pytest.mark.parametrize(
+        "form", ["raw-slash", "raw-question-mark", "raw-hash", "raw-bracket"]
+    )
+    def test_a_raw_delimiter_in_the_password_reads_back_as_written(self, form):
+        from tests.unreadable_urls import PASSWORDS, URLS
+
+        given, read = self._round_trip(URLS[form])
+        assert read.password == PASSWORDS[form]
+        for part in ("username", "password", "host", "port", "database"):
+            assert getattr(read, part) == getattr(given, part), part
+
+    def test_an_encoded_option_reads_back_as_written(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real-password@db.invalid/db"
+            "?options=-c%20search_path%3Dx"
+        )
+        assert read.query["options"] == "-c search_path=x"
+
+    def test_a_percent_encoded_password_reads_back_as_written(self):
+        _, read = self._round_trip(
+            "postgresql://owner:not-a-real%40%2F%3F%23%25password@db.invalid/db"
+        )
+        assert read.password == "not-a-real@/?#%password"
+
+    def test_an_asyncpg_url_or_another_scheme_is_left_as_it_is(self):
+        _, read = self._round_trip("postgresql+asyncpg://owner@db.invalid/db")
+        assert read.drivername == "postgresql+asyncpg"
+        _, read = self._round_trip("postgres://owner@db.invalid/db")
+        assert read.drivername == "postgres"
 
 
 class TestStatusLine:
@@ -865,33 +943,51 @@ class TestTheConversionRunIsReadOnce:
     def test_main_reads_the_run_once_and_hands_it_to_compose(
         self, ring_env, monkeypatch
     ):
-        import src.worker as worker
-        from cryptography.fernet import Fernet
-
-        record, reads, handed = _a_conversion_record(), [], {}
-
-        def build_worker(**kwargs):
-            handed["past_posts"] = kwargs
-
-        def fake_compose(**kwargs):
-            handed["compose"] = kwargs
-            return "app"
-
-        ring_env(key=Fernet.generate_key().decode())
-        monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
-        monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
-        monkeypatch.setattr(
-            worker, "_conversion_evidence", lambda env: reads.append(env) or record
+        record, reads = _a_conversion_record(), []
+        handed = _run_main(
+            ring_env, monkeypatch, lambda env: reads.append(env) or record
         )
-        monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
-        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
-        monkeypatch.setattr(worker, "compose", fake_compose)
-        monkeypatch.setattr(worker, "run", lambda app: app)
-        monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
-        worker.main()
         assert len(reads) == 1
         assert "conversion" not in handed["past_posts"]
         assert handed["compose"]["conversion_evidence"] is record
+
+
+def _run_main(ring_env, monkeypatch, conversion_evidence):
+    """`main` with its engine, past-posts source, composition and run stubbed:
+    what it handed `build_worker` and `compose`."""
+    import src.worker as worker
+    from cryptography.fernet import Fernet
+
+    handed = {}
+
+    def build_worker(**kwargs):
+        handed["past_posts"] = kwargs
+
+    def fake_compose(**kwargs):
+        handed["compose"] = kwargs
+        return "app"
+
+    ring_env(key=Fernet.generate_key().decode())
+    monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
+    monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(worker, "_conversion_evidence", conversion_evidence)
+    monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
+    monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
+    monkeypatch.setattr(worker, "compose", fake_compose)
+    monkeypatch.setattr(worker, "run", lambda app: app)
+    monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
+    worker.main()
+    return handed
+
+
+class TestThePastPostsSourceTakesTheConfiguredRetry:
+    def test_main_hands_it_the_retry(self, ring_env, monkeypatch):
+        """A selected post's refused fetch is tried again under `WorkerConfig`'s
+        numbers."""
+        from src.services.target.past_posts_retry import Retry
+
+        handed = _run_main(ring_env, monkeypatch, lambda env: _a_conversion_record())
+        assert handed["past_posts"]["retry"] == Retry.from_config(WorkerConfig())
 
 
 class TestTheReconcilerPollIsWired:
@@ -1190,6 +1286,90 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
             None, {"id": "j", "kind": "publish_pipeline"}
         )
         assert seen["precheck"] is sentinel
+
+
+_OPERATOR = "00000000-0000-4000-8000-000000000001"
+
+
+async def _send_text(chat_id, text, *, reply_markup=None):
+    return "1"
+
+
+def _Bot():
+    """A transport with the operator-facing `send_text` the ops notice uses."""
+    return SimpleNamespace(send_text=_send_text)
+
+
+class TestTheOpsNoticeIsComposedFromTheBotAndTheOperators:
+    """The operators' notice (`telegram_ops_notice`) needs the bot and
+    `OPS_USER_IDS`, read through settings as the API reads them. Without
+    either, the seam is None and the deploy log says which is missing once,
+    so a refusal nobody was told of is explained."""
+
+    def _compose(self, monkeypatch, operators, transport):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "OPS_USER_IDS", operators)
+        return compose(
+            engine=object(),
+            config=WorkerConfig(),
+            env={},
+            transport=transport,
+            adapters={"gdrive": object()},
+        )
+
+    def test_the_bot_and_the_operators_compose_it(self, monkeypatch):
+        from src.channels.telegram_ops_notice import OpsNotice
+
+        app = self._compose(monkeypatch, _OPERATOR, _Bot())
+        assert isinstance(app.deps.ops_notice, OpsNotice)
+
+    @pytest.mark.parametrize(
+        "operators,transport,missing",
+        [
+            ("", _Bot(), "OPS_USER_IDS"),
+            (_OPERATOR, None, "TARGET_TELEGRAM_BOT_TOKEN"),
+        ],
+        ids=["no-operators", "no-bot"],
+    )
+    def test_without_either_it_is_off_and_says_which(
+        self, monkeypatch, operators, transport, missing, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="target.worker"):
+            app = self._compose(monkeypatch, operators, transport)
+        assert app.deps.ops_notice is None
+        assert any(
+            "ops notice: off" in r.getMessage() and missing in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_pipeline_receives_the_composed_ops_notice(self, monkeypatch):
+        from src.services.target import publish_pipeline, work_loop
+
+        seen = {}
+
+        async def run_publish_pipeline(job, **kw):
+            seen.update(kw)
+            return "posted"
+
+        monkeypatch.setattr(
+            publish_pipeline, "run_publish_pipeline", run_publish_pipeline
+        )
+        sentinel = object()
+        deps = work_loop.WorkerDeps(
+            meta=object(),
+            transit=object(),
+            media_fetch=lambda row: None,
+            ops_notice=sentinel,
+            engine=object(),
+        )
+        await work_loop.build_registry(deps)["publish_pipeline"](
+            None, {"id": "j", "kind": "publish_pipeline"}
+        )
+        assert seen["ops_notice"] is sentinel
 
 
 def _documented_numbers(label: str, pattern: str) -> tuple:

@@ -3,6 +3,9 @@
 `ring_env` configures the credential key ring for real — the settings
 `TokenEncryption` reads, with its singleton reset on the way in and on the way
 out — so a test can break the ring the way a deploy would (#1401).
+`_nothing_past_the_refusal_may_run` stubs out everything past the worker's
+boot refusals, so a boot test that went past one cannot start a worker inside
+pytest.
 """
 
 from __future__ import annotations
@@ -24,6 +27,25 @@ def leaks(text: str, secret: str = MALFORMED_KEY, width: int = 4) -> bool:
     """Whether *text* carries any *width*-character run of *secret* — a
     refusal that printed the key's first or last few characters leaks too."""
     return any(secret[i : i + width] in text for i in range(len(secret) - width + 1))
+
+
+class _WentPastTheRefusal(Exception):
+    pass
+
+
+def _nothing_past_the_refusal_may_run(monkeypatch, worker) -> None:
+    """The boot tests' own safety, as the database-URL refusal's tests do it
+    (`tests/src/test_legacy_settings_gone.py`): under the failure they exist
+    to catch, `worker.main()` would build an engine and run a live worker
+    inside pytest. Everything past the refusals stops the test instead — by
+    raising, so a control can see it was reached."""
+
+    def refuse(*_args, **_kwargs):
+        raise _WentPastTheRefusal("the worker went past its refusal and tried to boot")
+
+    monkeypatch.setattr(worker.unit_of_work, "create_engine", refuse)
+    monkeypatch.setattr(worker, "compose", refuse)
+    monkeypatch.setattr(worker.asyncio, "run", refuse)
 
 
 @pytest.fixture

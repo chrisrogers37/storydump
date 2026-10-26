@@ -13,15 +13,16 @@ way the deployment assembles it:
   root, as it will in production once an operator arms it.
 * The real services over the replayed target schema, as the real logins: the
   API as `svc_ingress` (sign-in, the OAuth callback, the source-mix and
-  source-policy routes, the command port, the data-deletion callback), the
-  worker as `svc_worker` (the clock, the claim, the executors, the prompt and
-  sender sweeps). The worker's own `WorkLoop`s claim and run its jobs one at
-  a time, a tick of its clock mints what is due, and its sweepers make one
-  pass each: `src.main` and `src.worker.main` are never entered, and no clock
-  loop, cadence sleep or background task runs. Where a cadence would have
-  passed (a retry's backoff, the lifecycle sweep's minute) the scene says so
-  with an owner `UPDATE` of the due time, as the sibling gates do. A source's
-  first read is not one of those places: connecting, switching On or
+  source-policy routes, the command port, the Telegram webhook, the
+  data-deletion callback), the worker as `svc_worker` (the clock, the
+  claim, the executors, the prompt and sender sweeps). The worker's own
+  `WorkLoop`s claim and run its jobs one at a time, a tick of its clock
+  mints what is due, and its sweepers make one pass each: `src.main` and
+  `src.worker.main` are never entered, and no clock loop, cadence sleep
+  or background task runs. Where a cadence would have passed (a retry's
+  backoff, the lifecycle sweep's minute) the scene says so with an owner
+  `UPDATE` of the due time, as the sibling gates do. A source's first
+  read is not one of those places: connecting, switching On or
   reconnecting arms it, and a tick of the clock mints it.
 * Fake providers at their seams (`tests/fixtures/fake_providers.py`): the
   OAuth exchange, Instagram's Graph and CDN (the generated onboarding past-posts sources,
@@ -50,7 +51,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
-import json
 import sys
 import time
 import uuid
@@ -70,6 +70,7 @@ from sqlalchemy.pool import NullPool
 
 from src import worker
 from src.api.app import create_app
+from src.api.routes.webhooks import SECRET_HEADER
 from src.config.settings import settings
 from src.services.target import (
     past_posts_activation,
@@ -114,6 +115,10 @@ REF_A, REF_B = "17841400000000301", "17841400000000302"
 CHAT = "-1001234567890"
 SECRET = "fixture-past-posts-" + "a" * 32
 APP = "instagram:4242"
+#: The owner's synthetic Telegram id, and the webhook's secret, for the scene
+#: that taps a card through the real route.
+TAPPER = "7007"
+WEBHOOK_SECRET = "fixture-webhook-secret"
 
 
 @pytest.fixture
@@ -242,6 +247,17 @@ class Gate:
             self.ws,
         )
 
+    def link_telegram(self, telegram_user_id=TAPPER):
+        """The owner's Telegram identity, linked: who a tap in the bound group
+        is (`identity.tapper_for_identity`)."""
+        self.owner(
+            "INSERT INTO user_identities"
+            " (user_id, provider, external_id, display_name, verified_at)"
+            " VALUES (%s, 'telegram', %s, 'Ada', now())",
+            self.scene.user_id,
+            telegram_user_id,
+        )
+
     # -- the API --------------------------------------------------------------
 
     async def command(self, kind, **args):
@@ -251,6 +267,42 @@ class Gate:
             json=args,
             headers={**self.scene.owner, "Idempotency-Key": f"{kind}:{uuid.uuid4()}"},
         )
+
+    async def tap(self, action, intent_id, *, message_id, telegram_user_id=TAPPER):
+        """A tap on the bound group's card as Telegram delivers it: the real
+        webhook route, its secret, admission, the app's own dispatcher and the
+        commit (`POST /webhooks/telegram`)."""
+        self.monkeypatch.setattr(
+            settings,
+            "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN",
+            WEBHOOK_SECRET,
+            raising=False,
+        )
+        return await self.scene.client.post(
+            "/webhooks/telegram",
+            json={
+                "update_id": uuid.uuid4().int % 1_000_000_000,
+                "callback_query": {
+                    "id": f"q-{uuid.uuid4().hex[:8]}",
+                    "from": {"id": int(telegram_user_id), "first_name": "Ada"},
+                    "message": {
+                        "message_id": message_id,
+                        "chat": {"id": int(CHAT), "type": "supergroup"},
+                    },
+                    "data": f"v1:{action}:{intent_id}",
+                },
+            },
+            headers={SECRET_HEADER: WEBHOOK_SECRET},
+        )
+
+    def card_ref(self, intent_id):
+        """The message id the story's card was delivered under."""
+        (card,) = self.rows(
+            "SELECT external_message_ref AS ref FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            intent_id,
+        )
+        return int(card["ref"])
 
     async def mix(self, **body):
         """A source-mix write (`PUT category-mix`, protocol 2), at the mix's
@@ -773,14 +825,17 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             }
         ]
 
-        # The card is the rendered approval: the picture, the account, the taps.
+        # The card is the rendered approval: the picture and the account, then
+        # the edit that gives that message its taps.
         await g.deliver()
         (photo,) = g.telegram.sent("sendPhoto")
         assert fakes.jpeg() in photo.body
         assert fakes.multipart_field(photo, "caption").startswith(
             "\U0001f4f8 @example_handle_a"
         )
-        markup = json.loads(fakes.multipart_field(photo, "reply_markup"))
+        assert fakes.multipart_field(photo, "reply_markup") is None
+        (armed,) = g.telegram.sent("editMessageReplyMarkup")
+        markup = armed.json["reply_markup"]
         assert [
             b["callback_data"]
             for row in markup["inline_keyboard"]
@@ -1737,6 +1792,60 @@ def test_the_gate_enters_no_worker_or_api_entrypoint():
         )
     ]
     assert named == []
+
+
+async def test_post_now_on_the_telegram_card_approves_a_past_posts_story_as_the_web_does(
+    world, google_configured, instagram_configured, monkeypatch, tmp_path
+):
+    """A Post now tap on a past-posts card, end to end: the tap reaches
+    `approve` through the real webhook and the dispatcher `create_app` wires,
+    which carries the API's past-posts capability, so a past-posts story whose
+    media validated is approved from its card exactly as scene 1's web Approve
+    approves it, and posts once. Before, the tap ran with no capability and
+    answered `media_unsuitable`."""
+    async with armed_gate(world, monkeypatch, tmp_path) as g:
+        past_posts = past_posts_of(REF_A)
+        g.publishing()
+        g.bind()
+        g.link_telegram()
+        landed = await g.connect(REF_A, "example_handle_a", past_posts)
+        await g.index(landed.source, past_posts)
+        story = await g.card(landed.account)
+        # The positive control: the media validated, so the web would approve it.
+        assert g.rows(
+            "SELECT i.validation_state FROM instagram_media_assets i"
+            "  JOIN instagram_intent_provenance p ON p.media_item_id = i.media_item_id"
+            " WHERE p.intent_id = %s",
+            story,
+        ) == [{"validation_state": "supported"}]
+
+        tapped = await g.tap("post", story, message_id=g.card_ref(story))
+        assert tapped.status_code == 200, tapped.text
+        assert tapped.json() == {"status": "admitted", "outcome": "executed"}
+        assert g.state_of(story) == "approved"
+        assert g.rows(
+            "SELECT actor_kind, actor_user_id::text AS actor, channel"
+            "  FROM audit_events WHERE entity_kind = 'post_intent'"
+            "   AND entity_id = %s AND to_state = 'approved'",
+            story,
+        ) == [{"actor_kind": "user", "actor": g.scene.user_id, "channel": "telegram"}]
+        assert g.rows(
+            "SELECT count(*) AS n FROM jobs WHERE kind = 'publish_pipeline'"
+            " AND payload->>'intent_id' = %s",
+            story,
+        ) == [{"n": 1}]
+        assert g.meta.create_calls == [] and g.transit.uploads == []
+
+        # The worker publishes it as it publishes scene 1's.
+        await g.drain()
+        assert g.state_of(story) == "posted"
+        assert len(g.meta.create_calls) == len(g.meta.publish_calls) == 1
+
+        # The card learns both lines, the first naming the tapper.
+        await g.deliver()
+        edits = [c.json["caption"] for c in g.telegram.sent("editMessageCaption")]
+        assert len(edits) == 2
+        assert "Approved by Ada" in edits[0] and "Posted" in edits[1]
 
 
 def ten_slide_past_posts():

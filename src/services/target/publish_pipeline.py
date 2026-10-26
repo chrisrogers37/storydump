@@ -110,10 +110,12 @@ from src.services.target import (
     audit,
     intent_ledger,
     jobs,
+    media_validation,
     outbox,
     prompts,
     provider_ops,
     publish_cap,
+    refusal_evidence,
 )
 from src.services.target.media_adapters import (
     MediaError,
@@ -222,9 +224,16 @@ class _Ctx:
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
+        #: The status a readiness poll met when it answers "dead": Meta's
+        #: `status_code`, and its own reason (`ContainerStatus.reason`).
+        self.dead_status: Optional[str] = None
         #: The job payload's dry-run snapshot (see `_load`).
         self.dry_run: bool = False
         self.past_posts = job.get("_past_posts_pipeline")
+        #: What this run's readiness probe read of the story frame.
+        self.probe: Optional[dict] = None
+        #: The drift this run recorded (`_note_drift`), told after the run.
+        self.drift: Optional[dict] = None
 
     @property
     def intent_id(self) -> str:
@@ -303,6 +312,7 @@ async def run_publish_pipeline(
     media_fetch: Callable[[dict], Any],
     precheck=None,
     past_posts=None,
+    ops_notice=None,
     backoff_seconds: tuple = DEFAULT_BACKOFF_SECONDS,
     now_fn: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Any] = asyncio.sleep,
@@ -311,8 +321,9 @@ async def run_publish_pipeline(
 
     *job* is the claimed row (as `fn_claim_job` returns it). *meta*,
     *transit* and *media_fetch* are the injected provider seams (module
-    docstring). Returns one of the outcome constants; raises on anything
-    unexpected — a crashed run must look crashed.
+    docstring), and *ops_notice* tells the operators a drift the run
+    records (`_tell_ops`). Returns one of the outcome constants; raises on
+    anything unexpected — a crashed run must look crashed.
     """
     job = dict(job)
     job["_past_posts_pipeline"] = past_posts
@@ -377,7 +388,13 @@ async def run_publish_pipeline(
                 SourceReadRefused,
             ) as exc:
                 return await _past_posts_refusal(
-                    uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+                    uow,
+                    ctx,
+                    exc.reason,
+                    backoff_seconds,
+                    now_fn,
+                    transit=transit,
+                    evidence=refusal_evidence.of(exc),
                 )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
             # Pause Posting holds an approved intent here, before the cap is
@@ -457,7 +474,7 @@ async def run_publish_pipeline(
                     engine=engine, job=job, intent_id=ctx.intent_id, transit=transit
                 )
                 ctx = await _load(uow, job)
-        return await _ladder(
+        outcome = await _ladder(
             uow,
             ctx,
             engine=engine,
@@ -468,6 +485,8 @@ async def run_publish_pipeline(
             now_fn=now_fn,
             sleep=sleep,
         )
+        await _tell_ops(ctx, ops_notice)
+        return outcome
     except (
         instagram_publish.PastPostsEffectRefused,
         media_adapters.MediaSourceFenceDrop,
@@ -475,7 +494,13 @@ async def run_publish_pipeline(
         SourceReadRefused,
     ) as exc:
         return await _past_posts_refusal(
-            uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+            uow,
+            ctx,
+            exc.reason,
+            backoff_seconds,
+            now_fn,
+            transit=transit,
+            evidence=refusal_evidence.of(exc),
         )
 
 
@@ -892,6 +917,8 @@ async def _retry_or_poison(
     error: Optional[dict] = None,
     poison_now: bool = False,
     wait: _Wait = _Wait(),
+    notice: Optional[str] = None,
+    spec_drift: bool = False,
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
@@ -913,6 +940,15 @@ async def _retry_or_poison(
     if spent is None:
         spent = attempts >= int(ctx.job["max_attempts"])
     exhausted = poison_now or spent
+    if spec_drift and exhausted and error is not None:
+        # The story ends on a refusal of Meta's that may be about its file:
+        # recorded with our facts on the permit, else beside the reason, and
+        # told after the run (`_tell_ops`).
+        drift = _note_drift(ctx, error["error"])
+        if resolve_op_id is not None:
+            resolve_response = {**(resolve_response or {}), "spec_drift": drift}
+        else:
+            error = {**error, "error": {**error["error"], "spec_drift": drift}}
     now = now_fn()
     async with _leased_tx(uow, ctx.job) as session:
         if error is not None:
@@ -973,7 +1009,7 @@ async def _retry_or_poison(
                 ctx,
                 state="review_required",
                 at=now,
-                notice=_poison_notice(ctx, now),
+                notice=notice or _poison_notice(ctx, now),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1045,6 +1081,15 @@ def _poison_notice(ctx: _Ctx, now: datetime) -> str:
         "A story couldn't be posted after several tries and needs"
         " attention: choose on its card, or open the Queue on the web."
     )
+
+
+#: The sentence the workspace hears when a story's frame is outside Meta's
+#: story spec (`media_validation.judge_derivation`): its card says which line
+#: and what was measured.
+SPEC_REFUSED_NOTICE = (
+    "A story couldn't be posted: its file is outside Instagram's story"
+    " limits. Its card says why: choose there, or open the Queue on the web."
+)
 
 
 async def _bump(session, ctx: _Ctx, **changes) -> dict:
@@ -1168,6 +1213,8 @@ async def _route_readiness(
         # The container is definitively gone; a NEW one needs a fresh
         # create (and a fresh generation) from the still-valid transit
         # asset — step back, retry on the ladder.
+        status_code = str(ctx.dead_status)
+        status = getattr(ctx.dead_status, "reason", None)
         return await _retry_or_poison(
             uow,
             ctx,
@@ -1181,8 +1228,19 @@ async def _route_readiness(
                     "code": None,
                     "message": "Meta reported the container ERROR or EXPIRED —"
                     " the media at the delivery URL could not be processed",
+                    "status_code": status_code,
+                    "status": status,
+                    # Why, in Instagram's own status, for the review card's
+                    # line (`prompt_rendering.outcome_line`) should the ladder
+                    # be spent.
+                    "refusal": refusal_evidence.evidence(
+                        "container_dead", status_code=status_code, status=status
+                    ),
                 },
             },
+            # A container Meta would not process; an EXPIRED one only waited
+            # too long.
+            spec_drift=status_code == "ERROR",
         )
     if verdict == "unauthorized":
         return await _retry_or_poison(
@@ -1298,6 +1356,7 @@ async def _ladder(
             # What the worker itself saw of the frame, kept beside Meta's
             # answer on the permit.
             probe = getattr(readiness, "observation", None)
+            ctx.probe = probe
             if ready is not None and not readiness:
                 logger.warning(
                     "publish_pipeline intent %s: the story frame is not serving yet —"
@@ -1324,6 +1383,39 @@ async def _ladder(
                     now_fn,
                     error=not_ready,
                     step_back_to="none" if gone else None,
+                )
+            # What the probe read of the frame is judged against Meta's story
+            # spec before Meta is told to fetch it. No retry re-encodes the
+            # file, so a breach parks the story at once, its reason on its
+            # card.
+            try:
+                media_validation.judge_derivation(probe, ctx.intent["media_kind"])
+            except media_validation.UnsupportedMedia as exc:
+                logger.warning(
+                    "publish_pipeline intent %s: the story frame is outside"
+                    " Meta's story spec (%s, measured %s) — parked for review"
+                    " before any container call",
+                    ctx.intent_id,
+                    exc,
+                    exc.measured,
+                )
+                # The check and its values, where the card reads a refusal.
+                refused = _error_of(exc)
+                refused["error"]["refusal"] = refusal_evidence.evidence(
+                    "local_validation",
+                    state="unsupported",
+                    check=str(exc),
+                    measured=exc.measured,
+                    matrix_version=media_validation.MATRIX_VERSION,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    error=refused,
+                    poison_now=True,
+                    notice=SPEC_REFUSED_NOTICE,
                 )
             generation = ctx.next_generation("container_create")
             permit = await _permit(
@@ -1431,6 +1523,7 @@ async def _ladder(
                             },
                             restore_attempt=True,
                         ),
+                        spec_drift=_about_the_file(exc),
                     )
                 return await _fail_terminal(
                     uow,
@@ -1468,6 +1561,7 @@ async def _ladder(
                     ),
                     error=_error_of(exc),
                     poison_now=_dead_credential(exc),
+                    spec_drift=_about_the_file(exc),
                 )
             except MetaLostResponse:
                 # Lost response on a RECOVERABLE effect: resolve it
@@ -1651,6 +1745,7 @@ async def _ladder(
                 resolve_response=_permit_record({"v": 1, "error": exc.code}, exc=exc),
                 error=_error_of(exc),
                 poison_now=_dead_credential(exc),
+                spec_drift=_about_the_file(exc),
             )
         except MetaLostResponse:
             # Lost response on the IRREVERSIBLE effect. The call may have
@@ -1737,6 +1832,98 @@ def _error_of(exc: BaseException) -> dict:
     return {"v": 1, "error": error}
 
 
+#: Meta's error codes that say nothing about the file: a dead or missing
+#: token, and throttling (Graph's 4, 17, 32 and 613, and Instagram's 80002).
+#: Any other refusal that ends a story whose frame passed our checks is a
+#: drift (`_about_the_file`).
+NOT_ABOUT_THE_FILE = frozenset({OAUTH_ERROR_CODE, 4, 17, 32, 613, 80002})
+
+
+def _about_the_file(exc: BaseException) -> bool:
+    """Whether a refusal of Meta's may be about the file: any but those that
+    say nothing about it (`NOT_ABOUT_THE_FILE`)."""
+    return isinstance(exc, MetaError) and exc.code not in NOT_ABOUT_THE_FILE
+
+
+def _note_drift(ctx: _Ctx, answer: dict) -> dict:
+    """This run's `spec_drift`: what our checks read of the story's frame and
+    the limits they held it to, beside Meta's *answer* (the reason as
+    `last_error` records it) — the sign that Meta's spec moved under a number
+    of ours. The frame is this run's probe, else the one the story's
+    container permit recorded."""
+    probe = ctx.probe
+    if probe is None:
+        ref = (ctx.latest("container_create") or {}).get("response_ref") or {}
+        if isinstance(ref, str):
+            ref = json.loads(ref)
+        probe = ref.get("probe") or {}
+    ctx.drift = {
+        "ours": {
+            "length": probe.get("length"),
+            "container": probe.get("container"),
+            "derivation": probe.get("derivation"),
+            "limits": media_validation.derivation_limits(ctx.intent["media_kind"]),
+        },
+        "meta": answer,
+    }
+    return ctx.drift
+
+
+async def _tell_ops(ctx: _Ctx, ops_notice) -> None:
+    """After the run, its drift for the operators (`WorkerDeps.ops_notice`):
+    at most once a window per Meta answer, and always one log line. Never
+    raises: the job is already finalized, and the drift recorded."""
+    if ctx.drift is None:
+        return
+    try:
+        key, text = _drift_notice(ctx, ctx.drift)
+        logger.warning(
+            "publish_pipeline intent %s: Meta refused a file our checks passed"
+            " (%s) — recorded with our facts; %s",
+            ctx.intent_id,
+            key,
+            "telling the operators" if ops_notice else "no ops notice on this worker",
+        )
+        if ops_notice is not None:
+            await ops_notice(key, text)
+    except Exception:  # noqa: BLE001 — the job is finalized and the drift recorded
+        logger.exception(
+            "publish_pipeline intent %s: drift recorded, NO OPERATOR WAS TOLD",
+            ctx.intent_id,
+        )
+
+
+def _drift_notice(ctx: _Ctx, drift: dict) -> tuple[str, str]:
+    """A drift's latch key and the operators' message: Meta's answer, as a
+    chat line carries Meta's words (`refusal_evidence.chat_words`), and what
+    our checks read."""
+    meta, ours = drift["meta"], drift["ours"]
+    if meta.get("type") == "ContainerDead":
+        key = f"spec_drift:container:{meta.get('status_code')}"
+        said = f"container {meta.get('status_code')}: {meta.get('status') or 'no reason given'}"
+    else:
+        key = f"spec_drift:{meta.get('code')}/{meta.get('subcode')}"
+        said = meta.get("message") or f"code {meta.get('code')}"
+    container = ours.get("container") or {}
+    audio = (
+        ", ".join(
+            f"{a.get('codec')} {a.get('channels')} ch {a.get('hz')} Hz"
+            for a in container.get("audio") or ()
+        )
+        or "none read"
+    )
+    text = (
+        "Instagram refused a story file that passed storydump's checks: its"
+        " spec may have moved under one of our numbers.\n\n"
+        f"Meta: {refusal_evidence.chat_words(said)}\n"
+        f"Ours: {ours.get('length')} bytes; moov first {container.get('moov_first')};"
+        f" edit lists {container.get('edit_lists')}; audio {audio}\n\n"
+        f"Story {ctx.intent_id}: `storydump story {ctx.intent_id}` shows the"
+        " whole record."
+    )
+    return key, text
+
+
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
     """One bounded readiness segment: 'ready' | 'dead' | 'unauthorized' |
     'pending'.
@@ -1769,6 +1956,7 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
         if status in _READY_STATUSES:
             return "ready"
         if status in _DEAD_STATUSES:
+            ctx.dead_status = status
             return "dead"
         if attempt + 1 < POLL_BUDGET:
             await sleep(POLL_INTERVAL_S)
@@ -1875,6 +2063,11 @@ async def _fail_terminal(
     posted one's is: a failed story is not retried from its asset, and the
     sweep would otherwise hold it for up to two days."""
     at = now_fn() if now_fn is not None else datetime.now(timezone.utc)
+    if _about_the_file(exc):
+        # Meta refused it for good: recorded with our facts on the permit, and
+        # told after the run (`_tell_ops`).
+        drift = _note_drift(ctx, _error_of(exc)["error"])
+        record = {**(record or {}), "spec_drift": drift}
     async with _leased_tx(uow, ctx.job) as session:
         if op_id is not None:
             await provider_ops.resolve_permit(
@@ -1971,9 +2164,17 @@ async def _restate_and_notify(
 ) -> int:
     """The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
-    buttons because it is `review_required`."""
-    line = prompts.outcome_line(state, by=None, at=at, tz=tz)
+    buttons because it is `review_required`. Its line says why the story was
+    refused when its refusal says anything, as the card rendered again does
+    (`prompts.settled_line`)."""
     bindings = await prompts.push_bindings(session, workspace_id)
+    refusal = None
+    if bindings and state == "review_required":
+        settled = await intent_ledger.settlement(
+            session, workspace_id=workspace_id, intent_id=intent_id
+        )
+        refusal = settled.get("refusal")
+    line = prompts.outcome_line(state, by=None, at=at, tz=tz, refusal=refusal)
     for binding_id in bindings:
         await outbox.restate_cards(
             session,
@@ -2030,9 +2231,10 @@ async def tell_review(
     notice: str,
 ) -> None:
     """The courtesy a story parked for review is owed: its card restated with
-    the review keyboard, one notice per push binding, and the
-    `customer_notified` latch when anyone heard — in the caller's
-    transaction."""
+    the review keyboard, its review card in every chat that holds no card of
+    it (`prompts.prompt_review`; a story parked before it was served has none
+    anywhere), one notice per push binding, and the `customer_notified` latch
+    when anyone heard — in the caller's transaction."""
     at = datetime.now(timezone.utc)
     told = await _restate_and_notify(
         session,
@@ -2043,6 +2245,7 @@ async def tell_review(
         tz=tz,
         notice=notice,
     )
+    await prompts.prompt_review(session, workspace_id=workspace_id, intent_id=intent_id)
     if told:
         await session.execute(
             text(
@@ -2348,9 +2551,24 @@ async def _confirm(
     return POSTED
 
 
+def _review_notice(evidence) -> str:
+    """The notice of a past post parked for review: why it was refused, in
+    plain words, when its refusal says (`refusal_evidence.plain`)."""
+    said = refusal_evidence.plain(evidence)
+    refused = f" Refused: {said}." if said else ""
+    return (
+        "This story from your Instagram past posts needs review before another"
+        f" attempt.{refused} Open the Queue to choose."
+    )
+
+
 async def _past_posts_refusal(
-    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None
+    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None, evidence=None
 ):
+    """Wait, or park the story for review, on a past post's refusal. The
+    refused fetch's evidence, when the refusal carries one, rides with the
+    reason: `last_error -> 'error' -> 'refusal'`, the audit detail's `refusal`
+    and the review notice (`refusal_evidence`)."""
     if reason == "selected_asset_changed":
         reason = "past_posts_content_changed"
     if reason == "asset_unavailable":
@@ -2369,12 +2587,14 @@ async def _past_posts_refusal(
         "past_posts_pipeline_not_configured",
     )
     count = ctx.count("past_posts_waits") + 1
+    refusal = {"refusal": evidence} if evidence else {}
     error = {
         "v": 1,
         "error": {
             "type": "PastPostsEffectRefused",
             "reason": reason,
             "message": reason,
+            **refusal,
         },
     }
     now = now_fn()
@@ -2420,7 +2640,7 @@ async def _past_posts_refusal(
                 intent=ctx.intent_id,
                 from_state=current,
                 to_state=current,
-                detail={"reason": reason},
+                detail={"reason": reason, **refusal},
             )
             if immediate or count > len(backoff_seconds):
                 await park_for_review(
@@ -2429,7 +2649,7 @@ async def _past_posts_refusal(
                     intent_id=ctx.intent_id,
                     from_state=current,
                     tz=ctx.tz,
-                    notice="This story from your Instagram past posts needs review before another attempt. Open the Queue to choose.",
+                    notice=_review_notice(evidence),
                 )
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "review_required"

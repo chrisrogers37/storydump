@@ -12,6 +12,16 @@ from sqlalchemy import create_engine
 
 from scripts import schema_consistency, schema_parity as parity
 from scripts.migration_runner import adopt
+from tests.unreadable_urls import (
+    LIBPQ_READABLE,
+    LIBPQ_UNREADABLE,
+    OWNER_URL,
+    REFUSAL,
+    assert_names_only_the_host,
+    assert_refused_by_name,
+    assert_withheld,
+    cases,
+)
 
 
 def healthy_snapshot():
@@ -514,9 +524,11 @@ def test_extract_cli_reads_one_readonly_transaction_and_rolls_back(
     )
     monkeypatch.setattr(parity.psycopg2, "connect", lambda dsn: conn)
     output = tmp_path / "empty.json"
+    # A string libpq parses: it is read before the connection is opened.
+    dsn = "host=fake"
     assert (
         parity.main(
-            ["extract", "--out", str(output), "--read-only", "--database-url", "fake"]
+            ["extract", "--out", str(output), "--read-only", "--database-url", dsn]
         )
         == 1
     )
@@ -692,12 +704,14 @@ def test_dense_column_order_and_omitted_objects(catalog_db):
 
 
 def test_runner_parity_uses_complete_readonly_signatures(monkeypatch, capsys):
+    """Read-only, both sides, each named by where its URL came from, which is
+    what a refusal of an unreadable one prints."""
     from scripts import migration_runner
 
     calls = []
 
-    def signature(dsn, *, read_only):
-        calls.append((dsn, read_only))
+    def signature(dsn, *, read_only, variable):
+        calls.append((dsn, read_only, variable))
         return healthy_snapshot()
 
     monkeypatch.setattr(parity, "schema_signature", signature)
@@ -707,8 +721,46 @@ def test_runner_parity_uses_complete_readonly_signatures(monkeypatch, capsys):
         )
         == 0
     )
-    assert calls == [("live", True), ("built", True)]
+    assert calls == [
+        ("live", True, "DATABASE_URL (or --database-url)"),
+        ("built", True, "--against"),
+    ]
     assert "0 difference(s)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("dsn", **cases(LIBPQ_UNREADABLE))
+def test_extract_refuses_an_unreadable_url_by_name(dsn, tmp_path, capsys):
+    """libpq quotes the part of a URL it could not read, which can be the
+    password. `extract` names the variable instead, and the refusal carries
+    nothing of libpq's error. No database: the string is refused before libpq
+    connects."""
+    out_file = tmp_path / "catalog.json"
+    assert parity.main(["extract", "--out", str(out_file), "--database-url", dsn]) == 1
+    out, err = capsys.readouterr()
+    assert f"error: {OWNER_URL} {REFUSAL}" in err
+    assert_withheld(out, err)
+    assert not out_file.exists()
+
+    with pytest.raises(ValueError) as caught:
+        parity.schema_signature(dsn, read_only=True, variable="SOME_DSN")
+    assert_refused_by_name(caught.value, "SOME_DSN")
+
+
+@pytest.mark.parametrize("dsn", **cases(LIBPQ_READABLE))
+def test_control_extract_keeps_libpqs_own_error_for_a_host_it_cannot_reach(
+    dsn, tmp_path, capsys
+):
+    """A URL libpq reads is not refused: the error names the host, never
+    the password."""
+    assert (
+        parity.main(
+            ["extract", "--out", str(tmp_path / "c.json"), "--database-url", dsn]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert_names_only_the_host(err)
 
 
 @pytest.mark.integration

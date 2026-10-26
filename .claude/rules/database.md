@@ -18,7 +18,7 @@ ledger) and `archive` (built empty; `svc_maintenance` holds CREATE on it,
 ## The tables
 
 Forty-four, in seven model modules (`src/models/target/__init__.py` imports
-them all; the count is pinned at `tests/scripts/test_schema_builder.py:38`).
+them all; the count is pinned at `tests/scripts/test_schema_builder.py:92`).
 Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
 
 | Models | Tables |
@@ -134,7 +134,7 @@ Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
   owner, which owns every table and bypasses RLS, is `DATABASE_URL`, the
   pre-deploy runner's login alone
   (`documentation/operations/schema-cutover.md`). The worker logs its login at
-  boot (`connection_role`, `src/worker.py:884`); `storydump posture` and the
+  boot (`connection_role`, `src/worker.py:883`); `storydump posture` and the
   API's `db_role` report the live answer. The predicate is still the first
   fence. Every query names its tenant with an explicit `workspace_id = :ws`
   predicate on each table it touches, as `ops_views.py` and
@@ -150,7 +150,7 @@ Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
   tenant-keyed table — one with a `workspace_id` column, or `workspaces`
   itself — lacks RLS or a policy, or departs from the shared FORCE posture.
   `ENABLE` without `FORCE` is the ratified posture (`FORCE_REQUIRED = False`,
-  `scripts/tenancy_gate.py:34`). Its tests run it on probe tables; the built
+  `scripts/tenancy_gate.py:37`). Its tests run it on probe tables; the built
   schema is held by the Schema consistency job's catalog comparison, which
   includes RLS and policies. A new tenant table gets its `ENABLE ROW LEVEL
   SECURITY` and its policy in `07_row_security.sql` in the same PR.
@@ -172,7 +172,7 @@ as an ORM: no `session.query`, no relationship loading.
   runs with no tenant and no actor: the policies match nothing for it, and the
   audit triggers refuse its state changes. To commit and go on, close the block
   and open another. The worker's per-job sessions and the outbox poller's
-  follow the same rule (`unit_of_work.py:465-519`).
+  follow the same rule (`unit_of_work.py:532-586`).
 - **A transaction never spans a provider call**: write the checkpoint, commit,
   then call Meta, Telegram, Drive or Cloudinary. The egress floor raises
   `TransactionDisciplineError` for a floor-routed call made while
@@ -184,8 +184,8 @@ as an ORM: no `session.query`, no relationship loading.
   (the slot, admission), `FOR UPDATE` on the row a decision is about, a CAS on
   the state being left, `FOR UPDATE SKIP LOCKED` for claims.
 - The pool is pinned (`MAX_OVERFLOW_SEAM = 0`, `POOL_SIZE_SEAM = 10`,
-  `unit_of_work.py:73`-`:81`) and the engine comes from `TARGET_DATABASE_URL`
-  alone (`engine_url_from_env`, `:189`); there is no settings-built fallback.
+  `unit_of_work.py:78`-`:86`) and the engine comes from `TARGET_DATABASE_URL`
+  alone (`engine_url_from_env`, `:244`); there is no settings-built fallback.
 
 ## Bound parameters under asyncpg
 

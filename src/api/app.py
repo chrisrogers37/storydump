@@ -89,7 +89,7 @@ from src.services.target import (
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.connect_choice import ConnectChoiceRefused
 from src.services.target.health_reads import StatementTimedOut
-from src.services.target.instagram_sources import PastPostsRefused
+from src.services.target.instagram_sources import PastPostsRefused, is_activated
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import (
     MixInvalid,
@@ -110,7 +110,7 @@ from src.services.target.unit_of_work import (
 from src.services.target.vocabulary import DATABASE_URL_VAR, is_production
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
-from src.utils.logger import logger
+from src.utils.logger import loggable_path, logger
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -294,7 +294,7 @@ class BodySizeLimitMiddleware:
         logger.warning(
             "refused %s %s from %s: request body over %d bytes (%s)",
             scope.get("method"),
-            scope.get("path"),
+            loggable_path(scope),
             client[0] if client else "unknown",
             self.max_bytes,
             how,
@@ -433,8 +433,27 @@ _INVITATION_DETAIL = {
 
 
 def _unmapped(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("unmapped refusal on %s %s: %s", request.method, request.url.path, exc)
+    logger.error(
+        "unmapped refusal on %s %s: %s",
+        request.method,
+        loggable_path(request.scope),
+        exc,
+    )
     return JSONResponse(status_code=500, content={"detail": "internal error"})
+
+
+def _log_refusal(request: Request, exc: Exception) -> None:
+    """The line a refusal answered with its own status leaves: the method,
+    the route the request matched (`loggable_path`) and the refusal. Logged
+    from the caller's frame (`stacklevel=2`), so the file handler's
+    `%(filename)s:%(lineno)d` names the handler that refused."""
+    logger.info(
+        "refused %s %s: %s",
+        request.method,
+        loggable_path(request.scope),
+        exc,
+        stacklevel=2,
+    )
 
 
 def _busy(reason: str) -> JSONResponse:
@@ -496,7 +515,7 @@ def _mapped(table: dict, content=_reason_detail, *, log: bool = True):
         if status is None:
             return _unmapped(request, exc)
         if log:
-            logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+            _log_refusal(request, exc)
         return JSONResponse(status_code=status, content=content(exc, status))
 
     return handler
@@ -555,7 +574,9 @@ def _register_handlers(app: FastAPI) -> None:
         # not only the webhook: a web request that cannot get a connection is
         # told to retry rather than shown a 500 (the webhook route maps the
         # same wait itself, before admission, and never reaches this).
-        logger.warning("pool saturated on %s %s", request.method, request.url.path)
+        logger.warning(
+            "pool saturated on %s %s", request.method, loggable_path(request.scope)
+        )
         return _busy("pool_saturated")
 
     @app.exception_handler(StatementTimedOut)
@@ -617,7 +638,7 @@ def _register_handlers(app: FastAPI) -> None:
         # The web's one code carrier is `reason` (`target-api.ts::readError`),
         # matched as `[a-z0-9_]+` — so the refusal travels as
         # `invalid_mix_<reason>`, not in `detail`.
-        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        _log_refusal(request, exc)
         return JSONResponse(
             status_code=400,
             content={
@@ -988,7 +1009,12 @@ def create_app(
     app.state.ingress = (
         webhooks.IngressRuntime(
             connect=app.state.engine.connect,
-            dispatch=TelegramDispatcher(),
+            # The dispatcher reads the app's past-posts capability as each
+            # delivery runs, as `principal.open_tenant` reads it for each web
+            # request: `app.state` stays the one source, re-armed or not.
+            dispatch=TelegramDispatcher(
+                capability=lambda: getattr(app.state, "past_posts_capability", None)
+            ),
             reply=None if bot is None else bot.send_text,
             answer_callback=None if bot is None else bot.answer_callback,
             edit=None if bot is None else bot.edit,
@@ -996,6 +1022,15 @@ def create_app(
         if app.state.engine is not None
         else None
     )
+    if app.state.ingress is not None:
+        # One line on the shared logger, which this process emits, saying
+        # whether a tap's command reads Instagram past posts: `on` or `off`,
+        # never the capability itself (the activation line is a module
+        # logger's, which the API does not emit).
+        logger.info(
+            "telegram ingress: instagram past posts %s",
+            "on" if is_activated(app.state.past_posts_capability) else "off",
+        )
 
     _register_handlers(app)
 

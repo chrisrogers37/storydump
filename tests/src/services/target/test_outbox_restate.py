@@ -1,13 +1,14 @@
 """The restate-by-ref door, and its everywhere form for the review
-resolutions; the sender's claim of a card and of its edit.
+resolutions; the review card a parked story gets in a chat that holds no
+card of it; the sender's claim of a card and of its edit.
 
 `restate_cards` reaches a card the tap already superseded (by ref, any settled
 state). `restate_everywhere` is the executor's door: every active Telegram
 binding in one statement, the shape `supersede_everywhere` set for the tap
-(#1286). Neither carries a keyboard: the sender gives every approval card, and
-every edit of one, its story's keyboard as it is when the row is claimed
-(#1477) — a parked story's edit keeps the member's three resolutions
-because the story is `review_required`.
+(#1286). Neither carries a keyboard: the sender gives every edit of an
+approval card its story's keyboard as it is when the row is claimed (#1477),
+and sends the card itself with none — a parked story's edit keeps the member's
+three resolutions because the story is `review_required`.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.services.target import outbox, prompts
+from src.services.target import outbox
 from src.services.target.outbox import OutboxPaced
 
 PARKED = "00000000-0000-4000-8000-0000000000aa"
@@ -139,6 +140,191 @@ class TestRestateEverywhere:
         assert "reply_markup" not in sql
 
 
+CARD = {"v": 2, "text": "📸 card", "outcome_text": "👀 Needs review"}
+
+
+class TestTheChatsWithoutACard:
+    """`chats_without_card`: the push bindings holding no card of a story,
+    in one statement."""
+
+    async def test_a_card_counts_once_it_reached_the_chat_or_may_still(self):
+        s = _Session([("b1",), ("b2",)])
+        chats = await outbox.chats_without_card(s, workspace_id="ws", intent_id="i")
+        assert chats == ["b1", "b2"] and len(s.sql) == 1, "one round trip"
+        sql, params = s.sql[0]
+        assert "FROM channel_bindings b" in sql and "NOT EXISTS" in sql
+        assert "kind = 'approval_prompt'" in sql
+        assert "external_message_ref IS NOT NULL" in sql
+        assert "('pending', 'sending', 'ambiguous')" in sql
+        assert params == {"ws": "ws", "i": "i"}
+
+
+class TestThePromptForAParkedStory:
+    """`prompts.prompt_review`, the park's courtesy (`tell_review`): the
+    review card goes to every chat that holds no card of the story, and is
+    rendered only when one does."""
+
+    @pytest.fixture
+    def doors(self, monkeypatch):
+        from src.services.target import prompts
+
+        seen = {"chats": ["b1", "b2"], "rendered": 0, "written": []}
+
+        async def chats_without_card(session, *, workspace_id, intent_id):
+            return seen["chats"]
+
+        async def rerender_prompt(session, *, intent_id):
+            seen["rendered"] += 1
+            return CARD
+
+        async def enqueue(session, **kw):
+            seen["written"].append(kw)
+            return "ob-new"
+
+        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
+        monkeypatch.setattr(prompts, "rerender_prompt", rerender_prompt)
+        monkeypatch.setattr(outbox, "enqueue", enqueue)
+        return prompts, seen
+
+    async def test_each_chat_without_a_card_gets_the_review_card(self, doors):
+        prompts, seen = doors
+        n = await prompts.prompt_review(None, workspace_id="ws", intent_id="i")
+        assert n == 2 and seen["rendered"] == 1, "rendered once"
+        assert [
+            (w["binding_id"], w["kind"], w["payload"]) for w in seen["written"]
+        ] == [
+            ("b1", "approval_prompt", CARD),
+            ("b2", "approval_prompt", CARD),
+        ]
+        assert {w["intent_id"] for w in seen["written"]} == {"i"}
+
+    async def test_no_chat_without_a_card_renders_and_writes_nothing(self, doors):
+        prompts, seen = doors
+        seen["chats"] = []
+        assert await prompts.prompt_review(None, workspace_id="ws", intent_id="i") == 0
+        assert seen["rendered"] == 0 and seen["written"] == []
+
+    async def test_the_park_gives_its_cards_after_the_restate_and_notice(
+        self, monkeypatch
+    ):
+        from src.services.target import prompts, publish_pipeline
+
+        order = []
+
+        async def restate_and_notify(session, **kw):
+            order.append(("courtesy", kw["state"]))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            order.append(("cards", intent_id))
+            return 1
+
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", restate_and_notify)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        await publish_pipeline.tell_review(
+            _Session([]), workspace_id="ws", intent_id="i", tz="UTC", notice="n"
+        )
+        assert order == [("courtesy", "review_required"), ("cards", "i")]
+
+
+class TestTheReviewRestateSaysWhy:
+    """`publish_pipeline._restate_and_notify`, the restate a poison and every
+    park send: a story in review has its cards restated with its line and,
+    under it, why it was refused, from the refusal its `last_error` records
+    (`intent_ledger.settlement`), as the card rendered again says."""
+
+    AT = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+    IN_REVIEW = "👀 Needs review · 2026-09-12 13:02 UTC"
+    DEAD = {
+        "v": 1,
+        "kind": "container_dead",
+        "status_code": "ERROR",
+        "status": "Error: Media upload has failed with error code 2207026",
+    }
+
+    @pytest.fixture
+    def doors(self, monkeypatch):
+        from src.services.target import intent_ledger, prompts, publish_pipeline
+
+        seen = {
+            "refusal": None,
+            "bindings": ["b1", "b2"],
+            "reads": [],
+            "lines": [],
+            "notices": [],
+        }
+
+        async def settlement(session, *, workspace_id, intent_id):
+            seen["reads"].append((workspace_id, intent_id))
+            return {"state": "review_required", "refusal": seen["refusal"]}
+
+        async def push_bindings(session, workspace_id):
+            return seen["bindings"]
+
+        async def restate_cards(
+            session, *, workspace_id, binding_id, intent_id, outcome_text
+        ):
+            seen["lines"].append((binding_id, outcome_text))
+            return 1
+
+        async def fanout_notification(
+            session, *, workspace_id, bindings, text, intent_id
+        ):
+            seen["notices"].append(text)
+
+        monkeypatch.setattr(intent_ledger, "settlement", settlement)
+        monkeypatch.setattr(prompts, "push_bindings", push_bindings)
+        monkeypatch.setattr(outbox, "restate_cards", restate_cards)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+        return publish_pipeline, seen
+
+    async def _restate(self, publish_pipeline, state):
+        return await publish_pipeline._restate_and_notify(
+            None,
+            workspace_id="ws",
+            intent_id="i",
+            state=state,
+            at=self.AT,
+            tz="UTC",
+            notice="n",
+        )
+
+    async def test_a_dead_containers_cards_say_why_it_was_refused(self, doors):
+        publish_pipeline, seen = doors
+        seen["refusal"] = self.DEAD
+        assert await self._restate(publish_pipeline, "review_required") == 2
+        line = (
+            f"{self.IN_REVIEW}\nRefused: Instagram could not process this story's"
+            " media (ERROR): Error: Media upload has failed with error code 2207026."
+        )
+        assert seen["lines"] == [("b1", line), ("b2", line)]
+        assert seen["reads"] == [("ws", "i")], "one read, under the story's tenant"
+        assert seen["notices"] == ["n"]
+
+    async def test_a_story_in_review_whose_refusal_says_nothing_keeps_its_line(
+        self, doors
+    ):
+        publish_pipeline, seen = doors
+        await self._restate(publish_pipeline, "review_required")
+        assert seen["lines"] == [("b1", self.IN_REVIEW), ("b2", self.IN_REVIEW)]
+
+    async def test_any_other_states_line_reads_no_refusal(self, doors):
+        from src.services.target import prompts
+
+        publish_pipeline, seen = doors
+        seen["refusal"] = self.DEAD
+        await self._restate(publish_pipeline, "posted")
+        line = prompts.outcome_line("posted", by=None, at=self.AT, tz="UTC")
+        assert seen["reads"] == [] and seen["lines"][0] == ("b1", line)
+
+    async def test_a_workspace_no_chat_can_hear_reads_no_refusal(self, doors):
+        """No push binding: no card to restate, so the refusal is not read."""
+        publish_pipeline, seen = doors
+        seen["refusal"], seen["bindings"] = self.DEAD, []
+        assert await self._restate(publish_pipeline, "review_required") == 0
+        assert seen["reads"] == [] and seen["lines"] == []
+
+
 class TestACardLandingOnAMovedIntentIsEditedAtOnce:
     """`_edit_sent_card` (after a send): a card whose intent moved while it
     was in flight is edited at once. The edit picks no keyboard: the sender
@@ -201,8 +387,8 @@ class TestACardIsRenderedAgainAtClaimTime:
     """`_claim_current`: every claimed `approval_prompt` with an
     intent is rendered again before the send; a slot that moved on is retired
     unsent and the next row claimed; a live one goes out as the fresh card,
-    written through the one `sending` fence. After the pacing, every card and
-    every edit of one gets its story's keyboard (#1477)."""
+    written through the one `sending` fence. After the pacing, a card leaves
+    with no keyboard and every edit of one gets its story's (#1477)."""
 
     def test_the_rule(self):
         assert outbox._needs_refresh({"kind": "approval_prompt", "intent_id": "i"})
@@ -290,22 +476,27 @@ class TestACardIsRenderedAgainAtClaimTime:
         assert row is not None and row["id"] == "ob-2"
         assert claims["left"] == [("ob-1", "superseded", {})]
 
-    async def test_a_live_card_goes_out_as_the_fresh_card(self, claims):
+    async def test_a_live_card_goes_out_as_the_fresh_card_without_a_keyboard(
+        self, claims
+    ):
+        """A card leaves with no keyboard, whatever its render carries and
+        whatever its story is: the keyboard reaches the chat only as the edit
+        of a message whose id the ledger holds, so a copy a lost answer leaves
+        behind has no buttons. The card never asks for its story's keyboard,
+        and its record is the card as sent."""
         fresh = {"v": 2, "text": "new", "reply_markup": {"inline_keyboard": []}}
-        keyboard = prompts.card_keyboard(
-            "live", state="awaiting_approval", api_publishing_enabled=True
-        )
         claims["claimed"] = [
             _claimed("approval_prompt", "live", {"v": 2, "text": "old"}),
         ]
         claims["rendered"] = {"live": fresh}
         claims["facts"] = {"live": _facts()}
         row = await self._claim()
-        sent = {**fresh, "reply_markup": keyboard}
+        sent = {"v": 2, "text": "new"}
         assert row is not None and row["payload"] == sent
         assert claims["left"] == [("ob-1", "sending", {"payload": sent})], (
             "the record is rewritten through the one fence, in the claim transaction"
         )
+        assert claims["keyed"] == [], "a card does not read its story's keyboard"
 
     async def test_a_cards_edit_gets_the_storys_keyboard_as_it_is_now(self, claims):
         """#1477: a `prompt_supersede` of an approval card leaves with the
@@ -355,15 +546,14 @@ class TestACardIsRenderedAgainAtClaimTime:
         self, claims, kind
     ):
         """`card_facts` reads nothing when the session cannot see the story:
-        `card_keyboard_for` answers None, and the row leaves with no keyboard.
+        `card_keyboard_for` answers None, and an edit leaves with no keyboard.
         A raise here would roll the claim back at every tick and stall the
-        chat's queue behind the row. The edit is the half the sender can reach:
-        an edit is not rendered again before its keyboard. The card half is
-        synthetic: `_claim_current` reads a card's story first (`_CARD_SELECT`)
-        and retires one it cannot see as `superseded`, so only an outbox row
-        whose workspace is not its story's, which no writer makes, brings a
-        card here. It stays as the one unit test of a card recorded with no
-        keyboard."""
+        chat's queue behind the row. A card never asks: it leaves with no
+        keyboard whatever the story's facts are, and its record is written as
+        it was sent. (`_claim_current` reads a card's story first
+        (`_CARD_SELECT`) and retires one it cannot see as `superseded`, so only
+        an outbox row whose workspace is not its story's, which no writer
+        makes, brings a card here.)"""
         stale = {"inline_keyboard": [[{"text": "stale"}]]}
         claims["claimed"] = [
             _claimed(
@@ -374,7 +564,9 @@ class TestACardIsRenderedAgainAtClaimTime:
         claims["facts"] = {}
         row = await self._claim()
         assert "reply_markup" not in row["payload"]
-        assert claims["keyed"] == ["unseen"], "the story was read, and read nothing"
+        assert claims["keyed"] == (["unseen"] if kind == "prompt_supersede" else []), (
+            "an edit reads its story, and reads nothing; a card never asks"
+        )
         assert claims["left"] == (
             [("ob-1", "sending", {"payload": row["payload"]})]
             if kind == "approval_prompt"

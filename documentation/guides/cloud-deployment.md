@@ -72,6 +72,20 @@ separate runtime connection string. Row-level security binds tenant work to
 The owner login applies schema changes. The API's operating details report
 `db_role`, and `src.worker.run` logs the worker's database role at boot.
 
+**The direct host, never the pooled one.** Neon gives each endpoint two
+hosts: the direct one (`ep-<id>.<region>.aws.neon.tech`) and a pooled one
+whose first label ends in `-pooler` (PgBouncer in transaction mode). Use the
+direct host in every database URL. The worker's clock election and the
+migration runner's lock are session-scoped advisory locks; through a
+transaction pooler the server session, and the lock, can outlive the process
+that took it, so after a handover no worker becomes the clock, and the next
+deploy's runner waits on a lock no process is using: a pooled server session
+holds it. The worker refuses to boot
+(exit 2) when `TARGET_DATABASE_URL` names a `-pooler` host, names no host, or
+cannot be read; the runner refuses to run where it connected to a `-pooler`
+host. The API takes no session-scoped lock and is not refused; give it the
+direct host all the same.
+
 ### Build the schema on a fresh database
 
 As the database owner, build the schema from the models and the SQL files in
@@ -148,7 +162,7 @@ commands.
 | Key | Value | Effect |
 |---|---|---|
 | `buildCommand` | `pip install -r requirements.txt && pip install -e .` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
-| `preDeployCommand` | `python -m scripts.migration_runner apply` | applies ordinary pending migrations and reports manual cutover steps as owed; the runner's advisory lock serializes the two services, and a failing migration aborts the deploy with the old version still serving |
+| `preDeployCommand` | `python -m scripts.migration_runner apply` | applies ordinary pending migrations and reports manual cutover steps as owed; the runner's advisory lock serializes the two services (the second waits at most five minutes, trying the lock with no transaction open, and names the holder, then fails the deploy), and a failing migration aborts the deploy with the old version still serving |
 | `healthcheckPath` | `/health` | both services answer it (below) |
 | `restartPolicyType` | `ON_FAILURE`, 10 retries | |
 | `drainingSeconds` | `60` | the old deployment gets 60 s after SIGTERM |
@@ -196,8 +210,8 @@ reads. Variables are per service on Railway.
 
 | Variable | Description | Example |
 |---|---|---|
-| `DATABASE_URL` | The database-OWNER connection string the pre-deploy migration runner applies with | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
-| `TARGET_DATABASE_URL` | The runtime login. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `DATABASE_URL` | The database-OWNER connection string the pre-deploy migration runner applies with; the endpoint's direct host (no `-pooler`) | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_DATABASE_URL` | The runtime login. The endpoint's direct host, written in the URL: the worker refuses a `-pooler` host and a URL that names no host. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
 | `TARGET_TELEGRAM_BOT_TOKEN` | The one bot. The worker sends with it; the API registers the webhook and answers taps with it. Without it the worker runs with its Telegram channel parked | `123456:ABC-DEF1234ghIkl` |
 | `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @. A token whose bot is not this one parks the channel too | `storydump_app_bot` |
 | `ENCRYPTION_KEY` | Fernet key for the stored OAuth credentials (`ENCRYPTION_KEYS`, newest first, for rotation) — the SAME key on both services. Neither boots without a valid one: the deploy fails its health check and the previous deploy keeps serving | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
@@ -236,6 +250,7 @@ reads. Variables are per service on Railway.
 | `TARGET_ACTIVATION_NUDGE_LIMIT` | Optional, default 3: the nudge's emails per daily run. Each person is marked nudged as their email is queued, so a provider mistake uses up that run. Arm the nudge at the default once email is on and a send has been confirmed, then raise it | `20` |
 | `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
 | `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter and the Instagram past-posts adapter call (`instagram_graph.graph_version`) | `v21.0` |
+| `OPS_USER_IDS` | The worker's ops notice: each person it names who has linked Telegram, while their account is active, gets a direct message from the bot when Instagram refuses a story file that passed storydump's checks, at most once a day per Instagram answer, with Instagram's words and what storydump read of the file. Set it to the API's value. Unset, the worker logs `ops notice: off` at startup and each refusal on a `publish_pipeline` line instead | a user id (a UUID) |
 | `RESEND_API_KEY`, `EMAIL_FROM` | The worker's `send_email` jobs, which serve the activation nudge and admissions from the waitlist. An admission's email carries a claim link the worker draws as it sends. Set them on the worker, the same values the API has, once the claim link works at sign-in; the nudge keeps its own switch, `TARGET_ACTIVATION_NUDGE_ENABLED`. Invitations need them on the API | |
 | `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
 
@@ -401,6 +416,30 @@ Both processes log to the console, which Railway captures: the API through
 `src/utils/logger.py` at `LOG_LEVEL`, the worker through `logging.basicConfig`
 at `WORKER_LOG_LEVEL` (`src/worker.py`).
 
+The API's access log is uvicorn's: one line per request with the client
+address, the method, the path and the status. It prints no query string
+(`?<redacted>`). Wherever the path carries `/api/v1/invitations/`, or a
+misdirected `/join/`, everything after that prefix prints as one `<redacted>`
+(`/api/v1/invitations/<redacted>`), under a root path, after a doubled slash,
+in an absolute-form target and in any letter case too. uvicorn's trace-level
+request log prints the same masked path, and its raw path and query string as
+`<redacted>`. The API's own refusal lines name a request by its route
+template, or before routing by that masked path (`src/utils/logger.py`). So
+an OAuth callback's code and state reach neither the access line, the trace
+line nor a refusal line, and an invitation token reaches them only in a path
+that carries neither prefix before it.
+
+One deliberate exception: a deployment without the `PAST_POSTS_HMAC_KEYS` ring
+logs each Meta data-deletion request's receipt code
+(`src/api/routes/meta.py`). It is that deployment's only record of the
+request, and the code's status page says only `received`. A deployment with
+the ring never logs it.
+
+httpx and httpcore log at WARNING in both processes, so neither library prints
+an outbound provider URL. Railway's HTTP logs, and Vercel's for the site, are
+the platforms' own and are not configured here. The invitation link's path may
+reach them.
+
 ```bash
 railway logs --service worker
 railway logs --service storydump
@@ -461,10 +500,13 @@ rate- or quota-limited.
 | Problem | Solution |
 |---------|----------|
 | The worker exits at boot with `FATAL: TARGET_DATABASE_URL is unset` | Set it on the `worker` service (`src/worker.py`). |
+| The worker exits at boot with `FATAL: TARGET_DATABASE_URL names a pooled database endpoint`, `names no host` or `cannot be read as a database URL` | The owner sets the `worker` service's `TARGET_DATABASE_URL` to the endpoint's direct host, written in the URL (the same host without `-pooler`), percent-encoding every `@` but the one before the host and any `/ ? # %` in the user or password. The previous deployment keeps serving until then. |
+| A deploy fails in the pre-deploy step with `names a pooled database endpoint` | The owner sets `DATABASE_URL` to the endpoint's direct host, then redeploys. |
+| A deploy fails in the pre-deploy step with `the runner lock was still held after 300s` | The waiting pre-deploy holds no transaction while it waits, so it never blocked the other one. The other service's pre-deploy may still be applying. Once it has ended (`storydump deploys` shows both services), the owner redeploys the service that failed; its pre-deploy finds nothing pending. If no deploy is running, the holder the message names is a session left open (a terminal, a hung run): the owner ends it (`pg_terminate_backend(<pid>)`, as the database owner), then redeploys. |
 | Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; the operating details show `target_database: false`. |
 | A deploy fails in the pre-deploy step | A migration failed, or `DATABASE_URL` is missing or is not the owner. The old version keeps serving; fix forward with a new file. |
 | Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
-| Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
+| Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. Do not switch to the `-pooler` host: the worker and the migration runner refuse it. |
 | No cards arrive in the group | `storydump health` reports the webhook and scheduling; `storydump outbox --since 3h` shows what is owed or lost on the chats; verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`. Check the worker's log for a parked channel. |
 | Taps on a card do nothing | `storydump webhook status`: the registration must include `callback_query`, and the door must accept the secret. |
 | A deploy fails its health check, and its log shows `FATAL: the credential key ring cannot load` (worker) or `Refusing to start` (API) — e.g. `ENCRYPTION_KEY not configured` | `ENCRYPTION_KEY` is unset on that service or not a Fernet key, or `ENCRYPTION_KEYS` (which overrides it) holds a bad entry; the message names which. Set the key the other service holds — a NEW key cannot read the stored credentials. Only on a first install, generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
@@ -488,7 +530,7 @@ rate- or quota-limited.
 8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 11)
 9. [ ] Admit your own email: sign-up is invite-only (`fn_signup_admitted`) and the first account is no exception, so as the owner (the `DATABASE_URL` login), in lower case: `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
 10. [ ] Sign in on the web with that Google account, create a workspace
-11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API service to the `user` line of `storydump whoami`, let it redeploy; `storydump health` now exits 0
+11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API and worker services to the `user` line of `storydump whoami`, let them redeploy; `storydump health` now exits 0
 12. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
 13. [ ] Settings › Accounts: Connect Instagram
 14. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py`)

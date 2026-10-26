@@ -746,7 +746,10 @@ async def test_committed_publish_prevents_restaging_and_another_upload(
 async def test_bound_early_card_content_failure_parks_review(
     past_posts_engine, origin, live_state, failure
 ):
-    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    # A gone slide is proved against the indexed slide count: a carousel.
+    src, item, intent = await preparation.selected(
+        past_posts_engine, origin, carousel=failure == "gone"
+    )
     selected, calls = preparation.service(
         past_posts_engine,
         origin,
@@ -811,12 +814,132 @@ async def test_bound_early_card_content_failure_parks_review(
     assert "scontent.cdninstagram.com" not in calls if failure == "gone" else True
 
 
+#: A slide judged gone as the preparation raises it: the adapter's facts, the
+#: turn's counters and the slide count the index recorded.
+REFUSAL = {
+    "v": 1,
+    "kind": "slide_gone",
+    "children": 1,
+    "complete": True,
+    "counters": {
+        "graph_attempts": 2,
+        "observed_parents": 1,
+        "source_fence_drop": 3,
+        "listed_parents": 4,
+        "cdn_attempts": 5,
+    },
+    "slide_count": 2,
+}
+
+
+async def parked_after(engine, chain, pending):
+    """A bound card parked by a preparation that raises `pending`: the story's
+    row, with whether its `last_error` holds an `evidence` key, and the details
+    of the audit rows that carry the park's reason."""
+    src, item, intent = await preparation.selected(engine, chain)
+    selected, _ = preparation.service(engine, chain)
+    await selected.selected_prepare(
+        engine=engine, workspace_id=str(chain["ws"]), intent_id=intent
+    )
+
+    async def refuse(**kwargs):
+        raise pending
+
+    c = module().PastPostsPipeline(
+        capability=foundation.capability(),
+        fetch_selected=selected.fetch_selected,
+        prepare_selected=refuse,
+    )
+    await c.selected_prepare(
+        engine=engine, workspace_id=str(chain["ws"]), intent_id=intent
+    )
+    async with observations.uow(engine, chain) as conn:
+        row = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT state,last_error,last_error ? 'evidence' AS has_evidence FROM post_intents WHERE id=:id"
+                    ),
+                    dict(id=intent),
+                )
+            )
+            .mappings()
+            .one()
+        )
+        details = list(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT detail FROM audit_events WHERE entity_id=:id AND detail->>'reason'='past_posts_content_unavailable'"
+                    ),
+                    dict(id=intent),
+                )
+            ).scalars()
+        )
+    return row, details
+
+
+async def test_park_records_the_refusal_evidence_on_the_story_and_in_the_audit(
+    past_posts_engine, origin
+):
+    """The park keeps the evidence the preparation's refusal carried beside its
+    reason: the story's `last_error -> 'error' -> 'refusal'` and the audit
+    detail's `refusal` are that evidence. Nothing is written under
+    `last_error -> 'evidence'`; the gate's workspace has no push binding, so the
+    customer-notified latch that shares that key is not written either."""
+    row, details = await parked_after(
+        past_posts_engine,
+        origin,
+        source_policy.MediaAdmissionPending("asset_unavailable", evidence=REFUSAL),
+    )
+    assert row["state"] == "review_required"
+    assert row["last_error"] == {
+        "v": 1,
+        "error": {
+            "type": "PastPostsEffectRefused",
+            "reason": "past_posts_content_unavailable",
+            "message": "past_posts_content_unavailable",
+            "refusal": REFUSAL,
+        },
+    }
+    assert row["has_evidence"] is False
+    assert details == [{"reason": "past_posts_content_unavailable", "refusal": REFUSAL}]
+
+
+async def test_park_without_refusal_evidence_writes_no_refusal_key(
+    past_posts_engine, origin
+):
+    """A preparation that raises a pending carrying no evidence parks the story
+    with its reason alone: neither the story's `last_error -> 'error'` nor the
+    audit detail has a `refusal` key."""
+    row, details = await parked_after(
+        past_posts_engine,
+        origin,
+        source_policy.MediaAdmissionPending("asset_unavailable"),
+    )
+    assert row["state"] == "review_required"
+    assert row["last_error"] == {
+        "v": 1,
+        "error": {
+            "type": "PastPostsEffectRefused",
+            "reason": "past_posts_content_unavailable",
+            "message": "past_posts_content_unavailable",
+        },
+    }
+    assert row["has_evidence"] is False
+    assert details == [{"reason": "past_posts_content_unavailable"}]
+
+
 async def test_truncated_missing_slide_defers_early_card_without_review(
     past_posts_engine, origin
 ):
     src, item, intent = await preparation.selected(past_posts_engine, origin)
     selected, calls = preparation.service(
-        past_posts_engine, origin, changed_child="456", truncated=True
+        past_posts_engine,
+        origin,
+        changed_child="456",
+        truncated=True,
+        retry=preparation.RETRY,
     )
     c = module().PastPostsPipeline(
         capability=foundation.capability(),
@@ -907,7 +1030,10 @@ async def test_early_card_failure_cannot_cross_captured_version(
     from src.services.target import source_policy
     from src.services.target.source_read_admission import SourceReadRefused
 
-    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    # A carousel, so the slide the reads lack is proved gone: a content failure.
+    src, item, intent = await preparation.selected(
+        past_posts_engine, origin, carousel=True
+    )
     selected, calls = preparation.service(
         past_posts_engine, origin, changed_child="456"
     )
@@ -980,7 +1106,7 @@ async def test_early_card_failure_cannot_cross_captured_version(
         and str(p["selection_generation_id"]) == src["generation_id"]
         and p["selection_observation_revision"] == 1
     )
-    assert calls == ["graph.instagram.com"] * 2
+    assert calls == ["graph.instagram.com"] * 4
 
 
 @pytest.mark.parametrize("during_preparation", [False, True])

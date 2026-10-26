@@ -28,7 +28,7 @@ environment holding a `PAST_POSTS_HMAC_KEYS` ring and that service's release, an
 `past_posts_composition.build_worker` and `create_app(env=...)` read it. Nothing is read from the process environment and no
 test hands a service a capability. The API runs as `svc_ingress` (sign-in, the
 OAuth callback, the source-mix and source-policy routes, the command port, the
-data-deletion callback). The worker runs as `svc_worker`: its clock ticks, its
+Telegram webhook, the data-deletion callback). The worker runs as `svc_worker`: its clock ticks, its
 loops claim and run one job at a time, and its prompt and sender sweepers make one
 pass each. Each scene gets its own scratch database with the advertised migration
 stream replayed under the service roles, because jobs are claimed from the whole
@@ -53,8 +53,8 @@ selected is therefore known in advance. Every token, id and URL is synthetic.
 ## What a run needs
 
 - **Linux.** The selected-media validator refuses to run elsewhere
-  (`media_validation.run_bounded` needs Linux resource limits). Off Linux, seven of
-  the nine scenes fail by design, not skip, with the message
+  (`media_validation.run_bounded` needs Linux resource limits). Off Linux, every
+  scene that prepares a card fails by design, not skip, with the message
   ``the selected-media validator runs only on Linux (`media_validation.run_bounded`): run this gate on the Linux lane``.
   The two that pass on macOS are the OAuth interleaving scene (8) and the
   entry-point scan (9). A macOS result is neither a pass nor a defect.
@@ -67,10 +67,10 @@ selected is therefore known in advance. Every token, id and URL is synthetic.
 - **`psql` 15 on the `PATH`**, if you will run more than this gate. The gate's own
   fixtures bootstrap the roles and replay the migration stream through `psycopg2`,
   but the wider database-gated suites apply files through `psql`.
-- **`ffprobe` and `ffmpeg` 7.1**, for the validator's own suites on the same
-  machine. The video validator pins its evidence to 7.1 and answers another version
-  with `tool_version_unproven`. This gate selects an image, which is decoded by
-  Pillow in a resource-bounded subprocess, so none of its nine scenes calls them.
+- **`ffprobe` and `ffmpeg`**, for the validator's own suites on the same machine:
+  the video validator reads `ffprobe`'s JSON, and its suites write their stimuli with
+  `ffmpeg`. This gate selects an image, which is decoded by Pillow in a
+  resource-bounded subprocess, so none of its scenes calls them.
 - **A checkout with no `.env`.** The guard refuses to start when the working
   directory or the rootdir holds one, because settings would load it on import.
 - **One run at a time per cluster.** The suite takes a cluster-wide advisory lock;
@@ -292,6 +292,18 @@ as that account.
 
 `test_the_gate_enters_no_worker_or_api_entrypoint`. A syntax-tree scan of the gate file
 finds no `src.main` import and no `worker.main`, `run` or `_run` attribute.
+
+### 10. Post now on the card approves a past-posts story as the web does
+
+`test_post_now_on_the_telegram_card_approves_a_past_posts_story_as_the_web_does`.
+The owner's Telegram identity is linked and the card reaches the bound group as
+in scene 1. A Post now tap goes through the real webhook (`POST
+/webhooks/telegram`: its secret, admission, the app's own dispatcher and the
+commit) and answers `executed`. The story is `approved` by the tapper
+(`actor_kind = user`, `channel = telegram`) with one `publish_pipeline` job,
+then posts once, and the card's two edits read "Approved by Ada" and "Posted".
+Before the dispatcher carried the API's past-posts capability, the same tap
+answered `media_unsuitable` and nothing moved.
 
 ## Reading a failure
 

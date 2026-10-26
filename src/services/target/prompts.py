@@ -111,6 +111,7 @@ async def settled_line(
         from src.services.target import identity  # noqa: PLC0415 — cycle
 
         by = await identity.display_name_for(session, user_id=settled["by_user_id"])
+    # A story in review says why, in the words of its refusal's evidence.
     return outcome_line(
         state or settled["state"],
         by=by,
@@ -118,6 +119,7 @@ async def settled_line(
         tz=tz,
         published_via=settled.get("published_via"),
         rule=settled.get("approval_rule"),
+        refusal=settled.get("refusal"),
     )
 
 
@@ -173,6 +175,31 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
         )
 
 
+async def prompt_review(session, *, workspace_id: str, intent_id: str) -> int:
+    """A parked story's review card in every chat that holds no card of it,
+    in the CALLER's transaction: the card as it is now (`rerender_prompt`),
+    one `approval_prompt` row per such binding, as `prompt_intent` writes a
+    story's first card. The sender renders it again at claim. Returns the
+    rows written. The park's flip holds the story's row, so no other writer
+    adds its card between the read and the write."""
+    chats = await outbox.chats_without_card(
+        session, workspace_id=workspace_id, intent_id=intent_id
+    )
+    card = await rerender_prompt(session, intent_id=intent_id) if chats else None
+    if card is None:
+        return 0
+    for binding_id in chats:
+        await outbox.enqueue(
+            session,
+            workspace_id=workspace_id,
+            binding_id=binding_id,
+            kind="approval_prompt",
+            payload=card,
+            intent_id=intent_id,
+        )
+    return len(chats)
+
+
 #: Everything a card is rendered from — the one spelling for the prompt sweep
 #: and for a card rendered again at send time; each caller adds its WHERE.
 _CARD_SELECT = (
@@ -190,9 +217,19 @@ _CARD_SELECT = (
 
 
 # Keep the planned-door's core SELECT contract. Provider is routing metadata,
-# added by the local reader without altering that door's return schema.
+# added by the local reader without altering that door's return schema; so is a
+# past-posts video's trim, from its selected slide's validation evidence
+# (`media_validation.inspect_video_facts`), which the card states.
 _CARD_WITH_PROVIDER = (
-    "SELECT card.*, s.provider AS source_provider FROM (" + _CARD_SELECT + ") card "
+    "SELECT card.*, s.provider AS source_provider,"
+    " (SELECT a.validation_capture->'evidence'->>'trimmed_to_seconds'"
+    "    FROM instagram_intent_provenance p"
+    "    JOIN instagram_media_assets a ON a.workspace_id=p.workspace_id"
+    "     AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id"
+    "     AND a.asset_media_id=p.selected_asset_identity"
+    "   WHERE p.workspace_id=card.workspace_id AND p.intent_id=card.id"
+    " ) AS trimmed_to_seconds"
+    " FROM (" + _CARD_SELECT + ") card "
     "JOIN media_sources s ON s.workspace_id=card.workspace_id AND s.id=card.source_id"
 )
 
@@ -227,13 +264,13 @@ def _card_for(row, *, intent_id: str, note: Optional[str] = None) -> dict:
 def _settled_card(row, *, intent_id: str, line: str) -> dict:
     """The card of a story a rule approved, sent settled: the card as
     rendered, and its line in ``outcome_text`` — the outbox's own record of
-    the line a card carries. It leaves with the keyboard the sender gives
-    every approval card: for a settled story, ⚙️ Configure alone,
-    or none once its item is removed. The transport sends the line under the
-    card's text; a later edit replaces it rather than stacking under it,
-    since the card's text stays its header; the sender records the card
-    `superseded`; and its after-send edit heals it only when the line it would
-    write is not the one the card already carries."""
+    the line a card carries. Its keyboard arrives as every approval card's
+    does, by the edit that follows its send: for a settled story, ⚙️
+    Configure alone, or none once its item is removed. The transport sends
+    the line under the card's text; a later edit replaces it rather than
+    stacking under it, since the card's text stays its header; the sender
+    records the card `superseded`; and its after-send edit carries a line
+    only when it is not the one the card already carries."""
     card = _card_for(row, intent_id=intent_id)
     card["outcome_text"] = line
     return card
@@ -256,8 +293,8 @@ _CARD_FACTS = (
 async def card_facts(session, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """A card's story as it is now (`_CARD_FACTS`), or None when this session
     cannot see it: the one read behind a card's keyboard — the sender's at
-    every send and edit of an approval card, and Configure's at
-    every tap."""
+    every edit of an approval card (a card itself leaves with none), and
+    Configure's at every tap."""
     return await readers.row(
         session, _CARD_FACTS, ws=str(workspace_id), id=str(intent_id)
     )
@@ -267,8 +304,8 @@ async def card_keyboard_for(
     session, *, workspace_id: str, intent_id: str
 ) -> Optional[dict]:
     """A card's keyboard for its story as it is now: the sender's, at every
-    send and every edit of an approval card. None when the story
-    is gone, or carries no keyboard."""
+    edit of an approval card. None when the story is gone, or carries no
+    keyboard."""
     facts = await card_facts(session, workspace_id=workspace_id, intent_id=intent_id)
     return None if facts is None else keyboard_of(intent_id, facts)
 
@@ -350,9 +387,10 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     """The card for *intent_id* rendered from the intent AS IT IS NOW — at
     send time: the workspace's current buttons, the slot in its
     clock. None when the slot has moved on (answered, expired, ended) — such
-    a card is never sent. Two exceptions: a waiting card says
-    when a block stopped a rule from approving it, and a story a rule
-    approved is sent settled (`sends_settled`)."""
+    a card is never sent. Three exceptions: a waiting card says
+    when a block stopped a rule from approving it, a story a rule
+    approved is sent settled (`sends_settled`), and a story parked for
+    review is sent as its review card, which is the workspace's to resolve."""
     row = (
         (
             await session.execute(
@@ -379,12 +417,15 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
             intent_id=intent_id,
             note=await _block_note_for(session, row, intent_id=intent_id),
         )
-    if row.get("state") not in SETTLED_CARD_STATES:
+    in_review = row.get("state") == "review_required"
+    if not in_review and row.get("state") not in SETTLED_CARD_STATES:
         return None
     settled = await intent_ledger.settlement(
         session, workspace_id=str(row["workspace_id"]), intent_id=intent_id
     )
-    if not sends_settled(settled["state"], settled.get("approval_rule")):
+    if not in_review and not sends_settled(
+        settled["state"], settled.get("approval_rule")
+    ):
         return None
     line = await settled_line(
         session, settled, tz=str(row.get("tz") or "UTC"), at=utcnow()

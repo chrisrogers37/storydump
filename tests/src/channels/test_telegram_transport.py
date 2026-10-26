@@ -217,6 +217,23 @@ class TestSendText:
         await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
         assert sent == [{"chat_id": "7", "text": "hi"}]
 
+    @pytest.mark.parametrize(
+        "lost", [httpx.ReadTimeout("no answer"), httpx.RemoteProtocolError("cut")]
+    )
+    async def test_a_lost_answer_is_not_sent_again_inside_the_call(self, lost):
+        # The request reached Telegram and its answer did not come back: the
+        # message may stand, so a second sendMessage would be a second copy.
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            raise lost
+
+        t = _transport(handler)
+        with pytest.raises(TelegramSendError):
+            await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
+        assert calls == ["sendMessage"]
+
 
 class TestACardSentSettled:
     """#1477: a card sent settled keeps the card's own text in its payload
@@ -545,12 +562,27 @@ class TestMediaCardsStayHonest:
 
         def handler(request):
             calls.append(str(request.url).rsplit("/", 1)[1])
-            raise httpx.ConnectError("boom")
+            raise httpx.ReadTimeout("no answer")
 
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
         with pytest.raises(TelegramSendError):
             await t.for_chat("7")(MEDIA_ROW)
         assert calls == ["sendPhoto"], "one attempt, no re-upload, no text card"
+
+    async def test_an_upload_that_never_left_is_attempted_again(self):
+        # No connection was made, so no card can stand: a second attempt
+        # cannot be a second card.
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            if len(calls) == 1:
+                raise httpx.ConnectError("refused")
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        assert await t.for_chat("7")(MEDIA_ROW) == "5"
+        assert calls == ["sendPhoto", "sendPhoto"]
 
     @pytest.mark.parametrize("code", [429, 500, 502])
     async def test_a_429_or_5xx_on_the_upload_is_ambiguous_not_a_refusal(self, code):
@@ -757,7 +789,7 @@ class TestTheSupersedeRowEditsTheCard:
     plus the outcome line with an empty keyboard in the same request (one
     Telegram message per tap per binding). A row without an outcome strips
     alone; a refused combined edit falls back to the type-agnostic strip —
-    the call that must land."""
+    the call that must land — unless the refusal says the message is gone."""
 
     async def test_one_caption_edit_carries_the_line_and_removes_the_keyboard(self):
         calls = []
@@ -870,10 +902,51 @@ class TestTheSupersedeRowEditsTheCard:
         assert await t.for_chat("-100")(row) == "555"
         assert calls == ["editMessageCaption", "editMessageReplyMarkup"]
 
+    @pytest.mark.parametrize(
+        "sent_as, method",
+        [("text", "editMessageText"), ("media", "editMessageCaption")],
+    )
+    async def test_a_deleted_message_fails_the_edit_after_one_call(
+        self, sent_as, method
+    ):
+        """A combined edit refused with "message to edit not found" says the
+        message is gone: no call can land on it, so the keyboard-only strip is
+        not made and the row fails at once. Any other 400 takes the strip
+        (`test_a_refused_outcome_edit_still_strips_the_keyboard`)."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": sent_as,
+            },
+        }
+        with pytest.raises(TelegramRefused):
+            await t.for_chat("-100")(row)
+        assert calls == [method], "one call, and no editMessageReplyMarkup after it"
+
     async def test_a_failed_outcome_edit_escapes_after_one_call(self):
         """Only a definitive refusal takes the strip fallback. A 5xx means
         the edit MAY have landed: it escapes to the outbox's own policy
-        (ambiguous → resent under the prompt cap → failed) — a second call here would
+        (ambiguous → resent until confirmed) — a second call here would
         double-spend the pacing debit and could strip a card whose line
         already landed."""
         calls = []
@@ -1070,13 +1143,16 @@ class TestTheSupersedeRowEditsTheCard:
             await t.for_chat("-100")(row)
 
     async def test_a_refused_edit_and_a_refused_strip_fail_the_row(self):
+        calls = []
+
         def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
             return httpx.Response(
                 400,
                 json={
                     "ok": False,
                     "error_code": 400,
-                    "description": "Bad Request: message to edit not found",
+                    "description": "Bad Request: message can't be edited",
                 },
             )
 
@@ -1094,6 +1170,9 @@ class TestTheSupersedeRowEditsTheCard:
         }
         with pytest.raises(TelegramRefused):
             await t.for_chat("-100")(row)
+        assert calls == ["editMessageText", "editMessageReplyMarkup"], (
+            "the strip was tried after the edit, and its refusal fails the row"
+        )
 
 
 class TestASendReceiptSaysHowTheCardWent:

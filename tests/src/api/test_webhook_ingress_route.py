@@ -861,6 +861,54 @@ def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatc
     assert r.json() == {"status": "admitted", "outcome": "answered"}
 
 
+@pytest.mark.parametrize(
+    "source_reason, outcome",
+    [("past_posts_not_activated", "media_unsuitable"), (None, "executed")],
+)
+def test_the_tap_line_ends_with_the_refusals_suitability_reason(
+    client, armed, monkeypatch, caplog, source_reason, outcome
+):
+    """A Post now tap refused for its media is diagnosable from the API's log:
+    the route's `tap answered` line, the shared logger's one the API process
+    emits, ends with the closed suitability reason the refusal carried. The
+    prefix is unchanged."""
+    from src.services.target.telegram_dispatch import TapResult
+
+    conn = FakeConn()
+
+    async def dispatch(c, payload):
+        return TapResult(
+            outcome=outcome,
+            handled=True,
+            callback_query_id="q-41",
+            chat_ref="-100",
+            message_ref="555",
+            answer_text="…",
+            show_alert=True,
+            source_reason=source_reason,
+        )
+
+    monkeypatch.setattr(webhooks, "admit", _fake_admit)
+    app.state.ingress = webhooks.IngressRuntime(connect=lambda: conn, dispatch=dispatch)
+    # The app's logger does not propagate to the root: listen on it directly.
+    webhooks.logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger=webhooks.logger.name):
+            r = _post(client, _tap_update())
+    finally:
+        webhooks.logger.removeHandler(caplog.handler)
+    assert r.status_code == 200
+    (line,) = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.getMessage().startswith("tap answered ")
+    ]
+    assert line.startswith(
+        f"tap answered update_id=41 outcome={outcome} answered=None answer_ms="
+    )
+    assert line.endswith(f" source_reason={source_reason}")
+
+
 # --- the answer rides behind the 200 (#1284) -------------------------------
 
 

@@ -29,6 +29,7 @@ import pytest
 from src.services.target import egress as egress_mod
 from src.services.target.egress import (
     TIMEOUT_CLASSES,
+    EgressAnswerLost,
     EgressBudgetExhausted,
     EgressPolicy,
     EgressRefused,
@@ -152,20 +153,79 @@ class TestProofTwoARetryStormExhaustsONEAbsoluteBudget:
         assert calls["n"] == 4
 
 
+class TestACreatingCallIsNeverSentTwice:
+    """`retry_after_send=False`, the policy of a call that creates something
+    (a message): a request whose answer was lost after it left is not
+    attempted again, while one that never left is. The pair: at the default,
+    the same lost answer is attempted again."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lost", [httpx.ReadTimeout, httpx.RemoteProtocolError])
+    async def test_a_request_that_left_is_attempted_once(self, lost):
+        calls = {"n": 0}
+
+        async def answer_lost(request):
+            calls["n"] += 1
+            raise lost("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressAnswerLost):
+                await request(
+                    client,
+                    "POST",
+                    ALLOWED,
+                    policy=EgressPolicy(retry_after_send=False),
+                )
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_at_the_default_the_same_lost_answer_is_attempted_again(self):
+        """The negative half: it really is the flag that stops the resend."""
+        calls = {"n": 0}
+
+        async def answer_lost(request):
+            calls["n"] += 1
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(client, "POST", ALLOWED, policy=EgressPolicy())
+        assert calls["n"] == EgressPolicy().max_attempts
+
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_left_is_attempted_again(self):
+        calls = {"n": 0}
+
+        async def refused_then_answered(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("refused", request=request)
+            return httpx.Response(200, json={"ok": True})
+
+        async with httpx.AsyncClient(
+            transport=_transport(refused_then_answered)
+        ) as client:
+            response = await request(
+                client, "POST", ALLOWED, policy=EgressPolicy(retry_after_send=False)
+            )
+        assert response.status_code == 200 and calls["n"] == 2
+
+
 class TestProofThreeAnOversizedResponseCutsAtTheByteCap:
     @pytest.mark.asyncio
     async def test_a_body_over_the_cap_is_refused(self):
         async def big(request):
             return httpx.Response(200, content=b"x" * 5000)
 
+        policy = EgressPolicy(max_response_bytes=1000)
         async with httpx.AsyncClient(transport=_transport(big)) as client:
-            with pytest.raises(ResponseTooLarge):
-                await request(
-                    client,
-                    "GET",
-                    ALLOWED,
-                    policy=EgressPolicy(max_response_bytes=1000),
-                )
+            with pytest.raises(ResponseTooLarge) as refused:
+                await request(client, "GET", ALLOWED, policy=policy)
+        # The refusal names the cap and the bytes read when the read was
+        # abandoned, so a caller keeps them as evidence without parsing the
+        # message. Nothing past the body's own length can have been read.
+        assert refused.value.cap == policy.max_response_bytes
+        assert refused.value.cap < refused.value.received <= 5000
 
     @pytest.mark.asyncio
     async def test_with_the_cap_disabled_the_same_body_is_accepted(self):
@@ -390,13 +450,14 @@ class TestTheByteCapBoundsMemoryRatherThanReportingAfterwards:
     async def test_the_read_STOPS_EARLY_rather_than_draining_the_body(self):
         # 100 chunks of 1 KiB available; cap at 4 KiB.
         stream = CountingStream(b"x" * 1024, 100)
+        policy = EgressPolicy(max_response_bytes=4096)
         async with httpx.AsyncClient(transport=StreamingTransport(stream)) as client:
-            with pytest.raises(ResponseTooLarge):
+            with pytest.raises(ResponseTooLarge) as refused:
                 await request(
                     client,
                     "GET",
                     ALLOWED,
-                    policy=EgressPolicy(max_response_bytes=4096),
+                    policy=policy,
                     resolver=lambda h: ["93.184.216.34"],
                 )
         assert stream.pulled <= 6, (
@@ -405,6 +466,11 @@ class TestTheByteCapBoundsMemoryRatherThanReportingAfterwards:
             "post-hoc shape this test exists to prevent"
         )
         assert stream.pulled >= 5, "the cap fired before reaching its own limit"
+        # The refusal carries the cap and the bytes read when the read was
+        # abandoned: past the cap, and exactly the chunks the stream handed out.
+        assert refused.value.cap == policy.max_response_bytes
+        assert refused.value.received > refused.value.cap
+        assert refused.value.received == stream.pulled * 1024
 
     @pytest.mark.asyncio
     async def test_a_body_under_the_cap_is_fully_read(self):

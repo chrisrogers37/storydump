@@ -110,6 +110,13 @@ class WorkerConfig:
     # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
     # no migration.
     planned_late_seconds: int = 3600
+    # A past post whose fetch is refused without proof (`past_posts_retry`) is
+    # tried again after a wait that doubles from the base to the cap, up to the
+    # attempt ceiling, then parks with its last refusal. The defaults start every
+    # try inside the late window above (`tests/src/services/target/test_past_posts_retry.py`).
+    past_posts_retry_attempts: int = 8
+    past_posts_retry_base_seconds: float = 30.0
+    past_posts_retry_cap_seconds: float = 900.0
     status_interval_seconds: float = 60.0  # cadence of the status line
     # The event-loop watchdog (`loop_watchdog`): the loop stamps a beat every
     # `loop_beat_seconds`, and one silent for `loop_stall_seconds` ends the
@@ -144,6 +151,10 @@ class WorkerConfig:
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # The "no media available" notice for a missed slot: once per account per 24 h.
     no_media_notice_after_seconds: int = 24 * 3600
+    # An operator notice goes out once per key per window
+    # (`telegram_ops_notice`): an Instagram refusal of a checked file, once a
+    # day per Meta answer.
+    ops_notice_window_seconds: int = 24 * 3600
     # The runway notice's level, in days of eligible content: told once
     # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
     low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
@@ -282,6 +293,10 @@ class WorkerDeps:
     #: The advisory Meta usage pre-check, or None — off by default;
     #: `TARGET_USAGE_PRECHECK_ENABLED` composes it.
     precheck: Any = None
+    #: The operators' notice (`telegram_ops_notice.OpsNotice`), handed to the
+    #: publish pipeline; None without a bot or `OPS_USER_IDS`, and then what it
+    #: would say is logged instead.
+    ops_notice: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
     #: Selected-only preparation, outside SQL; strict fresh DB evidence remains authoritative.
@@ -587,6 +602,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             media_fetch=deps.media_fetch,
             precheck=deps.precheck,
             past_posts=deps.past_posts,
+            ops_notice=deps.ops_notice,
         )
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
         # The pipeline finalizes or reschedules its own job in its own
@@ -1440,10 +1456,11 @@ async def ensure_sender_jobs(
 
     The sweep-driven cycle is the design: a sender hold drains and the job
     finalizes `succeeded`; the next sweep re-mints only while pending rows
-    exist — or an `ambiguous` row has waited the resolution backoff (
-    a live sender's lost answer is resolved by the binding's sender, and a
-    quiet binding has none) — so an empty outbox mints nothing and a busy
-    one always has exactly one live sender per binding.
+    exist — or an `ambiguous` row has waited the resolution backoff, which
+    grows with its attempts (a live sender's lost answer is resolved by the
+    binding's sender, and a quiet binding has none) — so an empty outbox
+    mints nothing and a busy one always has exactly one live sender per
+    binding.
     """
     attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
     # The statement is `fn_sender_sweep`'s body (worker sweep functions): one INSERT … SELECT whose

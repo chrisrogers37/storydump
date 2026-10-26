@@ -112,7 +112,7 @@ class TestLiveSchemaDrift:
         """The schema the builder stands up equals the audited database's, on
         every dimension `schema_parity` compares."""
         expected = schema_signature(built_db)
-        live = schema_signature(drift_dsn)
+        live = schema_signature(drift_dsn, variable=DSN_ENV)
 
         # NON-VACUITY, both halves. An empty signature on either side makes the
         # diff below pass by comparing nothing — the failure mode a drift

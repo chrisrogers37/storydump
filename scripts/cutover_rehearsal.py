@@ -4,7 +4,8 @@ Both administrator DSNs must name independent disposable PostgreSQL clusters.
 The restore cluster's owners and roles must already match the dump; the code
 cluster starts without service roles. Only uniquely created databases and the
 service roles created on the code cluster are removed on exit. A supplied
-SCHEMA_DRIFT_DSN is only ever read, never restored, adopted, or migrated.
+SCHEMA_DRIFT_DSN is only ever read, never restored, adopted, or migrated. A
+URL libpq cannot read is refused by the variable it came from, never quoted.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import migration_runner
+from scripts import libpq_connect, migration_runner
 from scripts.schema_parity import print_comparison, schema_signature
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,11 +39,26 @@ SERVICE_ROLES = {
     "svc_membership",
 }
 
+#: How a refusal of an unreadable drift URL names it: by the variable an
+#: operator set, never by its value.
+DRIFT_NAME = "SCHEMA_DRIFT_DSN"
 
-def require_parity(restored_dsn, code_dsn):
-    """Use the runner's read-only parity command and refuse every difference."""
-    result = migration_runner.main(
-        ["--database-url", restored_dsn, "parity", "--against", code_dsn]
+
+def require_parity(
+    restored_dsn,
+    code_dsn,
+    *,
+    restored_name="the restored database",
+    code_name="the code database",
+):
+    """Use the runner's read-only parity command and refuse every difference.
+    The names are where each URL came from, for the refusal of one libpq
+    cannot read: the runner's own would name its flags."""
+    result = migration_runner.parity(
+        restored_dsn,
+        code_dsn,
+        database_url_name=restored_name,
+        against_name=code_name,
     )
     if result:
         raise RuntimeError(
@@ -284,8 +300,13 @@ def run(
     administrators, created = [], []
     code_roles_owned = False
     try:
-        for dsn in (restore_admin_url, code_admin_url):
-            admin = psycopg2.connect(dsn)
+        for dsn, variable in (
+            (restore_admin_url, "REHEARSAL_RESTORE_ADMIN_DSN (or --restore-admin-url)"),
+            (code_admin_url, "REHEARSAL_CODE_ADMIN_DSN (or --code-admin-url)"),
+        ):
+            # A URL libpq cannot read is refused by where it came from, never
+            # quoted; the URLs built from these below are `make_dsn`'s.
+            admin = libpq_connect.connect(dsn, variable)
             admin.autocommit = True
             administrators.append(admin)
         require_cluster_separation(*administrators)
@@ -351,9 +372,7 @@ def run(
             )
         print("pre-deploy: 0 applied; 001 and 002 owed (manual)")
         print("initial parity (diagnostic): pending owner-applied changes may differ")
-        migration_runner.main(
-            ["--database-url", restored, "parity", "--against", expected]
-        )
+        migration_runner.parity(restored, expected)
         migration_runner.apply_manual(restored, migrations, 1)
         print(
             "applied owner step 001; validating constraints in a separate transaction"
@@ -378,7 +397,7 @@ def run(
         require_parity(restored, expected)
         if drift_dsn:
             print("checking SCHEMA_DRIFT_DSN in read-only transactions")
-            require_parity(drift_dsn, expected)
+            require_parity(drift_dsn, expected, restored_name=DRIFT_NAME)
         print("cutover rehearsal passed: zero catalog differences")
         return 0
     finally:
@@ -449,7 +468,9 @@ def main(argv=None):
                 raise ValueError(
                     "--check-drift requires SCHEMA_DRIFT_DSN and --against"
                 )
-            require_parity(drift, args.against)
+            require_parity(
+                drift, args.against, restored_name=DRIFT_NAME, code_name="--against"
+            )
             return 0
         if not (
             args.dump

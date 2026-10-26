@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/api/routes/webhooks.py"
+  - "src/channels/telegram_ops_notice.py"
   - "src/channels/telegram_transport.py"
   - "src/channels/telegram_waitlist_ping.py"
   - "src/channels/telegram_webhook_registration.py"
@@ -22,22 +23,22 @@ is `storydump webhook status` (Registration, below); reading what was sent is
 
 ## Inbound: the webhook (`src/api/routes/webhooks.py`)
 
-`POST /webhooks/telegram` (`:142`, mounted at `app.py:1037`). In order:
+`POST /webhooks/telegram` (`:144`, mounted at `app.py:1050`). In order:
 
 1. The secret header must match `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` — 403
-   otherwise, and an unset secret refuses every delivery (`:163`).
+   otherwise, and an unset secret refuses every delivery (`:165`).
 2. No dispatcher wired (`app.state.ingress`, which exists only with an engine) →
-   503 **before admission**, so Telegram redelivers (`:201`).
+   503 **before admission**, so Telegram redelivers (`:203`).
 3. The pool's wait ran out at checkout → a tap is answered "Busy — tap again."
    and consumed; anything else is 503 and redelivered (`_refuse_saturated`,
-   `:294`).
+   `:296`).
 4. `admit` (`webhook_ingress.py:137`): one `INSERT … ON CONFLICT` into
    `command_dedup` keyed on the `update_id`. A replay is acknowledged without
    re-execution; the same key with different content is 409.
-5. `dispatch`, then `commit` — admission and effect are ONE transaction (`:241`).
+5. `dispatch`, then `commit` — admission and effect are ONE transaction (`:243`).
    A database fault rolls the admission back with it and answers 503.
 6. After the 200, as a background task: the tap's `answerCallbackQuery` or the
-   `/start` reply, best effort (`:267`).
+   `/start` reply, best effort (`:269`).
 
 **The ordering rule: a delivery that cannot be executed is refused BEFORE
 admission, never after.** Admission is irreversible — an admitted update that
@@ -45,10 +46,10 @@ was not executed is destroyed, wearing the shape of a successful dedup.
 
 ## The dispatcher (`telegram_dispatch.py`)
 
-Served (`TelegramDispatcher.__call__`, `:475`): a `callback_query` (the tap);
+Served (`TelegramDispatcher.__call__`, `:559`): a `callback_query` (the tap);
 a group's migration notice — Telegram retired the group's chat id for a
 supergroup's, and the binding follows it (`chat_migration.follow`);
-`/start <payload>` for the prefixes `build_router` registers (`:451`) — `link-`
+`/start <payload>` for the prefixes `build_router` registers (`:458`) — `link-`
 (link a Telegram identity: the `/start` only asks, naming the account by a
 masked email; the prompt's Confirm tap, `v1:linkok:<state>:<tg-user>` from
 `callback_tokens.link_token`, links — `identity_link.handle_tap` — and only for
@@ -59,16 +60,31 @@ update is the named outcome `not_a_start`, logged — not a silent drop, and not
 a raise, because the delivery is already admitted and a raise would make
 Telegram redeliver it forever.
 
-The tap (`_tap`, `:503`): parse the token (`callback_tokens.parse`,
+The tap (`_tap`, `:595`): parse the token (`callback_tokens.parse`,
 `v1:<action>:<intent-uuid>`; actions `post`, `posted`, `skip`, `reject`, the
 review card's `itposted`, `notposted`, `giveup`, and Configure's `cfg`, `back`,
 `aa1`, `aa0`, served by `_menu` below) → resolve the chat
 (`tenant_resolution.resolve_chat`, the `fn_resolve_binding` door) → resolve the
 tapper (`user_identities`; none is `unlinked`) → `apply_gucs` with the tenant,
 the actor and a 2 s `lock_timeout` → `commands.execute` as that member, inside a
-savepoint. Action → command is `ACTION_TO_COMMAND` (`:87`); the review buttons
+savepoint. Action → command is `ACTION_TO_COMMAND` (`:89`); the review buttons
 all run `resolve_review` with the resolution in `args`, and `notposted` carries
 the member's `not_posted` verdict.
+
+Every delivery is dispatched with the API's past-posts capability on its
+connection, read from `app.state` as the delivery runs, as the web's unit of
+work reads it for each request (`principal.open_tenant`): `create_app` hands
+the dispatcher a reader (`TelegramDispatcher(capability=lambda: …)`,
+`app.py:994`), so Post now's `approve` admits a past-posts story's media as
+the web's Approve does, and an app armed after `create_app` arms its taps too.
+The connection is pooled, and `AsyncConnection.info` is the pooled DBAPI
+connection's own dict, which outlives the checkout, so the dispatch puts back
+what the connection carried before (`_carrying_capability`). At startup the
+API logs `telegram ingress: instagram past posts on|off`. A refusal's closed
+suitability reason (`CommandRefused.facts["source_reason"]`) ends both tap log
+lines as `source_reason=<code>` (`TapResult.source_reason`); the API process
+emits the route's `tap answered …` line, not the dispatcher's module-logger
+one.
 
 Two buttons are on no card, so `_tap` sends their taps on first, before any
 card parse or chat resolution. Both are user-plane: no tenant, no command port,
@@ -115,9 +131,12 @@ surface every workspace has. A workspace with no Telegram binding gets no card
 and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
 (`prompt_rendering.py:39`) — the outcome line and a repeat tap's answer read the same table.
 
-**Every approval card's keyboard is the sender's to render**.
-`prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to a card or an
-edit of one once the row's pacing has passed (`outbox._with_the_storys_keyboard`
+**Every approval card's keyboard is the sender's to render**, and it reaches a
+chat only as an edit of a message whose id the ledger holds: a card is sent
+with no keyboard, and settling its send queues the edit that brings one
+(`outbox._edit_sent_card`), so a copy a lost answer left behind has no
+buttons. `prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to an
+edit of a card once the row's pacing has passed (`outbox._with_the_storys_keyboard`
 over `prompts.card_facts`, one read of the story and its item). No outbox door
 takes a keyboard, so no caller picks one, and a rejected card loses its
 buttons because it is rejected. ⚙️ **Configure** is on every card for the
@@ -177,6 +196,11 @@ says so in one line under its slot (`prompt_rendering.block_note`).
 
 ## Outbound: the outbox (`outbox.py`) and the transport
 
+- **Two sends go outside it, to operators, never to a workspace:** the API's
+  waitlist ping (`telegram_waitlist_ping`) and the worker's ops notice
+  (`telegram_ops_notice`), a direct message to each person in `OPS_USER_IDS`
+  who has linked Telegram. An operator's private chat is no workspace's, so
+  neither is an outbox row.
 - **The outbox row is the delivery record** and the only authority on "did this
   send". Kinds: `approval_prompt`, `prompt_supersede`, `notification`, `ack`,
   `invitation`. States: `pending`, `sending`, `sent`, `ambiguous`, `failed`,
@@ -193,17 +217,24 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   predecessor is recovered by whoever holds the binding's lease — to
   `ambiguous`, never a blind resend.
 - Ambiguity is per kind: `notification` / `ack` retry once, then fail;
-  `approval_prompt`, `invitation` and `prompt_supersede` resend (`RESEND_KINDS`,
-  `:119`), a prompt at most three times (`MAX_PROMPT_RESENDS`, `:200`). Two live cards for one intent are
-  tolerable; a duplicate notification is bounded at one.
+  `approval_prompt` and `invitation` resend at most three times
+  (`RESEND_KINDS`, `MAX_PROMPT_RESENDS`); a `prompt_supersede` resends until
+  Telegram confirms it, for at most `EDIT_RESEND_HORIZON_SECONDS`. Each lost
+  answer waits `AMBIGUOUS_RESOLVE_AFTER_SECONDS` times its attempts
+  (`fn_sender_sweep` mints the sender on the same schedule).
+  A card's resend leaves no second live card, since a card leaves without its
+  keyboard; what a lost answer can leave is one inert copy, which no tap
+  reaches. A duplicate notification is bounded at one.
 - **Edits go supersede-then-send**, never edit-in-place on an ambiguous ref. A
   flip writes `prompt_supersede` rows for every known card of the intent in
-  every binding (`supersede_all`, `:588`); that paced edit writes the outcome
+  every binding (`supersede_all`, `:610`); that paced edit writes the outcome
   line with the story's keyboard as the sender claims it (⚙️ Configure alone on
   a settled card, or none for a rejected story or a removed item) — one Telegram
   message per tap per binding. The route edits a card only for Configure's menu
-  (`edit_markup`). A card the ledger never learned (a resend's twin) is adopted
-  when it is tapped (`adopt_card`, `:782`).
+  (`edit_markup`). A card with buttons the ledger never learned is adopted
+  when it is tapped, and a tapped card whose newest edit did not land is
+  edited again (`adopt_card`). "Message to edit not found" fails the edit
+  after one call: the message is gone.
 - Pacing is two `rate_counters` scopes, `tg_chat` per binding and `tg_global`.
   Over budget is a deferral (the row stays `pending`), and a 429 writes the
   provider's `retry_after` as a durable hold — never an in-task sleep.
@@ -231,7 +262,7 @@ says so in one line under its slot (`prompt_rendering.block_note`).
 Telegram delivers only the update kinds a registration asks for; the one
 spelling is `vocabulary.ALLOWED_UPDATES` (`message`, `callback_query`), with the
 variable names beside it (`vocabulary.py:735`-`:744`). The API registers itself
-at startup in Railway's production environment (`_register_webhook`, `app.py:687`;
+at startup in Railway's production environment (`_register_webhook`, `app.py:689`;
 `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` overrides), and the operating details
 (`/api/v1/ops/health`, for `OPS_USER_IDS`) report the registration and
 Telegram's live backlog. `storydump webhook status` checks the

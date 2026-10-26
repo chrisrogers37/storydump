@@ -17,9 +17,12 @@ The past-posts source runs in every process where `past_posts_activation.resolve
 `PAST_POSTS_HMAC_KEYS` ring. The ring is required, not optional: it keys the tombstones
 and deletion receipts the past-posts source cannot run without.
 
-Without the ring, each composition root wires nothing and logs
-`instagram past posts: off (keys_missing)` or `off (keys_invalid)`. With it,
-each logs `instagram past posts: on (run=release-<first 12 hex of the commit>)`.
+Without the ring, each composition root wires nothing; with it, each arms the
+source. The worker's log says which: `instagram past posts: off (keys_missing)`
+or `off (keys_invalid)`, or `instagram past posts: on (run=release-<first 12
+hex of the commit>)`. The API writes that line to a module logger its process
+does not emit, so the API's own log shows `telegram ingress: instagram past
+posts on` or `off` instead.
 
 The run is the release's own (`mix_conversion.release_run`). Each deploy's
 source-mix conversion jobs and existing-account reconciliation jobs carry it, so a
@@ -113,11 +116,16 @@ names.
      empty-window probe depends on. The launch-date floor holds either way.
 5. **The carousel edge.** Whether `children` returns all slides in one page at
    `limit=20`.
-6. **The mixed-video validator** over a real past-posts source, including maximum bitrate.
-   Until then a video that passes every probe stays `validation_pending`
-   (`needs_spec_evidence`), so only images reach the rotation.
-   - The validator pins `ffprobe` and `ffmpeg` to 7.1. The deployed image supplies them
-     through `nixpacks.toml`.
+6. **The video derivation Meta receives.** Meta never fetches a video's source file: it
+   fetches the transit store's story derivation, delivered as MP4 in the story frame.
+   So the validator judges a past-posts video only on what the derivation keeps from it
+   (its size, a well-formed self-contained container, a stream `ffprobe` can open, its
+   duration and its frame rate). The transformation trims the derivation to 60 seconds
+   and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
+   frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
+   validation matrix (`media_validation.story_video_encoding`); its container layout is
+   Cloudinary's. Confirm on an owned account what a derived video carries (an edit
+   list, where `moov` sits, its audio channels) and that Meta accepts it.
 7. **The transit store's real answers**, which the transit drain relies on:
    Cloudinary's Admin API fields, 404 as the only absence signal, destroy's
    `not found`, and the removal of the derived frame.
@@ -133,10 +141,13 @@ Record what a live check shows without naming the account or any of its posts.
 Set `PAST_POSTS_HMAC_KEYS` on both the API and the worker (step 5). There is nothing
 else to set.
 
-**Check each service.** Read the compose line in each service's log:
-- `instagram past posts: on (run=<run id>)` means the service is on;
-- `instagram past posts: off (<reason>)` means it is not, and the reason is
-  `keys_missing` or `keys_invalid`.
+**Check each service.** Read each service's own line in its log:
+- the worker: `instagram past posts: on (run=<run id>)` means it is on, and
+  `instagram past posts: off (<reason>)` means it is not, the reason being
+  `keys_missing` or `keys_invalid`;
+- the API: `telegram ingress: instagram past posts on` means it is on, and
+  `… off` means it is not. The API's line gives no reason, so when it reads
+  `off`, check the ring set on the API service.
 
 **What happens next, on its own:**
 - **Conversion.** A workspace still on the folder-keyed posting mix is converted to
@@ -300,9 +311,12 @@ that hold no unresolved upload.
 - **Restricted media.** Copyright or licensed-audio restrictions can omit a media URL,
   even on the account's own post. Such an item is unavailable for reuse.
 - **Likes and comments** can be unavailable. Missing values do not mean zero.
-- **Videos.** Candidate videos still need duration and codec checks before they become
-  eligible. The validator does not mark a video `supported`: a video that passes every
-  probe ends `validation_pending` with reason `needs_spec_evidence`.
+- **Videos.** A candidate video is checked when its story is prepared: a video at least
+  3 seconds long, at 23 to 60 frames a second where its file states a rate, in a
+  well-formed MP4 or MOV that `ffprobe` can open, is `supported`, and one longer than
+  60 seconds is trimmed to 60 by its derivation. Meta receives the
+  transit store's derivation of it, never the file itself, so the file's edit lists,
+  `moov` position, codec settings and audio settings are not judged.
 - **Captions and attribution.** Instagram Login can return a caption, but not for every
   post or grant. Credit detection cannot be promised, and attribution can be unknown.
   Excluding unknown attribution can leave a past-posts source with no eligible items.

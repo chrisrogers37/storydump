@@ -64,7 +64,7 @@ storydump jobs --since 24h
 Look at the `deliver_outbox` rows. `pending` rows above with NO `ready` or
 `leased` sender job here means the worker is not minting senders: its Telegram
 channel is parked (no token, a dead token, or a token for a bot other than the
-configured one — `apply_transport_probe`, `src/worker.py:509`), or the worker is down (step 1's
+configured one — `apply_transport_probe`, `src/worker.py:508`), or the worker is down (step 1's
 `scheduling` verdict says which). A `ready` group whose `oldest_run_at` is long
 past means nothing is claiming the interactive lane; a `failed` group is a
 sender that spent its attempts. The reason is in the worker's log on Railway,

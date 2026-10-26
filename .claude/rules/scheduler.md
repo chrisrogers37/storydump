@@ -22,13 +22,15 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
 
 ## Composition (`src/worker.py`)
 
-- `main` refuses to boot without `TARGET_DATABASE_URL`, or without a credential
-  key ring that loads (`oauth_states.RingUnavailable`) — exit 2 for both,
-  before anything connects.
-- `compose` (`:346`) builds the whole graph without touching the network. A seam
+- `main` refuses to boot without `TARGET_DATABASE_URL`, with one that cannot be
+  read (`unit_of_work.engine_url_from_env`) or names a pooled host or no host
+  (`unit_of_work.engine_url_refusal`), or without a credential key ring that
+  loads (`oauth_states.RingUnavailable`)
+  — exit 2 for all of them, before anything connects.
+- `compose` (`:343`) builds the whole graph without touching the network. A seam
   the deployment lacks **parks** its kinds with the reason named, rather than
   running them against a fake: no `TARGET_TELEGRAM_BOT_TOKEN` (or a dead or
-  wrong-bot token at the startup probe, `apply_transport_probe`, `:509`) parks `deliver_outbox`; no
+  wrong-bot token at the startup probe, `apply_transport_probe`, `:508`) parks `deliver_outbox`; no
   `CLOUDINARY_*` trio parks `publish_pipeline` and `reap_transit_assets`; no
   email provider parks `send_email`; no `PAST_POSTS_HMAC_KEYS` ring parks
   `meta_deletion_cleanup` (without a transit store it runs, and counts an
@@ -41,11 +43,11 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
   `scheduler.execute_retention_sweep`).
   A claimed job of a parked kind is rescheduled alive, attempt restored, every
   `park_seconds` (900 s) — never finalized dead (`_run_parked`, `work_loop.py:1265`).
-- `run` (`:810`) binds the health endpoint before the first database connection,
+- `run` (`:809`) binds the health endpoint before the first database connection,
   then starts the clock, the lease heartbeat, K claim loops per lane
   (interactive 3, bulk 2; `TARGET_WORKER_*_CONCURRENCY`), the sender sweeper
   (3 s), the prompt sweeper (5 s) and a status line every 60 s. `supervise`
-  (`:744`) ends the worker loudly when any of them dies.
+  (`:743`) ends the worker loudly when any of them dies.
 - A task that dies is `supervise`'s; an event loop that stops turning is the
   watchdog thread's (`loop_watchdog.py`, armed by `run` for the whole run): exit
   3 with every thread's stack after `loop_stall_seconds` (300 s). It never acts
@@ -56,9 +58,23 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
 ## The clock (`scheduler.py`)
 
 - One clock per deployment, elected by a session-scoped advisory lock
-  (`pg_try_advisory_lock`, `CLOCK_ELECTION_KEY`, `:94`-`:149`). Losing the
+  (`pg_try_advisory_lock`, `CLOCK_ELECTION_KEY`, `:94`-`:184`). Losing the
   election is the mechanism working, not a failure. The clock mints jobs; it
   executes nothing.
+- The elected clock holds the lock ONCE. The lock is re-entrant, so a tick
+  confirms a lock its own session already holds (its `pg_locks` row,
+  `CLOCK_ELECTION_SQL`) rather than taking it again; a re-take per tick
+  stacked a hold per tick, and the one unlock at shutdown handed nothing over.
+  Do not turn the election back into a bare `pg_try_advisory_lock` per tick.
+- The election connection must BE the session. Through a transaction pooler
+  (Neon's `-pooler` host, PgBouncer in transaction mode) the server session
+  outlives the worker and can keep the lock, and no successor elects: `main`
+  refuses a pooled `TARGET_DATABASE_URL`. Today that connection also sits in
+  one open transaction for the worker's life (SQLAlchemy begins one at its
+  first statement, the role sample, and nothing commits it). That is current
+  behaviour, not a rule: behind a direct host it changes nothing, and behind a
+  pooler the name rule cannot see, it is what pins the election to one server
+  session while the worker runs.
 - A tick (15 s, at most 500 inserts) is one call to the `fn_clock_tick` door:
   recurring system singletons, due accounts → `plan_slot` jobs with the slot
   cursor (`ig_accounts.next_slot_at`) advanced in the same statement, due
@@ -74,7 +90,7 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
   breaks that read.
 - Every scheduling decision reads the DATABASE clock (`now()` inside the door);
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
-- The recurring kinds this worker asks for are `compose`'s (`worker.py:414`):
+- The recurring kinds this worker asks for are `compose`'s (`worker.py:415`):
   `reap_expired`, `reconcile_ambiguous` and `past_posts_lifecycle_sweep` (it mints
   the deletion-cleanup jobs a Meta deletion receipt is owed, which needs no
   activation, and, only with the activation evidence and an armed past-posts source, at
@@ -98,7 +114,7 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
 
 `plan_slot` mints at most one intent for its slot: the insert is
 `ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
-(`scheduler.py:476`), so a duplicate job mints nothing. The predicate is the slot key's own:
+(`scheduler.py:512`), so a duplicate job mints nothing. The predicate is the slot key's own:
 `uq_intent_slot` is cadence-only (`src/models/target/intent_ledger.py:231`), so a planned story (`origin = 'planned'`) never absorbs
 a slot. Keep the predicate: without it a bare `ON CONFLICT` finds no arbiter in the partial
 index and every cadence mint raises.
@@ -107,11 +123,11 @@ The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never
 more than the smallest explicit weight; Off (ratio 0) never
 (`category_mix.py:122`). Within the drawn folder: never-posted files first in
-the row id's shuffled order, then least-recently-posted (`scheduler.py:381`).
+the row id's shuffled order, then least-recently-posted (`scheduler.py:417`).
 Eligible means `available`, not already live for this account, and not under a
 live `post_locks` row. There is no pool behind the weighted set: when nothing
 is eligible the slot lapses and the workspace is told at most once per
-account per 24 h (`_notice_no_media`, `:217`).
+account per 24 h (`_notice_no_media`, `:253`).
 
 The rule and the folders' weights are ONE per-account read, `category_mix.pool`
 (the rule is `category_mix.ELIGIBLE_SQL`), which the draw and the Overview's
@@ -207,6 +223,25 @@ be written. Only the empty library's notice, where nothing was minted, parks a
   publish, then ONE terminal transaction (`posted`, the counters, the recent
   lock, `finalize_job`). Each permit is a `provider_operations` row committed
   BEFORE the provider call; every checkpoint re-asserts the lease.
+- **The frame is judged before the container permit.** Once the transit
+  store's readiness probe sees the story frame serve, what it read (the
+  frame's size and, for a video, its head to the end of `moov`) is held to
+  Meta's story spec by `media_validation.judge_derivation`. A breach parks
+  the story `review_required` at once, with no container call, the check and
+  what it measured as its refusal (`last_error -> 'error' -> 'refusal'`).
+  Where `moov` sits, edit lists and the audio channel count are recorded but
+  refuse only with their `REFUSE_*` switches. Everything read rides the
+  probe's observation onto the container permit, with the encoding the frame
+  was derived with.
+- **A refusal of a checked file is a drift, recorded and told.** When Meta
+  refuses a container or a publish and the refusal ends the story (a dead
+  container with status `ERROR`, or any create or publish error that parks or
+  fails it, except a dead token and throttling, `NOT_ABOUT_THE_FILE`), its
+  `spec_drift`, our facts beside Meta's answer, goes on the permit, or beside
+  a dead container's reason in `last_error`. After the run the operators get
+  one direct message per Meta answer per day (`WorkerDeps.ops_notice`,
+  `src/channels/telegram_ops_notice.py`, latched by the `rate_counters` scope
+  `ops_notice`); a worker without the bot or `OPS_USER_IDS` logs it instead.
 - **Only the cadence spends the daily cap.** A planned story
   (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
   stamps its `cap_consumed_on` without a debit, and the refunds return nothing

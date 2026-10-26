@@ -23,10 +23,11 @@ SECURITY DEFINER functions provide bounded system reads before a tenant is
 known. The owner login is reserved for schema changes.
 
 Configuration the worker cannot run on at all refuses to BOOT instead
-(:func:`main`): no database URL, a credential key ring that cannot load, a lane
-concurrency the pool cannot hold. Parking the ring's kinds would be possible and
-worse — a parked worker passes the health check and replaces a working deploy
-with one that cannot read a single credential; refusing keeps the old one.
+(:func:`main`): no database URL, or one that names a pooled host, no host, or
+cannot be read; a credential key ring that cannot load; a lane concurrency the
+pool cannot hold. Parking the ring's kinds would be possible and worse — a
+parked worker passes the health check and replaces a working deploy with one
+that cannot read a single credential; refusing keeps the old one.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_retry,
     credential_lifecycle,
     drive_credentials,
     email_sender,
@@ -114,6 +116,58 @@ def _precheck_from_env(env):
     # and a canary that is armed must be visible in the deploy log.
     logger.info("usage pre-check armed (ttl=%ds)", int(DEFAULT_TTL_SECONDS))
     return UsagePrecheck()
+
+
+async def _claim_ops_notice(engine, key: str, window_seconds: int) -> bool:
+    """The ops notice's latch: True for the first claim of *key* in the
+    current window, in a transaction of its own (`rate_counters`)."""
+    from src.channels import telegram_ops_notice
+    from src.services.target import rate_counters
+    from src.utils.datetime_utils import utcnow
+
+    window = rate_counters.window_start(utcnow(), window_seconds)
+    async with engine.begin() as conn:
+        claimed = await rate_counters.increment(
+            conn,
+            scope=telegram_ops_notice.SCOPE,
+            key=key,
+            window_start=window,
+            limit=1,
+        )
+    return claimed is not None
+
+
+def _ops_notice_from(engine, transport, config):
+    """`WorkerDeps.ops_notice`, or None, saying once at startup which setting
+    is missing. It writes to the people in `OPS_USER_IDS`
+    (`settings.ops_user_ids`, as the API reads them) who have linked
+    Telegram, read afresh for each notice."""
+    from src.channels import telegram_ops_notice
+    from src.services.target import identity
+
+    operators = settings.ops_user_ids
+    window_seconds = config.ops_notice_window_seconds
+    send_text = getattr(transport, "send_text", None)
+    missing = [
+        name
+        for name, value in ((reg.TOKEN_VAR, send_text), ("OPS_USER_IDS", operators))
+        if not value
+    ]
+    if missing:
+        logger.warning(
+            "ops notice: off, not set: %s; what it would say is logged instead",
+            ", ".join(missing),
+        )
+        return None
+
+    async def recipients():
+        async with engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    async def claim(key):
+        return await _claim_ops_notice(engine, key, window_seconds)
+
+    return telegram_ops_notice.OpsNotice(send_text, recipients, claim)
 
 
 def _transit_from_env(env):
@@ -388,6 +442,7 @@ def compose(
         poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         precheck=_precheck_from_env(env),
+        ops_notice=_ops_notice_from(engine, transport, config),
         adapters=adapters or {},
         mix_conversion_evidence=conversion_evidence,
         engine=engine,
@@ -1102,7 +1157,13 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     env = dict(os.environ)
-    url = unit_of_work.engine_url_from_env(env)
+    try:
+        url = unit_of_work.engine_url_from_env(env)
+    except unit_of_work.UnreadableUrl as exc:
+        # A URL the engine cannot read, refused by name: what SQLAlchemy or
+        # asyncpg would raise can quote the password (`engine_url_from_env`).
+        print(f"FATAL: {exc} Refusing to boot.", file=sys.stderr)
+        raise SystemExit(2)
     if url is None:
         # No fallback: a root that ran against a database nobody named is the
         # plausible-wrong-value casualty this refusal exists to prevent. By
@@ -1113,6 +1174,17 @@ def main() -> None:
             f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",
             file=sys.stderr,
         )
+        raise SystemExit(2)
+    # A URL the worker cannot hold a session-scoped lock through, refused as
+    # the absence is, before anything connects. The clock's election is a
+    # session-scoped advisory lock (`ClockElection`): through a transaction
+    # pooler the server session outlives this process and keeps the lock, and
+    # after a handover no worker becomes the clock (no slots, no recurring
+    # jobs). By name, never the value: the URL carries a password, and its
+    # host the endpoint's id.
+    refusal = unit_of_work.engine_url_refusal(url)
+    if refusal is not None:
+        print(f"FATAL: {refusal} Refusing to boot.", file=sys.stderr)
         raise SystemExit(2)
     # The key ring, before anything connects or binds. Built lazily, a missing
     # or malformed key booted a worker that answered its health check and then
@@ -1167,7 +1239,9 @@ def main() -> None:
     # The past-posts source first: the approval card's media fetch needs its coordinator.
     # None (and one `off (<reason>)` line) unless the key ring loads.
     conversion_evidence = _conversion_evidence(env)
-    past_posts = past_posts_composition.build_worker(engine=engine, env=env)
+    past_posts = past_posts_composition.build_worker(
+        engine=engine, env=env, retry=past_posts_retry.Retry.from_config(config)
+    )
     if token:
         from src.channels.telegram_transport import transport_from_env
 

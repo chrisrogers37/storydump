@@ -37,6 +37,7 @@ Concurrency rules, all exercised by the tests:
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import threading
@@ -56,6 +57,7 @@ from tests.scripts.conftest import (
     in_tenant,
     seed_intent,
     seed_workspace_chain,
+    sweep_as_worker,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -278,6 +280,27 @@ def _state(outbox_db, outbox_id):
         (outbox_id,),
         fetch=True,
     )[0]
+
+
+def _backdate(outbox_db, outbox_id, seconds):
+    """Age a row's `updated_at` by *seconds*. The touch trigger stamps it on
+    every UPDATE, so it is held off for the one statement."""
+    _owner_exec(
+        outbox_db,
+        "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox",
+    )
+    try:
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_outbox SET updated_at = now() - make_interval(secs => %s)"
+            " WHERE id = %s",
+            (seconds, outbox_id),
+        )
+    finally:
+        _owner_exec(
+            outbox_db,
+            "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox",
+        )
 
 
 def _seed_sender_job(outbox_db, binding=None):
@@ -1162,24 +1185,7 @@ class TestTheLostAckPolicyIsBoundedPerKind:
             "UPDATE channel_outbox SET state = 'ambiguous', attempts = 1 WHERE id IN (%s, %s)",
             (aged, fresh),
         )
-        # The touch trigger stamps `updated_at` on every UPDATE, so the age is
-        # set in a second statement (the trigger's own value is overridden).
-        _owner_exec(
-            outbox_db,
-            "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox",
-        )
-        try:
-            _owner_exec(
-                outbox_db,
-                "UPDATE channel_outbox SET updated_at = now() - make_interval(secs => %s)"
-                " WHERE id = %s",
-                (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, aged),
-            )
-        finally:
-            _owner_exec(
-                outbox_db,
-                "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox",
-            )
+        _backdate(outbox_db, aged, AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1)
         engine = self._engine(outbox_db)
         try:
             async with engine.connect() as conn:
@@ -1263,10 +1269,11 @@ class TestTheLostAckPolicyIsBoundedPerKind:
 
     @pytest.mark.asyncio
     async def test_an_approval_prompt_resends_rather_than_failing(self, outbox_db):
-        """Two live cards are tolerable; a silently dropped prompt is not.
-        The resend is bounded at MAX_PROMPT_RESENDS (a
-        card that keeps losing its answer is not resent forever), and that
-        bound is the prompt's own, not the notification's retry-once."""
+        """A silently dropped prompt is not tolerable, and a resend leaves no
+        second live card (a card leaves with no keyboard). The resend is
+        bounded at MAX_PROMPT_RESENDS (a card that keeps losing its answer is
+        not resent forever), and that bound is the prompt's own, not the
+        notification's retry-once."""
         from src.services.target.outbox import MAX_PROMPT_RESENDS, resolve_ambiguous
 
         within = _enqueue(outbox_db, kind="approval_prompt")
@@ -1303,7 +1310,8 @@ class TestTheLostAckPolicyIsBoundedPerKind:
     async def test_supersede_all_targets_every_known_ref_and_converges(self, outbox_db):
         """Prompts converge on supersede: every live card is retired and a
         `prompt_supersede` row is queued per KNOWN ref; a card whose ref was
-        lost is still retired; it heals on first touch (`adopt_card`)."""
+        lost is still retired, and a copy it left in the chat has no
+        keyboard."""
         from src.services.target.outbox import supersede_all
 
         binding = _new_binding(outbox_db)
@@ -1905,7 +1913,8 @@ class TestTheSenderCommitsBeforeItSpeaks:
     ):
         """A tap retires the card between claim and send: the supersede takes
         the committed `sending` row, `mark_sent` is fenced, and the sender —
-        the only one who knows the ref — queues the edit for it."""
+        the only one who knows the ref — records it on the card, so a later
+        line reaches the message, and queues the edit for it."""
         import asyncio
 
         from src.services.target.outbox import OutboxPoller, supersede_all
@@ -1973,7 +1982,17 @@ class TestTheSenderCommitsBeforeItSpeaks:
             release.set()
             await engine.dispose()
         assert result["state"] == "superseded"
-        assert _state(outbox_db, outbox_id)[0] == "superseded"
+        state, _, ref = _state(outbox_db, outbox_id)
+        assert (state, ref) == ("superseded", "tg-late"), (
+            "the card takes the ref only the sender received"
+        )
+        ((sent_as,),) = _owner_exec(
+            outbox_db,
+            "SELECT payload->>'sent_as' FROM channel_outbox WHERE id = %s",
+            (outbox_id,),
+            fetch=True,
+        )
+        assert sent_as == "media", "and how it went out, for the next edit's method"
         rows = _owner_exec(
             outbox_db,
             "SELECT payload->>'supersedes_ref', payload->>'sent_as',"
@@ -2297,8 +2316,9 @@ class TestASlowChatDoesNotDelayAnother:
 
 class TestACardIsRenderedAgainAtClaimTime:
     """A card is rendered again when the sender claims it: a card whose slot
-    moved on is retired without a send; a live one goes out with the
-    workspace's current buttons, and the row's record is the fresh card."""
+    moved on is retired without a send; a live one goes out as the fresh card
+    with no keyboard (`TestACardsKeyboardArrivesOnlyByAConfirmedEdit`), and
+    the row's record is the fresh card."""
 
     def _stale_card(self, outbox_db, binding, intent):
         """A stale card: manual buttons, one attempt spent."""
@@ -2361,7 +2381,94 @@ class TestACardIsRenderedAgainAtClaimTime:
         assert _state(outbox_db, row_id)[0] == "superseded"
 
     @pytest.mark.asyncio
-    async def test_a_card_for_a_live_slot_carries_the_workspaces_current_buttons(
+    async def test_a_story_parked_before_its_card_went_out_gets_its_review_card(
+        self, outbox_db
+    ):
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                "parked",
+                state="review_required",
+            )["intent"]
+        )
+        row_id = self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["payload"])
+            return "tg-review"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is not None and result["state"] == "sent"
+        assert len(sent) == 1, "the parked story's card goes out once"
+        assert sent[0]["outcome_text"].startswith("👀 Needs review")
+        # Its review keyboard (the three resolutions, then Configure) arrives
+        # by the edit that follows the send, as every card's does.
+        assert "reply_markup" not in sent[0]
+        assert _state(outbox_db, row_id)[0] == "superseded", (
+            "a card sent with its line is recorded settled, its ref kept"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_parked_storys_card_says_why_it_was_refused(self, outbox_db):
+        """A story parked for a refused past-posts fetch holds the refusal in
+        `last_error -> 'error' -> 'refusal'`, and the review card it is sent as
+        says it in words on a second line: the settlement's read, the render and
+        the send agree, against the real column and the worker's own login."""
+        from src.services.target import refusal_evidence
+
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                f"refused-{uuid.uuid4().hex[:6]}",
+                state="review_required",
+            )["intent"]
+        )
+        refusal = {
+            "v": 1,
+            "kind": "local_validation",
+            "check": "malformed_container",
+            "measured": {},
+        }
+        recorded = _owner_exec(
+            outbox_db,
+            "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+            (
+                json.dumps(
+                    {
+                        "v": 1,
+                        "error": {
+                            "type": "PastPostsEffectRefused",
+                            "reason": "past_posts_content_unavailable",
+                            "message": "past_posts_content_unavailable",
+                            "refusal": refusal,
+                        },
+                    }
+                ),
+                intent,
+            ),
+        )
+        assert recorded == 1, "the refusal was recorded on the parked story"
+        self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["payload"])
+            return "tg-refused"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is not None and result["state"] == "sent"
+        assert len(sent) == 1, "the parked story's card goes out once"
+        line = sent[0]["outcome_text"]
+        assert line.startswith("👀 Needs review")
+        assert line.endswith(f"\nRefused: {refusal_evidence.plain(refusal)}.")
+
+    @pytest.mark.asyncio
+    async def test_a_card_for_a_live_slot_goes_out_fresh_and_without_a_keyboard(
         self, outbox_db
     ):
         binding = _new_binding(outbox_db)
@@ -2373,6 +2480,7 @@ class TestACardIsRenderedAgainAtClaimTime:
                 state="awaiting_approval",
             )["intent"]
         )
+        # A workspace whose story would show Post now sends its card bare too.
         _owner_exec(
             outbox_db,
             "UPDATE workspaces SET api_publishing_enabled = true WHERE id = %s",
@@ -2388,19 +2496,413 @@ class TestACardIsRenderedAgainAtClaimTime:
         result = await self._deliver(outbox_db, binding, transport)
         assert result is not None and result["state"] == "sent"
         assert len(sent) == 1
-        tokens = [
-            b.get("callback_data")
-            for r in sent[0]["reply_markup"]["inline_keyboard"]
-            for b in r
-        ]
-        assert f"v1:post:{intent}" in tokens, "the member sees the fresh card"
+        assert "reply_markup" not in sent[0], "the card leaves with no keyboard"
+        assert "📸 old" not in json.dumps(sent[0], ensure_ascii=False)
         stored = _owner_exec(
             outbox_db,
             "SELECT payload::text FROM channel_outbox WHERE id = %s",
             (row_id,),
             fetch=True,
         )[0][0]
-        assert f"v1:post:{intent}" in stored and "📸 old" not in stored
+        assert "reply_markup" not in stored and "📸 old" not in stored
+
+
+class _ScriptedTransport:
+    """The sender's transport, scripted. Each call is answered from *script* in
+    turn: a receipt is returned, an exception raised. An edit past the script
+    lands, as Telegram answers one, with the ref it names. Every row it was
+    handed is kept in `rows`."""
+
+    def __init__(self, *script):
+        self._script = list(script)
+        self.rows: list[dict] = []
+
+    async def __call__(self, row):
+        from src.channels.telegram_transport import SendReceipt, TelegramSendError
+
+        self.rows.append(row)
+        answer = self._script.pop(0) if self._script else None
+        if isinstance(answer, Exception):
+            raise answer
+        if answer is not None:
+            return answer
+        if row["kind"] != "prompt_supersede":
+            raise TelegramSendError("no answer was scripted for this send")
+        return SendReceipt(row["payload"]["supersedes_ref"], sent_as="edit")
+
+    def sent(self, kind):
+        """The rows of *kind* it was handed, in order."""
+        return [r for r in self.rows if r["kind"] == kind]
+
+
+class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
+    """A card is sent with no keyboard, and settling its send queues the edit
+    that brings one, for the ref Telegram answered with. So the copy a lost
+    answer leaves behind has no buttons; an edit Telegram refuses leaves an
+    inert card on a story that stays decidable; and an edit that is lost or
+    paced is sent again until it lands. Driven through `OutboxPoller.tick`
+    over a transport double."""
+
+    def _pending_card(self, outbox_db, *, chat=None):
+        """A binding of its own, a story awaiting its decision, and its card
+        still pending with a keyboard in the payload, which the sender leaves
+        out. Returns the binding, the intent and the card."""
+        binding = _new_binding(outbox_db, chat)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                f"arm-{uuid.uuid4().hex[:6]}",
+                state="awaiting_approval",
+            )["intent"]
+        )
+        card = _enqueue(
+            outbox_db,
+            kind="approval_prompt",
+            intent_id=intent,
+            binding=binding,
+            payload={
+                "v": 2,
+                "text": "📸 old",
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Posted myself", "callback_data": "v1:posted:x"}]
+                    ]
+                },
+            },
+        )
+        return binding, intent, card
+
+    def _edits(self, outbox_db, binding):
+        """The binding's edits, oldest first, as (payload, state, attempts)."""
+        return _owner_exec(
+            outbox_db,
+            "SELECT payload, state, attempts FROM channel_outbox"
+            " WHERE binding_id = %s AND kind = 'prompt_supersede'"
+            " ORDER BY created_at",
+            (binding,),
+            fetch=True,
+        )
+
+    @contextlib.asynccontextmanager
+    async def _sender(self, outbox_db, binding, transport):
+        """The binding's poller over *transport*, on the worker's login and a
+        clock window of its own, with the tenant session factory it writes
+        through."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target.outbox import OutboxPoller
+
+        engine = _engine(outbox_db)
+        tenant = _tenant_session_factory(
+            outbox_db, async_sessionmaker(engine, expire_on_commit=False)
+        )
+        now = _now()
+        try:
+            yield (
+                OutboxPoller(
+                    tenant,
+                    binding_id=binding,
+                    transport=transport,
+                    clock=lambda: now,
+                    interval_seconds=0.05,
+                    chat_limit=CHAT_LIMIT,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                ),
+                tenant,
+            )
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_resent_card_leaves_no_second_card_with_buttons(self, outbox_db):
+        """A card whose send lost its answer is sent again, and the copy the
+        first send may have left in the chat has no buttons: no send carries a
+        keyboard, and the one edit that brings it names the ref of the send
+        that was answered."""
+        from src.channels.telegram_transport import SendReceipt, TelegramSendError
+        from src.services.target.outbox import AMBIGUOUS_RESOLVE_AFTER_SECONDS
+
+        binding, intent, card = self._pending_card(outbox_db)
+        telegram = _ScriptedTransport(
+            TelegramSendError("sendMessage: transport failure"),
+            SendReceipt("tg-2", sent_as="text"),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, _):
+            lost = await poller.tick()
+            assert lost is not None and lost["state"] == "ambiguous"
+            attempts = _state(outbox_db, card)[1]
+            _backdate(outbox_db, card, AMBIGUOUS_RESOLVE_AFTER_SECONDS * attempts + 1)
+            resent = await poller.tick()
+            armed = await poller.tick()
+        assert resent is not None and resent["state"] == "sent"
+        assert armed is not None and armed["state"] == "sent"
+
+        cards = telegram.sent("approval_prompt")
+        assert len(cards) == 2, "the send that lost its answer, and its resend"
+        assert all("reply_markup" not in c["payload"] for c in cards)
+        edits = self._edits(outbox_db, binding)
+        assert [(p["supersedes_ref"], s) for p, s, _ in edits] == [("tg-2", "sent")]
+        assert "outcome_text" not in edits[0][0], "the story waits: the keyboard alone"
+        (edit,) = telegram.sent("prompt_supersede")
+        tokens = [
+            b.get("callback_data")
+            for r in edit["payload"]["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert f"v1:cfg:{intent}" in tokens, "the edit brings the story's keyboard"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_edit_leaves_an_inert_card_and_the_next_change_repaints_it(
+        self, outbox_db
+    ):
+        """Telegram refusing the edit that would bring a card its keyboard
+        fails that edit once. The card stays in the chat with no buttons, the
+        story stays `awaiting_approval` (the web queue lists it, so it can be
+        decided there), and when the story changes, the edit that follows
+        writes its line onto the message."""
+        from src.channels.telegram_transport import SendReceipt, TelegramRefused
+        from src.services.target.outbox import supersede_all
+
+        binding, intent, card = self._pending_card(outbox_db)
+        line = "⏭️ Skipped by Ada · now"
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            TelegramRefused(
+                "editMessageReplyMarkup: 400 Bad Request: can't parse reply"
+                " keyboard markup",
+                code=400,
+            ),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, tenant):
+            sent = await poller.tick()
+            refused = await poller.tick()
+            assert sent is not None and sent["state"] == "sent"
+            assert refused is not None and refused["state"] == "failed"
+            assert [s for _, s, _ in self._edits(outbox_db, binding)] == ["failed"]
+            assert not any(
+                "reply_markup" in c["payload"] for c in telegram.sent("approval_prompt")
+            ), "no card was accepted with a keyboard"
+            assert _owner_exec(
+                outbox_db,
+                "SELECT state FROM post_intents WHERE id = %s",
+                (intent,),
+                fetch=True,
+            ) == [("awaiting_approval",)], "the story still waits for a decision"
+
+            # The story is decided the way a skip decides it.
+            _owner_exec(
+                outbox_db,
+                "UPDATE post_intents SET state = 'skipped' WHERE id = %s",
+                (intent,),
+            )
+            async with tenant() as session:
+                queued = await supersede_all(
+                    session,
+                    workspace_id=outbox_db["ws"],
+                    binding_id=binding,
+                    intent_id=intent,
+                    outcome_text=line,
+                )
+                await session.commit()
+            assert queued == 1, "the card is superseded, and its edit is queued"
+            repainted = await poller.tick()
+        assert repainted is not None and repainted["state"] == "sent"
+        edit = telegram.rows[-1]
+        assert edit["kind"] == "prompt_supersede"
+        assert edit["payload"]["supersedes_ref"] == "tg-1"
+        assert edit["payload"]["outcome_text"] == line
+        assert [
+            (p["supersedes_ref"], p.get("outcome_text"), s)
+            for p, s, _ in self._edits(outbox_db, binding)
+        ] == [("tg-1", None, "failed"), ("tg-1", line, "sent")]
+
+    def test_the_backoff_grows_with_attempts_and_the_sweep_agrees(self, outbox_db):
+        """A lost answer waits `AMBIGUOUS_RESOLVE_AFTER_SECONDS` times the
+        row's attempts before it is resolved, and the sender sweep mints the
+        binding's sender on the same schedule: a row still waiting is neither
+        resolved nor given a sender."""
+        import asyncio
+
+        from src.services.target.outbox import (
+            AMBIGUOUS_RESOLVE_AFTER_SECONDS,
+            resolve_aged_ambiguous,
+        )
+
+        attempts = 3
+        due = AMBIGUOUS_RESOLVE_AFTER_SECONDS * attempts
+        binding = _new_binding(outbox_db)
+        edit = _enqueue(
+            outbox_db,
+            kind="prompt_supersede",
+            binding=binding,
+            payload={"v": 1, "supersedes_ref": "tg-9"},
+            attempts=attempts,
+        )
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_outbox SET state = 'ambiguous' WHERE id = %s",
+            (edit,),
+        )
+
+        def senders():
+            return _owner_exec(
+                outbox_db,
+                "SELECT count(*) FROM jobs"
+                " WHERE kind = 'deliver_outbox' AND serialization_key = %s",
+                (f"tg:{binding}",),
+                fetch=True,
+            )[0][0]
+
+        async def resolve():
+            engine = _engine(outbox_db)
+            try:
+                async with engine.connect() as conn:
+                    await _tenant(conn, outbox_db)
+                    resolved = await resolve_aged_ambiguous(conn, binding_id=binding)
+                    await conn.commit()
+                return resolved
+            finally:
+                await engine.dispose()
+
+        # Past the backoff of one attempt, short of the one three have earned.
+        _backdate(outbox_db, edit, due - AMBIGUOUS_RESOLVE_AFTER_SECONDS)
+        sweep_as_worker(outbox_db["worker"])
+        assert senders() == 0, "a row still waiting is given no sender"
+        assert asyncio.run(resolve()) == []
+        assert _state(outbox_db, edit)[0] == "ambiguous"
+
+        _backdate(outbox_db, edit, due + 10)
+        sweep_as_worker(outbox_db["worker"])
+        assert senders() == 1, "a row that is due is given its binding's sender"
+        assert asyncio.run(resolve()) == [str(edit)]
+        assert _state(outbox_db, edit)[0] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_not_modified_confirms_the_edit(self, outbox_db):
+        """Telegram's "message is not modified" says the keyboard already
+        stands: the edit is sent, and nothing is queued after it. The real
+        transport, over a mock Bot API."""
+        import httpx
+
+        from src.channels.telegram_transport import TelegramTransport
+        from tests.fixtures.fake_providers import OFFLINE
+
+        chat = f"-100{uuid.uuid4().int % 10**10:010d}"
+        binding, intent, card = self._pending_card(outbox_db, chat=chat)
+        calls = []
+
+        def handler(request):
+            method = request.url.path.rsplit("/", 1)[-1]
+            calls.append((method, json.loads(request.content)))
+            if method == "sendMessage":
+                return httpx.Response(
+                    200, json={"ok": True, "result": {"message_id": 7}}
+                )
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": (
+                        "Bad Request: message is not modified: specified new"
+                        " message content and reply markup are exactly the same"
+                        " as a current content and reply markup of the message"
+                    ),
+                },
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = TelegramTransport(
+            "synthetic-bot-token", client=client, policy=OFFLINE
+        )
+        send = transport.for_chat(chat)
+        try:
+            async with self._sender(outbox_db, binding, send) as (poller, _):
+                sent = await poller.tick()
+                confirmed = await poller.tick()
+                idle = await poller.tick()
+        finally:
+            await client.aclose()
+        assert [m for m, _ in calls] == ["sendMessage", "editMessageReplyMarkup"]
+        assert "reply_markup" not in calls[0][1], "the card went out with no keyboard"
+        assert sent is not None and sent["state"] == "sent"
+        assert confirmed is not None and confirmed["state"] == "sent"
+        assert idle is None, "nothing is left to send"
+        assert [
+            (p["supersedes_ref"], s) for p, s, _ in self._edits(outbox_db, binding)
+        ] == [("7", "sent")], "the one edit is done, and none follows it"
+
+    @pytest.mark.asyncio
+    async def test_a_429_on_the_edit_holds_the_chat_and_spends_no_attempt(
+        self, outbox_db
+    ):
+        """Telegram's flood limit on the edit is not the edit's failure: it
+        goes back to `pending` with the attempt its claim consumed given back,
+        and the chat's pacing row is held for the wait Telegram named."""
+        from src.channels.telegram_transport import SendReceipt, TelegramPaced
+
+        binding, intent, card = self._pending_card(outbox_db)
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            TelegramPaced(
+                "editMessageReplyMarkup: 429",
+                retry_after_s=30,
+                scope="chat",
+                code=429,
+            ),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, _):
+            sent = await poller.tick()
+            paced = await poller.tick()
+        assert sent is not None and sent["state"] == "sent"
+        assert paced is not None and paced["state"] == "paced"
+        assert poller.held_for_s == 30.0
+        assert [(s, a) for _, s, a in self._edits(outbox_db, binding)] == [
+            ("pending", 0)
+        ]
+        held = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM rate_counters"
+            " WHERE scope = 'tg_chat' AND key = %s AND count >= %s",
+            (binding, CHAT_LIMIT),
+            fetch=True,
+        )[0][0]
+        assert held >= 1, "the chat's row is spent for the wait"
+        (sent_card,) = telegram.sent("approval_prompt")
+        assert "reply_markup" not in sent_card["payload"]
+
+    @pytest.mark.asyncio
+    async def test_edits_are_claimed_before_cards(self, outbox_db):
+        """A card's keyboard, which only an edit brings, follows the card
+        before the next card is sent: with the oldest pending row a card and
+        the newest an edit, the edit is claimed first."""
+        binding = _new_binding(outbox_db)
+        card = _enqueue(
+            outbox_db,
+            kind="approval_prompt",
+            binding=binding,
+            payload={"v": 2, "text": "card"},
+        )
+        edit = _enqueue(
+            outbox_db,
+            kind="prompt_supersede",
+            binding=binding,
+            payload={"v": 1, "supersedes_ref": "tg-9"},
+        )
+        engine = _engine(outbox_db)
+        try:
+            first = await _claim(engine, outbox_db, binding)
+            second = await _claim(engine, outbox_db, binding)
+        finally:
+            await engine.dispose()
+        assert first is not None and second is not None
+        assert (first["kind"], str(first["id"])) == ("prompt_supersede", str(edit))
+        assert (second["kind"], str(second["id"])) == ("approval_prompt", str(card)), (
+            "the card follows its edit; it is not lost"
+        )
 
 
 class TestTheSenderFollowsAGroupThatMoved:
