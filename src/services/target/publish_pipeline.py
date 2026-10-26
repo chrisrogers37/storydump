@@ -2030,9 +2030,10 @@ async def tell_review(
     notice: str,
 ) -> None:
     """The courtesy a story parked for review is owed: its card restated with
-    the review keyboard, one notice per push binding, and the
-    `customer_notified` latch when anyone heard — in the caller's
-    transaction."""
+    the review keyboard, its review card in every chat that holds no card of
+    it (`prompts.prompt_review`; a story parked before it was served has none
+    anywhere), one notice per push binding, and the `customer_notified` latch
+    when anyone heard — in the caller's transaction."""
     at = datetime.now(timezone.utc)
     told = await _restate_and_notify(
         session,
@@ -2043,6 +2044,7 @@ async def tell_review(
         tz=tz,
         notice=notice,
     )
+    await prompts.prompt_review(session, workspace_id=workspace_id, intent_id=intent_id)
     if told:
         await session.execute(
             text(
