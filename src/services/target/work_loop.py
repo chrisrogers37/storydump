@@ -110,6 +110,13 @@ class WorkerConfig:
     # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
     # no migration.
     planned_late_seconds: int = 3600
+    # A past post whose fetch is refused without proof (`past_posts_retry`) is
+    # tried again after a wait that doubles from the base to the cap, up to the
+    # attempt ceiling, then parks with its last refusal. The defaults start every
+    # try inside the late window above (`tests/src/services/target/test_past_posts_retry.py`).
+    past_posts_retry_attempts: int = 8
+    past_posts_retry_base_seconds: float = 30.0
+    past_posts_retry_cap_seconds: float = 900.0
     status_interval_seconds: float = 60.0  # cadence of the status line
     # The event-loop watchdog (`loop_watchdog`): the loop stamps a beat every
     # `loop_beat_seconds`, and one silent for `loop_stall_seconds` ends the
