@@ -171,15 +171,26 @@ def _seconds(value) -> str:
         return str(value)[:FIELD_LIMIT]
 
 
+def _held_to(measured, low: str, high: str, unit: str = "") -> str:
+    """The bounds a check recorded, as what stories take; nothing for a record
+    that kept none, since the bounds of its day are not read again."""
+    if measured.get(low) is None or measured.get(high) is None:
+        return ""
+    return (
+        f"; stories take {_seconds(measured[low])} to {_seconds(measured[high])}{unit}"
+    )
+
+
 #: What each local-validation check means in plain words, given what it measured.
 _CHECKS = {
     "stream_topology": lambda m: "this file holds no video stream",
     "duration": lambda m: (
-        f"this video is {_seconds(m.get('duration_seconds'))} s long;"
-        " stories take 3 to 60 s"
+        f"this video is {_seconds(m.get('duration_seconds'))} s long"
+        + _held_to(m, "min_seconds", "max_seconds", " s")
     ),
     "fps": lambda m: (
-        f"this video runs at {_seconds(m.get('fps'))} fps; stories take 23 to 60"
+        f"this video runs at {_seconds(m.get('fps'))} fps"
+        + _held_to(m, "min_fps", "max_fps")
     ),
     "video_codec": lambda m: (
         f"this video carries {_flat(m.get('refused_codecs')) or 'a stream'}, which"
