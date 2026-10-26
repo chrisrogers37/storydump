@@ -396,12 +396,17 @@ def test_a_plus_encoded_secret_with_a_space_is_removed():
             "fetch //Scontent-Test.fbcdn.net/v/y.mp4?oh=00_signature-value now",
             "fetch <link scontent-test.fbcdn.net> now",
         ),
+        (
+            "res.example/image/authenticated/s--AbC12_-x--/v1/f.jpg",
+            "<link res.example>",
+        ),
         ("write to someone@example.com today", "write to someone@example.com today"),
         ("Graph v26.0/1 refused it", "Graph v26.0/1 refused it"),
     ],
     ids=[
         "host-and-path",
         "scheme-relative",
+        "signed-delivery-path",
         "an-address-is-left-alone",
         "a-version-is-left-alone",
     ],
@@ -476,12 +481,12 @@ def test_scrub_text_removes_a_secret_before_it_cuts_so_no_prefix_survives():
     "text,scrubbed",
     [
         (
-            "res.example/image/authenticated/s--AbC12_-x--/v1/f.jpg",
-            "res.example/image/authenticated/s--<SIG>--/v1/f.jpg",
+            "/image/authenticated/s--AbC12_-x--/v1/f.jpg",
+            "/image/authenticated/s--<SIG>--/v1/f.jpg",
         ),
         ("sig s--AbC12_-x-- and s--DeF34--", "sig s--<SIG>-- and s--<SIG>--"),
     ],
-    ids=["in-a-bare-path", "several"],
+    ids=["in-a-path-without-its-host", "several"],
 )
 def test_scrub_text_masks_a_delivery_signature_outside_a_link(text, scrubbed):
     """A delivery signature standing outside a link is masked: the signed url
