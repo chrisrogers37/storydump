@@ -1,7 +1,7 @@
 """Selected-only preparation through actual tenant roles, real local JPEG proof."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
 import uuid
@@ -23,6 +23,7 @@ from src.services.target.instagram_past_posts_adapter import (
     PastPostsAccess,
     InstagramPastPostsAdapter,
 )
+from src.services.target.past_posts_retry import ONCE, Retry
 from src.services.target.unit_of_work import in_transaction
 from tests.scripts import test_candidate_selection_gate as selection
 from tests.scripts import test_instagram_observations_gate as obs
@@ -100,6 +101,7 @@ def service(
     returned=None,
     changed_child=None,
     truncated=False,
+    retry=ONCE,
 ):
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
@@ -165,8 +167,23 @@ def service(
         )
 
     return SelectedPreparation(
-        PastPostsPreparationPorts(foundation.capability(), prepare, obs.keys())
+        PastPostsPreparationPorts(
+            foundation.capability(), prepare, obs.keys(), retry=retry
+        )
     ), calls
+
+
+#: Tries again after 30 s, up to three tries.
+RETRY = Retry(attempts=3, base_seconds=30, cap_seconds=900)
+
+
+async def next_try(engine, chain, intent):
+    """The slide's capture without its next try, that next try, and the
+    database's clock now."""
+    capture = dict((await proof(engine, chain, intent))["validation_capture"])
+    async with obs.uow(engine, chain) as conn:
+        now = await conn.scalar(text("SELECT clock_timestamp()"))
+    return capture, datetime.fromisoformat(capture.pop("next_attempt_at")), now
 
 
 async def test_selected_bytes_bind_before_dispatch_and_real_proof_is_strict(
@@ -991,9 +1008,12 @@ async def test_remote_changed_first_asset_is_coherent_unavailable_without_cdn(
 async def test_truncated_children_missing_selected_slide_defers_without_cdn(
     past_posts_engine, origin
 ):
+    """A truncated children read cannot prove the selected slide left: the story
+    waits for its next try with the read's `slide_changed` evidence, and nothing
+    is retired."""
     src, item, intent = await selected(past_posts_engine, origin)
     prepared, calls = service(
-        past_posts_engine, origin, changed_child="456", truncated=True
+        past_posts_engine, origin, changed_child="456", truncated=True, retry=RETRY
     )
     with pytest.raises(source_policy.MediaAdmissionPending) as error:
         await prepared.fetch_selected(
@@ -1001,8 +1021,14 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
     assert error.value.reason == "past_posts_revalidation_required"
     assert calls == ["graph.instagram.com"] * 2
-    row = await proof(past_posts_engine, origin, intent)
-    assert row["validation_capture"] is None
+    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
+    assert (capture["reason"], capture["attempt"]) == ("download_pending", 1)
+    assert {
+        key: capture["refusal"][key] for key in ("kind", "children", "complete")
+    } == {"kind": "slide_changed", "children": 1, "complete": False}
+    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
@@ -1029,6 +1055,68 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
             )
             == 0
         )
+
+
+async def test_a_changed_slide_inside_its_wait_is_deferred_without_a_read(
+    past_posts_engine, origin
+):
+    """Before its next try a story waits for revalidation and nothing is read:
+    no Graph request, no download."""
+    _, _, intent = await selected(past_posts_engine, origin)
+    changed, _ = service(
+        past_posts_engine, origin, changed_child="456", truncated=True, retry=RETRY
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending):
+        await changed.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    prepared, calls = service(past_posts_engine, origin, retry=RETRY)
+    with pytest.raises(source_policy.MediaAdmissionPending) as error:
+        await prepared.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert error.value.reason == "past_posts_revalidation_required" and calls == []
+
+
+async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
+    past_posts_engine, origin
+):
+    """The last try parks the story `asset_unavailable` with the read's
+    `slide_changed` evidence; the slide is not retired."""
+    src, item, intent = await selected(past_posts_engine, origin)
+    twice = Retry(attempts=2, base_seconds=0, cap_seconds=0)
+    changed, calls = service(
+        past_posts_engine, origin, changed_child="456", truncated=True, retry=twice
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending) as first:
+        await changed.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    with pytest.raises(source_policy.MediaAdmissionPending) as last:
+        await changed.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert first.value.reason == "past_posts_revalidation_required"
+    assert last.value.reason == "asset_unavailable"
+    assert last.value.evidence["kind"] == "slide_changed"
+    assert calls == ["graph.instagram.com"] * 4
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert (capture["reason"], capture["attempt"], capture["refusal"]) == (
+        "asset_unavailable",
+        2,
+        last.value.evidence,
+    )
+    assert "next_attempt_at" not in capture
+    async with obs.uow(past_posts_engine, origin) as conn:
+        verdict = await selection.verdict(conn, origin, src, intent=intent)
+        assert (
+            await conn.scalar(
+                text("SELECT state FROM media_items WHERE id=:id"),
+                {"id": item.media_item_id},
+            )
+            == "available"
+        )
+    assert verdict["reason"] == "asset_unavailable" and not verdict["suitable"]
 
 
 @pytest.mark.parametrize("stale", ["reobserved", "policy", "cancelled"])

@@ -103,6 +103,20 @@ def scrub_text(value, *, secrets=()) -> Optional[str]:
     return text.replace("\x00", "")[:TEXT_LIMIT]
 
 
+#: Graph's answer for an object that does not exist: code 100, subcode 33.
+GRAPH_NOT_FOUND = (100, 33)
+
+
+def proves_gone(refusal) -> bool:
+    """Whether a refusal is Graph's own answer that the post does not exist,
+    the one refusal that proves a post gone."""
+    return (
+        isinstance(refusal, dict)
+        and refusal.get("kind") == "graph_error"
+        and (refusal.get("code"), refusal.get("error_subcode")) == GRAPH_NOT_FOUND
+    )
+
+
 def short(value) -> Optional[str]:
     """A short provider field as bounded text, or None."""
     if value is None:
