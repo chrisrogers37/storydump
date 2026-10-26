@@ -217,9 +217,19 @@ _CARD_SELECT = (
 
 
 # Keep the planned-door's core SELECT contract. Provider is routing metadata,
-# added by the local reader without altering that door's return schema.
+# added by the local reader without altering that door's return schema; so is a
+# past-posts video's trim, from its selected slide's validation evidence
+# (`media_validation.inspect_video_facts`), which the card states.
 _CARD_WITH_PROVIDER = (
-    "SELECT card.*, s.provider AS source_provider FROM (" + _CARD_SELECT + ") card "
+    "SELECT card.*, s.provider AS source_provider,"
+    " (SELECT a.validation_capture->'evidence'->>'trimmed_to_seconds'"
+    "    FROM instagram_intent_provenance p"
+    "    JOIN instagram_media_assets a ON a.workspace_id=p.workspace_id"
+    "     AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id"
+    "     AND a.asset_media_id=p.selected_asset_identity"
+    "   WHERE p.workspace_id=card.workspace_id AND p.intent_id=card.id"
+    " ) AS trimmed_to_seconds"
+    " FROM (" + _CARD_SELECT + ") card "
     "JOIN media_sources s ON s.workspace_id=card.workspace_id AND s.id=card.source_id"
 )
 

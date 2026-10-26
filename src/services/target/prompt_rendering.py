@@ -400,7 +400,8 @@ def render_card(
     ``scheduled_by``) also says who scheduled it, and whether it is late
     against *now*, the render's own instant (the clock's, when omitted).
     *note* is a waiting card's block note (`block_note`), one line under the
-    slot.
+    slot. ``trimmed_to_seconds``, set for a past-posts video longer than a
+    story, adds the line saying its story is trimmed.
     """
     intent_id = str(intent["intent_id"])
     slot = intent.get("schedule_slot_at")
@@ -411,6 +412,8 @@ def render_card(
     planned = _planned_line(intent, slot=slot, tz=tz, now=now)
     if planned:
         slot_line += f"\n{planned}"
+    if intent.get("trimmed_to_seconds"):
+        slot_line += f"\n✂️ Trimmed to {intent['trimmed_to_seconds']} s"
     if note:
         slot_line += f"\n{note}"
     file_name = intent.get("file_name") or "media"

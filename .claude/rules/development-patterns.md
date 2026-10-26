@@ -130,8 +130,10 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   (`media_adapters.MEDIA_CARD_MAX_BYTES`). Oversize is refused from
   metadata, before a download.
 - Framing is done at delivery, not on upload: `transit.story_transformation`
-  (`transit.py:218`) scales to 1080 × 1920 and pads to 9:16 over a blurred copy,
-  delivered as JPG or MP4. Nothing in `src/` resizes an image.
+  scales to 1080 × 1920 and pads to 9:16 over a blurred copy, delivered as JPG or
+  MP4. A video is also trimmed to the longest story and encoded to Instagram's
+  story spec, from the validation matrix (`media_validation.story_video_encoding`).
+  Nothing in `src/` resizes an image.
 
 ## Security patterns
 

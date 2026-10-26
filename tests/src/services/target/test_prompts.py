@@ -252,6 +252,20 @@ class TestTheCardCarriesTheMedia:
         payload = prompts.render_card(self._with_media(), api_publishing_enabled=False)
         assert "sunset.jpg" in payload["text"] and "14:30" in payload["text"]
 
+    def test_a_trimmed_video_says_so_in_its_text_and_its_caption(self):
+        payload = prompts.render_card(
+            self._with_media(
+                media_kind="video", mime_type="video/mp4", trimmed_to_seconds="60"
+            ),
+            api_publishing_enabled=False,
+        )
+        assert "✂️ Trimmed to 60 s" in payload["text"]
+        assert "✂️ Trimmed to 60 s" in payload["caption"]
+
+    def test_a_card_says_nothing_of_a_trim_it_did_not_have(self):
+        payload = prompts.render_card(self._with_media(), api_publishing_enabled=False)
+        assert "Trimmed" not in payload["text"] + payload["caption"]
+
     def test_an_intent_without_a_file_reference_renders_a_text_only_card(self):
         payload = prompts.render_card(_card_input(), api_publishing_enabled=False)
         assert "media" not in payload and "caption" not in payload

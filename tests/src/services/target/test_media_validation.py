@@ -219,16 +219,48 @@ def probe_facts(*, duration="10.000000", fps="30/1", format_duration=None, video
 
 
 @pytest.mark.parametrize(
-    "duration,reason",
-    [("2.999", "duration"), ("3", None), ("60", None), ("60.001", "duration")],
+    "duration,text,trimmed",
+    [
+        ("2.999", None, None),
+        ("3", "3", None),
+        ("60", "60", None),
+        ("60.001", "60001/1000", "60"),
+    ],
 )
-def test_exact_video_duration_boundaries(duration, reason):
-    if reason:
-        with pytest.raises(v.UnsupportedMedia, match=f"^{reason}$"):
+def test_exact_video_duration_boundaries(duration, text, trimmed):
+    """Under the shortest story is refused; over the longest is kept, and its
+    derivation trims it."""
+    if text is None:
+        with pytest.raises(v.UnsupportedMedia, match="^duration$"):
             v.inspect_video_facts(probe_facts(duration=duration))
     else:
         facts = v.inspect_video_facts(probe_facts(duration=duration))
-        assert facts["duration_seconds"] == duration
+        assert (facts["duration_seconds"], facts["trimmed_to_seconds"]) == (
+            text,
+            trimmed,
+        )
+
+
+def test_a_video_records_the_encoding_its_derivation_is_sent():
+    assert v.inspect_video_facts(probe_facts())["derivation"] == {
+        "video_codec": ["h264", "high", "4.2"],
+        "audio_codec": "aac",
+        "audio_hz": 48_000,
+        "fps": [23, 60],
+        "video_bits_per_second": 13_000_000,
+        "longest_seconds": 60,
+    }
+
+
+def test_the_bit_rate_cap_honours_both_of_metas_limits():
+    """Meta's VBR maximum, and its file size at the longest story with the
+    audio's share."""
+    matrix = v.SUPPORTED_MEDIA_MATRIX
+    cap = v.story_video_encoding()["video_bits_per_second"]
+    longest = matrix["duration_seconds"][1]
+    audio = matrix["provider_audio_bits_per_second"]
+    assert cap <= matrix["provider_video_bits_per_second"]
+    assert (cap + audio) * longest <= matrix["provider_video_bytes"] * 8
 
 
 @pytest.mark.parametrize(
@@ -663,8 +695,8 @@ VIDEO_REFUSALS = [
     pytest.param(
         v.UnsupportedMedia,
         "duration",
-        probe_facts(duration="61.5"),
-        {"duration_seconds": "123/2", "fps": "30"},
+        probe_facts(duration="2.5"),
+        {"duration_seconds": "5/2", "fps": "30"},
         id="duration",
     ),
     pytest.param(
