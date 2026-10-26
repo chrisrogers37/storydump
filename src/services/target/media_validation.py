@@ -12,9 +12,14 @@ Meta never receives a video's source file. It fetches the transit store's
 story derivation of it (`transit.story_transformation`, delivered as MP4 in the
 story frame), so a video is judged only on what the derivation keeps from it:
 its size, a well-formed self-contained container, a video stream the probe can
-open, its duration and its frame rate. The source's container layout (edit
-lists, where `moov` sits), its encoding settings and its audio settings are the
-derivation's to set, and are not judged here.
+open, its duration and its frame rate. The derivation is trimmed to the
+longest story and encoded to the matrix's story video
+(`story_video_encoding`), so a longer video is kept and only a shorter one is
+refused for its length. The frame rate is still refused outside the matrix:
+the derivation's frame-rate range is not documented for a source outside it.
+The source's container layout (edit lists, where `moov` sits), its encoding
+settings and its audio settings are the derivation's to set, and are not
+judged here.
 """
 
 from __future__ import annotations
@@ -39,8 +44,10 @@ from typing import Literal, Mapping
 
 from .vocabulary import PUBLISH_MAX_BYTES
 
-MATRIX_VERSION = "instagram-story-2026-10-25-v2"
-EVIDENCE_VERSION = 1
+MATRIX_VERSION = "instagram-story-2026-10-26-v3"
+EVIDENCE_VERSION = 2
+#: Meta: "File size: 100MB maximum"
+PROVIDER_VIDEO_BYTES = 100_000_000
 SUPPORTED_MEDIA_MATRIX = MappingProxyType(
     {
         "version": MATRIX_VERSION,
@@ -51,7 +58,7 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
         "byte_caps": MappingProxyType(
             {
                 "image": min(PUBLISH_MAX_BYTES["image"], 8_000_000),
-                "video": min(PUBLISH_MAX_BYTES["video"], 100_000_000),
+                "video": min(PUBLISH_MAX_BYTES["video"], PROVIDER_VIDEO_BYTES),
             }
         ),
         "image": ("JPEG", "sRGB; provider converts other color spaces"),
@@ -60,11 +67,47 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
             "a video stream the probe can open: H.264 or HEVC, with AAC audio",
             "delivered to Meta as the transit store's story derivation",
         ),
+        # Meta: "Duration: 60 seconds maximum,  3 seconds minimum"
         "duration_seconds": (3, 60),
+        # Meta: "Frame rate: 23-60 FPS."
         "fps": (23, 60),
-        "provider_video_bytes": 100_000_000,
+        # What the story derivation is encoded to (`story_video_encoding`).
+        # Meta: "Video codec: HEVC or H264, progressive scan, closed GOP, 4:2:0
+        # chroma subsampling." H.264 high profile is 4:2:0, and level 4.2
+        # holds 1080 x 1920 at up to 60 fps.
+        "video_codec": ("h264", "high", "4.2"),
+        # Meta: "Audio codec: AAC, 48khz sample rate maximum, 1 or 2 channels
+        # (mono or stereo)."
+        "audio_codec": "aac",
+        "audio_hz": 48_000,
+        # Meta: "Video bitrate: VBR, 25Mbps maximum"; "Audio bitrate: 128kbps"
+        "provider_video_bits_per_second": 25_000_000,
+        "provider_audio_bits_per_second": 128_000,
+        "provider_video_bytes": PROVIDER_VIDEO_BYTES,
     }
 )
+
+
+def story_video_encoding() -> dict:
+    """What every story video's derivation is encoded to, from the matrix, as
+    a video's evidence records it. The bit-rate cap is the lower of Meta's two
+    limits at the longest story: its VBR maximum, and its file size less the
+    audio, rounded down to the megabit so the container's overhead fits."""
+    matrix = SUPPORTED_MEDIA_MATRIX
+    longest = matrix["duration_seconds"][1]
+    file_rate = matrix["provider_video_bytes"] * 8 // longest
+    fits_the_file = file_rate - matrix["provider_audio_bits_per_second"]
+    return {
+        "video_codec": list(matrix["video_codec"]),
+        "audio_codec": matrix["audio_codec"],
+        "audio_hz": matrix["audio_hz"],
+        "fps": list(matrix["fps"]),
+        "video_bits_per_second": min(
+            matrix["provider_video_bits_per_second"],
+            fits_the_file // 1_000_000 * 1_000_000,
+        ),
+        "longest_seconds": longest,
+    }
 
 
 def _bounds(check: str, kind: str) -> dict:
@@ -643,8 +686,10 @@ def _positive_fraction(value):
 def inspect_video_facts(facts):
     """What the story derivation keeps of a video: its video stream (the first,
     as the derivation takes it), the stream's duration (else the container's)
-    and its frame rate. A frame rate the probe does not state is not judged;
-    one outside the matrix is refused."""
+    and its frame rate. A video shorter than the shortest story is refused; one
+    longer than the longest is kept, trimmed by the derivation, and recorded as
+    trimmed. A frame rate the probe does not state is not judged; one outside
+    the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
     if not videos:
@@ -660,7 +705,7 @@ def inspect_video_facts(facts):
     fps = _positive_fraction(video.get("avg_frame_rate"))
     timing = dict(duration_seconds=duration, fps=fps)
     shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
-    if not shortest <= duration <= longest:
+    if duration < shortest:
         raise _measured(UnsupportedMedia("duration"), **timing)
     slowest, fastest = SUPPORTED_MEDIA_MATRIX["fps"]
     if fps is not None and not slowest <= fps <= fastest:
@@ -672,6 +717,8 @@ def inspect_video_facts(facts):
         "duration_seconds": str(duration),
         "fps": "unstated" if fps is None else str(fps),
         "audio": any(s.get("codec_type") == "audio" for s in streams),
+        "trimmed_to_seconds": str(longest) if duration > longest else None,
+        "derivation": story_video_encoding(),
     }
 
 
