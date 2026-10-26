@@ -529,9 +529,9 @@ async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
 async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
     monkeypatch,
 ):
-    """Each late story the door lists is handed to the park with its tries and
-    the window, in workspace order, and a park that fails leaves the others to
-    run; the reaper counts the parks that took."""
+    """Each late story the door lists is handed to the park, as the reaper,
+    with its tries and the window, in the door's order, and a park that fails
+    leaves the others to run; the reaper counts the parks that took."""
     rows = [("i-2", "ws-b", 3), ("i-1", "ws-a", 0), ("i-3", "ws-c", 1)]
     parked = []
 
@@ -548,8 +548,10 @@ async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
     async def settled(session, *, limit):
         return None
 
-    async def park_late(*, engine, workspace_id, intent_id, tries, late_seconds):
-        parked.append((workspace_id, intent_id, tries, late_seconds))
+    async def park_late(
+        *, engine, workspace_id, intent_id, tries, late_seconds, actor_kind
+    ):
+        parked.append((workspace_id, intent_id, tries, late_seconds, actor_kind))
         if intent_id == "i-2":
             raise RuntimeError("one story rolls back alone")
         return intent_id == "i-1"
@@ -570,9 +572,9 @@ async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
     )
 
     assert parked == [
-        ("ws-a", "i-1", 0, 3600),
-        ("ws-b", "i-2", 3, 3600),
-        ("ws-c", "i-3", 1, 3600),
+        ("ws-b", "i-2", 3, 3600, "reaper"),
+        ("ws-a", "i-1", 0, 3600, "reaper"),
+        ("ws-c", "i-3", 1, 3600, "reaper"),
     ]
     assert touched == 1
 

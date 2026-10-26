@@ -300,6 +300,10 @@ REVOKE ALL ON FUNCTION fn_reaper_stale_approved(interval, integer) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_reaper_stale_approved(interval, integer) TO svc_worker;
 
+REVOKE ALL ON FUNCTION fn_reaper_parks_late(uuid, uuid) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_parks_late(uuid, uuid) TO svc_maintenance;
+
 REVOKE ALL ON FUNCTION fn_reaper_late_past_posts(interval, integer) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_reaper_late_past_posts(interval, integer) TO svc_worker;

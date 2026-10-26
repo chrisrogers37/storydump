@@ -176,20 +176,11 @@ async def authorize(
         elif reason == "asset_unavailable":
             # A slide a refused fetch parked: the story parks at once, saying
             # what refused it.
-            capture = await conn.scalar(
-                text(
-                    "SELECT validation_capture FROM instagram_media_assets"
-                    " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
-                ),
-                dict(
-                    ws=str(workspace_id),
-                    sid=str(subject["source_id"]),
-                    item=str(subject["media_item_id"]),
-                ),
-            )
             raise refusal_evidence.attach(
                 PastPostsEffectRefused("past_posts_content_unavailable"),
-                refusal_evidence.latched(capture),
+                refusal_evidence.latched(
+                    await _slide_capture(conn, workspace_id, subject)
+                ),
             )
         elif reason in ("past_posts_revalidation_required", "validation_pending"):
             reason = "past_posts_revalidation_required"
@@ -310,13 +301,29 @@ async def _write_stage(conn, *, workspace_id, intent_id, subject, artifact):
         raise PastPostsEffectRefused("past_posts_content_unavailable")
 
 
-async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> None:
+async def _slide_capture(conn, workspace_id, subject):
+    """The locked subject's slide capture (`validation_capture`), or None when
+    the slide has no asset row."""
+    return await conn.scalar(
+        text(
+            "SELECT validation_capture FROM instagram_media_assets"
+            " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
+        ),
+        dict(
+            ws=str(workspace_id),
+            sid=str(subject["source_id"]),
+            item=str(subject["media_item_id"]),
+        ),
+    )
+
+
+async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> bool:
     """Park a waiting past-posts story for review, in the caller's
     transaction, on the reason its preparation was not admitted. The refusal's
     *evidence*, when there is one, rides with the reason: `last_error ->
     'error' -> 'refusal'`, the audit detail's `refusal` and the notice
     (`refusal_evidence`). A slide judged gone has no asset row left to hold
-    it."""
+    it. False, and nothing logged, when the story had already moved on."""
     from src.services.target import publish_pipeline
 
     reason = (
@@ -353,7 +360,7 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> N
         detail={"reason": reason, **refusal},
     )
     tz = await conn.scalar(text("SELECT tz FROM workspaces WHERE id=:ws"), dict(ws=ws))
-    await publish_pipeline.park_for_review(
+    parked = await publish_pipeline.park_for_review(
         conn,
         workspace_id=ws,
         intent_id=iid,
@@ -361,13 +368,15 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> N
         tz=str(tz or "UTC"),
         notice=_park_notice(evidence, admission_reason),
     )
-    logger.info(
-        "past-posts story %s parked for review from %s: %s (%s)",
-        iid,
-        state,
-        reason,
-        (evidence or {}).get("kind", "no refusal recorded"),
-    )
+    if parked:
+        logger.info(
+            "past-posts story %s parked for review from %s: %s (%s)",
+            iid,
+            state,
+            reason,
+            (evidence or {}).get("kind", "no refusal recorded"),
+        )
+    return parked
 
 
 class PastPostsPipeline:
@@ -376,8 +385,8 @@ class PastPostsPipeline:
         self.prepare_selected = prepare_selected
         self._completions = set()
 
-    def _uow(self, engine, ws):
-        return unit_of_work(engine, str(ws), actor_kind="system")
+    def _uow(self, engine, ws, actor_kind="system"):
+        return unit_of_work(engine, str(ws), actor_kind=actor_kind)
 
     async def selected_prepare(self, *, engine, workspace_id, intent_id, attempt=1):
         """Prepare a bound card, or review definite content loss under fresh authority.
@@ -493,16 +502,25 @@ class PastPostsPipeline:
             return True
 
     async def park_late(
-        self, *, engine, workspace_id, intent_id, tries, late_seconds
+        self,
+        *,
+        engine,
+        workspace_id,
+        intent_id,
+        tries,
+        late_seconds,
+        actor_kind="system",
     ) -> bool:
         """Park a story whose late window, *late_seconds* after its slot,
-        closed before its file could be fetched. Its evidence says so
-        (`window_closed`): the *tries* its prepare jobs spent, and the refusal
-        its slide last recorded, read under the story's lock. No fetch decides
-        it, so no fetch's fence is needed: only that the story still waits for
-        its slot. False when it no longer does."""
+        closed before its file could be fetched, as *actor_kind* (the reaper's
+        leg passes its own). Its evidence says so (`window_closed`): the *tries*
+        its prepare jobs spent, and the refusal its slide last recorded, read
+        under the story's lock. That is any refusal the capture holds, a
+        waiting one (`download_pending`) included, so not `latched`'s. No fetch
+        decides it, so no fetch's fence is needed: only that the story still
+        waits for its slot. False when it no longer does."""
         ws, iid = str(workspace_id), str(intent_id)
-        async with self._uow(engine, ws).begin() as conn:
+        async with self._uow(engine, ws, actor_kind).begin() as conn:
             subject, _ = await lock_pipeline(
                 conn, workspace_id=ws, intent_id=iid, capability=self.capability
             )
@@ -513,18 +531,8 @@ class PastPostsPipeline:
                 or subject["cancel_requested"]
             ):
                 return False
-            capture = await conn.scalar(
-                text(
-                    "SELECT validation_capture FROM instagram_media_assets"
-                    " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
-                ),
-                dict(
-                    ws=ws,
-                    sid=str(subject["source_id"]),
-                    item=str(subject["media_item_id"]),
-                ),
-            )
-            await _record_park(
+            capture = await _slide_capture(conn, ws, subject)
+            return await _record_park(
                 conn,
                 ws=ws,
                 iid=iid,
@@ -539,7 +547,6 @@ class PastPostsPipeline:
                     ),
                 ),
             )
-        return True
 
     async def _inspect(self, conn, ws, iid, *, capture=None):
         locked = await lock_pipeline(

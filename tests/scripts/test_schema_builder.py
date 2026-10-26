@@ -98,7 +98,7 @@ def test_build_targets_public_and_restores_the_callers_search_path(
                         " ON n.oid = p.pronamespace WHERE n.nspname = 'public'"
                     )
                 ).scalar_one()
-                == 86
+                == 87
             )
             assert (
                 conn.execute(

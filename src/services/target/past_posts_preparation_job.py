@@ -10,10 +10,11 @@ Each claim is one try, which `fn_claim_job` counts in the job's attempts:
 
 - A cadence story still waiting for its slot is parked for review, before any
   read, once a download could no longer finish inside its late window
-  (`WorkerConfig.planned_late_seconds`, the window a planned story has). The
-  reaper never expires such a story: it parks one whose window closed with no
-  job running (`fn_reaper_late_past_posts`), the same way. A planned story's
-  window is the miss leg's (`fn_planned_misses`), which tells its chats.
+  (`WorkerConfig.planned_late_seconds`, the window a planned story has). With
+  the source armed, the reaper does not expire such a story of an active,
+  unpaused workspace: it parks one whose window closed with no job running
+  (`fn_reaper_late_past_posts`), the same way. A planned story's window is the
+  miss leg's (`fn_planned_misses`), which tells its chats.
 - Otherwise the coordinator prepares the file
   (`PastPostsPipeline.selected_prepare`). The preparation decides each refusal
   on this try's number (`past_posts_retry`): a refusal that proves nothing puts

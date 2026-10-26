@@ -585,6 +585,7 @@ async def execute_reap_expired(
 
     activated = is_activated(capability)
     parks = activated and park_late is not None
+    late_seconds = int(past_posts_late_seconds) if parks else None
     system = unit_of_work.poller_session_factory(engine, "")
     async with system() as session:
         swept = int(
@@ -612,7 +613,7 @@ async def execute_reap_expired(
         await session.commit()
 
     remaining = max(0, int(limit) - swept)
-    subjects = []
+    subjects, late = [], []
     if remaining:
         async with system() as session:
             subjects = (
@@ -624,6 +625,16 @@ async def execute_reap_expired(
                     {"ttl": int(approved_ttl_seconds), "lim": remaining},
                 )
             ).all()
+            if parks and remaining > len(subjects):
+                late = (
+                    await session.execute(
+                        text(
+                            "SELECT o_intent_id, o_workspace_id, o_tries FROM "
+                            "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)"
+                        ),
+                        {"late": late_seconds, "lim": remaining - len(subjects)},
+                    )
+                ).all()
             await session.commit()
 
     parked = 0
@@ -643,32 +654,16 @@ async def execute_reap_expired(
         except Exception:  # noqa: BLE001 — one subject rolls back alone
             logger.exception("reaper: stale approved subject skipped this tick")
 
-    late = []
-    if parks and remaining > len(subjects):
-        async with system() as session:
-            late = (
-                await session.execute(
-                    text(
-                        "SELECT o_intent_id, o_workspace_id, o_tries FROM "
-                        "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)"
-                    ),
-                    {
-                        "late": int(past_posts_late_seconds),
-                        "lim": remaining - len(subjects),
-                    },
-                )
-            ).all()
-            await session.commit()
-    for intent_id, workspace_id, tries in sorted(
-        late, key=lambda row: (str(row[1]), str(row[0]))
-    ):
+    # Oldest slot first, as the door lists them; each park is its own transaction.
+    for intent_id, workspace_id, tries in late:
         try:
             parked += await park_late(
                 engine=engine,
                 workspace_id=str(workspace_id),
                 intent_id=str(intent_id),
                 tries=int(tries),
-                late_seconds=int(past_posts_late_seconds),
+                late_seconds=late_seconds,
+                actor_kind="reaper",
             )
         except Exception:  # noqa: BLE001 — one story rolls back alone
             logger.exception(
