@@ -31,20 +31,11 @@ from src.services.target.unit_of_work import unit_of_work
 logger = logging.getLogger(__name__)
 
 
-#: The notice a story parked for its past-posts content gets when its refusal
-#: says nothing more specific.
-PARK_NOTICE = (
-    "This story from your Instagram past posts has selected content that is"
-    " unavailable or changed. Open the Queue to review it."
-)
-
-
 def _park_notice(evidence) -> str:
-    """The park's notice: why it was refused, in plain words, when the refusal's
-    evidence says (`refusal_evidence.plain`); otherwise the generic notice."""
-    reason = refusal_evidence.plain(evidence)
-    if reason is None:
-        return PARK_NOTICE
+    """The park's notice: why it was refused, in plain words
+    (`refusal_evidence.plain`), or that no reason was recorded. Never a cause
+    the record cannot support."""
+    reason = refusal_evidence.plain(evidence) or "no reason was recorded"
     return (
         "This story from your Instagram past posts could not be prepared."
         f" Refused: {reason}. Open the Queue to review it."
