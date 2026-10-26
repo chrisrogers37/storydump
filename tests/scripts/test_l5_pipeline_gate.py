@@ -1631,6 +1631,25 @@ class TestDefinitiveFailureClassification:
         ]
         assert len(transit.upload_calls) == 1
 
+    def test_a_dead_container_keeps_metas_own_reason(self, pipe_db):
+        """Meta's `status` text for a container it would not process is the
+        whole of its answer for that refusal: the retry records it with the
+        status, beside the type."""
+        from src.services.target.instagram_graph import ContainerStatus
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        reason = "Error: Media upload has failed with error code 2207026"
+        meta = StubMetaAdapter(status_script=[ContainerStatus("ERROR", reason)])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == RETRY_SCHEDULED
+        error = _intent_row(pipe_db, intent)["last_error"]["error"]
+        assert (error["type"], error["status_code"], error["status"]) == (
+            "ContainerDead",
+            "ERROR",
+            reason,
+        )
+
 
 class TestADeadContainerIdDoesNotOutliveItsContainer:
     """On the RETRY path a stale container id lives only "between two

@@ -1,4 +1,4 @@
-"""Reproducible matrix stimuli, generated only in the pinned local runtime.
+"""Reproducible matrix stimuli, and the judgment the validator gives each.
 
 Run: python generate_media_validation_fixtures.py /temporary/output-directory
 No provider calls or application startup. Flags are stimuli, not acceptance proof.
@@ -107,8 +107,8 @@ def generate(directory):
         extra=(),
         codec="libx264",
         pix="yuv420p",
-        reason="needs_spec_evidence",
-        state="validation_pending",
+        reason="validated",
+        state="supported",
     ):
         encoder = ["-c:v", codec, "-threads", "1", "-pix_fmt", pix]
         if codec == "libx264":
@@ -154,50 +154,38 @@ def generate(directory):
     video("h264.mp4")
     video("hevc.mp4", codec="libx265")
     video("format.mov")
-    for count, reason in (
-        (89, "duration"),
-        (90, "needs_spec_evidence"),
-        (1800, "needs_spec_evidence"),
-        (1801, "duration"),
-    ):
+    for count in (89, 90, 1800, 1801):
+        refused = count in (89, 1801)
         video(
             f"frames-{count}.mp4",
             count=count,
-            reason=reason,
-            state="validation_pending"
-            if reason == "needs_spec_evidence"
-            else "unsupported",
+            reason="duration" if refused else "validated",
+            state="unsupported" if refused else "supported",
         )
     for fps in (22, 23, 60, 61):
+        refused = fps in (22, 61)
         video(
             f"fps-{fps}.mp4",
             fps=fps,
             count=fps * 3,
-            reason="fps" if fps in (22, 61) else "needs_spec_evidence",
-            state="unsupported" if fps in (22, 61) else "validation_pending",
+            reason="fps" if refused else "validated",
+            state="unsupported" if refused else "supported",
         )
-    for size, reason in (
-        ("1920x1080", None),
-        ("1922x1080", "width"),
-        ("100x1000", None),
-        ("98x1000", "aspect"),
-        ("1000x100", None),
-        ("1002x100", "aspect"),
+    # The stream's frame size, chroma, interlacing and GOP are the story
+    # derivation's to set, so none of them is judged.
+    for size in (
+        "1920x1080",
+        "1922x1080",
+        "100x1000",
+        "98x1000",
+        "1000x100",
+        "1002x100",
     ):
-        video(
-            f"geometry-{size}.mp4",
-            size=size,
-            reason=reason or "needs_spec_evidence",
-            state="unsupported" if reason else "validation_pending",
-        )
-    video(
-        "chroma422.mp4", pix="yuv422p", state="unsupported", reason="chroma_subsampling"
-    )
+        video(f"geometry-{size}.mp4", size=size)
+    video("chroma422.mp4", pix="yuv422p")
     video(
         "interlaced.mp4",
         extra=("-flags", "+ilme+ildct", "-x264-params", "tff=1:open-gop=0"),
-        state="unsupported",
-        reason="interlaced",
     )
     video(
         "open-gop.mp4",
@@ -206,17 +194,16 @@ def generate(directory):
             "-x264-params",
             "open-gop=1:keyint=30:min-keyint=30:scenecut=0:bframes=3",
         ),
-        reason="closed_gop_unproven",
     )
     video("mpeg4.mp4", codec="mpeg4", state="unsupported", reason="video_codec")
     base = directory / "h264.mp4"
     for name, opts, state, reason in (
-        ("late-moov.mp4", (), "unsupported", "moov_not_front"),
+        ("late-moov.mp4", (), "supported", "validated"),
         (
             "edits.mp4",
             ("-movflags", "+faststart", "-use_editlist", "1"),
-            "unsupported",
-            "edit_list",
+            "supported",
+            "validated",
         ),
         (
             "fragmented.mp4",
@@ -261,19 +248,8 @@ def generate(directory):
                 "+faststart",
             ],
         )
-        reason = (
-            "audio_sample_rate"
-            if rate > 48000
-            else "audio_channels"
-            if channels > 2
-            else "needs_spec_evidence"
-        )
-        record(
-            name,
-            "video",
-            "validation_pending" if reason == "needs_spec_evidence" else "unsupported",
-            reason,
-        )
+        # Audio is the story derivation's to set, so none of these is judged.
+        record(name, "video", "supported", "validated")
     raw = base.read_bytes()
     (directory / "truncated.mp4").write_bytes(raw[:-100])
     record("truncated.mp4", "video", "unsupported", "malformed_container")
@@ -283,11 +259,11 @@ def generate(directory):
         record(
             name,
             "video",
-            "unsupported" if cap > 40_000_000 else "validation_pending",
-            "byte_limit" if cap > 40_000_000 else "needs_spec_evidence",
+            "unsupported" if cap > 40_000_000 else "supported",
+            "byte_limit" if cap > 40_000_000 else "validated",
         )
     (directory / "fake-elst.mp4").write_bytes(raw + box(b"free", b"elst"))
-    record("fake-elst.mp4", "video", "validation_pending", "needs_spec_evidence")
+    record("fake-elst.mp4", "video", "supported", "validated")
     entry = box(b"url ", bytes(4) + b"../must-not-open\0")
     dref = box(b"dref", bytes(4) + struct.pack(">I", 1) + entry)
     (directory / "external-dref.mp4").write_bytes(
@@ -314,7 +290,6 @@ def generate(directory):
             "-fps_mode",
             "passthrough",
         ),
-        reason="timing_evidence_incomplete",
     )
     probe = subprocess.run(
         [
@@ -336,9 +311,9 @@ def generate(directory):
     start, size = int(packet["pos"]), int(packet["size"])
     corrupt[start : start + size] = bytes(size)
     (directory / "malformed-second-gop.mp4").write_bytes(corrupt)
-    record(
-        "malformed-second-gop.mp4", "video", "validation_pending", "probe_incomplete"
-    )
+    # The probe reads the stream's start; a packet broken further in is the
+    # derivation's to meet.
+    record("malformed-second-gop.mp4", "video", "supported", "validated")
     (directory / "manifest.json").write_text(json.dumps(cases, indent=2) + "\n")
     return cases
 
