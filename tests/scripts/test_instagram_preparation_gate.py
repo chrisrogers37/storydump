@@ -1679,3 +1679,42 @@ async def test_selected_discovery_owner_has_only_required_past_posts_read_grants
         delete = "SELECT has_table_privilege('svc_maintenance',:table,'DELETE')"
         assert await conn.scalar(text(delete), {"table": "instagram_intent_provenance"})
         assert not await conn.scalar(text(delete), {"table": "instagram_media_assets"})
+
+
+@pytest.mark.parametrize(
+    "version", ["instagram-story-older", None], ids=["older", "unstamped"]
+)
+async def test_a_refusal_from_an_older_matrix_version_is_judged_again(
+    past_posts_engine, origin, version
+):
+    """A slide refused under an older matrix version, or under none, is fetched
+    and judged again when its story is prepared, and lands the new verdict."""
+    _, item, intent = await selected(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await obs.stamp_refusal(conn, origin, item, version)
+    prepared, calls = service(past_posts_engine, origin)
+    await prepared.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    row = await proof(past_posts_engine, origin, intent)
+    assert row["validation_state"] == "supported"
+    assert (
+        row["validation_capture"]["matrix_version"] == media_validation.MATRIX_VERSION
+    )
+    assert calls == ["graph.instagram.com", "scontent-test.cdninstagram.com"]
+
+
+async def test_a_refusal_under_the_current_matrix_version_is_returned_without_a_fetch(
+    past_posts_engine, origin
+):
+    """A slide refused under the current matrix version is not fetched again:
+    preparation returns the stored verdict."""
+    _, item, intent = await selected(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await obs.stamp_refusal(conn, origin, item, media_validation.MATRIX_VERSION)
+    prepared, calls = service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "unsupported" and calls == []

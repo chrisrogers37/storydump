@@ -99,6 +99,32 @@ async def redact(engine, chain, source, ring=None):
         )
 
 
+async def stamp_refusal(conn, chain, item, version):
+    """Store a refusal on *item*'s slide the way preparation records one: the
+    typed state, and a capture of the slide's own observation stamped with the
+    matrix *version* that refused it (unstamped when *version* is None)."""
+    await conn.execute(
+        text(
+            "UPDATE instagram_media_assets SET validation_state='unsupported',"
+            "validation_generation_id=data_generation_id,"
+            "validation_observation_revision=observation_revision,"
+            "validation_fingerprint='synthetic',validated_at=now(),"
+            "validation_capture=jsonb_strip_nulls(jsonb_build_object("
+            "'generation_id',data_generation_id::text,"
+            "'observation_revision',observation_revision,"
+            "'selected_asset_id',asset_media_id,"
+            "'state','unsupported',"
+            "'matrix_version',CAST(:version AS text)))"
+            " WHERE workspace_id=CAST(:ws AS uuid) AND media_item_id=CAST(:item AS uuid)"
+        ),
+        {
+            "ws": str(chain["ws"]),
+            "item": str(item.media_item_id),
+            "version": version,
+        },
+    )
+
+
 async def test_complete_replacement_clears_optional_fields_and_keeps_history(
     past_posts_engine, origin
 ):
