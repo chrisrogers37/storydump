@@ -290,6 +290,153 @@ def test_scrub_text_replaces_every_link_with_its_host(text, scrubbed):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,scrubbed",
+    [
+        (
+            "next=https%3A%2F%2Fgraph.instagram.com%2Fme%3Faccess_token%3DFAKE-TOKEN-1"
+            "%26fields%3Did",
+            "next=https%3A%2F%2Fgraph.instagram.com%2Fme%3Faccess_token%3D<token>"
+            "%26fields%3Did",
+        ),
+        ("access_token%3dFAKE-TOKEN-1 end", "access_token%3d<token> end"),
+    ],
+    ids=["in-an-encoded-link", "lower-case-escape"],
+)
+def test_scrub_text_removes_a_percent_encoded_token_parameter(text, scrubbed):
+    assert refusal_evidence.scrub_text(text) == scrubbed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,scrubbed",
+    [
+        (
+            '{"access_token": "FAKE-TOKEN-1", "token_type": "bearer"}',
+            '{"access_token": "<token>", "token_type": "bearer"}',
+        ),
+        ('{"access_token":"FAKE-TOKEN-1"}', '{"access_token":"<token>"}'),
+        ("{'access_token': 'FAKE-TOKEN-1'}", "{'access_token': '<token>'}"),
+        (
+            "/me?a=1\\u0026access_token\\u003dFAKE-TOKEN-1\\u0026b=2",
+            "/me?a=1\\u0026access_token\\u003d<token>\\u0026b=2",
+        ),
+    ],
+    ids=["json-key", "json-key-no-spaces", "quoted-key", "json-escaped-sign"],
+)
+def test_scrub_text_removes_a_token_written_as_a_quoted_key(text, scrubbed):
+    assert refusal_evidence.scrub_text(text) == scrubbed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text", ["access_token = FAKE-TOKEN-1 end", "access_token =FAKE-TOKEN-1 end"]
+)
+def test_scrub_text_removes_a_token_parameter_with_spaces_around_its_sign(text):
+    scrubbed = refusal_evidence.scrub_text(text)
+    assert "FAKE-TOKEN-1" not in scrubbed and scrubbed.endswith("<token> end")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,scrubbed",
+    [
+        ("Authorization: Bearer FAKE-TOKEN-1", "Authorization: Bearer <token>"),
+        ('"authorization": "bearer FAKE-TOKEN-1"', '"authorization": "bearer <token>"'),
+        ("the bearer of the news", "the bearer of the news"),
+    ],
+    ids=["header", "quoted-header", "prose-is-left-alone"],
+)
+def test_scrub_text_removes_a_bearer_credential(text, scrubbed):
+    assert refusal_evidence.scrub_text(text) == scrubbed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mark",
+    ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"],
+    ids=["zero-width-space", "non-joiner", "joiner", "word-joiner", "byte-order-mark"],
+)
+def test_scrub_text_removes_a_secret_split_by_a_zero_width_character(mark):
+    text = f"token {SECRET[:4]}{mark}{SECRET[4:]} seen"
+    assert refusal_evidence.scrub_text(text, secrets=(SECRET,)) == "token <token> seen"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "written",
+    ["123%7CFAKE%2FTOKEN%2B1", "123%7cFAKE%2fTOKEN%2b1"],
+    ids=["upper-case-escapes", "lower-case-escapes"],
+)
+def test_scrub_text_removes_a_percent_encoded_secret(written):
+    scrubbed = refusal_evidence.scrub_text(
+        f"x={written}&y=1", secrets=("123|FAKE/TOKEN+1",)
+    )
+    assert scrubbed == "x=<token>&y=1"
+
+
+@pytest.mark.unit
+def test_a_plus_encoded_secret_with_a_space_is_removed():
+    scrubbed = refusal_evidence.scrub_text(
+        "x=FAKE+TOKEN%2F1&y=1", secrets=("FAKE TOKEN/1",)
+    )
+    assert scrubbed == "x=<token>&y=1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,scrubbed",
+    [
+        (
+            "media at scontent-test.cdninstagram.com/v/t51/x.jpg"
+            "?oh=00_signature-value&oe=6A1B2C3D failed",
+            "media at <link scontent-test.cdninstagram.com> failed",
+        ),
+        (
+            "fetch //Scontent-Test.fbcdn.net/v/y.mp4?oh=00_signature-value now",
+            "fetch <link scontent-test.fbcdn.net> now",
+        ),
+        ("write to someone@example.com today", "write to someone@example.com today"),
+        ("Graph v26.0/1 refused it", "Graph v26.0/1 refused it"),
+    ],
+    ids=[
+        "host-and-path",
+        "scheme-relative",
+        "an-address-is-left-alone",
+        "a-version-is-left-alone",
+    ],
+)
+def test_scrub_text_says_a_link_without_its_scheme_as_its_host(text, scrubbed):
+    assert refusal_evidence.scrub_text(text) == scrubbed
+
+
+#: A signed link, its signature placed first, in the middle or last.
+GLUED_LINKS = [
+    "https://scontent-test.cdninstagram.com/v/x.jpg?oh=00_signature-value&oe=6A1B",
+    "https://scontent-test.cdninstagram.com/v/x.jpg?stp=a&oh=00_signature-value&oe=6A",
+    "https://scontent-test.cdninstagram.com/v/x.jpg?stp=a&oe=6A&oh=00_signature-value",
+    "scontent-test.cdninstagram.com/v/x.jpg?stp=a&oh=00_signature-value&oe=6A1B",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("link", GLUED_LINKS)
+@pytest.mark.parametrize(
+    "parameter",
+    ["access_token=FAKE-TOKEN-1", "fields=id", "x=1"],
+    ids=["token", "fields", "x"],
+)
+def test_scrub_text_leaves_nothing_of_a_link_written_up_against_a_parameter(
+    parameter, link
+):
+    """A parameter's value with a signed link glued to it, no space between:
+    neither the token nor any part of the link's signature survives."""
+    scrubbed = refusal_evidence.scrub_text(f"bad request {parameter}{link} end")
+    assert "signature-value" not in scrubbed and "FAKE-TOKEN-1" not in scrubbed
+    assert scrubbed.startswith("bad request ") and scrubbed.endswith(" end")
+
+
+@pytest.mark.unit
 def test_scrub_text_leaves_plain_text_alone():
     """Control for the cases above: text with nothing to scrub is returned as is."""
     text = "Unsupported get request. The media does not exist."
@@ -824,6 +971,37 @@ HELD_SENTENCES = [
     ),
 ]
 
+#: Why a story went into review by a route that refused nothing.
+REVIEW_SENTENCES = [
+    pytest.param(
+        refusal_evidence.evidence("container_pending", tries=5),
+        "Instagram did not report this story's media as ready on the last of 5 tries",
+        id="container-pending",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("answer_lost", tries=5),
+        "Instagram's answer was lost on the last of 5 tries to prepare this"
+        " story's media",
+        id="answer-lost",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("budget_spent", tries=5),
+        "we hit a fault on our side 5 times trying to post this story",
+        id="budget-spent",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("publish_unconfirmed", checks=12),
+        "Instagram's answer to the post was lost, and it could not be confirmed"
+        " as posted (12 checks)",
+        id="publish-unconfirmed",
+    ),
+    pytest.param(
+        refusal_evidence.evidence("approved_stale", days=3),
+        "we lost track of this story for 3 days",
+        id="approved-stale",
+    ),
+]
+
 #: Every reason the validator refuses a file with, read from its source.
 VALIDATOR_REASONS = set(
     re.findall(
@@ -837,7 +1015,10 @@ VALIDATOR_REASONS = set(
 
 #: Every kind `plain` speaks of: those with a case above, and local validation.
 KINDS = sorted(
-    {case.values[0]["kind"] for case in FETCH_SENTENCES + PUBLISH_SENTENCES}
+    {
+        case.values[0]["kind"]
+        for case in FETCH_SENTENCES + PUBLISH_SENTENCES + REVIEW_SENTENCES
+    }
     | {"local_validation"}
 )
 
@@ -849,6 +1030,90 @@ def test_plain_says_why_each_kind_was_refused(refusal, sentence):
     path, trace id and counters are not in it, and a dead container is said by
     its status and Instagram's own words for it."""
     assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal,sentence", REVIEW_SENTENCES)
+def test_plain_says_why_each_route_put_its_story_in_review(refusal, sentence):
+    """A route into review that refused nothing says its own reason, with the
+    count it kept: the tries spent, the checks made, the days waited."""
+    assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+def test_every_review_kind_has_its_sentence_above():
+    """A new review kind with no case here could reach a card with words
+    nobody has read."""
+    assert {case.values[0]["kind"] for case in REVIEW_SENTENCES} == set(
+        refusal_evidence.REVIEW_KINDS
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "refusal,sentence",
+    [
+        (
+            refusal_evidence.evidence("container_pending", tries=1),
+            "Instagram did not report this story's media as ready on the last of 1 try",
+        ),
+        (
+            refusal_evidence.evidence("budget_spent", tries=1),
+            "we hit a fault on our side 1 time trying to post this story",
+        ),
+        (
+            refusal_evidence.evidence("publish_unconfirmed", checks=1),
+            "Instagram's answer to the post was lost, and it could not be"
+            " confirmed as posted (1 check)",
+        ),
+        (
+            refusal_evidence.evidence("approved_stale", days=1),
+            "we lost track of this story for 1 day",
+        ),
+    ],
+)
+def test_a_count_of_one_is_said_in_the_singular(refusal, sentence):
+    assert refusal_evidence.plain(refusal) == sentence
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal", [case.values[0] for case in REVIEW_SENTENCES])
+def test_a_review_reason_opens_with_why(refusal):
+    """Nothing refused a story these routes put in review, so its line says
+    why rather than "Refused"."""
+    assert refusal_evidence.label(refusal) == "Why"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "refusal",
+    [case.values[0] for case in FETCH_SENTENCES + PUBLISH_SENTENCES]
+    + [
+        validation_refusal("duration", duration_seconds="61"),
+        {"kind": None},
+        {"kind": ["budget_spent"]},
+        None,
+        "x",
+    ],
+)
+def test_a_refusal_and_anything_else_opens_with_refused(refusal):
+    assert refusal_evidence.label(refusal) == "Refused"
+
+
+@pytest.mark.unit
+def test_review_error_holds_the_reason_as_the_refusal_the_card_reads():
+    """The operator's type and message beside the reason, under `refusal`,
+    where `intent_ledger.settlement` reads it for the card."""
+    error = refusal_evidence.review_error(
+        "JobBudgetSpent", "the publish job's budget is spent", "budget_spent", tries=5
+    )
+    assert error == {
+        "type": "JobBudgetSpent",
+        "code": None,
+        "message": "the publish job's budget is spent",
+        "refusal": {"v": 1, "kind": "budget_spent", "tries": 5},
+    }
+    assert json.loads(json.dumps(error)) == error, "stored as jsonb as it is"
 
 
 @pytest.mark.unit

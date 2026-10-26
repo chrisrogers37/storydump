@@ -1680,6 +1680,50 @@ class TestDefinitiveFailureClassification:
         assert edit["outcome_text"].endswith(f"\nRefused: {sentence}.")
 
 
+class TestAPoisonNoProviderErrorExplainsSaysItsOwnReason:
+    """A rung that spends the ladder with no provider error to record still
+    records why, in place of an earlier attempt's dead container, so the card
+    of the story it parks says the reason it went into review."""
+
+    def test_a_container_still_not_ready_on_the_last_try_says_so(self, pipe_db):
+        from src.services.target.publish_pipeline import POLL_BUDGET
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(status_script=["IN_PROGRESS"] * POLL_BUDGET)
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta))) == POISONED
+        _says_why(pipe_db, intent, binding, "container_pending", tries=5)
+
+    def test_a_lost_answer_to_the_container_create_on_the_last_try_says_so(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["transport"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        assert [
+            op["response"]["error"]
+            for op in _ops(pipe_db, intent)
+            if op["op_kind"] == "container_create"
+        ] == ["lost_response"]
+        _says_why(pipe_db, intent, binding, "answer_lost", tries=5)
+
+
 class TestADeadContainerIdDoesNotOutliveItsContainer:
     """On the RETRY path a stale container id lives only "between two
     instants" — the step-back and the next run.
@@ -2125,6 +2169,50 @@ def _notices(pipe_db, intent, binding):
             fetch=True,
         )
     ]
+
+
+#: An earlier attempt's dead container, as `_route_readiness` records it: the
+#: reason a story's card would show if a later route into review wrote none.
+EARLIER_DEAD_STATUS = "Error: Media upload has failed with error code 2207026"
+EARLIER_DEAD = {
+    "v": 1,
+    "error": {
+        "type": "ContainerDead",
+        "code": None,
+        "message": "Meta reported the container ERROR or EXPIRED",
+        "status_code": "ERROR",
+        "status": EARLIER_DEAD_STATUS,
+        "refusal": {
+            "v": 1,
+            "kind": "container_dead",
+            "status_code": "ERROR",
+            "status": EARLIER_DEAD_STATUS,
+        },
+    },
+}
+
+
+def _after_a_dead_container(pipe_db, intent):
+    _exec(
+        pipe_db,
+        "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+        (json.dumps(EARLIER_DEAD), intent),
+    )
+
+
+def _says_why(pipe_db, intent, binding, kind, **facts):
+    """The parked story records its own reason in place of the earlier
+    attempt's, and its card's review line says it, opened by "Why"."""
+    from src.services.target import refusal_evidence
+
+    row = _intent_row(pipe_db, intent)
+    assert row["state"] == "review_required"
+    refusal = row["last_error"]["error"]["refusal"]
+    assert refusal == refusal_evidence.evidence(kind, **facts)
+    line = _review_edit(pipe_db, intent, binding)["outcome_text"]
+    assert line.startswith("👀 Needs review")
+    assert line.endswith(f"\nWhy: {refusal_evidence.plain(refusal)}.")
+    assert EARLIER_DEAD_STATUS not in line and "Refused" not in line
 
 
 class TestTheFirstFetch:
@@ -3114,6 +3202,18 @@ class TestTheFloatsSafetyNets:
         assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
         assert len(_notices(pipe_db, intent, binding)) == 1
 
+    def test_a_dead_job_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
+        _says_why(pipe_db, intent, binding, "budget_spent", tries=5)
+
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
 
         intent, ref = _new_intent(pipe_db, state="skipped")
@@ -3267,6 +3367,30 @@ class TestTheFloatsSafetyNets:
         assert _intent_row(pipe_db, floating)["state"] == "approved", (
             "inside the TTL: untouched"
         )
+
+    def test_the_reaper_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, _ = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, stale)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days',"
+            " cap_consumed_on = current_date WHERE id = %s",
+            (stale,),
+        )
+        _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        _says_why(pipe_db, stale, binding, "approved_stale", days=3)
 
     def test_the_reaper_lists_through_a_door_and_parks_as_the_worker_role(
         self, pipe_db
