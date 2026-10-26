@@ -231,7 +231,17 @@ be written. Only the empty library's notice, where nothing was minted, parks a
   what it measured as its refusal (`last_error -> 'error' -> 'refusal'`).
   Where `moov` sits, edit lists and the audio channel count are recorded but
   refuse only with their `REFUSE_*` switches. Everything read rides the
-  probe's observation onto the container permit.
+  probe's observation onto the container permit, with the encoding the frame
+  was derived with.
+- **A refusal of a checked file is a drift, recorded and told.** When Meta
+  refuses a container or a publish and the refusal ends the story (a dead
+  container with status `ERROR`, or any create or publish error that parks or
+  fails it, except a dead token and throttling, `NOT_ABOUT_THE_FILE`), its
+  `spec_drift`, our facts beside Meta's answer, goes on the permit, or beside
+  a dead container's reason in `last_error`. After the run the operators get
+  one direct message per Meta answer per day (`WorkerDeps.ops_notice`,
+  `src/channels/telegram_ops_notice.py`, latched by the `rate_counters` scope
+  `ops_notice`); a worker without the bot or `OPS_USER_IDS` logs it instead.
 - **Only the cadence spends the daily cap.** A planned story
   (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
   stamps its `cap_consumed_on` without a debit, and the refunds return nothing
