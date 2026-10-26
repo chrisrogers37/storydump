@@ -250,6 +250,7 @@ reads. Variables are per service on Railway.
 | `TARGET_ACTIVATION_NUDGE_LIMIT` | Optional, default 3: the nudge's emails per daily run. Each person is marked nudged as their email is queued, so a provider mistake uses up that run. Arm the nudge at the default once email is on and a send has been confirmed, then raise it | `20` |
 | `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
 | `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter and the Instagram past-posts adapter call (`instagram_graph.graph_version`) | `v21.0` |
+| `OPS_USER_IDS` | The worker's ops notice: each person it names who has linked Telegram, while their account is active, gets a direct message from the bot when Instagram refuses a story file that passed storydump's checks, at most once a day per Instagram answer, with Instagram's words and what storydump read of the file. Set it to the API's value. Unset, the worker logs `ops notice: off` at startup and each refusal on a `publish_pipeline` line instead | a user id (a UUID) |
 | `RESEND_API_KEY`, `EMAIL_FROM` | The worker's `send_email` jobs, which serve the activation nudge and admissions from the waitlist. An admission's email carries a claim link the worker draws as it sends. Set them on the worker, the same values the API has, once the claim link works at sign-in; the nudge keeps its own switch, `TARGET_ACTIVATION_NUDGE_ENABLED`. Invitations need them on the API | |
 | `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
 
@@ -529,7 +530,7 @@ rate- or quota-limited.
 8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 11)
 9. [ ] Admit your own email: sign-up is invite-only (`fn_signup_admitted`) and the first account is no exception, so as the owner (the `DATABASE_URL` login), in lower case: `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
 10. [ ] Sign in on the web with that Google account, create a workspace
-11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API service to the `user` line of `storydump whoami`, let it redeploy; `storydump health` now exits 0
+11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API and worker services to the `user` line of `storydump whoami`, let them redeploy; `storydump health` now exits 0
 12. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
 13. [ ] Settings › Accounts: Connect Instagram
 14. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py`)

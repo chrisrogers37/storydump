@@ -711,7 +711,7 @@ class TransitStore:
         exception: the caller's ladder decides. The answer is truthy iff
         ready and carries the last probe's observation for the ledger: for a
         video that serves, with what its head says of Meta's container and
-        audio lines (`_container`)."""
+        audio lines (`_container`) and the encoding it was derived with."""
         url = self.delivery_url(
             transit_asset_ref, media_kind=media_kind, variant=variant
         )
@@ -746,6 +746,8 @@ class TransitStore:
             if serves_media(answer, media_kind):
                 if media_kind == "video":
                     observation["container"] = await self._container(url, answer)
+                    # What the frame was encoded to (`story_transformation`).
+                    observation["derivation"] = media_validation.story_video_encoding()
                 return Readiness(True, observation)
             if self._now_fn() >= deadline:
                 return Readiness(False, observation)

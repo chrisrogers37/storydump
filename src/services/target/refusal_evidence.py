@@ -215,11 +215,16 @@ def _flat(value) -> str:
     return short(value) or ""
 
 
+def chat_words(words) -> str:
+    """Instagram's own *words* as a chat line carries them. They may name the
+    object they refer to: the record keeps its id, a chat line says `<id>`."""
+    return _LONG_ID.sub("<id>", str(words))
+
+
 def _with_words(sentence: str, words) -> str:
-    """*sentence*, then Instagram's own *words* after a colon when it gave any.
-    They may name the object they refer to: the record keeps it, a chat line
-    does not."""
-    return f"{sentence}: {_LONG_ID.sub('<id>', str(words))}" if words else sentence
+    """*sentence*, then Instagram's own *words* after a colon when it gave any
+    (`chat_words`)."""
+    return f"{sentence}: {chat_words(words)}" if words else sentence
 
 
 def _count(value) -> str:

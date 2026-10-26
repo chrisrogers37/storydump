@@ -301,6 +301,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 source_id=selected.capture.source_id,
                 workspace_id=selected.capture.workspace_id,
                 selected_asset_id=selected.subject["selected_asset_id"],
+                expected_slide_count=selected.subject["slide_count"],
                 max_bytes=media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"][
                     selected.subject["media_kind"]
                 ],

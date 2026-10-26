@@ -267,7 +267,7 @@ class RateCounter(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "scope IN ('tg_chat','tg_global','ws_admission','preauth_ip',"
-            "'email_global')",
+            "'email_global','ops_notice')",
             name="ck_rate_scope",
         ),
         CheckConstraint("count >= 0", name="ck_rate_nonneg"),
