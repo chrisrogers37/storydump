@@ -313,6 +313,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 download_budget_s=self.ports.download_seconds.get(
                     selected.subject["media_kind"]
                 ),
+                expected_slide_count=selected.subject["slide_count"],
                 max_bytes=media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"][
                     selected.subject["media_kind"]
                 ],

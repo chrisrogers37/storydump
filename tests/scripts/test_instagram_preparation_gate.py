@@ -46,7 +46,7 @@ def png(color="red"):
     return output.getvalue()
 
 
-async def selected(engine, chain):
+async def selected(engine, chain, *, carousel=False):
     async with obs.uow(engine, chain) as conn:
         await conn.execute(
             text("UPDATE ig_accounts SET provider_account_ref=:ref WHERE id=:id"),
@@ -55,7 +55,7 @@ async def selected(engine, chain):
                 "ref": str(int(uuid.UUID(str(chain["iga"])).int % 10**16) + 10**16),
             },
         )
-    src, item = await selection.metadata(engine, chain)
+    src, item = await selection.metadata(engine, chain, carousel=carousel)
     async with obs.uow(engine, chain) as conn:
         intent = str(
             (
@@ -586,10 +586,11 @@ TURN = {
 AT_ONCE = Retry(attempts=8, base_seconds=0, cap_seconds=0)
 
 
-def refusing(error, *, retry=ONCE, download_seconds=None, asked=None):
+def refusing(error, *, retry=ONCE, download_seconds=None, given=None):
     """A preparation whose adapter reports `TURN`, then raises `error`. *retry*
     and *download_seconds* are its ports' numbers (by default one try and the
-    adapter's own budget); *asked*, a list, gets each fetch's keyword arguments."""
+    adapter's own budget); the keyword arguments each fetch receives are
+    appended to *given*."""
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
         SelectedPreparation,
@@ -597,8 +598,8 @@ def refusing(error, *, retry=ONCE, download_seconds=None, asked=None):
 
     class RefusingAdapter:
         async def fetch_bytes(self, *args, **kwargs):
-            if asked is not None:
-                asked.append(kwargs)
+            if given is not None:
+                given.append(kwargs)
             kwargs["on_counters"](media_adapters.MediaTurnCounters(**TURN))
             raise error
 
@@ -905,18 +906,18 @@ async def test_the_fetch_runs_under_the_download_budget_of_its_kind(
     """The fetch is asked for the wall budget configured for the slide's kind
     (`WorkerConfig.past_posts_download_seconds`)."""
     _, _, intent = await selected(past_posts_engine, origin)
-    asked = []
+    given = []
     prepared = refusing(
         refused("cdn_refused", **CDN_404),
         retry=RETRY,
         download_seconds={"image": 90.0, "video": 240.0},
-        asked=asked,
+        given=given,
     )
     with pytest.raises(source_policy.MediaAdmissionPending):
         await prepared.selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    assert [kwargs.get("download_budget_s") for kwargs in asked] == [90.0]
+    assert [kwargs.get("download_budget_s") for kwargs in given] == [90.0]
 
 
 async def test_unsupported_bytes_record_the_failed_check_with_what_it_measured(
@@ -1135,7 +1136,9 @@ async def test_remote_changed_first_asset_is_coherent_unavailable_without_cdn(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert error.value.reason == "asset_unavailable"
-    assert calls == ["graph.instagram.com"] * 2
+    # Parent and children, then both again: the slide is gone only when a
+    # second read agrees with the first.
+    assert calls == ["graph.instagram.com"] * 4
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
@@ -1261,6 +1264,27 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
 
 
+@pytest.mark.parametrize("carousel", [False, True], ids=["single", "carousel"])
+async def test_the_fetch_is_given_the_slide_count_the_index_recorded(
+    past_posts_engine, origin, carousel
+):
+    """A missing slide is judged against the index's own count, so the
+    preparation hands the fetch the selected post's recorded slide count, and
+    none for a single post."""
+    src, item, intent = await selected(past_posts_engine, origin, carousel=carousel)
+    given = []
+    prepared = refusing(
+        media_adapters.MediaRetryableError("synthetic"), retry=RETRY, given=given
+    )
+    with pytest.raises(media_adapters.MediaRetryableError):
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert [kwargs.get("expected_slide_count", "not passed") for kwargs in given] == [
+        2 if carousel else None
+    ]
+
+
 async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
     past_posts_engine, origin
 ):
@@ -1309,7 +1333,9 @@ async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
 async def test_selected_gone_fresh_cas_refuses_stale_or_cancelled_turn(
     past_posts_engine, origin, stale
 ):
-    src, item, intent = await selected(past_posts_engine, origin)
+    # A carousel, so the two reads that lack slide 123 prove it gone against
+    # the indexed count and the retirement's own check is what refuses.
+    src, item, intent = await selected(past_posts_engine, origin, carousel=True)
 
     async def change_while_fetching():
         if stale == "reobserved":
@@ -1342,7 +1368,7 @@ async def test_selected_gone_fresh_cas_refuses_stale_or_cancelled_turn(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert error.value.reason == "past_posts_revalidation_required"
-    assert calls == ["graph.instagram.com"] * 2
+    assert calls == ["graph.instagram.com"] * 4
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(

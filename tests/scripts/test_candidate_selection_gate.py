@@ -29,14 +29,28 @@ async def set_drive_ratio(conn, chain, ratio):
 
 
 async def metadata(
-    engine, chain, *, kind="image", attribution="not_detected", recent=False
+    engine,
+    chain,
+    *,
+    kind="image",
+    attribution="not_detected",
+    recent=False,
+    carousel=False,
 ):
+    """One indexed post whose item is asset 123: a single post, or with
+    `carousel` the first of two slides (123 and 456) and a slide count of 2."""
     from src.services.target.instagram_catalog import PastPostsAsset
 
     src = await obs.enabled(engine, chain)
     bundle = replace(
         obs.bundle(attribution=attribution),
-        assets=(PastPostsAsset("123", kind),),
+        assets=(
+            PastPostsAsset("123", kind, position=1),
+            PastPostsAsset("456", kind, position=2),
+        )
+        if carousel
+        else (PastPostsAsset("123", kind),),
+        slide_count=2 if carousel else None,
         original_at=datetime.now(timezone.utc)
         if recent
         else datetime(2020, 1, 1, tzinfo=timezone.utc),
