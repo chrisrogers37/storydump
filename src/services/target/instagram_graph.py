@@ -44,12 +44,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import httpx
 
-from src.services.target import egress
+from src.services.target import egress, refusal_evidence
 from src.services.target.egress import (
     EgressBudgetExhausted,
     EgressPolicy,
@@ -69,12 +68,6 @@ from src.services.target.oauth_states import RingUnavailable
 
 logger = logging.getLogger(__name__)
 
-#: Text Meta answers with is bound for the ledger (`provider_operations`,
-#: `post_intents.last_error`): capped, and scrubbed of a Cloudinary url
-#: signature should Meta ever echo the media url (the signed url does
-#: not expire). The token is scrubbed by `_redact` on every field.
-LEDGER_TEXT_MAX = 500
-_SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
 DEFAULT_GRAPH_VERSION = "v21.0"
 
 
@@ -296,13 +289,14 @@ class InstagramGraphAdapter:
         except EgressRefused as exc:
             # The floor would not make the call: nothing left the process, so
             # the effect definitively did not happen. Retryable, never a park.
+            scrubbed = refusal_evidence.scrub_text(str(exc), secrets=(token,))
             raise MetaRetryableError(
-                code=0,
-                message=f"{where}: egress refused: {self._redact(str(exc), token)}",
+                code=0, message=f"{where}: egress refused: {scrubbed}"
             ) from None
         except (EgressBudgetExhausted, ResponseTooLarge, httpx.HTTPError) as exc:
+            scrubbed = refusal_evidence.scrub_text(str(exc), secrets=(token,))
             raise MetaLostResponse(
-                f"{where}: {type(exc).__name__}: {self._redact(str(exc), token)}"
+                f"{where}: {type(exc).__name__}: {scrubbed}"
             ) from None
         try:
             body = response.json()
@@ -332,19 +326,15 @@ class InstagramGraphAdapter:
         return body
 
     @staticmethod
-    def _redact(text: str, token: str) -> str:
-        return text.replace(token, "<TOKEN>") if token else text
-
-    @classmethod
-    def _scrub(cls, value: Any, token: str) -> Optional[str]:
-        """A text field bound for the ledger: the token and any Cloudinary url
-        signature scrubbed, NUL dropped (PostgreSQL's jsonb refuses it —
-        a crash inside the retry's own transaction, not a retry), capped."""
-        if value is None or value == "":
+    def _scrub(value: Any, token: str) -> Optional[str]:
+        """A field Meta answers with, bound for the ledger (`provider_operations`,
+        `post_intents.last_error`) and a dead container's log line: as text,
+        through the one provider-text scrub (`refusal_evidence.scrub_text`)
+        with the token as its secret. None for a field that is absent or
+        empty."""
+        if value is None:
             return None
-        text = cls._redact(str(value), token).replace("\x00", "")
-        text = _SIGNATURE.sub("s--<SIG>--", text)
-        return text[:LEDGER_TEXT_MAX] or None
+        return refusal_evidence.scrub_text(str(value), secrets=(token,)) or None
 
     @classmethod
     def _detail_of(cls, error: dict, http_status: int, token: str) -> dict:

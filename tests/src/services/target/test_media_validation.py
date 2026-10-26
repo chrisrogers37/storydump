@@ -316,9 +316,10 @@ def test_what_the_story_derivation_sets_is_not_judged():
     assert evidence["audio"] is True
 
 
-def encoded_video(tmp_path, *, seconds=4, rate=30):
+def encoded_video(tmp_path, *, seconds=4, rate=30, faststart=False):
     """An H.264 + AAC MP4 written with ffmpeg's defaults, which put an edit
-    list on each track and `moov` after the media."""
+    list on each track and `moov` after the media (before it, with
+    *faststart*)."""
     _requires_linux()
     out = tmp_path / "source.mp4"
     subprocess.run(
@@ -343,6 +344,7 @@ def encoded_video(tmp_path, *, seconds=4, rate=30):
             "yuv420p",
             "-c:a",
             "aac",
+            *(["-movflags", "+faststart"] if faststart else []),
             str(out),
         ],
         check=True,
@@ -1168,3 +1170,236 @@ async def test_a_video_longer_than_a_story_passes_its_duration_check_trimmed(
         "min_seconds": shortest,
         "max_seconds": longest,
     }
+
+
+# -- the story derivation ------------------------------------------------------
+
+
+def esds(channels, frequency_index=3):
+    """An `esds` whose AudioSpecificConfig is AAC LC (object type 2) at
+    *frequency_index* (3 is 48 kHz, 0 is 96 kHz) with *channels* as its
+    channelConfiguration, inside its decoder config (objectTypeIndication
+    0x40) and its ES descriptor."""
+    config = struct.pack(">H", 2 << 11 | frequency_index << 7 | channels << 3)
+    specific = bytes([0x05, len(config)]) + config
+    decoder = bytes([0x04, 13 + len(specific), 0x40, 0x15]) + bytes(11) + specific
+    es = bytes([0x03, 3 + len(decoder)]) + b"\x00\x01\x00" + decoder
+    return box(b"esds", bytes(4) + es)
+
+
+def audio_entry(codec=b"mp4a", channels=2, frequency_index=3, *, hz=48_000):
+    """An AudioSampleEntry: reserved bytes and the data reference index, two
+    reserved words, the channel count as its template 2 (as ffmpeg writes an
+    MP4's), the sample size, two zeroes and *hz* as the 16.16 rate, then for
+    AAC the `esds` that configures *channels* at *frequency_index*."""
+    return box(
+        codec,
+        bytes(6)
+        + b"\x00\x01"
+        + bytes(8)
+        + struct.pack(">HHHHI", 2, 16, 0, 0, hz << 16)
+        + (esds(channels, frequency_index) if codec == b"mp4a" else b""),
+    )
+
+
+def track(handler, entry, *, edits=False):
+    """A `trak` whose `mdia` names its *handler* and whose `stsd` holds
+    *entry*, with an edit list when *edits*."""
+    hdlr = box(b"hdlr", bytes(8) + handler + bytes(12) + b"\x00")
+    stsd = box(b"stsd", bytes(4) + struct.pack(">I", 1) + entry)
+    return box(
+        b"trak",
+        (box(b"edts", box(b"elst", bytes(8))) if edits else b"")
+        + box(b"mdia", hdlr + box(b"minf", box(b"stbl", stsd))),
+    )
+
+
+def derivation(*, late=False, edits=False, audio=audio_entry(), pad=0):
+    """A story derivation's bytes: `ftyp`, then `moov` (a video track and,
+    with *audio*, a sound track, grown by *pad* bytes of `free`) before
+    `mdat`, or after it when *late*."""
+    video = track(
+        b"vide", box(b"avc1", bytes(6) + b"\x00\x01" + bytes(70)), edits=edits
+    )
+    sound = track(b"soun", audio, edits=edits) if audio else b""
+    moov = box(
+        b"moov",
+        box(b"mvhd", bytes(100))
+        + video
+        + sound
+        + (box(b"free", bytes(pad)) if pad else b""),
+    )
+    mdat = box(b"mdat", bytes(64))
+    return box(b"ftyp", b"isom" + bytes(4)) + (mdat + moov if late else moov + mdat)
+
+
+def moov_end(data):
+    """Where `moov` ends in a derivation built with `moov` first."""
+    return data.index(b"mdat") - 4
+
+
+def test_a_derivation_with_moov_first_says_what_its_moov_holds():
+    data = derivation()
+    assert v.derivation_container(data) == {
+        "boxes": ["ftyp", "moov"],
+        "moov_first": True,
+        "moov_end": moov_end(data),
+        "edit_lists": 0,
+        "sample_codecs": ["avc1", "mp4a"],
+        "audio": [{"codec": "mp4a", "channels": 2, "hz": 48_000}],
+    }
+
+
+def test_a_head_that_stops_inside_moov_says_only_where_moov_ends():
+    """The probe's first bytes: enough to find `moov` and its size, not its
+    tracks. The rest is read once `ready` knows how far to read."""
+    data = derivation(pad=4096)
+    facts = v.derivation_container(data[:1024])
+    assert (facts["moov_first"], facts["moov_end"]) == (True, moov_end(data))
+    assert facts["edit_lists"] is None
+    assert facts["sample_codecs"] is None and facts["audio"] is None
+
+
+def test_a_derivation_with_its_media_first_is_not_walked():
+    facts = v.derivation_container(derivation(late=True))
+    assert facts["boxes"] == ["ftyp", "mdat"]
+    assert (facts["moov_first"], facts["moov_end"]) == (False, None)
+    assert facts["edit_lists"] is None and facts["audio"] is None
+
+
+def test_every_edit_list_and_every_audio_entry_is_read():
+    facts = v.derivation_container(
+        derivation(edits=True, audio=audio_entry(b"ac-3", hz=64_000))
+    )
+    assert facts["edit_lists"] == 2
+    assert facts["sample_codecs"] == ["avc1", "ac-3"]
+    assert facts["audio"] == [{"codec": "ac-3", "channels": None, "hz": 64_000}]
+
+
+@pytest.mark.parametrize("channels", [1, 2, 6])
+def test_the_channels_are_the_aac_configurations_not_the_entrys_template(channels):
+    """Every entry here says 2 in its own channel field; the AAC
+    configuration in its `esds` names what the stream carries."""
+    facts = v.derivation_container(derivation(audio=audio_entry(channels=channels)))
+    assert facts["audio"] == [{"codec": "mp4a", "channels": channels, "hz": 48_000}]
+
+
+def test_the_rate_is_the_aac_configurations_past_what_the_entry_can_hold():
+    """A 16.16 rate stops at 65,535 Hz, so the entry here says 48 kHz; its AAC
+    configuration says 96 kHz, which is the rate the stream carries."""
+    facts = v.derivation_container(derivation(audio=audio_entry(frequency_index=0)))
+    assert facts["audio"] == [{"codec": "mp4a", "channels": 2, "hz": 96_000}]
+    with pytest.raises(v.UnsupportedMedia, match="derivation_audio_rate") as rate:
+        v.judge_derivation({"length": None, "container": facts}, "video")
+    assert rate.value.measured == {"hz": 96_000, "limit": 48_000}
+
+
+def test_an_aac_entry_without_a_configuration_reads_no_channels():
+    """Its rate is the entry's own; its channel count is not read."""
+    entry = box(b"mp4a", bytes(6) + b"\x00\x01" + bytes(20))
+    facts = v.derivation_container(derivation(audio=entry))
+    assert facts["audio"] == [{"codec": "mp4a", "channels": None, "hz": 0}]
+
+
+def test_a_moov_whose_boxes_do_not_nest_is_left_unread():
+    data = bytearray(derivation())
+    trak = data.index(b"trak") - 4
+    data[trak : trak + 4] = struct.pack(">I", 1 << 20)  # past the end of `moov`
+    facts = v.derivation_container(bytes(data))
+    assert facts["moov_first"] is True and facts["unread"] == "moov_unwalkable"
+    assert facts["edit_lists"] is None and facts["audio"] is None
+
+
+def test_a_real_encoded_video_is_read_as_its_muxer_wrote_it(tmp_path):
+    """ffmpeg's defaults put `moov` after the media and an edit list on the
+    tracks; `+faststart` moves `moov` to the front. The sine source is mono
+    AAC at 48 kHz."""
+    late = v.derivation_container(encoded_video(tmp_path))
+    assert (late["boxes"][-1], late["moov_first"]) == ("mdat", False)
+    early = v.derivation_container(encoded_video(tmp_path, faststart=True))
+    assert early["moov_first"] is True and early["edit_lists"] >= 1
+    assert early["sample_codecs"] == ["avc1", "mp4a"]
+    assert early["audio"] == [{"codec": "mp4a", "channels": 1, "hz": 48_000}]
+
+
+def observed(length=None, **container):
+    """What `ready` records of a frame, as `judge_derivation` reads it."""
+    return {"status": 206, "length": length, "container": container}
+
+
+@pytest.mark.parametrize("kind,limit", [("video", 100_000_000), ("image", 8_000_000)])
+def test_a_derivation_over_metas_size_is_refused_with_both_numbers(kind, limit):
+    v.judge_derivation(observed(limit), kind)
+    with pytest.raises(v.UnsupportedMedia, match="derivation_bytes") as refused:
+        v.judge_derivation(observed(limit + 1), kind)
+    assert refused.value.measured == {"bytes": limit + 1, "limit": limit}
+    assert_reads_with_what_it_measured("derivation_bytes", refused.value.measured)
+
+
+def test_a_derivation_whose_audio_is_not_aac_or_is_over_48_khz_is_refused():
+    fits = {"codec": "mp4a", "channels": 2, "hz": 48_000}
+    v.judge_derivation(observed(audio=[fits]), "video")
+    with pytest.raises(v.UnsupportedMedia, match="derivation_audio_codec") as codec:
+        v.judge_derivation(observed(audio=[{**fits, "codec": "ac-3"}]), "video")
+    assert codec.value.measured == {"codec": "ac-3"}
+    assert_reads_with_what_it_measured("derivation_audio_codec", codec.value.measured)
+    with pytest.raises(v.UnsupportedMedia, match="derivation_audio_rate") as rate:
+        v.judge_derivation(observed(audio=[{**fits, "hz": 64_000}]), "video")
+    assert rate.value.measured == {"hz": 64_000, "limit": 48_000}
+    assert_reads_with_what_it_measured("derivation_audio_rate", rate.value.measured)
+
+
+#: The layout and encoding facts that are recorded and left to Meta's answer:
+#: each one's switch, a container that breaks its line, the check its switch
+#: refuses with, and what that refusal measures.
+RECORDED_LINES = [
+    pytest.param(
+        "REFUSE_MOOV_POSITION",
+        {"moov_first": False, "boxes": ["ftyp", "mdat"]},
+        "derivation_moov_position",
+        {"boxes": ["ftyp", "mdat"]},
+        id="moov-position",
+    ),
+    pytest.param(
+        "REFUSE_EDIT_LISTS",
+        {"moov_first": True, "edit_lists": 2},
+        "derivation_edit_list",
+        {"edit_lists": 2},
+        id="edit-lists",
+    ),
+    pytest.param(
+        "REFUSE_AUDIO_CHANNELS",
+        {"audio": [{"codec": "mp4a", "channels": 6, "hz": 48_000}]},
+        "derivation_audio_channels",
+        {"channels": 6, "limit": 2},
+        id="audio-channels",
+    ),
+]
+
+
+@pytest.mark.parametrize("switch,container,check,measured", RECORDED_LINES)
+def test_a_recorded_line_refuses_only_with_its_switch(
+    monkeypatch, switch, container, check, measured
+):
+    assert getattr(v, switch) is False, "recorded, and left to Meta's answer"
+    v.judge_derivation(observed(**container), "video")
+    monkeypatch.setattr(v, switch, True)
+    with pytest.raises(v.UnsupportedMedia, match=check) as refused:
+        v.judge_derivation(observed(**container), "video")
+    assert refused.value.measured == measured
+    assert_reads_with_what_it_measured(check, refused.value.measured)
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        None,
+        {},
+        observed(),
+        observed(moov_first=None, edit_lists=None, audio=None),
+        observed(audio=[{"codec": "mp4a", "channels": None, "hz": None}]),
+    ],
+    ids=["no-probe", "empty", "no-length", "nothing-read", "entry-cut-short"],
+)
+def test_what_the_probe_did_not_read_is_not_judged(observation):
+    v.judge_derivation(observation, "video")

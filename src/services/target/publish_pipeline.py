@@ -110,10 +110,12 @@ from src.services.target import (
     audit,
     intent_ledger,
     jobs,
+    media_validation,
     outbox,
     prompts,
     provider_ops,
     publish_cap,
+    refusal_evidence,
 )
 from src.services.target.media_adapters import (
     MediaError,
@@ -895,6 +897,7 @@ async def _retry_or_poison(
     error: Optional[dict] = None,
     poison_now: bool = False,
     wait: _Wait = _Wait(),
+    notice: Optional[str] = None,
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
@@ -976,7 +979,7 @@ async def _retry_or_poison(
                 ctx,
                 state="review_required",
                 at=now,
-                notice=_poison_notice(ctx, now),
+                notice=notice or _poison_notice(ctx, now),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1048,6 +1051,15 @@ def _poison_notice(ctx: _Ctx, now: datetime) -> str:
         "A story couldn't be posted after several tries and needs"
         " attention: choose on its card, or open the Queue on the web."
     )
+
+
+#: The sentence the workspace hears when a story's frame is outside Meta's
+#: story spec (`media_validation.judge_derivation`): its card says which line
+#: and what was measured.
+SPEC_REFUSED_NOTICE = (
+    "A story couldn't be posted: its file is outside Instagram's story"
+    " limits. Its card says why: choose there, or open the Queue on the web."
+)
 
 
 async def _bump(session, ctx: _Ctx, **changes) -> dict:
@@ -1171,6 +1183,8 @@ async def _route_readiness(
         # The container is definitively gone; a NEW one needs a fresh
         # create (and a fresh generation) from the still-valid transit
         # asset — step back, retry on the ladder.
+        status_code = str(ctx.dead_status)
+        status = getattr(ctx.dead_status, "reason", None)
         return await _retry_or_poison(
             uow,
             ctx,
@@ -1184,8 +1198,14 @@ async def _route_readiness(
                     "code": None,
                     "message": "Meta reported the container ERROR or EXPIRED —"
                     " the media at the delivery URL could not be processed",
-                    "status_code": str(ctx.dead_status),
-                    "status": getattr(ctx.dead_status, "reason", None),
+                    "status_code": status_code,
+                    "status": status,
+                    # Why, in Instagram's own status, for the review card's
+                    # line (`prompt_rendering.outcome_line`) should the ladder
+                    # be spent.
+                    "refusal": refusal_evidence.evidence(
+                        "container_dead", status_code=status_code, status=status
+                    ),
                 },
             },
         )
@@ -1329,6 +1349,39 @@ async def _ladder(
                     now_fn,
                     error=not_ready,
                     step_back_to="none" if gone else None,
+                )
+            # What the probe read of the frame is judged against Meta's story
+            # spec before Meta is told to fetch it. No retry re-encodes the
+            # file, so a breach parks the story at once, its reason on its
+            # card.
+            try:
+                media_validation.judge_derivation(probe, ctx.intent["media_kind"])
+            except media_validation.UnsupportedMedia as exc:
+                logger.warning(
+                    "publish_pipeline intent %s: the story frame is outside"
+                    " Meta's story spec (%s, measured %s) — parked for review"
+                    " before any container call",
+                    ctx.intent_id,
+                    exc,
+                    exc.measured,
+                )
+                # The check and its values, where the card reads a refusal.
+                refused = _error_of(exc)
+                refused["error"]["refusal"] = refusal_evidence.evidence(
+                    "local_validation",
+                    state="unsupported",
+                    check=str(exc),
+                    measured=exc.measured,
+                    matrix_version=media_validation.MATRIX_VERSION,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    error=refused,
+                    poison_now=True,
+                    notice=SPEC_REFUSED_NOTICE,
                 )
             generation = ctx.next_generation("container_create")
             permit = await _permit(
@@ -1977,9 +2030,17 @@ async def _restate_and_notify(
 ) -> int:
     """The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
-    buttons because it is `review_required`."""
-    line = prompts.outcome_line(state, by=None, at=at, tz=tz)
+    buttons because it is `review_required`. Its line says why the story was
+    refused when its refusal says anything, as the card rendered again does
+    (`prompts.settled_line`)."""
     bindings = await prompts.push_bindings(session, workspace_id)
+    refusal = None
+    if bindings and state == "review_required":
+        settled = await intent_ledger.settlement(
+            session, workspace_id=workspace_id, intent_id=intent_id
+        )
+        refusal = settled.get("refusal")
+    line = prompts.outcome_line(state, by=None, at=at, tz=tz, refusal=refusal)
     for binding_id in bindings:
         await outbox.restate_cards(
             session,
