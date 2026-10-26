@@ -247,6 +247,12 @@ class ValidationPending(Exception):
 UNSUPPORTED_CHECKS = frozenset(
     {
         "byte_limit",
+        "derivation_audio_channels",
+        "derivation_audio_codec",
+        "derivation_audio_rate",
+        "derivation_bytes",
+        "derivation_edit_list",
+        "derivation_moov_position",
         "duration",
         "external_reference",
         "fps",
