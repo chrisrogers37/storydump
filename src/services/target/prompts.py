@@ -758,18 +758,14 @@ _NOTICE_SELECT = (
 )
 
 
-async def say_not_served_for(
-    session, *, workspace_id: str, intent_ids: list[str], reason: str
+async def say_removed_before_served(
+    session, *, workspace_id: str, intent_ids: list[str]
 ) -> None:
-    """Queue the not-served notice, with *reason*, for each story of
-    *intent_ids*, in the caller's transaction — the same words the miss leg
-    sends, for a story the miss door never lists:
-    - a planned story a destination's removal flagged before its time was
-      served (`account_removed`, `provisioning.disable_destination`): flagged,
-      it never reaches the miss door, which lists no flagged row;
-    - a past-posts cadence story the reaper expired at the end of its late
-      window while its prepare job waited for the lane (`late`, told by that
-      job, `past_posts_preparation_job`)."""
+    """Queue the `account_removed` notice for each planned story a
+    destination's removal flagged before its time was served
+    (`provisioning.disable_destination`), in the removal's own transaction.
+    Flagged, such a story never reaches the miss door, which lists no flagged
+    row, so this is its one notice — the same words the miss leg sends."""
     rows = await readers.rows(
         session,
         _NOTICE_SELECT + " WHERE i.workspace_id = :ws"
@@ -783,7 +779,7 @@ async def say_not_served_for(
         await say_not_served(
             session,
             row,
-            reason=reason,
+            reason="account_removed",
             surface=surface,
             by=await _scheduler_name(
                 session, row.get("scheduled_by_user_id"), row["workspace_id"], names

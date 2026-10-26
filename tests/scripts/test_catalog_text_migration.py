@@ -61,8 +61,8 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 def test_replaced_functions_are_exact_schema_definitions():
     """Every function a migration defines is the schema's text, unless a later
     one redefined what that text names: 003 renamed the archive's to past
-    posts', and 006 rewrote the reaper and the preparation door. Every one 006
-    defines is the schema's text."""
+    posts', and 006 rewrote the reaper and the preparation door and added the
+    reaper's late door. Every one 006 defines is the schema's text."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
@@ -81,7 +81,11 @@ def test_replaced_functions_are_exact_schema_definitions():
     assert all(
         definition in schema for definition in rename if definition[0] not in relaned
     )
-    assert relaned == {"fn_reaper_sweep", "fn_selected_preparation_due"}
+    assert relaned == {
+        "fn_reaper_sweep",
+        "fn_reaper_late_past_posts",
+        "fn_selected_preparation_due",
+    }
     assert all(definition in schema for definition in lane)
 
 

@@ -36,9 +36,7 @@ def story(**over):
         cancel_requested=False,
         schedule_slot_at=NOW - timedelta(minutes=5),
         media_kind="image",
-        capture=None,
         now=NOW,
-        expired_from=None,
     )
     row.update(over)
     return row
@@ -57,11 +55,11 @@ def job(attempts=1, payload=None):
 
 
 class Seams:
-    """What the executor did: its reads, finalizes, reschedules and tells."""
+    """What the executor did: its reads, finalizes, reschedules and parks."""
 
     def __init__(self, monkeypatch, row):
         self.row = row
-        self.finalized, self.rescheduled, self.told = [], [], []
+        self.finalized, self.rescheduled = [], []
         self.prepared, self.parked_late = [], []
 
         def sessions(engine):
@@ -83,14 +81,10 @@ class Seams:
         ):
             self.rescheduled.append((run_at - NOW, restore_attempt))
 
-        async def say_not_served_for(session, *, workspace_id, intent_ids, reason):
-            self.told.append((workspace_id, intent_ids, reason))
-
         monkeypatch.setattr(prep.unit_of_work, "make_session_for", sessions)
         monkeypatch.setattr(prep.readers, "row", read)
         monkeypatch.setattr(prep.jobs, "finalize_job", finalize_job)
         monkeypatch.setattr(prep.jobs, "reschedule_job", reschedule_job)
-        monkeypatch.setattr(prep.prompts, "say_not_served_for", say_not_served_for)
         monkeypatch.setattr(prep, "utcnow", lambda: NOW)
 
     def deps(self, *, prepare=None, parks_late=True):
@@ -194,22 +188,19 @@ async def test_a_provider_answer_spends_the_try_and_a_closed_source_does_not(
 
 async def test_past_its_window_a_cadence_story_parks_before_any_read(monkeypatch):
     """A download that could not finish inside the story's late window is not
-    started: the story parks for review, saying how long it had, how many tries
-    it got and what refused the last."""
-    capture = {"reason": "download_pending", "attempt": 2, "refusal": CDN}
-    seams = Seams(
-        monkeypatch,
-        story(schedule_slot_at=NOW - timedelta(minutes=59), capture=capture),
-    )
-    await prep.execute(seams.deps(), job(attempts=3))
+    started: the story parks for review with how long it had and the tries
+    before this one, the claim that brought the job here being no try."""
+    seams = Seams(monkeypatch, story(schedule_slot_at=NOW - timedelta(minutes=59)))
+    deps = seams.deps()
+    await prep.execute(deps, job(attempts=3))
     assert seams.prepared == []
-    assert [late["evidence"] for late in seams.parked_late] == [
+    assert seams.parked_late == [
         {
-            "v": 1,
-            "kind": "window_closed",
-            "late_seconds": CONFIG.planned_late_seconds,
+            "engine": deps.engine,
+            "workspace_id": "ws-1",
+            "intent_id": STORY,
             "tries": 2,
-            "last_refusal": CDN,
+            "late_seconds": CONFIG.planned_late_seconds,
         }
     ]
     assert seams.finalized == [("job-1", "lease-1", "review_required")]
@@ -262,43 +253,23 @@ async def test_no_window_holds_a_served_or_a_planned_story(monkeypatch, state, o
     assert seams.parked_late == [] and len(seams.prepared) == 1
 
 
-async def test_a_story_the_reaper_expired_while_its_job_waited_is_told_once(
-    monkeypatch,
-):
-    """A cadence story the reaper expired at the end of its window before its
-    job got the lane is told, as a planned story's miss is, and the job ends."""
-    seams = Seams(monkeypatch, story(state="expired", expired_from="scheduled"))
-    await prep.execute(seams.deps(), job(attempts=2))
-    assert seams.told == [("ws-1", [STORY], "late")]
-    assert seams.finalized == [("job-1", "lease-1", "cancelled")]
-    assert seams.prepared == []
-
-
 @pytest.mark.parametrize(
     "over",
     [
-        dict(state="expired", expired_from="awaiting_approval"),
-        dict(state="expired", origin="planned", expired_from="scheduled"),
+        dict(state="expired"),
         dict(state="cancelled"),
         dict(state="approved"),
         dict(state="review_required"),
         dict(cancel_requested=True),
     ],
-    ids=[
-        "approval-ttl",
-        "planned-miss",
-        "cancelled",
-        "approved",
-        "parked",
-        "cancel-asked",
-    ],
+    ids=["expired", "cancelled", "approved", "parked", "cancel-asked"],
 )
-async def test_a_story_that_moved_on_ends_the_job_untold(monkeypatch, over):
-    """Every other end has its own teller, or none is owed: the job ends and
-    says nothing."""
+async def test_a_story_that_moved_on_ends_the_job(monkeypatch, over):
+    """A story no longer waiting for its file, or one whose cancel was asked,
+    ends the job cancelled, with nothing fetched and nothing parked."""
     seams = Seams(monkeypatch, story(**over))
     await prep.execute(seams.deps(), job())
-    assert seams.told == [] and seams.prepared == []
+    assert seams.prepared == [] and seams.parked_late == []
     assert seams.finalized == [("job-1", "lease-1", "cancelled")]
 
 

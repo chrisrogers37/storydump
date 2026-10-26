@@ -614,10 +614,10 @@ class TestDisableDestination:
 
         told = []
 
-        async def say(executor, *, workspace_id, intent_ids, reason):
-            told.append((workspace_id, intent_ids, reason))
+        async def say(executor, *, workspace_id, intent_ids):
+            told.append((workspace_id, intent_ids))
 
-        monkeypatch.setattr(prompts, "say_not_served_for", say)
+        monkeypatch.setattr(prompts, "say_removed_before_served", say)
         flagged = [
             {"id": "p-waiting", "origin": "planned", "state": "scheduled"},
             {"id": "p-served", "origin": "planned", "state": "awaiting_approval"},
@@ -626,7 +626,7 @@ class TestDisableDestination:
         ex = _ScriptedExecutor((1, {"id": "acct"}), (1, None), (3, flagged), (1, None))
         result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
         assert result["intents_flagged"] == 3
-        assert told == [("ws", ["p-waiting"], "account_removed")]
+        assert told == [("ws", ["p-waiting"])]
 
     async def test_nothing_to_revoke_flag_or_retire_is_reported_not_invented(self):
         from src.services.target.provisioning import disable_destination

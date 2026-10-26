@@ -201,7 +201,7 @@ END $$;
 
 CREATE FUNCTION fn_reaper_sweep(p_lim int,p_approval_ttl interval,p_approved_ttl interval)
 RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
- SELECT fn_reaper_sweep(p_lim,p_approval_ttl,p_approved_ttl,false,NULL::interval)
+ SELECT fn_reaper_sweep(p_lim,p_approval_ttl,p_approved_ttl,false)
 $$;
 
 CREATE FUNCTION fn_retention_batch(p_class text, p_keep interval, p_batch int)
@@ -477,6 +477,33 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
    WHERE i.state = 'approved' AND NOT w.is_paused
      AND i.entered_state_at < now() - p_approved_ttl
    ORDER BY i.entered_state_at
+   LIMIT GREATEST(p_lim, 0)
+$$;
+
+-- The past-posts cadence stories a reaper that parks them (fn_reaper_sweep's
+-- p_past_posts_park_late) parks now: of an active, unpaused workspace, still
+-- waiting for their slot p_late after it, and with no prepare_past_post job
+-- running, so no download is in flight. Each comes with the tries its latest
+-- prepare job spent; a job puts back unspent the tries that asked nothing.
+CREATE FUNCTION fn_reaper_late_past_posts(p_late interval, p_lim int)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid, o_tries int)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT i.id, i.workspace_id,
+         COALESCE((SELECT j.attempts FROM jobs j
+                    WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                      AND j.serialization_key = 'prep:' || i.id
+                    ORDER BY j.created_at DESC, j.id DESC LIMIT 1), 0)
+    FROM post_intents i
+    JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id
+    JOIN media_sources s ON s.workspace_id = m.workspace_id AND s.id = m.source_id
+    JOIN workspaces w ON w.id = i.workspace_id
+   WHERE i.state IN ('scheduled', 'prompt_pending') AND i.origin = 'cadence'
+     AND NOT i.cancel_requested AND i.schedule_slot_at < now() - p_late
+     AND s.provider = 'instagram_past_posts' AND w.state = 'active' AND NOT w.is_paused
+     AND NOT EXISTS (SELECT 1 FROM jobs j
+                      WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                        AND j.serialization_key = 'prep:' || i.id AND j.state = 'leased')
+   ORDER BY i.schedule_slot_at, i.id
    LIMIT GREATEST(p_lim, 0)
 $$;
 
@@ -1687,10 +1714,11 @@ BEGIN
 END $$;
 
 -- The cadence leg expires a cadence story still waiting after its slot. A
--- past-posts story keeps p_past_posts_late after its slot, the window a planned
--- story has: its prepare_past_post job fetches its file in that time or parks
--- it for review. A NULL window expires it at its slot, as a Drive story is.
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_late interval)
+-- caller that passes p_past_posts_park_late parks a past-posts cadence story of
+-- an active, unpaused workspace itself once its late window closes
+-- (fn_reaper_late_past_posts), so the leg leaves that story to it. Without it,
+-- the default, the story expires at its slot, as a Drive story does.
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -1704,9 +1732,10 @@ BEGIN
     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved') ORDER BY id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i WHERE i.state IN ('scheduled','prompt_pending')
     AND i.schedule_slot_at<now() AND i.origin='cadence'
-    AND (p_past_posts_late IS NULL OR i.schedule_slot_at<now()-p_past_posts_late
-     OR NOT EXISTS (SELECT 1 FROM media_items m JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
-      WHERE m.workspace_id=i.workspace_id AND m.id=i.media_item_id AND s.provider='instagram_past_posts'))
+    AND NOT (p_past_posts_park_late AND EXISTS (SELECT 1 FROM media_items m
+     JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id JOIN workspaces w ON w.id=m.workspace_id
+     WHERE m.workspace_id=i.workspace_id AND m.id=i.media_item_id AND s.provider='instagram_past_posts'
+      AND w.state='active' AND NOT w.is_paused))
     ORDER BY i.id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
     WHERE i.state='awaiting_approval' AND i.entered_state_at<now()-COALESCE(w.approval_ttl_minutes*interval '1 minute',p_approval_ttl)
@@ -1742,11 +1771,13 @@ BEGIN
    WHERE id IN (SELECT i.id FROM post_intents i
                  WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now()
                    AND i.origin = 'cadence'
-                   AND (p_past_posts_late IS NULL OR i.schedule_slot_at < now() - p_past_posts_late
-                        OR NOT EXISTS (SELECT 1 FROM media_items m JOIN media_sources s
-                                        ON s.workspace_id = m.workspace_id AND s.id = m.source_id
-                                       WHERE m.workspace_id = i.workspace_id AND m.id = i.media_item_id
-                                         AND s.provider = 'instagram_past_posts'))
+                   AND NOT (p_past_posts_park_late
+                            AND EXISTS (SELECT 1 FROM media_items m JOIN media_sources s
+                                         ON s.workspace_id = m.workspace_id AND s.id = m.source_id
+                                        JOIN workspaces w ON w.id = m.workspace_id
+                                        WHERE m.workspace_id = i.workspace_id AND m.id = i.media_item_id
+                                          AND s.provider = 'instagram_past_posts'
+                                          AND w.state = 'active' AND NOT w.is_paused))
                  ORDER BY i.id LIMIT rem);
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents i SET state = 'expired'

@@ -556,6 +556,7 @@ async def execute_reap_expired(
     approval_ttl_seconds: int,
     approved_ttl_seconds: int,
     capability=None,
+    park_late=None,
     past_posts_late_seconds: Optional[int] = None,
 ) -> int:
     """Reap in closed door, discovery, subject and card transactions.
@@ -569,14 +570,21 @@ async def execute_reap_expired(
     judge a sync job or re-arm its source: an expired past-posts sync is re-readied
     or ended by whether its source may still be read. Without it the
     three-argument door runs, which answers as an inactive past-posts source does.
-    *past_posts_late_seconds* rides with it: how long after its slot a past-posts
-    cadence story waits for its file before the cadence leg expires it. With
-    neither, that story expires at its slot, as a Drive story does.
+
+    *park_late* is the armed past-posts pipeline's park
+    (`PastPostsPipeline.park_late`). With it and the activation, the reaper
+    never expires a past-posts cadence story of an active, unpaused workspace:
+    the door's cadence leg leaves it, and once it is still waiting
+    *past_posts_late_seconds* after its slot with no prepare job running
+    (`fn_reaper_late_past_posts`), it is parked for review, saying so, in a
+    transaction of its own. Without them, it expires at its slot, as a Drive
+    story does.
     """
     from src.services.target import publish_pipeline, unit_of_work
     from src.services.target.instagram_sources import is_activated
 
     activated = is_activated(capability)
+    parks = activated and park_late is not None
     system = unit_of_work.poller_session_factory(engine, "")
     async with system() as session:
         swept = int(
@@ -586,7 +594,7 @@ async def execute_reap_expired(
                         "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
                         " make_interval(secs => :b)"
                         + (
-                            ", CAST(:activated AS boolean), make_interval(secs => :late))"
+                            ", CAST(:activated AS boolean), CAST(:parks AS boolean))"
                             if activated
                             else ")"
                         )
@@ -595,11 +603,7 @@ async def execute_reap_expired(
                         "lim": limit,
                         "a": approval_ttl_seconds,
                         "b": approved_ttl_seconds,
-                        **(
-                            {"activated": True, "late": past_posts_late_seconds}
-                            if activated
-                            else {}
-                        ),
+                        **({"activated": True, "parks": parks} if activated else {}),
                     },
                 )
             ).scalar()
@@ -638,6 +642,38 @@ async def execute_reap_expired(
                 )
         except Exception:  # noqa: BLE001 — one subject rolls back alone
             logger.exception("reaper: stale approved subject skipped this tick")
+
+    late = []
+    if parks and remaining > len(subjects):
+        async with system() as session:
+            late = (
+                await session.execute(
+                    text(
+                        "SELECT o_intent_id, o_workspace_id, o_tries FROM "
+                        "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)"
+                    ),
+                    {
+                        "late": int(past_posts_late_seconds),
+                        "lim": remaining - len(subjects),
+                    },
+                )
+            ).all()
+            await session.commit()
+    for intent_id, workspace_id, tries in sorted(
+        late, key=lambda row: (str(row[1]), str(row[0]))
+    ):
+        try:
+            parked += await park_late(
+                engine=engine,
+                workspace_id=str(workspace_id),
+                intent_id=str(intent_id),
+                tries=int(tries),
+                late_seconds=int(past_posts_late_seconds),
+            )
+        except Exception:  # noqa: BLE001 — one story rolls back alone
+            logger.exception(
+                "reaper: late past-posts story %s not parked this tick", intent_id
+            )
 
     # Header/ref cleanup acquires no new source authority and shares none of
     # the door or subject locks. WorkLoop alone finalizes the reaper job.

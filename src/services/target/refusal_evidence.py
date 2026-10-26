@@ -321,9 +321,10 @@ def _plain(refusal) -> Optional[str]:
     if kind == "window_closed":
         late = whole(refusal.get("late_seconds"))
         within = f"within {late // 60:,} minutes of its slot" if late else "in time"
+        tries = refusal.get("tries")
         sentence = (
             f"its file could not be fetched {within}"
-            f" ({_count(refusal.get('tries'))} tries)"
+            f" ({_count(tries)} {'try' if whole(tries) == 1 else 'tries'})"
         )
         last = plain(refusal.get("last_refusal"))
         return f"{sentence}; the last was refused: {last}" if last else sentence

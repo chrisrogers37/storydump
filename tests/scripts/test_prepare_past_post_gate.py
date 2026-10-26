@@ -1,11 +1,13 @@
-"""The file lane through the database: the reaper's window for a past-posts
+"""The file lane through the database: what the reaper does with a past-posts
 cadence story, the preparation door's fence, the sweep that mints a story's
 prepare job and the executor that runs it.
 
-`fn_reaper_sweep` leaves a past-posts cadence story alone for the window it is
-given after the story's slot, so its prepare_past_post job can fetch the file,
-and expires it after: a Drive story, or a call that gives no window, expires at
-its slot. `fn_selected_preparation_due` leaves out a story whose
+`fn_reaper_sweep` leaves a past-posts cadence story of an active, unpaused
+workspace to a caller that parks it (`p_past_posts_park_late`), and that
+caller's reaper parks it for review once its window has closed with no prepare
+job running (`fn_reaper_late_past_posts`). Any other call, the four-argument
+one an older worker makes included, expires it at its slot, as it expires a
+Drive story. `fn_selected_preparation_due` leaves out a story whose
 prepare_past_post job is ready or leased. The prompt sweep mints the job under
 the story's tenant, a worker claims it from the media lane, and the executor
 ends it by what one try at the file decides. The doors are called as
@@ -25,6 +27,7 @@ from src.services.target import (
     instagram_publish,
     jobs,
     past_posts_preparation_job as prepare_job,
+    scheduler,
     unit_of_work,
 )
 from src.services.target.past_posts_retry import Retry
@@ -42,14 +45,24 @@ past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 worker = composition.worker
 
-#: The sweep with a one-hour window, as the worker calls it once past posts are
-#: activated, and as the three-argument door calls it, which gives none.
-WINDOWED = (
-    "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours',"
-    " true, interval '1 hour')"
+#: The sweep as a worker that parks late past-posts stories calls it, and the
+#: calls that expire them at their slot: the four-argument one an older worker
+#: makes, and the three-argument door.
+PARKS = (
+    "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours', true, true)"
 )
-WINDOWLESS = "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours')"
+EXPIRES = {
+    "four-arguments": (
+        "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours', true)"
+    ),
+    "three-arguments": (
+        "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours')"
+    ),
+}
 DUE = "SELECT intent_id FROM fn_selected_preparation_due(50)"
+LATE = (
+    "SELECT o_intent_id, o_tries FROM fn_reaper_late_past_posts(interval '1 hour', 50)"
+)
 
 #: What a story waiting on its slot is: its state, its origin and the provider of
 #: the source its file belongs to.
@@ -140,6 +153,25 @@ def move(sync_conn, job, state):
     sync_conn.commit()
 
 
+def late(world_db):
+    """The stories the late door lists for a one-hour window, called as the
+    worker calls it, each with its tries."""
+    with txn(as_user(world_db, "svc_worker"), expect_user="svc_worker") as conn:
+        with conn.cursor() as cur:
+            cur.execute(LATE)
+            rows = {str(intent): tries for intent, tries in cur.fetchall()}
+        conn.commit()
+    return rows
+
+
+def pause(sync_conn, ws):
+    """Pause the workspace, as the owner."""
+    with sync_conn.cursor() as cur:
+        cur.execute("UPDATE workspaces SET is_paused = true WHERE id = %s", (str(ws),))
+        assert cur.rowcount == 1
+    sync_conn.commit()
+
+
 def is_due(world_db, intent):
     """Whether the preparation door lists the story, called as the worker calls it."""
     return intent in {str(row) for row in as_worker(world_db, DUE)}
@@ -185,6 +217,41 @@ def parked(sync_conn, intent):
         row = cur.fetchone()
     sync_conn.commit()
     return row
+
+
+async def bind(engine, chain):
+    """A group chat bound to the workspace, so a notice has a chat to go to."""
+    async with obs.uow(engine, chain) as conn:
+        return str(
+            (
+                await conn.execute(
+                    text(
+                        "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                        " VALUES (:ws, 'telegram_group', :ref) RETURNING id"
+                    ),
+                    dict(ws=str(chain["ws"]), ref="synthetic-" + uuid.uuid4().hex),
+                )
+            ).scalar_one()
+        )
+
+
+async def notices(engine, chain, intent, binding):
+    """The texts of the notifications queued for the story in the bound chat."""
+    async with obs.uow(engine, chain) as conn:
+        return list(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT payload->>'text' FROM channel_outbox"
+                        " WHERE intent_id = :id AND binding_id = :binding"
+                        " AND kind = 'notification' ORDER BY created_at, id"
+                    ),
+                    dict(id=intent, binding=binding),
+                )
+            )
+            .scalars()
+            .all()
+        )
 
 
 async def minted(engine, chain, intent):
@@ -245,56 +312,86 @@ def deps_of(engine, prepared):
     )
 
 
-async def test_a_past_posts_cadence_story_waits_out_its_window(
+async def test_a_caller_that_parks_leaves_a_late_past_posts_story_waiting(
     world_db, sync_conn, past_posts_engine, origin
 ):
-    """A sweep that gives a one-hour window leaves a past-posts cadence story
-    30 seconds past its slot `scheduled`, while it expires the Drive story beside
-    it, so the cadence leg ran."""
+    """A sweep from a worker that parks late past-posts stories leaves a
+    past-posts cadence story 61 minutes past its slot `scheduled`, while it
+    expires the Drive story beside it, so the cadence leg ran."""
     _, _, intent = await preparation.selected(past_posts_engine, origin)
-    assert slip(sync_conn, intent, "30 seconds") == PAST_POSTS_STORY
+    assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
 
-    as_worker(world_db, WINDOWED)
+    as_worker(world_db, PARKS)
 
     assert state_of(sync_conn, intent) == "scheduled"
     assert state_of(sync_conn, origin["intent"]) == "expired"
 
 
-async def test_one_past_its_window_is_expired(
-    world_db, sync_conn, past_posts_engine, origin
+@pytest.mark.parametrize("call", sorted(EXPIRES))
+async def test_any_other_call_expires_it_at_its_slot(
+    world_db, sync_conn, past_posts_engine, origin, call
 ):
-    """A past-posts cadence story 61 minutes past its slot is past a one-hour
-    window, and the sweep expires it."""
-    _, _, intent = await preparation.selected(past_posts_engine, origin)
-    assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
-
-    as_worker(world_db, WINDOWED)
-
-    assert state_of(sync_conn, intent) == "expired"
-
-
-async def test_without_a_window_it_expires_at_its_slot(
-    world_db, sync_conn, past_posts_engine, origin
-):
-    """The three-argument door gives no window, so it expires a past-posts cadence
-    story 30 seconds past its slot, as it expires a Drive story."""
+    """The four-argument call an older worker makes, and the three-argument
+    door, expire a past-posts cadence story 30 seconds past its slot, as they
+    expire a Drive story: the new argument's default keeps what they did."""
     _, _, intent = await preparation.selected(past_posts_engine, origin)
     assert slip(sync_conn, intent, "30 seconds") == PAST_POSTS_STORY
 
-    as_worker(world_db, WINDOWLESS)
+    as_worker(world_db, EXPIRES[call])
 
     assert state_of(sync_conn, intent) == "expired"
 
 
 async def test_a_drive_cadence_story_is_expired_at_its_slot(world_db, sync_conn):
-    """The window is a past-posts story's alone: a Drive cadence story 30 seconds
-    past its slot is expired by a sweep that gives a one-hour window."""
+    """Only a past-posts story is left to the caller: a sweep from a worker
+    that parks expires a Drive cadence story 30 seconds past its slot."""
     chain = seed_workspace_chain(sync_conn, "drive-late")
     assert slip(sync_conn, chain["intent"], "30 seconds") == DRIVE_STORY
 
-    as_worker(world_db, WINDOWED)
+    as_worker(world_db, PARKS)
 
     assert state_of(sync_conn, chain["intent"]) == "expired"
+
+
+async def test_a_paused_workspaces_story_expires_and_is_never_listed(
+    world_db, sync_conn, past_posts_engine, origin
+):
+    """A paused workspace's past-posts cadence story is neither served nor
+    parked: the late door never lists it, and a sweep from a worker that parks
+    expires it at its slot, as before."""
+    _, _, intent = await preparation.selected(past_posts_engine, origin)
+    assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
+    assert intent in late(world_db), "listed while its workspace posts"
+    pause(sync_conn, origin["ws"])
+    assert intent not in late(world_db)
+
+    as_worker(world_db, PARKS)
+
+    assert state_of(sync_conn, intent) == "expired"
+
+
+async def test_the_late_door_lists_a_story_past_its_window_with_its_tries(
+    world_db, sync_conn, past_posts_engine, origin
+):
+    """The late door lists a waiting past-posts cadence story only once it is a
+    window past its slot, with the tries its latest prepare job spent, and
+    leaves it out while that job's try is running."""
+    _, _, intent = await preparation.selected(past_posts_engine, origin)
+    assert slip(sync_conn, intent, "59 minutes") == PAST_POSTS_STORY
+    assert intent not in late(world_db), "inside its window"
+    assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
+    assert late(world_db)[intent] == 0, "no job has tried it"
+
+    job = await mint(past_posts_engine, origin, "prep:" + intent)
+    with sync_conn.cursor() as cur:
+        cur.execute("UPDATE jobs SET attempts = 3 WHERE id = %s", (str(job),))
+        assert cur.rowcount == 1
+    sync_conn.commit()
+    assert late(world_db)[intent] == 3, "ready, between tries"
+    move(sync_conn, job, "leased")
+    assert intent not in late(world_db), "a try is running"
+    move(sync_conn, job, "failed")
+    assert late(world_db)[intent] == 3, "ended"
 
 
 async def test_the_door_leaves_out_a_story_whose_prep_job_is_live(
@@ -456,52 +553,61 @@ async def test_past_its_window_the_story_parks_without_a_read(
     assert job_row(sync_conn, job["id"])["state"] == "review_required"
 
 
-async def test_a_story_the_reaper_expired_is_told_once_and_its_job_ends(
-    world_db, worker, origin, sync_conn
+async def test_the_reaper_parks_a_late_story_saying_why_and_tells_it_once(
+    worker, origin, sync_conn
 ):
-    """A cadence story the reaper expired at the end of its window while its job
-    waited for the lane is told to the workspace's chat once, as a planned story's
-    miss is, and the job ends cancelled; the door lists nothing to mint after it."""
+    """The reaper of a worker that parks: a past-posts cadence story whose try
+    was refused, still waiting 61 minutes past its slot, is parked for review.
+    Its evidence says the window closed, how many tries it had and the refusal
+    its slide recorded, and its chat is told once. Its job, run after, ends
+    cancelled and tells nothing more."""
+    config = WorkerConfig()
     _, _, intent = await preparation.selected(worker, origin)
+    job = await taken(worker, origin, intent)
+    prepared = preparation.refusing(
+        preparation.refused("cdn_refused", **preparation.CDN_404),
+        retry=Retry.from_config(config),
+    )
+    deps = deps_of(worker, prepared)
+    await prepare_job.execute(deps, job)
+    assert job_row(sync_conn, job["id"])["state"] == "ready"
     assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
-    async with obs.uow(worker, origin) as conn:
-        binding = (
-            await conn.execute(
-                text(
-                    "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
-                    " VALUES (:ws, 'telegram_group', :ref) RETURNING id"
-                ),
-                dict(ws=str(origin["ws"]), ref="synthetic-" + uuid.uuid4().hex),
-            )
-        ).scalar_one()
-    job_id = await minted(worker, origin, intent)
-    as_worker(world_db, WINDOWED)
-    assert state_of(sync_conn, intent) == "expired"
-    job = await claim(worker)
-    assert job is not None and str(job["id"]) == job_id
-    prepared, calls = preparation.service(worker, origin)
+    binding = await bind(worker, origin)
 
-    await prepare_job.execute(deps_of(worker, prepared), job)
+    await scheduler.execute_reap_expired(
+        worker,
+        limit=50,
+        approval_ttl_seconds=config.approval_ttl_seconds,
+        approved_ttl_seconds=config.approved_ttl_seconds,
+        capability=foundation.capability(),
+        park_late=deps.past_posts.park_late,
+        past_posts_late_seconds=config.planned_late_seconds,
+    )
 
-    assert job_row(sync_conn, job_id)["state"] == "cancelled"
-    assert calls == []
-    async with obs.uow(worker, origin) as conn:
-        told = (
-            (
-                await conn.execute(
-                    text(
-                        "SELECT payload->>'text' FROM channel_outbox"
-                        " WHERE intent_id = :id AND binding_id = :binding"
-                        " AND kind = 'notification'"
-                    ),
-                    dict(id=intent, binding=str(binding)),
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert len(told) == 1 and told[0].startswith("🗓 Not served")
-    assert not is_due(world_db, intent)
+    story = parked(sync_conn, intent)
+    assert story["state"] == "review_required"
+    assert story["reason"] == "past_posts_content_unavailable"
+    assert story["refusal"] == {
+        "v": 1,
+        "kind": "window_closed",
+        "late_seconds": config.planned_late_seconds,
+        "tries": 1,
+        "last_refusal": CDN_REFUSAL,
+    }
+    (told,) = await notices(worker, origin, intent, binding)
+    assert "could not be fetched within 60 minutes of its slot (1 try)" in told
+
+    with sync_conn.cursor() as cur:
+        cur.execute("UPDATE jobs SET run_at = now() WHERE id = %s", (str(job["id"]),))
+        assert cur.rowcount == 1
+    sync_conn.commit()
+    again = await claim(worker)
+    assert again is not None and str(again["id"]) == str(job["id"])
+    await prepare_job.execute(deps, again)
+
+    assert job_row(sync_conn, job["id"])["state"] == "cancelled"
+    assert await notices(worker, origin, intent, binding) == [told]
+    assert parked(sync_conn, intent)["state"] == "review_required"
 
 
 async def test_a_workspace_holds_one_file_task_at_a_time(worker, origin, sync_conn):

@@ -11,18 +11,15 @@ Each claim is one try, which `fn_claim_job` counts in the job's attempts:
 - A cadence story still waiting for its slot is parked for review, before any
   read, once a download could no longer finish inside its late window
   (`WorkerConfig.planned_late_seconds`, the window a planned story has). The
-  reaper keeps such a story that long after its slot (`fn_reaper_sweep`). A
-  planned story's window is the miss leg's (`fn_planned_misses`), which tells
-  its chats.
+  reaper never expires such a story: it parks one whose window closed with no
+  job running (`fn_reaper_late_past_posts`), the same way. A planned story's
+  window is the miss leg's (`fn_planned_misses`), which tells its chats.
 - Otherwise the coordinator prepares the file
   (`PastPostsPipeline.selected_prepare`). The preparation decides each refusal
   on this try's number (`past_posts_retry`): a refusal that proves nothing puts
   the job back after the retry's wait, with the try spent; a proven refusal or
   the last try parks the story with its evidence. A wait that read nothing
   puts the job back with the try restored.
-- A cadence story the reaper expired while its job waited for the lane is told
-  once, as a planned story's miss is (`prompts.say_not_served_for`), so no
-  expiry of a story waiting for its file is silent.
 
 A job whose untyped faults spend its budget parks its story through
 `publish_pipeline.flip_exhausted`, as a spent publish job's story is.
@@ -39,9 +36,7 @@ from src.services.target import (
     jobs,
     media_adapters,
     past_posts_retry,
-    prompts,
     readers,
-    refusal_evidence,
     source_policy,
     unit_of_work,
     vocabulary,
@@ -55,16 +50,9 @@ LANE = "media"
 
 _STORY = """
 SELECT i.state, i.origin, i.cancel_requested, i.schedule_slot_at, m.media_kind,
-       a.validation_capture AS capture, clock_timestamp() AS now,
-       CASE WHEN i.state = 'expired' THEN
-         (SELECT e.from_state FROM audit_events e
-           WHERE e.workspace_id = i.workspace_id AND e.entity_kind = 'post_intent'
-             AND e.entity_id = i.id AND e.to_state = 'expired'
-           ORDER BY e.id DESC LIMIT 1) END AS expired_from
+       clock_timestamp() AS now
   FROM post_intents i
   JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id
-  LEFT JOIN instagram_media_assets a ON a.workspace_id = m.workspace_id
-   AND a.source_id = m.source_id AND a.media_item_id = m.id
  WHERE i.workspace_id = :ws AND i.id = :id
 """
 
@@ -108,28 +96,9 @@ def _past_window(story, config) -> bool:
     ] + timedelta(seconds=config.planned_late_seconds)
 
 
-def _late_evidence(story, job, config) -> dict:
-    capture = story["capture"] if isinstance(story["capture"], dict) else {}
-    return refusal_evidence.evidence(
-        "window_closed",
-        late_seconds=config.planned_late_seconds,
-        tries=max(int(job["attempts"]) - 1, 0),
-        last_refusal=capture.get("refusal"),
-    )
-
-
-async def _end(deps, job, state: str, *, tell_late: bool = False) -> str:
-    """Finalize the job *state*; with *tell_late*, first tell the story's
-    chats it was not served in time, in the same transaction."""
+async def _end(deps, job, state: str) -> str:
     sessions = unit_of_work.make_session_for(deps.engine)
     async with sessions(job) as session:
-        if tell_late:
-            await prompts.say_not_served_for(
-                session,
-                workspace_id=str(job["workspace_id"]),
-                intent_ids=[_intent_of(job)],
-                reason="late",
-            )
         await jobs.finalize_job(session, job["id"], job["lease_token"], state)
     return state
 
@@ -173,15 +142,8 @@ async def _turn(deps, job) -> str:
     if story is None:
         return await _end(deps, job, "cancelled")
     if story["state"] not in vocabulary.WAITING_STATES or story["cancel_requested"]:
-        # Moved on: served, parked, approved, cancelled or ended. A cadence
-        # story the reaper expired at the end of its window while this job
-        # waited is told, once: no other job of it is minted after.
-        expired_late = (
-            story["state"] == "expired"
-            and story["origin"] == "cadence"
-            and story["expired_from"] in vocabulary.UNSERVED_STATES
-        )
-        return await _end(deps, job, "cancelled", tell_late=expired_late)
+        # Moved on: served, parked, approved, cancelled or ended.
+        return await _end(deps, job, "cancelled")
     if (
         story["origin"] == "cadence"
         and story["state"] in vocabulary.UNSERVED_STATES
@@ -191,7 +153,8 @@ async def _turn(deps, job) -> str:
             engine=deps.engine,
             workspace_id=ws,
             intent_id=iid,
-            evidence=_late_evidence(story, job, deps.config),
+            tries=max(int(job["attempts"]) - 1, 0),
+            late_seconds=deps.config.planned_late_seconds,
         ):
             return await _end(deps, job, "review_required")
         # It moved on between the read and the lock: look again.

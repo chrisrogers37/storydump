@@ -356,6 +356,7 @@ async def test_the_claim_the_reaper_and_the_clock_receive_the_capability(
 
     assert claimed["capability"] is past_posts.capability
     assert reaped["capability"] is past_posts.capability
+    assert reaped["park_late"] == past_posts.coordinator.park_late
     assert reaped["past_posts_late_seconds"] == app.config.planned_late_seconds
     assert ticked["capability"] is past_posts.capability
 
@@ -465,12 +466,17 @@ class _Door:
         return None
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_the_reaper_hands_the_door_the_late_window_only_when_activated(
-    monkeypatch, enabled
+@pytest.mark.parametrize(
+    ("enabled", "parker"), [(True, True), (True, False), (False, True)]
+)
+async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
+    monkeypatch, enabled, parker
 ):
-    """Activated, the door hears the source is on and how long a past-posts
-    story may wait after its slot; otherwise the three-argument door runs."""
+    """Activated and handed the pipeline's park, the door hears that the caller
+    parks a late past-posts story itself, and the reaper lists the stories whose
+    window closed, from the budget the door left. Activated without a park, the
+    door hears it does not; not activated, the three-argument door runs. Neither
+    lists a late story."""
     log = []
 
     @asynccontextmanager
@@ -479,6 +485,9 @@ async def test_the_reaper_hands_the_door_the_late_window_only_when_activated(
 
     async def settled(session, *, limit):
         return None
+
+    async def park_late(**kwargs):
+        raise AssertionError("nothing is listed, so nothing is parked")
 
     monkeypatch.setattr(
         unit_of_work, "poller_session_factory", lambda engine, tenant: system
@@ -491,20 +500,81 @@ async def test_the_reaper_hands_the_door_the_late_window_only_when_activated(
         approval_ttl_seconds=60,
         approved_ttl_seconds=120,
         capability=PastPostsCapability(enabled=True) if enabled else None,
+        park_late=park_late if parker else None,
         past_posts_late_seconds=3600,
     )
 
     sql, params = log[0]
     assert "fn_reaper_sweep" in sql
-    assert (
-        "CAST(:activated AS boolean), make_interval(secs => :late))" in sql
-    ) is enabled
+    assert ("CAST(:activated AS boolean), CAST(:parks AS boolean))" in sql) is enabled
     assert params == {
         "lim": 5,
         "a": 60,
         "b": 120,
-        **({"activated": True, "late": 3600} if enabled else {}),
+        **({"activated": True, "parks": parker} if enabled else {}),
     }
+    late = [(q, p) for q, p in log if "fn_reaper_late_past_posts" in q]
+    if enabled and parker:
+        assert late == [
+            (
+                "SELECT o_intent_id, o_workspace_id, o_tries FROM "
+                "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)",
+                {"late": 3600, "lim": 5},
+            )
+        ]
+    else:
+        assert late == []
+
+
+async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
+    monkeypatch,
+):
+    """Each late story the door lists is handed to the park with its tries and
+    the window, in workspace order, and a park that fails leaves the others to
+    run; the reaper counts the parks that took."""
+    rows = [("i-2", "ws-b", 3), ("i-1", "ws-a", 0), ("i-3", "ws-c", 1)]
+    parked = []
+
+    class _Late(_Door):
+        async def execute(self, statement, params=None):
+            self.log.append((str(statement), dict(params or {})))
+            listed = rows if "fn_reaper_late_past_posts" in str(statement) else []
+            return SimpleNamespace(scalar=lambda: 0, all=lambda: listed)
+
+    @asynccontextmanager
+    async def system():
+        yield _Late([])
+
+    async def settled(session, *, limit):
+        return None
+
+    async def park_late(*, engine, workspace_id, intent_id, tries, late_seconds):
+        parked.append((workspace_id, intent_id, tries, late_seconds))
+        if intent_id == "i-2":
+            raise RuntimeError("one story rolls back alone")
+        return intent_id == "i-1"
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+    monkeypatch.setattr(scheduler.prompts, "sweep_settled_cards", settled)
+
+    touched = await scheduler.execute_reap_expired(
+        object(),
+        limit=5,
+        approval_ttl_seconds=60,
+        approved_ttl_seconds=120,
+        capability=PastPostsCapability(enabled=True),
+        park_late=park_late,
+        past_posts_late_seconds=3600,
+    )
+
+    assert parked == [
+        ("ws-a", "i-1", 0, 3600),
+        ("ws-b", "i-2", 3, 3600),
+        ("ws-c", "i-3", 1, 3600),
+    ]
+    assert touched == 1
 
 
 # --- the API ----------------------------------------------------------------------

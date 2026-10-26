@@ -361,6 +361,13 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> N
         tz=str(tz or "UTC"),
         notice=_park_notice(evidence, admission_reason),
     )
+    logger.info(
+        "past-posts story %s parked for review from %s: %s (%s)",
+        iid,
+        state,
+        reason,
+        (evidence or {}).get("kind", "no refusal recorded"),
+    )
 
 
 class PastPostsPipeline:
@@ -485,11 +492,15 @@ class PastPostsPipeline:
                 )
             return True
 
-    async def park_late(self, *, engine, workspace_id, intent_id, evidence) -> bool:
-        """Park a story whose late window closed before its file could be
-        fetched, *evidence* saying so (`window_closed`). No fetch decides it,
-        so no fetch's fence is needed: only that the story still waits for its
-        slot. False when it no longer does."""
+    async def park_late(
+        self, *, engine, workspace_id, intent_id, tries, late_seconds
+    ) -> bool:
+        """Park a story whose late window, *late_seconds* after its slot,
+        closed before its file could be fetched. Its evidence says so
+        (`window_closed`): the *tries* its prepare jobs spent, and the refusal
+        its slide last recorded, read under the story's lock. No fetch decides
+        it, so no fetch's fence is needed: only that the story still waits for
+        its slot. False when it no longer does."""
         ws, iid = str(workspace_id), str(intent_id)
         async with self._uow(engine, ws).begin() as conn:
             subject, _ = await lock_pipeline(
@@ -502,13 +513,31 @@ class PastPostsPipeline:
                 or subject["cancel_requested"]
             ):
                 return False
+            capture = await conn.scalar(
+                text(
+                    "SELECT validation_capture FROM instagram_media_assets"
+                    " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
+                ),
+                dict(
+                    ws=ws,
+                    sid=str(subject["source_id"]),
+                    item=str(subject["media_item_id"]),
+                ),
+            )
             await _record_park(
                 conn,
                 ws=ws,
                 iid=iid,
                 state=subject["state"],
                 admission_reason="asset_unavailable",
-                evidence=evidence,
+                evidence=refusal_evidence.evidence(
+                    "window_closed",
+                    late_seconds=late_seconds,
+                    tries=tries,
+                    last_refusal=(
+                        capture.get("refusal") if isinstance(capture, dict) else None
+                    ),
+                ),
             )
         return True
 

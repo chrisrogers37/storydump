@@ -1918,11 +1918,8 @@ class TestSayRemovedBeforeServed:
         monkeypatch.setattr(prompts, "say_not_served", say)
         monkeypatch.setattr(prompts, "push_bindings", bindings)
         monkeypatch.setattr(identity, "member_name_for", member_name_for)
-        await prompts.say_not_served_for(
-            session,
-            workspace_id="ws-1",
-            intent_ids=["i-1", "i-2"],
-            reason="account_removed",
+        await prompts.say_removed_before_served(
+            session, workspace_id="ws-1", intent_ids=["i-1", "i-2"]
         )
         ((sql, params),) = session.statements
         assert sql.startswith(prompts._NOTICE_SELECT)

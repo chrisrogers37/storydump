@@ -657,6 +657,13 @@ FETCH_SENTENCES = [
         id="window-closed-before-a-try",
     ),
     pytest.param(
+        refusal_evidence.evidence(
+            "window_closed", late_seconds=3600, tries=1, last_refusal=None
+        ),
+        "its file could not be fetched within 60 minutes of its slot (1 try)",
+        id="window-closed-after-one-try",
+    ),
+    pytest.param(
         fetch_refusal("cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY),
         "Instagram's file server refused the link twice (HTTP 403/404)",
         id="cdn-refused",

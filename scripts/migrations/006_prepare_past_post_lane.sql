@@ -1,17 +1,20 @@
 -- A past-posts story's file is fetched by a prepare_past_post job on a media
 -- lane, so jobs takes the kind and the lane: ck_jobs_kind and ck_jobs_lane are
 -- rebuilt with the lists the model declares (machinery.py), in their order.
--- The reaper door takes a fifth argument, p_past_posts_late. Its cadence leg
--- expires a past-posts story that long after its slot, the window a planned
--- story has, instead of at it; a NULL window expires it at its slot, as a Drive
--- story is. The four-argument door is dropped and the five-argument one made in
--- its place, owned and granted as the schema code has it, and the
--- three-argument door passes a NULL window. The preparation door leaves out a
--- story whose prepare_past_post job is ready or leased.
+-- The reaper door takes a fifth argument, p_past_posts_park_late, false by
+-- default. A caller that passes true parks a late past-posts cadence story of
+-- an active, unpaused workspace itself, so the cadence leg leaves that story to
+-- it; any other call, a four-argument one included, expires it at its slot as
+-- before. The four-argument door is dropped and the five-argument one made in
+-- its place, and the three-argument door's call reaches it unchanged.
+-- fn_reaper_late_past_posts lists the stories such a caller parks. Both doors
+-- are owned and granted as the schema code has them. The preparation door
+-- leaves out a story whose prepare_past_post job is ready or leased.
 -- The runner wraps this file and its ledger row in one transaction.
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_jobs_kind' AND conrelid = to_regclass('public.jobs') AND pg_get_constraintdef(oid) LIKE '%prepare_past_post%')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_jobs_lane' AND conrelid = to_regclass('public.jobs') AND pg_get_constraintdef(oid) LIKE '%media%')
--- runner:postcondition SELECT to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean,interval)') IS NOT NULL AND to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean)') IS NULL
+-- runner:postcondition SELECT to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean,boolean)') IS NOT NULL AND to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean)') IS NULL
+-- runner:postcondition SELECT to_regprocedure('public.fn_reaper_late_past_posts(interval,integer)') IS NOT NULL
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('public.fn_selected_preparation_due(integer)') AND prosrc LIKE '%prepare_past_post%')
 
 SET LOCAL search_path = public, pg_temp;
@@ -32,11 +35,11 @@ ALTER TABLE jobs
   ),
   ADD CONSTRAINT ck_jobs_lane CHECK (lane IN ('interactive','bulk','media'));
 
--- The reaper door changes signature, so it is dropped and made again; the
--- three-argument door that calls it is replaced after it.
+-- The reaper door changes signature, so it is dropped and made again. Its new
+-- argument has a default, so a four-argument call still reaches it.
 DROP FUNCTION fn_reaper_sweep(integer, interval, interval, boolean);
 
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_late interval)
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -50,9 +53,10 @@ BEGIN
     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved') ORDER BY id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i WHERE i.state IN ('scheduled','prompt_pending')
     AND i.schedule_slot_at<now() AND i.origin='cadence'
-    AND (p_past_posts_late IS NULL OR i.schedule_slot_at<now()-p_past_posts_late
-     OR NOT EXISTS (SELECT 1 FROM media_items m JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
-      WHERE m.workspace_id=i.workspace_id AND m.id=i.media_item_id AND s.provider='instagram_past_posts'))
+    AND NOT (p_past_posts_park_late AND EXISTS (SELECT 1 FROM media_items m
+     JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id JOIN workspaces w ON w.id=m.workspace_id
+     WHERE m.workspace_id=i.workspace_id AND m.id=i.media_item_id AND s.provider='instagram_past_posts'
+      AND w.state='active' AND NOT w.is_paused))
     ORDER BY i.id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
     WHERE i.state='awaiting_approval' AND i.entered_state_at<now()-COALESCE(w.approval_ttl_minutes*interval '1 minute',p_approval_ttl)
@@ -88,11 +92,13 @@ BEGIN
    WHERE id IN (SELECT i.id FROM post_intents i
                  WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now()
                    AND i.origin = 'cadence'
-                   AND (p_past_posts_late IS NULL OR i.schedule_slot_at < now() - p_past_posts_late
-                        OR NOT EXISTS (SELECT 1 FROM media_items m JOIN media_sources s
-                                        ON s.workspace_id = m.workspace_id AND s.id = m.source_id
-                                       WHERE m.workspace_id = i.workspace_id AND m.id = i.media_item_id
-                                         AND s.provider = 'instagram_past_posts'))
+                   AND NOT (p_past_posts_park_late
+                            AND EXISTS (SELECT 1 FROM media_items m JOIN media_sources s
+                                         ON s.workspace_id = m.workspace_id AND s.id = m.source_id
+                                        JOIN workspaces w ON w.id = m.workspace_id
+                                        WHERE m.workspace_id = i.workspace_id AND m.id = i.media_item_id
+                                          AND s.provider = 'instagram_past_posts'
+                                          AND w.state = 'active' AND NOT w.is_paused))
                  ORDER BY i.id LIMIT rem);
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents i SET state = 'expired'
@@ -143,9 +149,27 @@ BEGIN
   RETURN n;
 END $$;
 
-CREATE OR REPLACE FUNCTION fn_reaper_sweep(p_lim int,p_approval_ttl interval,p_approved_ttl interval)
-RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
- SELECT fn_reaper_sweep(p_lim,p_approval_ttl,p_approved_ttl,false,NULL::interval)
+-- The door that lists the late past-posts stories such a caller parks
+CREATE FUNCTION fn_reaper_late_past_posts(p_late interval, p_lim int)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid, o_tries int)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT i.id, i.workspace_id,
+         COALESCE((SELECT j.attempts FROM jobs j
+                    WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                      AND j.serialization_key = 'prep:' || i.id
+                    ORDER BY j.created_at DESC, j.id DESC LIMIT 1), 0)
+    FROM post_intents i
+    JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id
+    JOIN media_sources s ON s.workspace_id = m.workspace_id AND s.id = m.source_id
+    JOIN workspaces w ON w.id = i.workspace_id
+   WHERE i.state IN ('scheduled', 'prompt_pending') AND i.origin = 'cadence'
+     AND NOT i.cancel_requested AND i.schedule_slot_at < now() - p_late
+     AND s.provider = 'instagram_past_posts' AND w.state = 'active' AND NOT w.is_paused
+     AND NOT EXISTS (SELECT 1 FROM jobs j
+                      WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                        AND j.serialization_key = 'prep:' || i.id AND j.state = 'leased')
+   ORDER BY i.schedule_slot_at, i.id
+   LIMIT GREATEST(p_lim, 0)
 $$;
 
 -- The preparation door
@@ -186,9 +210,12 @@ SET search_path=pg_catalog,public,pg_temp AS $$
  ORDER BY i.schedule_slot_at,i.id LIMIT p_limit
 $$;
 
--- The five-argument reaper door is owned and granted as the schema code has it.
+-- The two reaper doors are owned and granted as the schema code has them.
 GRANT CREATE ON SCHEMA public TO svc_maintenance;
-ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) OWNER TO svc_maintenance;
+ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) OWNER TO svc_maintenance;
+ALTER FUNCTION fn_reaper_late_past_posts(interval, integer) OWNER TO svc_maintenance;
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
-REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) TO svc_worker;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) TO svc_worker;
+REVOKE ALL ON FUNCTION fn_reaper_late_past_posts(interval, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_reaper_late_past_posts(interval, integer) TO svc_worker;

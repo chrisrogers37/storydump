@@ -424,6 +424,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             approval_ttl_seconds=cfg.approval_ttl_seconds,
             approved_ttl_seconds=cfg.approved_ttl_seconds,
             capability=deps.past_posts_capability,
+            park_late=deps.past_posts.park_late if deps.past_posts else None,
             past_posts_late_seconds=cfg.planned_late_seconds,
         )
 
