@@ -85,7 +85,9 @@ its predeploy (`railway.toml:8`), so **merged is applied**. The ledger is
   `vocabulary.py` and pinned to the models
   (`tests/src/services/target/test_vocabulary.py:57`): change both together. A
   new table or function moves the counts at
-  `tests/scripts/test_schema_builder.py:92` and `:101`.
+  `tests/scripts/test_schema_builder.py:92` and `:101`, and the floors in
+  `scripts/schema_parity.py` (`FLOORS`, pinned exactly by its real-build gates)
+  with the healthy snapshot in `tests/scripts/test_schema_parity.py`.
 - **Name a trigger `tg_<table>_<what>` and its function `trg_<table>_<what>`.**
   The prefix means trigger, not Telegram. Postgres fires a table's `BEFORE`
   triggers in name order, and on `post_intents` the edge guard
