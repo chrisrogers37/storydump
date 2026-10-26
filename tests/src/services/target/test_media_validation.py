@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 
 from src.services.target import media_validation as v
+from src.services.target import refusal_evidence
 
 
 def image_bytes(fmt="JPEG", size=(32, 48)):
@@ -34,7 +35,9 @@ def box(kind, payload=b"", *, extended=False):
     return struct.pack(">I4s", 8 + len(payload), kind) + payload
 
 
-def movie(*, external=False, edits=False, late=False, fragmented=False):
+def movie(
+    *, external=False, edits=False, late=False, fragmented=False, codecs=(b"avc1",)
+):
     ref = box(
         b"url ",
         b"\x00\x00\x00" + (b"\x00../private-secret\x00" if external else b"\x01"),
@@ -43,8 +46,8 @@ def movie(*, external=False, edits=False, late=False, fragmented=False):
     stsd = box(
         b"stsd",
         bytes(4)
-        + struct.pack(">I", 1)
-        + box(b"avc1", bytes(6) + b"\x00\x01" + bytes(78)),
+        + struct.pack(">I", len(codecs))
+        + b"".join(box(codec, bytes(6) + b"\x00\x01" + bytes(78)) for codec in codecs),
     )
     track = box(
         b"trak",
@@ -688,7 +691,7 @@ def test_video_check_carries_the_values_it_read(error, check, facts, measured):
 #: defaults), the reason, whether it is pending, and the values it measured.
 CONTAINER_REFUSALS = [
     pytest.param(
-        movie().replace(b"avc1", b"vp09"),
+        movie(codecs=(b"vp09",)),
         None,
         "video_codec",
         False,
@@ -696,8 +699,22 @@ CONTAINER_REFUSALS = [
             "boxes": ["ftyp", "moov", "mdat"],
             "box_count": 12,
             "sample_codecs": ["vp09"],
+            "refused_codecs": ["vp09"],
         },
         id="video_codec",
+    ),
+    pytest.param(
+        movie(codecs=(b"avc1", b"ac-3")),
+        None,
+        "video_codec",
+        False,
+        {
+            "boxes": ["ftyp", "moov", "mdat"],
+            "box_count": 13,
+            "sample_codecs": ["avc1", "ac-3"],
+            "refused_codecs": ["ac-3"],
+        },
+        id="video_codec-names-only-the-refused-stream",
     ),
     pytest.param(
         movie()[:-1],
@@ -754,11 +771,57 @@ def test_container_refusal_carries_the_boxes_it_walked(
     refusal, in file order and at most 32 of them; the number of boxes counted
     at any depth, which the bound on the list does not cap; and the sample
     codecs read so far. An unsupported refusal and a pending one carry the
-    same."""
+    same. A codec refusal also names the sample codecs it refused, and only
+    those."""
     checked = v.inspect_container(data, limits)
     assert (checked.reason, checked.pending) == (reason, pending)
     assert checked.measured == measured
     assert_plain(checked.measured)
+
+
+#: What a refusal sentence says for a value its record lacks.
+UNREAD = ("a stream", "another format", "?", "None")
+
+
+def assert_reads_with_what_it_measured(check, measured):
+    """The card's sentence for a refusal the validator raised is its check's
+    own, built from the values the check recorded: never the sentence for a
+    check without words, and never a placeholder for a value it did not find.
+    A measured value renamed on either side fails here, where the sentence
+    table's own cases, built by hand, would not."""
+    sentence = refusal_evidence.plain(
+        refusal_evidence.evidence(
+            "local_validation",
+            state="unsupported",
+            check=check,
+            measured=dict(measured),
+        )
+    )
+    assert f"the {check} check" not in sentence, sentence
+    assert not any(word in sentence for word in UNREAD), sentence
+
+
+@pytest.mark.parametrize(
+    "error,check,facts,measured",
+    [case for case in VIDEO_REFUSALS if case.values[0] is v.UnsupportedMedia],
+)
+def test_a_video_refusal_reads_with_what_it_measured(error, check, facts, measured):
+    """Each video refusal the probe's facts raise reads as its own sentence."""
+    raised = refusal_of(error, facts)
+    assert_reads_with_what_it_measured(str(raised), raised.measured)
+
+
+@pytest.mark.parametrize(
+    "data,limits,reason,pending,measured",
+    [case for case in CONTAINER_REFUSALS if not case.values[3]],
+)
+def test_a_container_refusal_reads_with_what_it_measured(
+    data, limits, reason, pending, measured
+):
+    """Each unsupported container the walker refuses reads as its own
+    sentence."""
+    checked = v.inspect_container(data, limits)
+    assert_reads_with_what_it_measured(checked.reason, checked.measured)
 
 
 def test_clean_container_measures_nothing():

@@ -4,7 +4,7 @@ chat that holds no card of it, beside the notice, under real tenant roles."""
 import pytest
 from sqlalchemy import text
 
-from src.services.target import instagram_publish
+from src.services.target import instagram_publish, refusal_evidence
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -60,6 +60,32 @@ async def test_a_story_parked_before_it_was_served_gets_its_review_card(
         assert "media" not in payload, "a review fetches no past-posts bytes"
     notices = [r for r in rows if r[1] == "notification"]
     assert sorted(r[0] for r in notices) == sorted(chats), "the notice goes too"
+
+
+async def test_a_parked_storys_review_card_and_notice_say_why_it_was_refused(
+    past_posts_engine, origin, sync_conn
+):
+    """The card the park writes carries its refusal's reason under its outcome
+    line, and the notice says the same: both read the story's recorded refusal."""
+    _bind(sync_conn, origin["ws"])
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    await _park_unsupported(past_posts_engine, origin, intent)
+    with sync_conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_error -> 'error' -> 'refusal' FROM post_intents WHERE id = %s",
+            (intent,),
+        )
+        (refusal,) = cur.fetchone()
+    sync_conn.commit()
+    sentence = refusal_evidence.plain(refusal)
+    assert sentence, "the park records a refusal with something to say"
+    rows = _outbox_rows(sync_conn, intent)
+    (card,) = [r[3] for r in rows if r[1] == "approval_prompt"]
+    assert card["outcome_text"].startswith("👀 Needs review")
+    assert card["outcome_text"].endswith(f"\nRefused: {sentence}.")
+    (notice,) = [r[3] for r in rows if r[1] == "notification"]
+    assert f"Refused: {sentence}." in str(notice)
+    assert "unavailable or changed" not in str(notice)
 
 
 @pytest.mark.parametrize(

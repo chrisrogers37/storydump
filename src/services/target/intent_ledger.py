@@ -16,6 +16,7 @@ as unset, including on pooled connections.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from asyncpg.exceptions import CheckViolationError, RaiseError
@@ -199,7 +200,8 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
             await session.execute(
                 text(
                     "SELECT i.state, i.published_via, i.entered_state_at,"
-                    "       i.approval_rule, a.actor_user_id, a.created_at"
+                    "       i.approval_rule, a.actor_user_id, a.created_at,"
+                    "       i.last_error -> 'error' -> 'refusal' AS refusal"
                     "  FROM post_intents i"
                     "  LEFT JOIN LATERAL ("
                     "    SELECT actor_user_id, created_at FROM audit_events e"
@@ -222,7 +224,11 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
             "approval_rule": None,
             "by_user_id": None,
             "at": None,
+            "refusal": None,
         }
+    refusal = row["refusal"]
+    if isinstance(refusal, str):
+        refusal = json.loads(refusal)
     return {
         "state": row["state"],
         "published_via": row["published_via"],
@@ -231,6 +237,9 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
         if row["actor_user_id"] is None
         else str(row["actor_user_id"]),
         "at": row["created_at"] or row["entered_state_at"],
+        # Why a story in review was refused (`refusal_evidence`), for its card's
+        # line; None for every other state.
+        "refusal": refusal if row["state"] == "review_required" else None,
     }
 
 
