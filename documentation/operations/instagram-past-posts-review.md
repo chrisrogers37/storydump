@@ -120,10 +120,11 @@ names.
    fetches the transit store's story derivation, delivered as MP4 in the story frame.
    So the validator judges a past-posts video only on what the derivation keeps from it
    (its size against what the transit store takes, a well-formed self-contained
-   container, a stream `ffprobe` can open, its duration, which is the container's or
+   container, its video stream, its duration, which is the container's or
    its longest stream's, and its frame rate). A container the walker cannot read
-   whole, a file with more streams than the probe opens (16) and a duration nothing
-   states are left to the derivation and recorded, never left pending. The
+   whole, a stream `ffprobe` does not decode, a file with more streams than the probe
+   opens (16) and a duration nothing states are left to the derivation and recorded,
+   never left pending. The
    transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
@@ -317,7 +318,7 @@ that hold no unresolved upload.
 - **Likes and comments** can be unavailable. Missing values do not mean zero.
 - **Videos.** A candidate video is checked when its story is prepared: a video at least
   3 seconds long, at 23 to 60 frames a second where its file states a rate, in a
-  well-formed MP4 or MOV that `ffprobe` can open, is `supported`, and one longer than
+  well-formed MP4 or MOV that `ffprobe` can read, is `supported`, and one longer than
   60 seconds is trimmed to 60 by its derivation. Meta receives the
   transit store's derivation of it, never the file itself, so the file's edit lists,
   `moov` position, codec settings and audio settings are not judged.

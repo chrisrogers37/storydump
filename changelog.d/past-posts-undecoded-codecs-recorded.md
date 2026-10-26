@@ -1,0 +1,3 @@
+### Changed
+
+- **A past post's video is no longer refused for a codec the probe does not decode.** The story derivation re-encodes every stream, so a sample entry outside H.264, HEVC and AAC (an MPEG-4 Part 2 video, a timecode or text track) is recorded in the evidence as `undecoded_codecs`, and the file is judged on what the probe reads of its container. The probe still opens only those three decoders, and ffmpeg's line for a decoder it keeps closed is not taken as a fault of the file. A video already refused for its codec stays refused until its asset is observed again, and its card keeps its sentence (`refusal_evidence.LEGACY_CHECKS`).
