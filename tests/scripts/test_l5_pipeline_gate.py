@@ -1651,6 +1651,35 @@ class TestDefinitiveFailureClassification:
             "ERROR",
             reason,
         )
+        assert error["refusal"] == {
+            "v": 1,
+            "kind": "container_dead",
+            "status_code": "ERROR",
+            "status": reason,
+        }, "the refusal the review card reads"
+
+    def test_a_dead_container_that_spends_the_ladder_says_why_on_its_card(
+        self, pipe_db
+    ):
+        """The poison restates the story's card with the review line and, under
+        it, Instagram's own status for the container: the refusal the poison
+        recorded, read back in the same transaction."""
+        from src.services.target import refusal_evidence
+        from src.services.target.instagram_graph import ContainerStatus
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        reason = "Error: Media upload has failed with error code 2207026"
+        meta = StubMetaAdapter(status_script=[ContainerStatus("ERROR", reason)])
+        binding = _seed_card(pipe_db, intent)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        refusal = _intent_row(pipe_db, intent)["last_error"]["error"]["refusal"]
+        sentence = refusal_evidence.plain(refusal)
+        assert reason in sentence
+        edit = _review_edit(pipe_db, intent, binding)
+        assert edit["outcome_text"].startswith("👀 Needs review")
+        assert edit["outcome_text"].endswith(f"\nRefused: {sentence}.")
 
 
 class TestADeadContainerIdDoesNotOutliveItsContainer:
