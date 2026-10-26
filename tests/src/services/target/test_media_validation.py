@@ -367,14 +367,24 @@ def test_what_the_story_derivation_sets_is_not_judged():
 
 
 def encoded_video(
-    tmp_path, *, seconds=4, rate=30, faststart=False, fragmented=False, audio_tracks=1
+    tmp_path,
+    *,
+    seconds=4,
+    rate=30,
+    faststart=False,
+    fragmented=False,
+    audio_tracks=1,
+    codec="libx264",
+    timecode=False,
 ):
     """An H.264 + AAC MP4 written with ffmpeg's defaults, which put an edit
     list on each track and `moov` after the media (before it, with
     *faststart*), with *audio_tracks* copies of the audio; *fragmented* writes
-    the media in fragments after an empty `moov`."""
+    the media in fragments after an empty `moov`, *codec* encodes the video
+    with another encoder, and *timecode* writes a MOV with a timecode
+    track."""
     _requires_linux()
-    out = tmp_path / "source.mp4"
+    out = tmp_path / ("source.mov" if timecode else "source.mp4")
     subprocess.run(
         [
             "ffmpeg",
@@ -395,13 +405,14 @@ def encoded_video(
             "0:v",
             *["-map", "1:a"] * audio_tracks,
             "-c:v",
-            "libx264",
+            codec,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
             "aac",
             *(["-movflags", "+faststart"] if faststart else []),
             *(["-movflags", "+empty_moov+frag_keyframe"] if fragmented else []),
+            *(["-timecode", "00:00:00:00"] if timecode else []),
             str(out),
         ],
         check=True,
@@ -457,6 +468,26 @@ async def test_a_real_video_with_four_streams_is_probed(tmp_path):
     )
     assert (result.state, result.reason) == ("supported", "validated")
     assert "probe_skipped" not in result.evidence
+
+
+@pytest.mark.parametrize(
+    "kwargs,undecoded",
+    [({"codec": "mpeg4"}, ["mp4v"]), ({"timecode": True}, ["tmcd"])],
+    ids=["mpeg4-part-2-video", "timecode-track"],
+)
+async def test_a_real_video_with_a_stream_the_probe_does_not_decode_is_supported(
+    tmp_path, kwargs, undecoded
+):
+    """An MPEG-4 Part 2 video, or a MOV with a timecode track, is judged on
+    what the probe reads of its container, and the codecs it does not decode
+    are recorded: the derivation re-encodes them."""
+    data = encoded_video(tmp_path, **kwargs)
+    result = await v.validate_media(
+        request(data, "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    assert (result.state, result.reason) == ("supported", "validated")
+    assert result.evidence["undecoded_codecs"] == undecoded
 
 
 def test_linux_probe_tools_are_required_in_ci():
@@ -795,42 +826,6 @@ def test_video_check_carries_the_values_it_read(error, check, facts, measured):
 #: defaults), the reason, and the values it measured.
 CONTAINER_REFUSALS = [
     pytest.param(
-        movie(codecs=(b"vp09",)),
-        None,
-        "video_codec",
-        {
-            "boxes": ["ftyp", "moov", "mdat"],
-            "box_count": 12,
-            "sample_codecs": ["vp09"],
-            "refused_codecs": ["vp09"],
-        },
-        id="video_codec",
-    ),
-    pytest.param(
-        movie(codecs=(b"avc1", b"ac-3")),
-        None,
-        "video_codec",
-        {
-            "boxes": ["ftyp", "moov", "mdat"],
-            "box_count": 13,
-            "sample_codecs": ["avc1", "ac-3"],
-            "refused_codecs": ["ac-3"],
-        },
-        id="video_codec-names-only-the-refused-stream",
-    ),
-    pytest.param(
-        movie(fragmented=True, codecs=(b"vp09",)),
-        None,
-        "video_codec",
-        {
-            "boxes": ["ftyp", "moov", "mdat", "moof"],
-            "box_count": 13,
-            "sample_codecs": ["vp09"],
-            "refused_codecs": ["vp09"],
-        },
-        id="video_codec-in-a-walk-that-stopped",
-    ),
-    pytest.param(
         movie()[:-1],
         None,
         "malformed_container",
@@ -859,13 +854,60 @@ def test_container_refusal_carries_the_boxes_it_walked(data, limits, reason, mea
     """A refused container measures the top-level box kinds walked up to the
     refusal, in file order and at most 32 of them; the number of boxes counted
     at any depth, which the bound on the list does not cap; and the sample
-    codecs read so far. A codec refusal also names the sample codecs it
-    refused, and only those, whether or not the walk read the container
-    whole."""
+    codecs read so far."""
     checked = v.inspect_container(data, limits)
     assert (checked.reason, checked.stopped) == (reason, None)
     assert checked.measured == measured
     assert_plain(checked.measured)
+
+
+@pytest.mark.parametrize(
+    "data,undecoded",
+    [
+        (movie(codecs=(b"vp09",)), ("vp09",)),
+        (movie(codecs=(b"avc1", b"mp4a", b"tmcd")), ("tmcd",)),
+        (movie(fragmented=True, codecs=(b"vp09",)), ("vp09",)),
+    ],
+    ids=["vp09", "only-the-undecoded-entry", "in-a-walk-that-stopped"],
+)
+def test_a_codec_the_probe_does_not_decode_is_recorded_not_refused(data, undecoded):
+    """The story derivation re-encodes every stream, so a sample entry outside
+    the probe's decoders is recorded, whether or not the walk read the
+    container whole, and refuses nothing."""
+    checked = v.inspect_container(data)
+    assert (checked.reason, checked.undecoded) == (None, undecoded)
+
+
+@pytest.mark.parametrize(
+    "stderr,state,reason",
+    [
+        (
+            b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n",
+            "supported",
+            "validated",
+        ),
+        (
+            b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n"
+            b"moov atom truncated\n",
+            "validation_pending",
+            "probe_incomplete",
+        ),
+        (
+            b"Protocol 'http' not on whitelist 'file'!\n",
+            "validation_pending",
+            "probe_incomplete",
+        ),
+    ],
+    ids=["a-closed-decoder", "and-another-line", "a-closed-protocol"],
+)
+async def test_a_decoder_the_whitelist_keeps_closed_is_not_a_fault_of_the_file(
+    monkeypatch, tmp_path, stderr, state, reason
+):
+    """ffmpeg's line for a decoder outside `-codec_whitelist` is the probe's
+    own bound: alone, the probe ran clean. Any other line still counts, a
+    refused protocol among them."""
+    result = await validated_video(monkeypatch, tmp_path, probe_facts(), stderr=stderr)
+    assert (result.state, result.reason) == (state, reason)
 
 
 #: Every container the walk cannot read whole: the bytes, the limits (None for
@@ -945,7 +987,7 @@ async def test_a_walk_that_stopped_is_evidence_and_the_probe_decides(
 
 
 #: What a refusal sentence says for a value its record lacks.
-UNREAD = ("a stream", "another format", "?", "None")
+UNREAD = ("another format", "?", "None")
 
 
 def sentence_of(check, measured):
@@ -1166,17 +1208,17 @@ async def test_fingerprint_does_not_move_with_what_the_check_measured(monkeypatc
 
 
 async def validated_video(
-    monkeypatch, tmp_path, facts, data=None, limits=None, argvs=None
+    monkeypatch, tmp_path, facts, data=None, limits=None, argvs=None, stderr=b""
 ):
-    """`validate_media` on a video whose probe answers with ffprobe's *facts*:
-    the bounded run is faked, and the real `_validate_video` reads the answer.
-    Each probe's argv is appended to *argvs* when given."""
+    """`validate_media` on a video whose probe answers with ffprobe's *facts*
+    and *stderr*: the bounded run is faked, and the real `_validate_video`
+    reads the answer. Each probe's argv is appended to *argvs* when given."""
 
     async def probe(argv, *args):
         if argvs is not None:
             argvs.append(argv)
         return SimpleNamespace(
-            returncode=0, stdout=json.dumps(facts).encode(), stderr=b""
+            returncode=0, stdout=json.dumps(facts).encode(), stderr=stderr
         )
 
     monkeypatch.setattr(v, "run_bounded", probe)
@@ -1278,6 +1320,7 @@ async def test_the_probe_opens_up_to_its_named_stream_bound(monkeypatch, tmp_pat
     )
     (argv,) = argvs
     assert argv[argv.index("-max_streams") + 1] == str(bound) == "16"
+    assert argv[argv.index("-codec_whitelist") + 1] == "h264,hevc,aac"
     assert (result.state, "probe_skipped" in result.evidence) == ("supported", False)
     with pytest.raises(ValueError):
         v.ValidationLimits(streams=bound + 1)
@@ -1319,7 +1362,7 @@ async def test_a_refused_timing_records_its_bounds_and_reads_with_them(
 
 def test_a_refusal_names_a_check_of_the_closed_set():
     """A refusal carries a check from `UNSUPPORTED_CHECKS`, or the validator
-    fails loudly: the refusal sentences are held to that set."""
+    fails loudly: the refusal sentences cover that set."""
     assert str(v.UnsupportedMedia("duration")) == "duration"
     with pytest.raises(ValueError, match="made_up_check"):
         v.UnsupportedMedia("made_up_check")

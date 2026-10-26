@@ -984,9 +984,13 @@ def test_plain_says_what_a_record_with_nothing_specific_holds(refusal, sentence)
 @pytest.mark.unit
 def test_the_table_has_words_for_every_check_the_validator_refuses_by():
     """Each check a file can be refused by (`media_validation.UNSUPPORTED_CHECKS`,
-    the closed set `UnsupportedMedia` carries) has its sentence, and the table
-    holds no other."""
-    assert set(refusal_evidence._CHECKS) == media_validation.UNSUPPORTED_CHECKS
+    the closed set `UnsupportedMedia` carries) has its sentence, and so does
+    each check it no longer makes (`LEGACY_CHECKS`), for the refusals stored
+    under one; the table holds no other."""
+    assert set(refusal_evidence._CHECKS) == (
+        media_validation.UNSUPPORTED_CHECKS | refusal_evidence.LEGACY_CHECKS
+    )
+    assert not media_validation.UNSUPPORTED_CHECKS & refusal_evidence.LEGACY_CHECKS
 
 
 @pytest.mark.unit
