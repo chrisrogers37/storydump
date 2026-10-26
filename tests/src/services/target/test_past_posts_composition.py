@@ -134,12 +134,11 @@ def test_an_inactive_worker_wires_no_past_posts_seam_but_still_loads_the_receipt
     assert (
         deps.past_posts,
         deps.past_posts_sync,
-        deps.selected_prepare,
         deps.past_posts_capability,
         deps.past_posts_evidence,
         deps.past_posts_client,
         deps.past_posts_keys,
-    ) == (None,) * 7
+    ) == (None,) * 6
     assert all(loop._past_posts_capability is None for loop in bare.loops)
     assert isinstance(bare.registry["reconcile_past_posts_accounts"], Parked)
     # `compose` reads the key ring itself: a deletion receipt is redacted with
@@ -276,11 +275,10 @@ def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):
     app = composed(past_posts, env=armed())
     deps = app.deps
 
+    # The coordinator, whose `selected_prepare` WRAPPER owns the bound-content
+    # review route: the prepare job never reaches the bare `SelectedPreparation`
+    # method the coordinator was built over.
     assert deps.past_posts is past_posts.coordinator
-    # The WRAPPER, which owns the bound-content review route: never the bare
-    # `SelectedPreparation` method the coordinator was built over.
-    assert deps.selected_prepare == past_posts.coordinator.selected_prepare
-    assert deps.selected_prepare != past_posts.preparation.selected_prepare
     assert deps.past_posts_sync is past_posts.sync_ports
     assert deps.past_posts_capability is past_posts.capability
     assert deps.past_posts_evidence is past_posts.evidence

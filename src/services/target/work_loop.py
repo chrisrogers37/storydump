@@ -56,6 +56,7 @@ from src.services.target import (
     reconciler,
     scheduler,
     unit_of_work,
+    vocabulary,
 )
 from src.services.target.instagram_sources import is_activated
 from src.utils.datetime_utils import utcnow
@@ -316,8 +317,6 @@ class WorkerDeps:
     ops_notice: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
-    #: Selected-only preparation, outside SQL; strict fresh DB evidence remains authoritative.
-    selected_prepare: Any = None
     past_posts_capability: Any = None
 
 
@@ -837,7 +836,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     )
     registry["prepare_past_post"] = (
         prepare_past_post
-        if deps.selected_prepare is not None and deps.past_posts is not None
+        if deps.past_posts is not None
         else Parked("instagram past posts off (no armed past-posts source)")
     )
     if reconciling:
@@ -1155,7 +1154,12 @@ async def _settle_exhausted(session, job, *, capability=None) -> Optional[dict]:
     if kind == "publish_pipeline":
         return await publish_pipeline.flip_exhausted(session, job)
     if kind == past_posts_preparation_job.KIND:
-        return await past_posts_preparation_job.flip_exhausted(session, job)
+        return await publish_pipeline.flip_exhausted(
+            session,
+            job,
+            from_states=vocabulary.WAITING_STATES,
+            trying_to="fetch this story's file from Instagram",
+        )
     return None
 
 

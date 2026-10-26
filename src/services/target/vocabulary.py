@@ -108,6 +108,12 @@ TERMINAL_STATES: tuple[str, ...] = (
     "cancelled",
 )
 
+#: The states a story waits in before it is approved: before its card is
+#: served (``UNSERVED_STATES``, which the reaper's cadence leg expires a story
+#: from once its slot is past), and while its card waits for a decision.
+UNSERVED_STATES: tuple[str, ...] = ("scheduled", "prompt_pending")
+WAITING_STATES: tuple[str, ...] = (*UNSERVED_STATES, "awaiting_approval")
+
 #: `post_intents.origin` (`post_intents.origin` ``ck_intent_origin``): a ``cadence`` story is
 #: minted by the clock for a slot, a ``planned`` one by a person who chose the
 #: item, the account and the time (`schedule_item`).

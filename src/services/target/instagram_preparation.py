@@ -84,22 +84,6 @@ FOR UPDATE OF m,i
 """
 
 
-def _tried(generation_id, subject, attempt):
-    """The tries before try `attempt`, and the last one's refusal the slide's
-    capture keeps for this observation."""
-    return past_posts_retry.Tried(
-        attempt - 1,
-        past_posts_retry.last_refusal(
-            subject["current_capture"],
-            (
-                generation_id,
-                subject["observation_revision"],
-                subject["selected_asset_id"],
-            ),
-        ),
-    )
-
-
 def _unsuitable(verdict, subject):
     """The pending for a story its suitability verdict refuses. A slide parked
     by an earlier refusal keeps that refusal on its capture, so whichever caller
@@ -400,7 +384,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
     async def _failure(self, engine, ws, iid, selected, refusal):
         """Record a refused fetch on the slide's capture. A proven class or a
         spent bound (`past_posts_retry`) parks the story here; otherwise the
-        capture keeps the attempt and the time of the next try."""
+        capture keeps the attempt and the refusal, and the prepare job runs
+        again after its wait."""
         if await self._land(engine, ws, iid, selected, None, refusal=refusal):
             raise source_policy.MediaAdmissionPending(
                 "asset_unavailable", evidence=refusal
@@ -475,8 +460,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
     ):
         """Record the fetch's outcome on the slide's capture. A refused fetch
         (no validation) is the retry rule's to decide (`past_posts_retry`): True
-        when it parks the story, else the capture keeps the attempt and the time
-        of the next try."""
+        when it parks the story, else the capture keeps the attempt and the
+        refusal."""
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
         async with unit_of_work(engine, str(ws), actor_kind="worker").begin() as conn:
@@ -542,16 +527,24 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             if not verdict or not verdict["suitable"]:
                 raise _unsuitable(verdict, subject)
             state = validation.state if validation else "validation_pending"
-            decision = reason = None
+            park = reason = None
             if validation is None:
                 # Decided under the row locks, on the try the prepare job counts
                 # and the last refusal the slide's capture keeps.
-                decision = past_posts_retry.decide(
+                park = past_posts_retry.parks(
                     refusal,
-                    _tried(selected.capture.generation_id, subject, selected.attempt),
-                    self.ports.retry,
+                    attempt=selected.attempt,
+                    last_refusal=past_posts_retry.last_refusal(
+                        subject["current_capture"],
+                        (
+                            selected.capture.generation_id,
+                            subject["observation_revision"],
+                            subject["selected_asset_id"],
+                        ),
+                    ),
+                    retry=self.ports.retry,
                 )
-                reason = "asset_unavailable" if decision.park else "download_pending"
+                reason = "asset_unavailable" if park else "download_pending"
             evidence = dict(
                 generation_id=selected.capture.generation_id,
                 observation_revision=subject["observation_revision"],
@@ -559,8 +552,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 state=state,
                 reason=validation.reason if validation else reason,
             )
-            if decision is not None:
-                evidence["attempt"] = decision.attempt
+            if park is not None:
+                evidence["attempt"] = selected.attempt
             if refusal is not None:
                 evidence["refusal"] = refusal
             if passed is not None:
@@ -621,4 +614,4 @@ WHERE workspace_id=:ws AND intent_id=:id
                         policy=verdict["policy_revision"],
                     ),
                 )
-        return decision is not None and decision.park
+        return bool(park)

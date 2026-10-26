@@ -31,16 +31,11 @@ CONFIG = WorkerConfig()
 def story(**over):
     """The executor's read of a cadence story five minutes past its slot."""
     row = dict(
-        id=STORY,
-        workspace_id="ws-1",
         state="scheduled",
         origin="cadence",
         cancel_requested=False,
         schedule_slot_at=NOW - timedelta(minutes=5),
         media_kind="image",
-        file_name="a.jpg",
-        handle="h",
-        tz="UTC",
         capture=None,
         now=NOW,
         expired_from=None,
@@ -67,7 +62,7 @@ class Seams:
     def __init__(self, monkeypatch, row):
         self.row = row
         self.finalized, self.rescheduled, self.told = [], [], []
-        self.prepared, self.parked_late, self.flipped = [], [], []
+        self.prepared, self.parked_late = [], []
 
         def sessions(engine):
             @asynccontextmanager
@@ -88,23 +83,14 @@ class Seams:
         ):
             self.rescheduled.append((run_at - NOW, restore_attempt))
 
-        async def push_bindings(session, workspace_id):
-            return ["binding-1"]
-
-        async def say_not_served(session, row, *, reason, surface, by, repeats=None):
-            self.told.append((row["id"], reason, surface, by))
-
-        async def flip_to_review(session, *, intent_id, from_state):
-            self.flipped.append((intent_id, from_state))
-            return True
+        async def say_not_served_for(session, *, workspace_id, intent_ids, reason):
+            self.told.append((workspace_id, intent_ids, reason))
 
         monkeypatch.setattr(prep.unit_of_work, "make_session_for", sessions)
         monkeypatch.setattr(prep.readers, "row", read)
         monkeypatch.setattr(prep.jobs, "finalize_job", finalize_job)
         monkeypatch.setattr(prep.jobs, "reschedule_job", reschedule_job)
-        monkeypatch.setattr(prep.prompts, "push_bindings", push_bindings)
-        monkeypatch.setattr(prep.prompts, "say_not_served", say_not_served)
-        monkeypatch.setattr(prep.publish_pipeline, "flip_to_review", flip_to_review)
+        monkeypatch.setattr(prep.prompts, "say_not_served_for", say_not_served_for)
         monkeypatch.setattr(prep, "utcnow", lambda: NOW)
 
     def deps(self, *, prepare=None, parks_late=True):
@@ -119,8 +105,9 @@ class Seams:
         return SimpleNamespace(
             engine=object(),
             config=CONFIG,
-            selected_prepare=selected_prepare,
-            past_posts=SimpleNamespace(park_late=park_late),
+            past_posts=SimpleNamespace(
+                selected_prepare=selected_prepare, park_late=park_late
+            ),
         )
 
 
@@ -282,7 +269,7 @@ async def test_a_story_the_reaper_expired_while_its_job_waited_is_told_once(
     job got the lane is told, as a planned story's miss is, and the job ends."""
     seams = Seams(monkeypatch, story(state="expired", expired_from="scheduled"))
     await prep.execute(seams.deps(), job(attempts=2))
-    assert seams.told == [(STORY, "late", ["binding-1"], None)]
+    assert seams.told == [("ws-1", [STORY], "late")]
     assert seams.finalized == [("job-1", "lease-1", "cancelled")]
     assert seams.prepared == []
 
@@ -328,24 +315,56 @@ async def test_a_payload_that_names_no_story_fails_the_job(monkeypatch):
     assert seams.prepared == []
 
 
+class _ParkRead:
+    """A session that answers the exhausted flip's read with *row*."""
+
+    def __init__(self, row):
+        self.row = row
+
+    async def execute(self, statement, params):
+        assert params == {"intent": STORY}
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: self.row))
+
+
 @pytest.mark.parametrize("state", ["scheduled", "prompt_pending", "awaiting_approval"])
-async def test_a_spent_job_parks_its_waiting_story_for_review(monkeypatch, state):
-    seams = Seams(monkeypatch, {"state": state, "workspace_id": "ws-1", "tz": "UTC"})
-    parked = await prep.flip_exhausted(object(), job(attempts=8))
-    assert seams.flipped == [(STORY, state)]
-    assert parked["intent_id"] == STORY and "8 times" in parked["notice"]
+async def test_a_spent_prepare_job_parks_its_waiting_story_saying_what_it_tried(
+    monkeypatch, state
+):
+    """A prepare job whose faults spend its budget parks its story through the
+    publish pipeline's flip, from any state the story waits in, saying it was
+    fetching the story's file."""
+    from src.services.target import publish_pipeline, vocabulary
+
+    flipped = []
+
+    async def flip_to_review(session, *, intent_id, from_state):
+        flipped.append((intent_id, from_state))
+        return True
+
+    monkeypatch.setattr(publish_pipeline, "flip_to_review", flip_to_review)
+    parked = await publish_pipeline.flip_exhausted(
+        _ParkRead({"state": state, "workspace_id": "ws-1", "tz": "UTC"}),
+        job(attempts=8),
+        from_states=vocabulary.WAITING_STATES,
+        trying_to="fetch this story's file from Instagram",
+    )
+    assert flipped == [(STORY, state)]
+    assert parked["notice"].startswith(
+        "We hit a fault on our side 8 times trying to fetch this story's file"
+    )
 
 
-@pytest.mark.parametrize(
-    "row,payload",
-    [
-        ({"state": "approved", "workspace_id": "ws-1", "tz": "UTC"}, None),
-        (None, None),
-        ({"state": "scheduled", "workspace_id": "ws-1", "tz": "UTC"}, {"v": 1}),
-    ],
-    ids=["moved-on", "gone", "no-story-named"],
-)
-async def test_a_spent_job_parks_nothing_else(monkeypatch, row, payload):
-    seams = Seams(monkeypatch, row)
-    assert await prep.flip_exhausted(object(), job(payload=payload)) is None
-    assert seams.flipped == []
+async def test_a_spent_prepare_job_leaves_a_story_that_moved_on(monkeypatch):
+    from src.services.target import publish_pipeline, vocabulary
+
+    async def flip_to_review(session, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("a story that moved on is not flipped")
+
+    monkeypatch.setattr(publish_pipeline, "flip_to_review", flip_to_review)
+    parked = await publish_pipeline.flip_exhausted(
+        _ParkRead({"state": "approved", "workspace_id": "ws-1", "tz": "UTC"}),
+        job(),
+        from_states=vocabulary.WAITING_STATES,
+        trying_to="fetch this story's file from Instagram",
+    )
+    assert parked is None

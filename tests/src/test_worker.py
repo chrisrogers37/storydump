@@ -1583,7 +1583,7 @@ async def test_the_prompt_sweep_mints_a_prepare_job_per_due_story_and_fetches_no
     app = SimpleNamespace(
         engine=object(),
         config=SimpleNamespace(prompt_sweep_limit=2),
-        deps=SimpleNamespace(selected_prepare=fetch),
+        deps=SimpleNamespace(past_posts=SimpleNamespace(selected_prepare=fetch)),
     )
     await worker.PromptSweeper(app).prepare_selected(sessions)
     assert minted == [("workspace-a", "pending-card"), ("workspace-b", "scheduled")]

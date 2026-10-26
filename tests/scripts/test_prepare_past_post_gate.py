@@ -241,7 +241,6 @@ def deps_of(engine, prepared):
     return SimpleNamespace(
         engine=engine,
         config=WorkerConfig(),
-        selected_prepare=coordinator.selected_prepare,
         past_posts=coordinator,
     )
 
@@ -335,7 +334,7 @@ async def test_the_sweep_mints_one_prepare_job_per_due_story(
                 session, workspace_id=ws, intent_id=intent, config=config
             )
     app = SimpleNamespace(
-        engine=worker, config=config, deps=SimpleNamespace(selected_prepare=object())
+        engine=worker, config=config, deps=SimpleNamespace(past_posts=object())
     )
     assert is_due(world_db, intent)
 

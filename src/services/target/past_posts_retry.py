@@ -9,10 +9,10 @@ only once its attempts are spent. A proven class parks at once:
 - a file whose kind Instagram names but whose link it withholds, on two
   reads in a row.
 
-The decisions are pure: they read a count of failed tries and the last
-refusal (`Tried`), never where those are kept. The story's prepare job keeps
-the count on its own row (its attempts) and runs again after `Retry.delay`;
-the slide's capture keeps the last refusal (`last_refusal`).
+The decision is pure (`parks`): it reads which try this is and the last
+try's refusal, never where those are kept. The story's prepare job counts its
+tries on its own row (its attempts) and runs again after `Retry.delay`; the
+slide's capture keeps the last refusal (`last_refusal`).
 """
 
 from __future__ import annotations
@@ -60,24 +60,6 @@ class Retry:
 ONCE = Retry(attempts=1, base_seconds=0, cap_seconds=0)
 
 
-@dataclass(frozen=True)
-class Tried:
-    """One slide's failed tries before this one: how many, and the last one's
-    refusal."""
-
-    attempts: int = 0
-    refusal: Optional[Mapping] = None
-
-
-@dataclass(frozen=True)
-class Decision:
-    """Park the story, or try again after `Retry.delay(attempt)`; `attempt`
-    counts this one."""
-
-    attempt: int
-    park: bool
-
-
 def _kind(refusal):
     return refusal.get("kind") if isinstance(refusal, Mapping) else None
 
@@ -110,13 +92,14 @@ def last_refusal(capture, identity) -> Optional[Mapping]:
     return capture.get("refusal") if stored == tuple(identity) else None
 
 
-def decide(refusal, tried: Tried, retry: Retry) -> Decision:
-    """The decision for one refused fetch after `tried`."""
-    attempt = tried.attempts + 1
-    return Decision(
-        attempt,
-        park=attempt >= retry.attempts
+def parks(refusal, *, attempt: int, last_refusal, retry: Retry) -> bool:
+    """Whether refused try *attempt* (1 for the first) parks the story: its
+    tries are spent, or *refusal* is one every try would meet again, read with
+    the try before it (*last_refusal*). Otherwise it is tried again after
+    `retry.delay(attempt)`."""
+    return (
+        attempt >= retry.attempts
         or proves_gone(refusal)
         or _names_a_bound(refusal)
-        or (_withheld(refusal) and _withheld(tried.refusal)),
+        or (_withheld(refusal) and _withheld(last_refusal))
     )

@@ -458,11 +458,6 @@ def compose(
         past_posts_evidence=past_posts.evidence if past_posts else None,
         past_posts_client=past_posts.client if past_posts else None,
         past_posts_sync=past_posts.sync_ports if past_posts else None,
-        # The coordinator's wrapper, which owns the bound-content review route,
-        # never the bare `SelectedPreparation` under it.
-        selected_prepare=past_posts.coordinator.selected_prepare
-        if past_posts
-        else None,
         past_posts_capability=past_posts.capability if past_posts else None,
     )
     registry = build_registry(deps)
@@ -739,7 +734,7 @@ class PromptSweeper:
         file lane (`past_posts_preparation_job`): the sweep fetches nothing, so
         a slow download never holds the cards behind it."""
         deps = getattr(self._app, "deps", None)
-        if getattr(deps, "selected_prepare", None) is None:
+        if getattr(deps, "past_posts", None) is None:
             return
         # The bounded door discovers already selected subjects, never a past-posts catalog.
         async with sessions({}) as session:

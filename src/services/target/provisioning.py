@@ -843,8 +843,11 @@ async def disable_destination(
         if row["origin"] == "planned" and row["state"] == "scheduled"
     ]
     if unserved:
-        await prompts.say_removed_before_served(
-            executor, workspace_id=str(workspace_id), intent_ids=unserved
+        await prompts.say_not_served_for(
+            executor,
+            workspace_id=str(workspace_id),
+            intent_ids=unserved,
+            reason="account_removed",
         )
     # A grant issued BEFORE the removal must not land afterwards and revive the
     # row by surprise — the statement `issue_state` uses to retire a target's

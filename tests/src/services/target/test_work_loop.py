@@ -74,10 +74,9 @@ def full_deps(**over):
         # through, which is what makes the reconciliation executor live.
         past_posts_capability=PastPostsCapability(enabled=True),
         past_posts_client=object(),
-        # the past-posts coordinator and its preparation, which make the file
-        # lane's prepare executor live.
+        # the past-posts coordinator, which makes the file lane's prepare
+        # executor live.
         past_posts=object(),
-        selected_prepare=_fake_seam,
         config=WorkerConfig(**FULL_CONFIG),
     )
     base.update(over)
@@ -1983,12 +1982,12 @@ class TestTheBudgetCeiling:
         """A past-posts story's prepare job whose faults spend its budget parks
         the story it carried for review and tells, as a dead publish job's
         story is: never a story left waiting for a file nobody fetches."""
-        from src.services.target import past_posts_preparation_job, publish_pipeline
+        from src.services.target import publish_pipeline, vocabulary
 
         flipped, told = [], []
 
-        async def flip_exhausted(session, job):
-            flipped.append(job["id"])
+        async def flip_exhausted(session, job, **how):
+            flipped.append((job["id"], how["from_states"], how["trying_to"]))
             return {
                 "workspace_id": "ws-1",
                 "intent_id": "it-1",
@@ -2002,16 +2001,21 @@ class TestTheBudgetCeiling:
         async def executor(session, job):
             raise RuntimeError("pool timeout")
 
-        monkeypatch.setattr(
-            past_posts_preparation_job, "flip_exhausted", flip_exhausted
-        )
+        monkeypatch.setattr(publish_pipeline, "flip_exhausted", flip_exhausted)
         monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         loop, calls = self._loop(monkeypatch, executor=executor)
         loop._registry["prepare_past_post"] = executor
         job = self._job(kind="prepare_past_post", lane="media", attempts=5)
         await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
-        assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
+        assert flipped == [
+            (
+                job["id"],
+                vocabulary.WAITING_STATES,
+                "fetch this story's file from Instagram",
+            )
+        ]
+        assert told == ["it-1"] and calls["notices"] == []
 
     async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
         self, monkeypatch

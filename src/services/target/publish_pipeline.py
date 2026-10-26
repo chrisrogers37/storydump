@@ -2283,13 +2283,20 @@ async def park_for_review(
     return True
 
 
-async def flip_exhausted(session, job: dict) -> Optional[dict]:
-    """A `publish_pipeline` job whose budget is spent (five untyped crashes):
-    the story it carried is flipped to review from wherever it stood —
-    `publishing` mid-ladder or `approved` between attempts. Returns the
-    `tell_review` arguments for its courtesy, or None when nothing was parked:
-    no story, a story already settled, or an `intent_id` that is not a uuid
-    (logged)."""
+async def flip_exhausted(
+    session,
+    job: dict,
+    *,
+    from_states=("publishing", "approved"),
+    trying_to: str = "post this story",
+) -> Optional[dict]:
+    """A job whose budget is spent on untyped crashes: the story it carried is
+    flipped to review from wherever it stood among *from_states* — for a
+    `publish_pipeline` job, `publishing` mid-ladder or `approved` between
+    attempts; for a past-posts story's prepare job, any state it waits in.
+    Its notice says what the job was *trying_to* do. Returns the `tell_review`
+    arguments for its courtesy, or None when nothing was parked: no story, a
+    story already settled, or an `intent_id` that is not a uuid (logged)."""
     payload = job.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -2310,7 +2317,7 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
         .mappings()
         .first()
     )
-    if row is None or row["state"] not in ("publishing", "approved"):
+    if row is None or row["state"] not in from_states:
         return None
     if not await flip_to_review(
         session, intent_id=str(intent_id), from_state=row["state"]
@@ -2325,7 +2332,7 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
         "intent_id": str(intent_id),
         "tz": str(row["tz"] or "UTC"),
         "notice": (
-            f"We hit a fault on our side {tries} times trying to post this story:"
+            f"We hit a fault on our side {tries} times trying to {trying_to}:"
             " choose on its card, or open the Queue on the web."
         ),
     }

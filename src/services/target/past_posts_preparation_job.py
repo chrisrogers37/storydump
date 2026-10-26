@@ -21,8 +21,11 @@ Each claim is one try, which `fn_claim_job` counts in the job's attempts:
   the last try parks the story with its evidence. A wait that read nothing
   puts the job back with the try restored.
 - A cadence story the reaper expired while its job waited for the lane is told
-  once, as a planned story's miss is (`prompts.say_not_served`), so no expiry
-  of a story waiting for its file is silent.
+  once, as a planned story's miss is (`prompts.say_not_served_for`), so no
+  expiry of a story waiting for its file is silent.
+
+A job whose untyped faults spend its budget parks its story through
+`publish_pipeline.flip_exhausted`, as a spent publish job's story is.
 """
 
 from __future__ import annotations
@@ -37,11 +40,11 @@ from src.services.target import (
     media_adapters,
     past_posts_retry,
     prompts,
-    publish_pipeline,
     readers,
     refusal_evidence,
     source_policy,
     unit_of_work,
+    vocabulary,
 )
 from src.utils.datetime_utils import utcnow
 
@@ -50,34 +53,18 @@ logger = logging.getLogger(__name__)
 KIND = "prepare_past_post"
 LANE = "media"
 
-#: The states a story waits in for its file: the door's subjects.
-_WAITING = ("scheduled", "prompt_pending", "awaiting_approval")
-#: The states the reaper's cadence leg expires a story from.
-_BEFORE_SLOT = ("scheduled", "prompt_pending")
-
 _STORY = """
-SELECT i.id, i.workspace_id, i.state, i.origin, i.cancel_requested,
-       i.schedule_slot_at, m.media_kind, m.file_name, acc.handle, w.tz,
+SELECT i.state, i.origin, i.cancel_requested, i.schedule_slot_at, m.media_kind,
        a.validation_capture AS capture, clock_timestamp() AS now,
-       (SELECT e.from_state FROM audit_events e
-         WHERE e.workspace_id = i.workspace_id AND e.entity_kind = 'post_intent'
-           AND e.entity_id = i.id AND e.to_state = 'expired'
-         ORDER BY e.id DESC LIMIT 1) AS expired_from
+       CASE WHEN i.state = 'expired' THEN
+         (SELECT e.from_state FROM audit_events e
+           WHERE e.workspace_id = i.workspace_id AND e.entity_kind = 'post_intent'
+             AND e.entity_id = i.id AND e.to_state = 'expired'
+           ORDER BY e.id DESC LIMIT 1) END AS expired_from
   FROM post_intents i
-  JOIN workspaces w ON w.id = i.workspace_id
   JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id
-  LEFT JOIN ig_accounts acc ON acc.workspace_id = i.workspace_id
-   AND acc.id = i.ig_account_id
   LEFT JOIN instagram_media_assets a ON a.workspace_id = m.workspace_id
    AND a.source_id = m.source_id AND a.media_item_id = m.id
- WHERE i.workspace_id = :ws AND i.id = :id
-"""
-
-_PARKABLE = """
-SELECT i.state, i.workspace_id, COALESCE(acc.tz, w.tz) AS tz
-  FROM post_intents i
-  JOIN workspaces w ON w.id = i.workspace_id
-  LEFT JOIN ig_accounts acc ON acc.id = i.ig_account_id
  WHERE i.workspace_id = :ws AND i.id = :id
 """
 
@@ -131,26 +118,27 @@ def _late_evidence(story, job, config) -> dict:
     )
 
 
-async def _end(deps, job, state: str, *, told: Optional[dict] = None) -> str:
-    """Finalize the job *state*; with *told*, first tell the story's chats it
-    was not served, in the same transaction."""
+async def _end(deps, job, state: str, *, tell_late: bool = False) -> str:
+    """Finalize the job *state*; with *tell_late*, first tell the story's
+    chats it was not served in time, in the same transaction."""
     sessions = unit_of_work.make_session_for(deps.engine)
     async with sessions(job) as session:
-        if told is not None:
-            await prompts.say_not_served(
+        if tell_late:
+            await prompts.say_not_served_for(
                 session,
-                told,
+                workspace_id=str(job["workspace_id"]),
+                intent_ids=[_intent_of(job)],
                 reason="late",
-                surface=await prompts.push_bindings(session, str(job["workspace_id"])),
-                by=None,
             )
         await jobs.finalize_job(session, job["id"], job["lease_token"], state)
     return state
 
 
-async def _put_back(deps, job, seconds: float, *, spent: bool) -> str:
-    """Run the job again after *seconds*: a try *spent*, or a wait that read
-    nothing and gives its try back."""
+async def _put_back(deps, job, *, spent: bool) -> str:
+    """Run the job again: after the retry's wait for this try when the try was
+    *spent*, else after the retry's base wait, with the try given back."""
+    retry = past_posts_retry.Retry.from_config(deps.config)
+    seconds = retry.delay(int(job["attempts"])) if spent else retry.base_seconds
     sessions = unit_of_work.make_session_for(deps.engine)
     async with sessions(job) as session:
         await jobs.reschedule_job(
@@ -172,8 +160,6 @@ async def execute(deps, job) -> str:
 
 
 async def _turn(deps, job) -> str:
-    cfg = deps.config
-    retry = past_posts_retry.Retry.from_config(cfg)
     ws, iid = str(job["workspace_id"]), _intent_of(job)
     if iid is None:
         logger.warning(
@@ -186,49 +172,45 @@ async def _turn(deps, job) -> str:
         story = await readers.row(session, _STORY, ws=ws, id=iid)
     if story is None:
         return await _end(deps, job, "cancelled")
-    if story["state"] not in _WAITING or story["cancel_requested"]:
+    if story["state"] not in vocabulary.WAITING_STATES or story["cancel_requested"]:
         # Moved on: served, parked, approved, cancelled or ended. A cadence
         # story the reaper expired at the end of its window while this job
         # waited is told, once: no other job of it is minted after.
         expired_late = (
             story["state"] == "expired"
             and story["origin"] == "cadence"
-            and story["expired_from"] in _BEFORE_SLOT
+            and story["expired_from"] in vocabulary.UNSERVED_STATES
         )
-        return await _end(deps, job, "cancelled", told=story if expired_late else None)
+        return await _end(deps, job, "cancelled", tell_late=expired_late)
     if (
         story["origin"] == "cadence"
-        and story["state"] in _BEFORE_SLOT
-        and _past_window(story, cfg)
+        and story["state"] in vocabulary.UNSERVED_STATES
+        and _past_window(story, deps.config)
     ):
         if await deps.past_posts.park_late(
             engine=deps.engine,
             workspace_id=ws,
             intent_id=iid,
-            evidence=_late_evidence(story, job, cfg),
+            evidence=_late_evidence(story, job, deps.config),
         ):
             return await _end(deps, job, "review_required")
         # It moved on between the read and the lock: look again.
-        return await _put_back(deps, job, retry.base_seconds, spent=False)
+        return await _put_back(deps, job, spent=False)
     try:
-        parked = await deps.selected_prepare(
+        parked = await deps.past_posts.selected_prepare(
             engine=deps.engine,
             workspace_id=ws,
             intent_id=iid,
             attempt=int(job["attempts"]),
         )
     except source_policy.MediaAdmissionPending as exc:
-        if exc.evidence:
-            # A try was refused and the refusal proved nothing yet.
-            return await _put_back(
-                deps, job, retry.delay(int(job["attempts"])), spent=True
-            )
-        return await _put_back(deps, job, retry.base_seconds, spent=False)
+        # With evidence, a try was refused and the refusal proved nothing yet.
+        return await _put_back(deps, job, spent=bool(exc.evidence))
     except (media_adapters.MediaSourceFenceDrop, media_adapters.MediaSourceGone):
         # The source no longer admits the read: nothing was asked, and the
         # story's window still bounds it. (A fence drop is a retryable error,
         # so it is caught first.)
-        return await _put_back(deps, job, retry.base_seconds, spent=False)
+        return await _put_back(deps, job, spent=False)
     except (
         media_adapters.MediaRetryableError,
         media_adapters.MediaLostResponse,
@@ -237,32 +219,5 @@ async def _turn(deps, job) -> str:
         # Instagram was asked and did not answer with the file: the try is
         # spent. A dead connection is told by its own reauth prompt; its story
         # keeps trying, further apart, until its window or TTL.
-        return await _put_back(deps, job, retry.delay(int(job["attempts"])), spent=True)
+        return await _put_back(deps, job, spent=True)
     return await _end(deps, job, "review_required" if parked else "succeeded")
-
-
-async def flip_exhausted(session, job) -> Optional[dict]:
-    """A prepare job whose budget is spent on untyped faults: its story, still
-    waiting for its file, is parked for review. Returns the `tell_review`
-    arguments, or None when nothing was parked."""
-    iid = _intent_of(job)
-    if iid is None or job.get("workspace_id") is None:
-        return None
-    row = await readers.row(session, _PARKABLE, ws=str(job["workspace_id"]), id=iid)
-    if row is None or row["state"] not in _WAITING:
-        return None
-    if not await publish_pipeline.flip_to_review(
-        session, intent_id=iid, from_state=row["state"]
-    ):
-        return None
-    tries = int(job.get("attempts") or job.get("max_attempts") or 0)
-    return {
-        "workspace_id": str(row["workspace_id"]),
-        "intent_id": iid,
-        "tz": str(row["tz"] or "UTC"),
-        "notice": (
-            f"We hit a fault on our side {tries} times trying to fetch this"
-            " story's file from Instagram: choose on its card, or open the Queue"
-            " on the web."
-        ),
-    }

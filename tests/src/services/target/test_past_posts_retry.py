@@ -3,7 +3,7 @@
 import pytest
 
 from src.services.target import past_posts_retry
-from src.services.target.past_posts_retry import Retry, Tried
+from src.services.target.past_posts_retry import Retry
 from src.services.target.work_loop import WorkerConfig
 
 IDENTITY = ("gen-1", 4, "17890000000000011")
@@ -59,8 +59,7 @@ def test_the_default_tries_fit_inside_the_late_window():
     ids=["graph-says-it-does-not-exist", "a-named-byte-bound"],
 )
 def test_a_proven_refusal_parks_at_once(refusal):
-    decision = past_posts_retry.decide(refusal, Tried(), RETRY)
-    assert (decision.park, decision.attempt) == (True, 1)
+    assert past_posts_retry.parks(refusal, attempt=1, last_refusal=None, retry=RETRY)
 
 
 @pytest.mark.parametrize(
@@ -87,13 +86,18 @@ def test_a_proven_refusal_parks_at_once(refusal):
     ],
 )
 def test_a_refusal_that_proves_nothing_is_tried_again(refusal):
-    decision = past_posts_retry.decide(refusal, Tried(), RETRY)
-    assert (decision.park, decision.attempt) == (False, 1)
+    assert not past_posts_retry.parks(
+        refusal, attempt=1, last_refusal=None, retry=RETRY
+    )
 
 
-def test_the_decision_counts_this_try_after_those_before_it():
-    decision = past_posts_retry.decide(CDN, Tried(attempts=3), RETRY)
-    assert (decision.park, decision.attempt) == (False, 4)
+def test_a_try_before_the_last_waits_and_the_last_parks():
+    """The try's number is the prepare job's attempts: the ceiling parks."""
+    tries = [
+        past_posts_retry.parks(CDN, attempt=attempt, last_refusal=CDN, retry=RETRY)
+        for attempt in range(1, RETRY.attempts + 1)
+    ]
+    assert tries == [False] * (RETRY.attempts - 1) + [True]
 
 
 def test_the_last_refusal_is_the_stored_capture_of_the_same_slide():
@@ -121,14 +125,10 @@ def test_a_capture_of_anything_else_has_no_last_refusal(stored):
     assert past_posts_retry.last_refusal(stored, IDENTITY) is None
 
 
-def test_the_last_try_parks_with_its_refusal():
-    decision = past_posts_retry.decide(CDN, Tried(attempts=7), RETRY)
-    assert (decision.park, decision.attempt) == (True, 8)
-
-
 def test_a_single_try_parks_at_once():
-    decision = past_posts_retry.decide(None, Tried(), past_posts_retry.ONCE)
-    assert (decision.park, decision.attempt) == (True, 1)
+    assert past_posts_retry.parks(
+        None, attempt=1, last_refusal=None, retry=past_posts_retry.ONCE
+    )
 
 
 def test_a_file_instagram_withholds_on_two_reads_parks():
@@ -140,15 +140,15 @@ def test_a_file_instagram_withholds_on_two_reads_parks():
         "media_type": "VIDEO",
         "has_link": False,
     }
-    once = past_posts_retry.decide(withheld, Tried(), RETRY)
-    twice = past_posts_retry.decide(
-        withheld, Tried(attempts=1, refusal=withheld), RETRY
-    )
-    after_cdn = past_posts_retry.decide(withheld, Tried(attempts=1, refusal=CDN), RETRY)
-    assert (once.park, twice.park, twice.attempt, after_cdn.park) == (
+
+    def parks(last_refusal, attempt):
+        return past_posts_retry.parks(
+            withheld, attempt=attempt, last_refusal=last_refusal, retry=RETRY
+        )
+
+    assert (parks(None, 1), parks(withheld, 2), parks(CDN, 2)) == (
         False,
         True,
-        2,
         False,
     )
 

@@ -23,6 +23,7 @@ from src.services.target import (
     readers,
     refusal_evidence,
     source_policy,
+    vocabulary,
 )
 from src.services.target import source_read_admission as admission
 from src.services.target.transit import PastPostsUploadUncertain
@@ -79,7 +80,7 @@ async def lock_pipeline(
         "i.media_item_id,i.ig_account_id,m.source_id,m.state AS media_item_state,m.media_kind,s.provider,s.source_use_epoch,"
         "s.current_authorization_generation_id,g.lifecycle AS current_lifecycle,x.observation_revision,"
         "a.asset_media_id AS current_asset,a.validation_fingerprint AS current_fingerprint,"
-        "a.validation_capture AS current_capture,pol.revision AS policy_revision "
+        "pol.revision AS policy_revision "
         "FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id "
         "JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id "
         "LEFT JOIN instagram_past_posts_generations g ON g.workspace_id=s.workspace_id AND g.id=s.current_authorization_generation_id "
@@ -175,9 +176,20 @@ async def authorize(
         elif reason == "asset_unavailable":
             # A slide a refused fetch parked: the story parks at once, saying
             # what refused it.
+            capture = await conn.scalar(
+                text(
+                    "SELECT validation_capture FROM instagram_media_assets"
+                    " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
+                ),
+                dict(
+                    ws=str(workspace_id),
+                    sid=str(subject["source_id"]),
+                    item=str(subject["media_item_id"]),
+                ),
+            )
             raise refusal_evidence.attach(
                 PastPostsEffectRefused("past_posts_content_unavailable"),
-                refusal_evidence.latched(subject.get("current_capture")),
+                refusal_evidence.latched(capture),
             )
         elif reason in ("past_posts_revalidation_required", "validation_pending"):
             reason = "past_posts_revalidation_required"
@@ -298,25 +310,21 @@ async def _write_stage(conn, *, workspace_id, intent_id, subject, artifact):
         raise PastPostsEffectRefused("past_posts_content_unavailable")
 
 
-#: The states a past-posts story waits in before it is approved: the ones a
-#: refusal of its file can park for review.
-_WAITING = ("scheduled", "prompt_pending", "awaiting_approval")
-
-
-async def _record_park(conn, *, ws, iid, state, pending) -> None:
-    """Park a waiting past-posts story for review on *pending*, in the
-    caller's transaction. Its evidence, when there is one, rides with the
-    reason: `last_error -> 'error' -> 'refusal'`, the audit detail's `refusal`
-    and the notice (`refusal_evidence`). A slide judged gone has no asset row
-    left to hold it."""
+async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> None:
+    """Park a waiting past-posts story for review, in the caller's
+    transaction, on the reason its preparation was not admitted. The refusal's
+    *evidence*, when there is one, rides with the reason: `last_error ->
+    'error' -> 'refusal'`, the audit detail's `refusal` and the notice
+    (`refusal_evidence`). A slide judged gone has no asset row left to hold
+    it."""
     from src.services.target import publish_pipeline
 
     reason = (
         "past_posts_content_changed"
-        if pending.reason == "selected_asset_changed"
+        if admission_reason == "selected_asset_changed"
         else "past_posts_content_unavailable"
     )
-    refusal = {"refusal": pending.evidence} if pending.evidence else {}
+    refusal = {"refusal": evidence} if evidence else {}
     await conn.execute(
         text("UPDATE post_intents SET last_error=CAST(:error AS jsonb) WHERE id=:id"),
         dict(
@@ -351,7 +359,7 @@ async def _record_park(conn, *, ws, iid, state, pending) -> None:
         intent_id=iid,
         from_state=state,
         tz=str(tz or "UTC"),
-        notice=_park_notice(pending.evidence, pending.reason),
+        notice=_park_notice(evidence, admission_reason),
     )
 
 
@@ -462,13 +470,18 @@ class PastPostsPipeline:
                     subject is None
                     or subject["provider"] != "instagram_past_posts"
                     or str(subject["source_id"]) != capture.source_id
-                    or subject["state"] not in _WAITING
+                    or subject["state"] not in vocabulary.WAITING_STATES
                     or subject["cancel_requested"]
                     or subject.get("provenance") is None
                 ):
                     raise
                 await _record_park(
-                    conn, ws=ws, iid=iid, state=subject["state"], pending=exc
+                    conn,
+                    ws=ws,
+                    iid=iid,
+                    state=subject["state"],
+                    admission_reason=exc.reason,
+                    evidence=exc.evidence,
                 )
             return True
 
@@ -485,7 +498,7 @@ class PastPostsPipeline:
             if (
                 subject is None
                 or subject["provider"] != "instagram_past_posts"
-                or subject["state"] not in ("scheduled", "prompt_pending")
+                or subject["state"] not in vocabulary.UNSERVED_STATES
                 or subject["cancel_requested"]
             ):
                 return False
@@ -494,9 +507,8 @@ class PastPostsPipeline:
                 ws=ws,
                 iid=iid,
                 state=subject["state"],
-                pending=source_policy.MediaAdmissionPending(
-                    "asset_unavailable", evidence=evidence
-                ),
+                admission_reason="asset_unavailable",
+                evidence=evidence,
             )
         return True
 
