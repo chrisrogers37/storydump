@@ -55,7 +55,6 @@ from src.services.target import (
     intent_ledger,
     outbox,
     readers,
-    refusal_evidence,
     vocabulary,
 )
 from src.services.target.prompt_rendering import (
@@ -112,17 +111,16 @@ async def settled_line(
         from src.services.target import identity  # noqa: PLC0415 — cycle
 
         by = await identity.display_name_for(session, user_id=settled["by_user_id"])
-    line = outcome_line(
+    # A story in review says why, in the words of its refusal's evidence.
+    return outcome_line(
         state or settled["state"],
         by=by,
         at=settled.get("at") or at,
         tz=tz,
         published_via=settled.get("published_via"),
         rule=settled.get("approval_rule"),
+        refusal=settled.get("refusal"),
     )
-    # A story in review says why, in the words of its refusal's evidence.
-    reason = refusal_evidence.plain(settled.get("refusal"))
-    return f"{line}\nRefused: {reason}." if reason else line
 
 
 async def _still_due(session, row: dict) -> bool:
@@ -219,9 +217,19 @@ _CARD_SELECT = (
 
 
 # Keep the planned-door's core SELECT contract. Provider is routing metadata,
-# added by the local reader without altering that door's return schema.
+# added by the local reader without altering that door's return schema; so is a
+# past-posts video's trim, from its selected slide's validation evidence
+# (`media_validation.inspect_video_facts`), which the card states.
 _CARD_WITH_PROVIDER = (
-    "SELECT card.*, s.provider AS source_provider FROM (" + _CARD_SELECT + ") card "
+    "SELECT card.*, s.provider AS source_provider,"
+    " (SELECT a.validation_capture->'evidence'->>'trimmed_to_seconds'"
+    "    FROM instagram_intent_provenance p"
+    "    JOIN instagram_media_assets a ON a.workspace_id=p.workspace_id"
+    "     AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id"
+    "     AND a.asset_media_id=p.selected_asset_identity"
+    "   WHERE p.workspace_id=card.workspace_id AND p.intent_id=card.id"
+    " ) AS trimmed_to_seconds"
+    " FROM (" + _CARD_SELECT + ") card "
     "JOIN media_sources s ON s.workspace_id=card.workspace_id AND s.id=card.source_id"
 )
 

@@ -31,11 +31,26 @@ from src.services.target.unit_of_work import unit_of_work
 logger = logging.getLogger(__name__)
 
 
-def _park_notice(evidence) -> str:
+#: What a park says when it holds no refusal evidence, by the reason its
+#: preparation was not admitted (`MediaAdmissionPending.reason`): the chosen
+#: post is gone, what was chosen changed, or its media was judged one stories
+#: do not take.
+_ADMISSION_SENTENCES = {
+    "asset_unavailable": "the chosen post is no longer available",
+    "selected_asset_changed": "the chosen post's content changed",
+    "unsupported": "the chosen post's media is not one stories take",
+}
+
+
+def _park_notice(evidence, admission_reason=None) -> str:
     """The park's notice: why it was refused, in plain words
-    (`refusal_evidence.plain`), or that no reason was recorded. Never a cause
-    the record cannot support."""
-    reason = refusal_evidence.plain(evidence) or "no reason was recorded"
+    (`refusal_evidence.plain`), else what its admission reason says, or that
+    no reason was recorded. Never a cause the record cannot support."""
+    reason = (
+        refusal_evidence.plain(evidence)
+        or _ADMISSION_SENTENCES.get(admission_reason)
+        or "no reason was recorded"
+    )
     return (
         "This story from your Instagram past posts could not be prepared."
         f" Refused: {reason}. Open the Queue to review it."
@@ -436,7 +451,7 @@ class PastPostsPipeline:
                     intent_id=iid,
                     from_state=state,
                     tz=str(tz or "UTC"),
-                    notice=_park_notice(exc.evidence),
+                    notice=_park_notice(exc.evidence, exc.reason),
                 )
 
     async def _inspect(self, conn, ws, iid, *, capture=None):

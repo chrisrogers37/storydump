@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -28,6 +29,11 @@ from src.services.target.transit import (
     PastPostsUploadUncertain,
     TransitDestroyRefused,
     TransitStore,
+)
+from tests.src.services.target.test_media_validation import (
+    audio_entry,
+    derivation,
+    moov_end,
 )
 
 WS = "0b6ad24e-6b3e-4a86-9e6b-1a2b3c4d5e6f"  # a real UUID — folder scoping is validated
@@ -1329,8 +1335,6 @@ class TestClosedSetsTrackTheSchema:
             for c in MediaItem.__table_args__
             if getattr(c, "name", None) == "ck_media_kind"
         )
-        import re
-
         allowed = set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
         assert allowed == set(_RESOURCE_TYPES)
 
@@ -1380,11 +1384,12 @@ class TestTheStoryFrame:
             "gravity": "center",
         }
 
-    def test_a_video_is_padded_with_cloudinarys_blurred_background(self):
+    def test_a_video_is_trimmed_padded_then_encoded_to_the_story(self):
         from src.services.target.transit import story_transformation
 
         chain = story_transformation(f"ws/{WS}/clip1", media_kind="video")
         assert chain == [
+            {"duration": 60},
             {"crop": "limit", "width": 1080, "height": 1920},
             {
                 "crop": "pad",
@@ -1392,7 +1397,25 @@ class TestTheStoryFrame:
                 "height": 1920,
                 "background": "blurred:2000:15",
             },
+            {
+                "video_codec": "h264:high:4.2",
+                "audio_codec": "aac",
+                "audio_frequency": 48000,
+                "fps": "23-60",
+                "bit_rate": 13_000_000,
+            },
         ]
+
+    def test_the_codec_level_holds_the_story_frame_at_the_top_frame_rate(self):
+        """H.264 Annex A, level 4.2: at most 8,704 macroblocks a frame and
+        522,240 a second."""
+        from src.services.target import media_validation
+        from src.services.target.transit import STORY_HEIGHT, STORY_WIDTH
+
+        matrix = media_validation.SUPPORTED_MEDIA_MATRIX
+        assert matrix["video_codec"] == ("h264", "high", "4.2")
+        frame = -(-STORY_WIDTH // 16) * -(-STORY_HEIGHT // 16)
+        assert frame <= 8_704 and frame * matrix["fps"][1] <= 522_240
 
     def test_delivery_url_carries_the_frame(self):
         sdk = RecordingSdk()
@@ -1448,7 +1471,11 @@ class TestTheStoryFrame:
             api_key="k",
             api_secret="s",
         )
-        assert "/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/" in url
+        steps = re.search(r"/s--[^/]+--/(.+?)/(?:v\d+/)?ws/", url).group(1)
+        assert steps == (
+            "du_60/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/"
+            "ac_aac,af_48000,br_13000000,fps_23-60,vc_h264:high:4.2"
+        ), "every step, in order, and no named transformation"
         assert url.endswith(".mp4") and "/video/authenticated/" in url
 
     def test_delivery_is_in_the_format_meta_accepts(self):
@@ -1750,6 +1777,159 @@ class TestReadiness:
         answer = await self._floor_store(handler)._default_probe(self.FRAME_URL)
         assert answer.status == 200 and answer.bytes_read is True
         assert answer.length == 2004 and answer.head[:2] == b"\xff\xd8"
+
+    @pytest.mark.asyncio
+    async def test_the_default_probe_reads_as_much_head_as_it_is_asked_for(self):
+        """The container read asks for `moov`'s whole extent, past the poll's
+        cap: the range names it, and the cap does not cut it short."""
+        import httpx
+
+        from src.services.target import transit
+
+        calls = []
+        wanted = transit.PROBE_MAX_RESPONSE_BYTES + 4096
+
+        def handler(request):
+            calls.append(request.headers.get("range"))
+            return httpx.Response(
+                206,
+                headers={
+                    "content-type": "video/mp4",
+                    "content-range": f"bytes 0-{wanted - 1}/9000000",
+                },
+                content=b"\x00\x00\x00\x10ftypisom" + bytes(wanted - 12),
+            )
+
+        answer = await self._floor_store(handler)._default_probe(
+            self.FRAME_URL, head_bytes=wanted
+        )
+        assert calls == [f"bytes=0-{wanted - 1}"]
+        assert answer.bytes_read is True and len(answer.head) == wanted
+        assert answer.length == 9_000_000
+
+    # -- what a video's head says of Meta's container line -----------------
+
+    def _video_store(self, data, *, container_read=None):
+        """A store whose probe serves *data*'s head, as many bytes of it as
+        each call asks for. *container_read*, when given, answers every read
+        past the poll's first bytes instead: an exception to raise, or the
+        bytes to serve."""
+        from src.services.target.transit import PROBE_RANGE_BYTES, ProbeAnswer
+
+        reads = []
+
+        async def probe(url, *, head_bytes=PROBE_RANGE_BYTES):
+            reads.append(head_bytes)
+            head = data[:head_bytes]
+            if head_bytes != PROBE_RANGE_BYTES and container_read is not None:
+                if isinstance(container_read, Exception):
+                    raise container_read
+                head = container_read
+            return ProbeAnswer(206, "video/mp4", head=head, length=len(data))
+
+        return _store(RecordingSdk(), probe_fn=probe), reads
+
+    @pytest.mark.asyncio
+    async def test_a_video_whose_moov_comes_first_is_read_to_moov_s_end(self):
+        """The first bytes say where `moov` ends; one more ranged read takes it
+        whole, and what it holds rides the observation to the permit."""
+        from src.services.target import media_validation, transit
+
+        data = derivation(pad=4096)
+        end = moov_end(data)
+        store, reads = self._video_store(data)
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready and reads == [transit.PROBE_RANGE_BYTES, end]
+        container = ready.observation["container"]
+        assert container == media_validation.derivation_container(data[:end])
+        assert container["moov_first"] is True and container["moov_end"] == end
+        assert container["edit_lists"] == 0 and "unread" not in container
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "frequency_index,check",
+        [(3, None), (0, "derivation_audio_rate")],
+        ids=["48-kHz", "96-kHz"],
+    )
+    async def test_the_judge_reads_what_ready_records(self, frequency_index, check):
+        """`judge_derivation` reads `ready`'s own observation: AAC at 96 kHz
+        is refused from it, and at 48 kHz it is not."""
+        from src.services.target import media_validation
+
+        data = derivation(audio=audio_entry(frequency_index=frequency_index), pad=4096)
+        store, _ = self._video_store(data)
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        if check is None:
+            media_validation.judge_derivation(ready.observation, "video")
+        else:
+            with pytest.raises(media_validation.UnsupportedMedia, match=check):
+                media_validation.judge_derivation(ready.observation, "video")
+
+    @pytest.mark.asyncio
+    async def test_a_video_whose_media_comes_first_is_read_no_further(self):
+        from src.services.target import transit
+
+        store, reads = self._video_store(derivation(late=True))
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready and reads == [transit.PROBE_RANGE_BYTES]
+        assert ready.observation["container"]["moov_first"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_moov_past_the_read_cap_is_left_unread(self):
+        from src.services.target import transit
+
+        store, reads = self._video_store(
+            derivation(pad=transit.CONTAINER_READ_MAX_BYTES)
+        )
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready and reads == [transit.PROBE_RANGE_BYTES]
+        container = ready.observation["container"]
+        assert container["unread"] == "moov_past_read_cap"
+        assert container["moov_end"] > transit.CONTAINER_READ_MAX_BYTES
+        assert container["edit_lists"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "container_read,unread",
+        [
+            (RuntimeError("connection reset"), ("read_failed", "RuntimeError")),
+            (b"\x00\x00\x00\x10ftypisom", ("short_read", None)),
+        ],
+        ids=["failed", "short"],
+    )
+    async def test_a_container_read_that_misses_leaves_its_facts_unread(
+        self, container_read, unread
+    ):
+        """The frame serves either way: the ledger says what the read missed,
+        and Meta's answer judges it."""
+        store, _ = self._video_store(
+            derivation(pad=4096), container_read=container_read
+        )
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready
+        container = ready.observation["container"]
+        assert (container["unread"], container.get("read_error")) == unread
+        assert container["moov_first"] is True and container["edit_lists"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_image_frame_reads_no_container(self):
+        store, probes = self._store_with([(206, "image/jpeg")])
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert ready and len(probes) == 1 and "container" not in ready.observation
+        assert "derivation" not in ready.observation
+
+    @pytest.mark.asyncio
+    async def test_a_video_frame_records_the_encoding_it_was_derived_with(self):
+        """The encoding rides the observation onto the container permit, so
+        every video story records it, from Drive or from past posts."""
+        from src.services.target import media_validation
+
+        store, _ = self._video_store(derivation(pad=4096))
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready
+        assert ready.observation["derivation"] == (
+            media_validation.story_video_encoding()
+        )
 
 
 class TestFreshUrls:

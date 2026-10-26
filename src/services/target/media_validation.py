@@ -12,9 +12,18 @@ Meta never receives a video's source file. It fetches the transit store's
 story derivation of it (`transit.story_transformation`, delivered as MP4 in the
 story frame), so a video is judged only on what the derivation keeps from it:
 its size, a well-formed self-contained container, a video stream the probe can
-open, its duration and its frame rate. The source's container layout (edit
-lists, where `moov` sits), its encoding settings and its audio settings are the
-derivation's to set, and are not judged here.
+open, its duration and its frame rate. The derivation is trimmed to the
+longest story and encoded to the matrix's story video
+(`story_video_encoding`), so a longer video is kept and only a shorter one is
+refused for its length. The frame rate is still refused outside the matrix:
+the derivation's frame-rate range is not documented for a source outside it.
+The source's container layout (edit lists, where `moov` sits), its encoding
+settings and its audio settings are the derivation's to set, and are not
+judged here.
+
+The derivation itself is judged before Meta is asked to fetch it
+(`judge_derivation`), on what the transit store's readiness probe read of it
+(`derivation_container`).
 """
 
 from __future__ import annotations
@@ -39,8 +48,12 @@ from typing import Literal, Mapping
 
 from .vocabulary import PUBLISH_MAX_BYTES
 
-MATRIX_VERSION = "instagram-story-2026-10-25-v2"
-EVIDENCE_VERSION = 1
+MATRIX_VERSION = "instagram-story-2026-10-26-v3"
+EVIDENCE_VERSION = 2
+#: Meta: "File size: 100MB maximum"
+PROVIDER_VIDEO_BYTES = 100_000_000
+#: Meta: "File size: 8 MB maximum." (Story Image Specifications)
+PROVIDER_IMAGE_BYTES = 8_000_000
 SUPPORTED_MEDIA_MATRIX = MappingProxyType(
     {
         "version": MATRIX_VERSION,
@@ -50,8 +63,8 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
         "color_evidence": "Story Image Specifications explicitly permits conversion to sRGB",
         "byte_caps": MappingProxyType(
             {
-                "image": min(PUBLISH_MAX_BYTES["image"], 8_000_000),
-                "video": min(PUBLISH_MAX_BYTES["video"], 100_000_000),
+                "image": min(PUBLISH_MAX_BYTES["image"], PROVIDER_IMAGE_BYTES),
+                "video": min(PUBLISH_MAX_BYTES["video"], PROVIDER_VIDEO_BYTES),
             }
         ),
         "image": ("JPEG", "sRGB; provider converts other color spaces"),
@@ -60,11 +73,88 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
             "a video stream the probe can open: H.264 or HEVC, with AAC audio",
             "delivered to Meta as the transit store's story derivation",
         ),
+        # Meta: "Duration: 60 seconds maximum,  3 seconds minimum"
         "duration_seconds": (3, 60),
+        # Meta: "Frame rate: 23-60 FPS."
         "fps": (23, 60),
-        "provider_video_bytes": 100_000_000,
+        # What the story derivation is encoded to (`story_video_encoding`).
+        # Meta: "Video codec: HEVC or H264, progressive scan, closed GOP, 4:2:0
+        # chroma subsampling." H.264 high profile is 4:2:0, and level 4.2
+        # holds 1080 x 1920 at up to 60 fps.
+        "video_codec": ("h264", "high", "4.2"),
+        # Meta: "Audio codec: AAC, 48khz sample rate maximum, 1 or 2 channels
+        # (mono or stereo)."
+        "audio_codec": "aac",
+        "audio_hz": 48_000,
+        "audio_channels": 2,
+        # Meta: "Video bitrate: VBR, 25Mbps maximum"; "Audio bitrate: 128kbps"
+        "provider_video_bits_per_second": 25_000_000,
+        "provider_audio_bits_per_second": 128_000,
+        "provider_video_bytes": PROVIDER_VIDEO_BYTES,
+        "provider_image_bytes": PROVIDER_IMAGE_BYTES,
     }
 )
+
+
+def story_video_encoding() -> dict:
+    """What every story video's derivation is encoded to, from the matrix, as
+    a video's evidence records it. The bit-rate cap is the lower of Meta's two
+    limits at the longest story: its VBR maximum, and its file size less the
+    audio, rounded down to the megabit so the container's overhead fits."""
+    matrix = SUPPORTED_MEDIA_MATRIX
+    longest = matrix["duration_seconds"][1]
+    file_rate = matrix["provider_video_bytes"] * 8 // longest
+    fits_the_file = file_rate - matrix["provider_audio_bits_per_second"]
+    return {
+        "video_codec": list(matrix["video_codec"]),
+        "audio_codec": matrix["audio_codec"],
+        "audio_hz": matrix["audio_hz"],
+        "fps": list(matrix["fps"]),
+        "video_bits_per_second": min(
+            matrix["provider_video_bits_per_second"],
+            fits_the_file // 1_000_000 * 1_000_000,
+        ),
+        "longest_seconds": longest,
+    }
+
+
+def _bounds(check: str, kind: str) -> dict:
+    """The bounds *check* holds a *kind* of file to, as the matrix states them:
+    recorded beside what the check measured, so a record says what it was
+    judged against without anyone reading the matrix again."""
+    if check == "byte_limit":
+        return {"cap": SUPPORTED_MEDIA_MATRIX["byte_caps"][kind]}
+    if check == "duration":
+        shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
+        return {"min_seconds": shortest, "max_seconds": longest}
+    if check == "fps":
+        lowest, highest = SUPPORTED_MEDIA_MATRIX["fps"]
+        return {"min_fps": lowest, "max_fps": highest}
+    return {}
+
+
+def _check_record(check: str, kind: str, measured: Mapping[str, object]) -> Mapping:
+    """One check's record, `{"check", "measured"}`: what it measured and the
+    bounds it holds a *kind* of file to (`_bounds`). The shape of a refusal's
+    `failed_check` and of each of a supported result's `passed_checks`."""
+    return MappingProxyType(
+        {"check": check, "measured": {**measured, **_bounds(check, kind)}}
+    )
+
+
+def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
+    """Each check a supported file passed that holds it to a bound, recorded
+    from the evidence. A video whose probe states no frame rate was not judged
+    on one."""
+    checks = [_check_record("byte_limit", kind, {"bytes": evidence["bytes"]})]
+    if kind == "video":
+        duration = {"duration_seconds": evidence["duration_seconds"]}
+        if evidence["trimmed_to_seconds"] is not None:
+            duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
+        checks.append(_check_record("duration", kind, duration))
+        if _positive_fraction(evidence["fps"]) is not None:
+            checks.append(_check_record("fps", kind, {"fps": evidence["fps"]}))
+    return tuple(checks)
 
 
 @dataclass(frozen=True)
@@ -139,16 +229,50 @@ class ValidationResult:
     matrix_version: str = MATRIX_VERSION
     evidence_version: int = EVIDENCE_VERSION
     #: For a result that is not supported: the check that decided it and the
-    #: values it measured (`{"check", "measured"}`). Not part of the fingerprint.
+    #: values it measured, with the bounds it held them to (`{"check",
+    #: "measured"}`). Not part of the fingerprint.
     failed_check: Mapping[str, object] | None = None
+    #: For a supported result: each check it passed that holds a file to a
+    #: bound, in `failed_check`'s shape (`_check_record`). Not part of the
+    #: fingerprint.
+    passed_checks: tuple[Mapping[str, object], ...] = ()
 
 
 class ValidationPending(Exception):
     """Closed safe diagnostic, never the raw tool exception."""
 
 
+#: Every check a file can be refused by: the closed set `UnsupportedMedia`
+#: carries, which the refusal sentences (`refusal_evidence`) are held to.
+UNSUPPORTED_CHECKS = frozenset(
+    {
+        "byte_limit",
+        "derivation_audio_channels",
+        "derivation_audio_codec",
+        "derivation_audio_rate",
+        "derivation_bytes",
+        "derivation_edit_list",
+        "derivation_moov_position",
+        "duration",
+        "external_reference",
+        "fps",
+        "image_format",
+        "malformed_container",
+        "malformed_image",
+        "malformed_video",
+        "stream_topology",
+        "video_codec",
+    }
+)
+
+
 class UnsupportedMedia(Exception):
-    pass
+    """A file refused by one check, named from `UNSUPPORTED_CHECKS`."""
+
+    def __init__(self, check: str):
+        if check not in UNSUPPORTED_CHECKS:
+            raise ValueError(f"not a check in UNSUPPORTED_CHECKS: {check!r}")
+        super().__init__(check)
 
 
 #: Bounds on a measured value kept as text, and on a list of them.
@@ -308,44 +432,58 @@ class ContainerEvidence:
     measured: Mapping[str, object] = field(default_factory=dict)
 
 
+class _BoxBudget:
+    """How many boxes a walk has read, against its limits' box and depth
+    budget."""
+
+    __slots__ = ("limits", "count")
+
+    def __init__(self, limits: ValidationLimits):
+        self.limits = limits
+        self.count = 0
+
+
+def _boxes(data: bytes, start: int, end: int, depth: int, budget: _BoxBudget):
+    """The ISO-BMFF boxes between *start* and *end*, as (kind, payload start,
+    end). A header cut short, or a box that runs past its parent, is
+    `malformed_container`; a walk past the budget is `container_budget`.
+    Opaque payload text never becomes a box."""
+    if depth > budget.limits.depth:
+        raise ValidationPending("container_budget")
+    while start < end:
+        budget.count += 1
+        if budget.count > budget.limits.boxes:
+            raise ValidationPending("container_budget")
+        if end - start < 8:
+            raise UnsupportedMedia("malformed_container")
+        size, kind = struct.unpack_from(">I4s", data, start)
+        header = 8
+        if size == 1:
+            if end - start < 16:
+                raise UnsupportedMedia("malformed_container")
+            size = struct.unpack_from(">Q", data, start + 8)[0]
+            header = 16
+        elif size == 0:
+            size = end - start
+        if size < header or size > end - start:
+            raise UnsupportedMedia("malformed_container")
+        yield kind, start + header, start + size
+        start += size
+
+
 def inspect_container(
     data: bytes, limits: ValidationLimits | None = None
 ) -> ContainerEvidence:
     """Small bounded ISO-BMFF walker; opaque payload text never becomes a box."""
-    limits = limits or ValidationLimits()
-    count = 0
+    budget = _BoxBudget(limits or ValidationLimits())
     top = []
     tracks = []
     codecs = []
     pending = False
 
-    def boxes(start, end, depth):
-        nonlocal count
-        if depth > limits.depth:
-            raise ValidationPending("container_budget")
-        while start < end:
-            count += 1
-            if count > limits.boxes:
-                raise ValidationPending("container_budget")
-            if end - start < 8:
-                raise UnsupportedMedia("malformed_container")
-            size, kind = struct.unpack_from(">I4s", data, start)
-            header = 8
-            if size == 1:
-                if end - start < 16:
-                    raise UnsupportedMedia("malformed_container")
-                size = struct.unpack_from(">Q", data, start + 8)[0]
-                header = 16
-            elif size == 0:
-                size = end - start
-            if size < header or size > end - start:
-                raise UnsupportedMedia("malformed_container")
-            yield kind, start + header, start + size
-            start += size
-
     def walk(start, end, depth, track=None):
         nonlocal pending
-        for kind, payload, finish in boxes(start, end, depth):
+        for kind, payload, finish in _boxes(data, start, end, depth, budget):
             if depth == 0:
                 top.append(kind)
             if kind in (b"cmov", b"moof", b"mvex"):
@@ -360,7 +498,7 @@ def inspect_container(
                 if track is None or finish - payload < 8:
                     raise ValidationPending("container_evidence_incomplete")
                 n = struct.unpack_from(">I", data, payload + 4)[0]
-                entries = list(boxes(payload + 8, finish, depth + 1))
+                entries = list(_boxes(data, payload + 8, finish, depth + 1, budget))
                 if len(entries) != n:
                     raise UnsupportedMedia("malformed_container")
                 for entry, content, end_entry in entries:
@@ -404,7 +542,7 @@ def inspect_container(
     except (UnsupportedMedia, ValidationPending) as exc:
         measured = {
             "boxes": [kind.decode("ascii", errors="replace") for kind in top],
-            "box_count": count,
+            "box_count": budget.count,
             "sample_codecs": codecs,
             **getattr(exc, "measured", {}),
         }
@@ -533,11 +671,11 @@ async def validate_media(
             "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
         )
         reason = str(exc)
-        failed_check = MappingProxyType(
-            {"check": reason, "measured": dict(getattr(exc, "measured", {}))}
-        )
+        failed_check = _check_record(reason, source.kind, getattr(exc, "measured", {}))
+        passed_checks = ()
     else:
         failed_check = None
+        passed_checks = _passed(source.kind, evidence)
     fingerprint_data = {
         "kind": source.kind,
         "generation": source.source_generation,
@@ -561,6 +699,7 @@ async def validate_media(
         fingerprint,
         MappingProxyType(evidence),
         failed_check=failed_check,
+        passed_checks=passed_checks,
     )
 
 
@@ -577,8 +716,10 @@ def _positive_fraction(value):
 def inspect_video_facts(facts):
     """What the story derivation keeps of a video: its video stream (the first,
     as the derivation takes it), the stream's duration (else the container's)
-    and its frame rate. A frame rate the probe does not state is not judged;
-    one outside the matrix is refused."""
+    and its frame rate. A video shorter than the shortest story is refused; one
+    longer than the longest is kept, trimmed by the derivation, and recorded as
+    trimmed. A frame rate the probe does not state is not judged; one outside
+    the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
     if not videos:
@@ -594,7 +735,7 @@ def inspect_video_facts(facts):
     fps = _positive_fraction(video.get("avg_frame_rate"))
     timing = dict(duration_seconds=duration, fps=fps)
     shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
-    if not shortest <= duration <= longest:
+    if duration < shortest:
         raise _measured(UnsupportedMedia("duration"), **timing)
     slowest, fastest = SUPPORTED_MEDIA_MATRIX["fps"]
     if fps is not None and not slowest <= fps <= fastest:
@@ -606,6 +747,8 @@ def inspect_video_facts(facts):
         "duration_seconds": str(duration),
         "fps": "unstated" if fps is None else str(fps),
         "audio": any(s.get("codec_type") == "audio" for s in streams),
+        "trimmed_to_seconds": str(longest) if duration > longest else None,
+        "derivation": story_video_encoding(),
     }
 
 
@@ -674,3 +817,283 @@ async def _validate_video(local, limits, directory, deadline):
         return inspect_video_facts(json.loads(output.stdout))
     except (ValueError, TypeError, AttributeError):
         raise ValidationPending("incomplete_evidence") from None
+
+
+# -- the story derivation ------------------------------------------------------
+
+#: AAC's sample entry in an MP4 (ISO/IEC 14496-14), as the derivation's
+#: `stsd` names it.
+_AAC_SAMPLE_ENTRY = "mp4a"
+#: Whether each of three lines of Meta's refuses the derivation: "MOV or MP4
+#: (MPEG-4 Part 14), no edit lists, moov atom at the front of the file." and
+#: "1 or 2 channels (mono or stereo)". They describe an output nobody has
+#: measured: ffmpeg's MP4 muxer, for one, writes an edit list on each H.264
+#: and AAC track and puts `moov` after the media by default, and Cloudinary
+#: has no parameter for the channel count. So each is recorded with the
+#: derivation's other facts, and Meta's answer to the container call judges
+#: it.
+REFUSE_MOOV_POSITION = False
+REFUSE_EDIT_LISTS = False
+REFUSE_AUDIO_CHANNELS = False
+#: An AudioSpecificConfig's sampling frequency index, as its rate (ISO/IEC
+#: 14496-3); index 15 is an explicit 24-bit rate.
+_AAC_RATES = (
+    96_000,
+    88_200,
+    64_000,
+    48_000,
+    44_100,
+    32_000,
+    24_000,
+    22_050,
+    16_000,
+    12_000,
+    11_025,
+    8_000,
+    7_350,
+)
+#: Its channelConfiguration, as the channels it names; 0 leaves them to a
+#: program config element, unread here.
+_AAC_CHANNELS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 8, 11: 7, 12: 8, 13: 24, 14: 8}
+
+
+def _fourcc(kind: bytes) -> str:
+    """A box or sample-entry kind as bounded, printable text."""
+    return _measured_value(kind.decode("latin-1"))
+
+
+def derivation_container(data: bytes) -> dict:
+    """What the first bytes of the story derivation say about Meta's container
+    and audio lines: the top-level boxes up to `moov` or `mdat`, whether `moov`
+    comes first and where it ends, and, once the bytes hold `moov` whole, its
+    edit lists, its sample entries and each audio track's codec, rate and
+    channel count. A fact the bytes do not reach is None."""
+    facts = {
+        "boxes": [],
+        "moov_first": None,
+        "moov_end": None,
+        "edit_lists": None,
+        "sample_codecs": None,
+        "audio": None,
+    }
+    start = 0
+    while start + 8 <= len(data):
+        size, kind = struct.unpack_from(">I4s", data, start)
+        header = 8
+        if size == 1:
+            if start + 16 > len(data):
+                break
+            size, header = struct.unpack_from(">Q", data, start + 8)[0], 16
+        facts["boxes"].append(_fourcc(kind))
+        if kind == b"mdat":
+            facts["moov_first"] = False
+            break
+        if kind == b"moov":
+            facts["moov_first"] = True
+            if size >= header:
+                facts["moov_end"] = start + size
+                if start + size <= len(data):
+                    facts.update(_moov_facts(data, start + header, start + size))
+            break
+        if size < header:
+            # Size 0 runs to the end of the file, and a smaller one is no box:
+            # no later box can be found.
+            break
+        start += size
+    facts["boxes"] = _measured_value(facts["boxes"])
+    return facts
+
+
+def _moov_facts(data: bytes, start: int, end: int) -> dict:
+    """`moov`'s edit lists, sample entries and audio tracks, read with the
+    source walker's framing and budget (`_boxes`). A `moov` that does not nest
+    within its bounds, or runs past the budget, is left unread, and says so."""
+    budget = _BoxBudget(ValidationLimits())
+    tracks = []
+    try:
+        for kind, payload, finish in _boxes(data, start, end, 1, budget):
+            if kind == b"trak":
+                tracks.append({"handler": None, "edit_lists": 0, "entries": []})
+                _walk_track(data, payload, finish, 2, budget, tracks[-1])
+        audio = [
+            _sound(data, *entry, budget)
+            for track in tracks
+            if track["handler"] == b"soun"
+            for entry in track["entries"]
+        ]
+    except (UnsupportedMedia, ValidationPending):
+        return {"unread": "moov_unwalkable"}
+    return {
+        "edit_lists": sum(track["edit_lists"] for track in tracks),
+        "sample_codecs": _measured_value(
+            [_fourcc(entry[0]) for track in tracks for entry in track["entries"]]
+        ),
+        "audio": audio,
+    }
+
+
+def _walk_track(data, start, end, depth, budget, track) -> None:
+    """A `trak`'s boxes into *track*: its handler type (`mdia`'s, which comes
+    before a MOV `minf`'s data handler), its edit lists and its sample
+    entries."""
+    for kind, payload, finish in _boxes(data, start, end, depth, budget):
+        if kind in (b"mdia", b"minf", b"stbl", b"edts"):
+            _walk_track(data, payload, finish, depth + 1, budget, track)
+        elif kind == b"elst":
+            track["edit_lists"] += 1
+        elif kind == b"hdlr" and track["handler"] is None and finish - payload >= 12:
+            # A full box's version and flags and `pre_defined`, then the type.
+            track["handler"] = data[payload + 8 : payload + 12]
+        elif kind == b"stsd" and finish - payload >= 8:
+            # A full box's version and flags and the entry count, then the
+            # entries.
+            track["entries"].extend(
+                _boxes(data, payload + 8, finish, depth + 1, budget)
+            )
+
+
+def _sound(data, entry, content, finish, budget) -> dict:
+    """An audio entry's codec, rate and channel count. An AudioSampleEntry
+    holds 8 bytes of SampleEntry, a version and 6 reserved bytes, the channel
+    count and 6 more, the 16.16 rate at +24 and its boxes at +28. An MP4 muxer
+    may write that channel count as its template 2 whatever the stream carries
+    (ffmpeg does), and a 16.16 rate cannot hold 88.2 kHz, so for AAC both come
+    from its configuration; otherwise the rate is the entry's and the count is
+    not read."""
+    codec = _fourcc(entry)
+    fixed = finish - content >= 28
+    rate = struct.unpack_from(">I", data, content + 24)[0] >> 16 if fixed else None
+    channels = None
+    if (
+        codec == _AAC_SAMPLE_ENTRY
+        and fixed
+        and data[content + 8 : content + 10] == bytes(2)
+    ):
+        for kind, payload, end in _boxes(data, content + 28, finish, 0, budget):
+            if kind == b"esds":
+                # A full box's version and flags, then its descriptors.
+                configured, channels = _aac_config(data, payload + 4, end)
+                rate = configured or rate
+    return {"codec": codec, "channels": channels, "hz": rate}
+
+
+def _aac_config(data: bytes, start: int, end: int) -> tuple:
+    """The rate and channel count an `esds`'s AudioSpecificConfig names,
+    between *start* and *end* (ISO/IEC 14496-1 and -3): through the ES
+    descriptor and its decoder config to the decoder-specific info. Either is
+    None when a descriptor is missing or cut short, or the configuration
+    leaves it to a later element."""
+
+    def descriptor(pos, limit, tag):
+        # A tag, then a size of up to four bytes of seven bits each.
+        if pos >= limit or data[pos] != tag:
+            return None
+        pos, size = pos + 1, 0
+        for _ in range(4):
+            if pos >= limit:
+                return None
+            size, pos = size << 7 | data[pos] & 0x7F, pos + 1
+            if not data[pos - 1] & 0x80:
+                break
+        return (pos, pos + size) if pos + size <= limit else None
+
+    found = descriptor(start, end, 0x03)
+    if found is None or found[0] + 3 > found[1]:
+        return None, None
+    pos, limit = found
+    # ES_ID, then the flags: a dependency's id, a URL, an OCR stream's id.
+    flags = data[pos + 2]
+    pos += 3 + (2 if flags & 0x80 else 0)
+    if flags & 0x40:
+        pos += 1 + (data[pos] if pos < limit else 0)
+    pos += 2 if flags & 0x20 else 0
+    found = descriptor(pos, limit, 0x04)
+    # Thirteen bytes, objectTypeIndication to avgBitrate, then the
+    # decoder-specific info.
+    found = found and descriptor(found[0] + 13, found[1], 0x05)
+    if not found:
+        return None, None
+    bits = "".join(
+        f"{byte:08b}" for byte in data[found[0] : min(found[1], found[0] + 8)]
+    )
+    at = 0
+
+    def field(width):
+        nonlocal at
+        value, at = bits[at : at + width], at + width
+        return int(value, 2) if len(value) == width else None
+
+    # The object type (31 escapes to six more bits), the rate's index (15 is
+    # an explicit rate), then the channel configuration.
+    if field(5) == 31:
+        field(6)
+    index = field(4)
+    if index == 15:
+        rate = field(24)
+    else:
+        rate = (
+            _AAC_RATES[index] if index is not None and index < len(_AAC_RATES) else None
+        )
+    return rate, _AAC_CHANNELS.get(field(4))
+
+
+def derivation_limits(media_kind: str) -> dict:
+    """The matrix's limits a story derivation of *media_kind* is held to
+    (`judge_derivation`): its size and, for a video, its audio's."""
+    matrix = SUPPORTED_MEDIA_MATRIX
+    if media_kind != "video":
+        return {"bytes": matrix["provider_image_bytes"]}
+    return {
+        "bytes": matrix["provider_video_bytes"],
+        "audio_codec": matrix["audio_codec"],
+        "audio_hz": matrix["audio_hz"],
+        "audio_channels": matrix["audio_channels"],
+    }
+
+
+def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
+    """Raise `UnsupportedMedia` for a story derivation that breaks a line of
+    Meta's the matrix holds, from what the transit store's readiness probe
+    read of it (`TransitStore.ready`): its size, and for a video its audio's
+    codec and rate, then the lines behind the `REFUSE_*` switches. What the
+    probe did not read is left to Meta's answer to the container call."""
+    if not observation:
+        return
+    limits = derivation_limits(media_kind)
+    size = observation.get("length")
+    if isinstance(size, int) and size > limits["bytes"]:
+        raise _measured(
+            UnsupportedMedia("derivation_bytes"), bytes=size, limit=limits["bytes"]
+        )
+    container = observation.get("container") or {}
+    if REFUSE_MOOV_POSITION and container.get("moov_first") is False:
+        raise _measured(
+            UnsupportedMedia("derivation_moov_position"), boxes=container.get("boxes")
+        )
+    if REFUSE_EDIT_LISTS and container.get("edit_lists"):
+        raise _measured(
+            UnsupportedMedia("derivation_edit_list"),
+            edit_lists=container["edit_lists"],
+        )
+    for audio in container.get("audio") or ():
+        if audio.get("codec") != _AAC_SAMPLE_ENTRY:
+            raise _measured(
+                UnsupportedMedia("derivation_audio_codec"), codec=audio.get("codec")
+            )
+        channels, hz = audio.get("channels"), audio.get("hz")
+        if (
+            REFUSE_AUDIO_CHANNELS
+            and isinstance(channels, int)
+            and channels > limits["audio_channels"]
+        ):
+            raise _measured(
+                UnsupportedMedia("derivation_audio_channels"),
+                channels=channels,
+                limit=limits["audio_channels"],
+            )
+        if isinstance(hz, int) and hz > limits["audio_hz"]:
+            raise _measured(
+                UnsupportedMedia("derivation_audio_rate"),
+                hz=hz,
+                limit=limits["audio_hz"],
+            )
