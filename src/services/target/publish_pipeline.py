@@ -110,10 +110,12 @@ from src.services.target import (
     audit,
     intent_ledger,
     jobs,
+    media_validation,
     outbox,
     prompts,
     provider_ops,
     publish_cap,
+    refusal_evidence,
 )
 from src.services.target.media_adapters import (
     MediaError,
@@ -222,6 +224,9 @@ class _Ctx:
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
+        #: The status a readiness poll met when it answers "dead": Meta's
+        #: `status_code`, and its own reason (`ContainerStatus.reason`).
+        self.dead_status: Optional[str] = None
         #: The job payload's dry-run snapshot (see `_load`).
         self.dry_run: bool = False
         self.past_posts = job.get("_past_posts_pipeline")
@@ -377,7 +382,13 @@ async def run_publish_pipeline(
                 SourceReadRefused,
             ) as exc:
                 return await _past_posts_refusal(
-                    uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+                    uow,
+                    ctx,
+                    exc.reason,
+                    backoff_seconds,
+                    now_fn,
+                    transit=transit,
+                    evidence=refusal_evidence.of(exc),
                 )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
             # Pause Posting holds an approved intent here, before the cap is
@@ -475,7 +486,13 @@ async def run_publish_pipeline(
         SourceReadRefused,
     ) as exc:
         return await _past_posts_refusal(
-            uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+            uow,
+            ctx,
+            exc.reason,
+            backoff_seconds,
+            now_fn,
+            transit=transit,
+            evidence=refusal_evidence.of(exc),
         )
 
 
@@ -892,6 +909,7 @@ async def _retry_or_poison(
     error: Optional[dict] = None,
     poison_now: bool = False,
     wait: _Wait = _Wait(),
+    notice: Optional[str] = None,
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
@@ -973,7 +991,7 @@ async def _retry_or_poison(
                 ctx,
                 state="review_required",
                 at=now,
-                notice=_poison_notice(ctx, now),
+                notice=notice or _poison_notice(ctx, now),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1045,6 +1063,15 @@ def _poison_notice(ctx: _Ctx, now: datetime) -> str:
         "A story couldn't be posted after several tries and needs"
         " attention: choose on its card, or open the Queue on the web."
     )
+
+
+#: The sentence the workspace hears when a story's frame is outside Meta's
+#: story spec (`media_validation.judge_derivation`): its card says which line
+#: and what was measured.
+SPEC_REFUSED_NOTICE = (
+    "A story couldn't be posted: its file is outside Instagram's story"
+    " limits. Its card says why: choose there, or open the Queue on the web."
+)
 
 
 async def _bump(session, ctx: _Ctx, **changes) -> dict:
@@ -1168,6 +1195,8 @@ async def _route_readiness(
         # The container is definitively gone; a NEW one needs a fresh
         # create (and a fresh generation) from the still-valid transit
         # asset — step back, retry on the ladder.
+        status_code = str(ctx.dead_status)
+        status = getattr(ctx.dead_status, "reason", None)
         return await _retry_or_poison(
             uow,
             ctx,
@@ -1181,6 +1210,14 @@ async def _route_readiness(
                     "code": None,
                     "message": "Meta reported the container ERROR or EXPIRED —"
                     " the media at the delivery URL could not be processed",
+                    "status_code": status_code,
+                    "status": status,
+                    # Why, in Instagram's own status, for the review card's
+                    # line (`prompt_rendering.outcome_line`) should the ladder
+                    # be spent.
+                    "refusal": refusal_evidence.evidence(
+                        "container_dead", status_code=status_code, status=status
+                    ),
                 },
             },
         )
@@ -1324,6 +1361,39 @@ async def _ladder(
                     now_fn,
                     error=not_ready,
                     step_back_to="none" if gone else None,
+                )
+            # What the probe read of the frame is judged against Meta's story
+            # spec before Meta is told to fetch it. No retry re-encodes the
+            # file, so a breach parks the story at once, its reason on its
+            # card.
+            try:
+                media_validation.judge_derivation(probe, ctx.intent["media_kind"])
+            except media_validation.UnsupportedMedia as exc:
+                logger.warning(
+                    "publish_pipeline intent %s: the story frame is outside"
+                    " Meta's story spec (%s, measured %s) — parked for review"
+                    " before any container call",
+                    ctx.intent_id,
+                    exc,
+                    exc.measured,
+                )
+                # The check and its values, where the card reads a refusal.
+                refused = _error_of(exc)
+                refused["error"]["refusal"] = refusal_evidence.evidence(
+                    "local_validation",
+                    state="unsupported",
+                    check=str(exc),
+                    measured=exc.measured,
+                    matrix_version=media_validation.MATRIX_VERSION,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    error=refused,
+                    poison_now=True,
+                    notice=SPEC_REFUSED_NOTICE,
                 )
             generation = ctx.next_generation("container_create")
             permit = await _permit(
@@ -1769,6 +1839,7 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
         if status in _READY_STATUSES:
             return "ready"
         if status in _DEAD_STATUSES:
+            ctx.dead_status = status
             return "dead"
         if attempt + 1 < POLL_BUDGET:
             await sleep(POLL_INTERVAL_S)
@@ -1971,9 +2042,17 @@ async def _restate_and_notify(
 ) -> int:
     """The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
-    buttons because it is `review_required`."""
-    line = prompts.outcome_line(state, by=None, at=at, tz=tz)
+    buttons because it is `review_required`. Its line says why the story was
+    refused when its refusal says anything, as the card rendered again does
+    (`prompts.settled_line`)."""
     bindings = await prompts.push_bindings(session, workspace_id)
+    refusal = None
+    if bindings and state == "review_required":
+        settled = await intent_ledger.settlement(
+            session, workspace_id=workspace_id, intent_id=intent_id
+        )
+        refusal = settled.get("refusal")
+    line = prompts.outcome_line(state, by=None, at=at, tz=tz, refusal=refusal)
     for binding_id in bindings:
         await outbox.restate_cards(
             session,
@@ -2350,9 +2429,24 @@ async def _confirm(
     return POSTED
 
 
+def _review_notice(evidence) -> str:
+    """The notice of a past post parked for review: why it was refused, in
+    plain words, when its refusal says (`refusal_evidence.plain`)."""
+    said = refusal_evidence.plain(evidence)
+    refused = f" Refused: {said}." if said else ""
+    return (
+        "This story from your Instagram past posts needs review before another"
+        f" attempt.{refused} Open the Queue to choose."
+    )
+
+
 async def _past_posts_refusal(
-    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None
+    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None, evidence=None
 ):
+    """Wait, or park the story for review, on a past post's refusal. The
+    refused fetch's evidence, when the refusal carries one, rides with the
+    reason: `last_error -> 'error' -> 'refusal'`, the audit detail's `refusal`
+    and the review notice (`refusal_evidence`)."""
     if reason == "selected_asset_changed":
         reason = "past_posts_content_changed"
     if reason == "asset_unavailable":
@@ -2371,12 +2465,14 @@ async def _past_posts_refusal(
         "past_posts_pipeline_not_configured",
     )
     count = ctx.count("past_posts_waits") + 1
+    refusal = {"refusal": evidence} if evidence else {}
     error = {
         "v": 1,
         "error": {
             "type": "PastPostsEffectRefused",
             "reason": reason,
             "message": reason,
+            **refusal,
         },
     }
     now = now_fn()
@@ -2422,7 +2518,7 @@ async def _past_posts_refusal(
                 intent=ctx.intent_id,
                 from_state=current,
                 to_state=current,
-                detail={"reason": reason},
+                detail={"reason": reason, **refusal},
             )
             if immediate or count > len(backoff_seconds):
                 await park_for_review(
@@ -2431,7 +2527,7 @@ async def _past_posts_refusal(
                     intent_id=ctx.intent_id,
                     from_state=current,
                     tz=ctx.tz,
-                    notice="This story from your Instagram past posts needs review before another attempt. Open the Queue to choose.",
+                    notice=_review_notice(evidence),
                 )
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "review_required"
