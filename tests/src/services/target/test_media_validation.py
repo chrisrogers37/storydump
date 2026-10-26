@@ -471,23 +471,37 @@ async def test_a_real_video_with_four_streams_is_probed(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "kwargs,undecoded",
-    [({"codec": "mpeg4"}, ["mp4v"]), ({"timecode": True}, ["tmcd"])],
+    "kwargs,undecoded,skipped",
+    [
+        ({"codec": "mpeg4"}, ["mp4v"], {"closed_decoders": ["mp4v"]}),
+        ({"timecode": True}, ["tmcd"], None),
+    ],
     ids=["mpeg4-part-2-video", "timecode-track"],
 )
 async def test_a_real_video_with_a_stream_the_probe_does_not_decode_is_supported(
-    tmp_path, kwargs, undecoded
+    tmp_path, monkeypatch, kwargs, undecoded, skipped
 ):
-    """An MPEG-4 Part 2 video, or a MOV with a timecode track, is judged on
-    what the probe reads of its container, and the codecs it does not decode
-    are recorded: the derivation re-encodes them."""
+    """A MOV's timecode track has no decoder, so the probe reads the file. An
+    MPEG-4 Part 2 video's decoder is closed to the probe, which stops at it,
+    so the file is its derivation's to read. Either way it is supported, and
+    the codecs the probe does not decode are recorded."""
     data = encoded_video(tmp_path, **kwargs)
+    probed = []
+    run = v.run_bounded
+
+    async def recorded(*args):
+        probed.append(await run(*args))
+        return probed[-1]
+
+    monkeypatch.setattr(v, "run_bounded", recorded)
     result = await v.validate_media(
         request(data, "video"),
         limits=v.ValidationLimits(temporary_root=str(tmp_path)),
     )
-    assert (result.state, result.reason) == ("supported", "validated")
+    said = [(output.returncode, output.stderr[-400:]) for output in probed]
+    assert (result.state, result.reason) == ("supported", "validated"), said
     assert result.evidence["undecoded_codecs"] == undecoded
+    assert result.evidence.get("probe_skipped") == skipped, said
 
 
 def test_linux_probe_tools_are_required_in_ci():
@@ -878,36 +892,50 @@ def test_a_codec_the_probe_does_not_decode_is_recorded_not_refused(data, undecod
     assert (checked.reason, checked.undecoded) == (None, undecoded)
 
 
+#: ffmpeg's line for a decoder `-codec_whitelist` keeps closed.
+CLOSED = b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n"
+
+
 @pytest.mark.parametrize(
-    "stderr,state,reason",
+    "returncode,stderr,state,reason,skipped",
     [
+        (0, CLOSED, "supported", "validated", None),
+        (1, CLOSED, "supported", "validated", {"closed_decoders": ["mp4v"]}),
         (
-            b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n",
-            "supported",
-            "validated",
-        ),
-        (
-            b"[mpeg4 @ 0x1] Codec (mpeg4) not on whitelist 'h264,hevc,aac'\n"
-            b"moov atom truncated\n",
+            1,
+            CLOSED + b"moov atom truncated\n",
             "validation_pending",
             "probe_incomplete",
+            None,
         ),
         (
+            0,
             b"Protocol 'http' not on whitelist 'file'!\n",
             "validation_pending",
             "probe_incomplete",
+            None,
         ),
     ],
-    ids=["a-closed-decoder", "and-another-line", "a-closed-protocol"],
+    ids=["a-closed-decoder", "stopped-at-it", "and-another-line", "a-closed-protocol"],
 )
 async def test_a_decoder_the_whitelist_keeps_closed_is_not_a_fault_of_the_file(
-    monkeypatch, tmp_path, stderr, state, reason
+    monkeypatch, tmp_path, returncode, stderr, state, reason, skipped
 ):
     """ffmpeg's line for a decoder outside `-codec_whitelist` is the probe's
-    own bound: alone, the probe ran clean. Any other line still counts, a
-    refused protocol among them."""
-    result = await validated_video(monkeypatch, tmp_path, probe_facts(), stderr=stderr)
+    own bound. Alone, the probe ran clean; a probe it stopped gave no facts,
+    so the file is its derivation's to read, as one with more streams than the
+    probe opens. Any other line still counts, a refused protocol among
+    them."""
+    result = await validated_video(
+        monkeypatch,
+        tmp_path,
+        probe_facts(),
+        movie(codecs=(b"mp4v", b"mp4a")),
+        stderr=stderr,
+        returncode=returncode,
+    )
     assert (result.state, result.reason) == (state, reason)
+    assert result.evidence.get("probe_skipped") == skipped
 
 
 #: Every container the walk cannot read whole: the bytes, the limits (None for
@@ -1208,17 +1236,25 @@ async def test_fingerprint_does_not_move_with_what_the_check_measured(monkeypatc
 
 
 async def validated_video(
-    monkeypatch, tmp_path, facts, data=None, limits=None, argvs=None, stderr=b""
+    monkeypatch,
+    tmp_path,
+    facts,
+    data=None,
+    limits=None,
+    argvs=None,
+    stderr=b"",
+    returncode=0,
 ):
-    """`validate_media` on a video whose probe answers with ffprobe's *facts*
-    and *stderr*: the bounded run is faked, and the real `_validate_video`
-    reads the answer. Each probe's argv is appended to *argvs* when given."""
+    """`validate_media` on a video whose probe answers with ffprobe's *facts*,
+    *stderr* and *returncode*: the bounded run is faked, and the real
+    `_validate_video` reads the answer. Each probe's argv is appended to
+    *argvs* when given."""
 
     async def probe(argv, *args):
         if argvs is not None:
             argvs.append(argv)
         return SimpleNamespace(
-            returncode=0, stdout=json.dumps(facts).encode(), stderr=stderr
+            returncode=returncode, stdout=json.dumps(facts).encode(), stderr=stderr
         )
 
     monkeypatch.setattr(v, "run_bounded", probe)

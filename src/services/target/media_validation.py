@@ -826,19 +826,29 @@ def _closed_decoder(line: bytes) -> bool:
     return b"codec (" in line and b"not on whitelist" in line
 
 
+class _ClosedDecoder(Exception):
+    """The probe stopped at a decoder `-codec_whitelist` keeps closed, and at
+    nothing else (`_closed_decoder`): ffprobe ends when it cannot open one."""
+
+
 def _probe_succeeded(output):
     """Return when the probe ran clean, apart from the decoders it may not
-    open (`_closed_decoder`). Words that establish malformed bytes refuse the
-    file; a resource or capability failure leaves it pending."""
+    open (`_closed_decoder`), and raise `_ClosedDecoder` when one of them is
+    all that stopped it. Words that establish malformed bytes refuse the file;
+    a resource or capability failure leaves it pending."""
     if output.returncode < 0:
         raise ValidationPending("resource_budget")
     stderr = output.stderr.lower()
+    closed = False
     if b"not on whitelist" in stderr:
-        stderr = b"\n".join(
-            line for line in stderr.splitlines() if not _closed_decoder(line)
-        )
-    if output.returncode == 0 and not stderr:
-        return
+        lines = stderr.splitlines()
+        kept = [line for line in lines if not _closed_decoder(line)]
+        closed, stderr = len(kept) < len(lines), b"\n".join(kept)
+    if not stderr:
+        if output.returncode == 0:
+            return
+        if closed:
+            raise _ClosedDecoder()
     if any(
         word in stderr
         for word in (
@@ -857,8 +867,10 @@ async def _validate_video(data, limits, deadline):
     private copy. A walk that stopped short is recorded with what it read
     (`container`), and so are the sample entries the probe does not decode
     (`undecoded_codecs`). A file with more streams than the probe opens is not
-    probed: its evidence says why (`probe_skipped`), and each fact the probe
-    would give is unstated."""
+    probed, and one whose probe stops at a decoder it keeps closed is judged
+    without it: either way the file is its story derivation's to read, its
+    evidence says why (`probe_skipped`), and each fact the probe would give is
+    unstated."""
     container = inspect_container(data, limits)
     if container.reason:
         raise _measured(UnsupportedMedia(container.reason), **container.measured)
@@ -874,8 +886,14 @@ async def _validate_video(data, limits, deadline):
         }
         facts = _video_evidence({})
     else:
-        with _private_copy(data, limits) as local:
-            facts = await _probe_video(local, limits, deadline)
+        try:
+            with _private_copy(data, limits) as local:
+                facts = await _probe_video(local, limits, deadline)
+        except _ClosedDecoder:
+            evidence["probe_skipped"] = {
+                "closed_decoders": _measured_value(container.undecoded)
+            }
+            facts = _video_evidence({})
     return {**evidence, **facts}
 
 
