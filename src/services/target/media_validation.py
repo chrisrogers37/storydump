@@ -393,10 +393,13 @@ def inspect_container(
             raise ValidationPending("container_evidence_incomplete")
         # The decoders the probe may open on untrusted bytes (`_PROBE_CODECS`):
         # a stream outside them is refused here rather than left to the probe.
-        if any(
-            codec not in ("avc1", "avc3", "hvc1", "hev1", "mp4a") for codec in codecs
-        ):
-            raise UnsupportedMedia("video_codec")
+        refused = [
+            codec
+            for codec in codecs
+            if codec not in ("avc1", "avc3", "hvc1", "hev1", "mp4a")
+        ]
+        if refused:
+            raise _measured(UnsupportedMedia("video_codec"), refused_codecs=refused)
         return ContainerEvidence(None)
     except (UnsupportedMedia, ValidationPending) as exc:
         measured = {

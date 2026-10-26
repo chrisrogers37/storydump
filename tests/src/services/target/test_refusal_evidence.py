@@ -613,12 +613,11 @@ FETCH_SENTENCES = [
 #: One local-validation refusal per `_CHECKS` entry, and a second where an entry
 #: reads its measurements differently: (check, what it measured, the sentence).
 CHECK_CASES = [
-    pytest.param("edit_list", CONTAINER, "this video has an edit list", id="edit_list"),
     pytest.param(
-        "moov_not_front",
-        CONTAINER,
-        "this video's index comes after its media",
-        id="moov_not_front",
+        "stream_topology",
+        {"streams": 1, "video_streams": 0},
+        "this file holds no video stream",
+        id="stream_topology",
     ),
     pytest.param(
         "duration",
@@ -657,64 +656,26 @@ CHECK_CASES = [
         id="fps-ntsc",
     ),
     pytest.param(
-        "width",
-        {"width": 2160, "height": 3840},
-        "this video is 2160 px wide; stories take up to 1920",
-        id="width",
-    ),
-    pytest.param(
-        "aspect",
-        {"width": 100, "height": 1500, "sample_aspect_ratio": "1", "aspect": "1/15"},
-        "this video's aspect ratio (1/15) is outside what stories take",
-        id="aspect",
-    ),
-    pytest.param(
-        "interlaced",
-        {"width": 1080, "height": 1920},
-        "this video is interlaced",
-        id="interlaced",
-    ),
-    pytest.param(
-        "chroma_subsampling",
-        {"pix_fmt": "yuv444p"},
-        "this video's pixel format (yuv444p) is not 4:2:0",
-        id="chroma_subsampling",
-    ),
-    pytest.param(
         "video_codec",
-        {"video_codec": "vp9"},
-        "this video's codec (vp9) is not H.264 or HEVC",
+        {
+            **CONTAINER,
+            "sample_codecs": ["avc1", "vp09", "Opus"],
+            "refused_codecs": ["vp09", "Opus"],
+        },
+        (
+            "this video carries vp09, Opus, which stories do not take: they take"
+            " H.264 or HEVC video and AAC audio"
+        ),
         id="video_codec",
     ),
     pytest.param(
         "video_codec",
-        {**CONTAINER, "sample_codecs": ["vp09", "mp4a"]},
-        "this video's codec (vp09, mp4a) is not H.264 or HEVC",
-        id="video_codec-from-the-container",
-    ),
-    pytest.param(
-        "video_codec",
-        {"video_codec": None},
-        "this video's codec (unknown) is not H.264 or HEVC",
+        {},
+        (
+            "this video carries a stream, which stories do not take: they take H.264"
+            " or HEVC video and AAC audio"
+        ),
         id="video_codec-unnamed",
-    ),
-    pytest.param(
-        "audio_codec",
-        {"audio_codec": "mp3"},
-        "this video's audio (mp3) is not AAC",
-        id="audio_codec",
-    ),
-    pytest.param(
-        "audio_sample_rate",
-        {"sample_rate": 96000},
-        "this video's audio runs at 96,000 Hz; stories take up to 48,000",
-        id="audio_sample_rate",
-    ),
-    pytest.param(
-        "audio_channels",
-        {"channels": 6},
-        "this video's audio has 6 channels; stories take 1 or 2",
-        id="audio_channels",
     ),
     pytest.param(
         "image_format",
@@ -757,12 +718,6 @@ CHECK_CASES = [
         CONTAINER,
         "this video refers to media outside its own file",
         id="external_reference",
-    ),
-    pytest.param(
-        "packet_outside_media",
-        {"packet_pos": 12, "packet_size": 34},
-        "this video has data outside its media",
-        id="packet_outside_media",
     ),
 ]
 
@@ -941,11 +896,11 @@ def test_a_long_object_id_in_a_provider_message_is_masked():
         ),
         pytest.param(fetch_refusal("cdn_refused", statuses=5), id="statuses-int"),
         pytest.param(
-            {"v": 1, "kind": "local_validation", "check": "width", "measured": [1]},
+            {"v": 1, "kind": "local_validation", "check": "duration", "measured": [1]},
             id="measured-list",
         ),
         pytest.param(
-            validation_refusal("video_codec", sample_codecs=[1, 2]), id="codecs-ints"
+            validation_refusal("video_codec", refused_codecs=[1, 2]), id="codecs-ints"
         ),
     ],
 )
@@ -1027,10 +982,10 @@ def test_plain_does_not_raise_on_a_check_that_measured_nothing(check):
     "evidence,notice",
     [
         pytest.param(
-            validation_refusal("edit_list", **CONTAINER),
+            validation_refusal("malformed_container", **CONTAINER),
             (
                 "This story from your Instagram past posts could not be prepared."
-                " Refused: this video has an edit list. Open the Queue to review it."
+                " Refused: this video file is damaged. Open the Queue to review it."
             ),
             id="local-validation",
         ),

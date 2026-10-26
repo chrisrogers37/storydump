@@ -137,8 +137,7 @@ def _seconds(value) -> str:
 
 #: What each local-validation check means in plain words, given what it measured.
 _CHECKS = {
-    "edit_list": lambda m: "this video has an edit list",
-    "moov_not_front": lambda m: "this video's index comes after its media",
+    "stream_topology": lambda m: "this file holds no video stream",
     "duration": lambda m: (
         f"this video is {_seconds(m.get('duration_seconds'))} s long;"
         " stories take 3 to 60 s"
@@ -146,27 +145,9 @@ _CHECKS = {
     "fps": lambda m: (
         f"this video runs at {_seconds(m.get('fps'))} fps; stories take 23 to 60"
     ),
-    "width": lambda m: (
-        f"this video is {m.get('width')} px wide; stories take up to 1920"
-    ),
-    "aspect": lambda m: (
-        f"this video's aspect ratio ({m.get('aspect')}) is outside what stories take"
-    ),
-    "interlaced": lambda m: "this video is interlaced",
-    "chroma_subsampling": lambda m: (
-        f"this video's pixel format ({m.get('pix_fmt')}) is not 4:2:0"
-    ),
     "video_codec": lambda m: (
-        "this video's codec"
-        f" ({m.get('video_codec') or ', '.join(m.get('sample_codecs') or []) or 'unknown'})"
-        " is not H.264 or HEVC"
-    ),
-    "audio_codec": lambda m: f"this video's audio ({m.get('audio_codec')}) is not AAC",
-    "audio_sample_rate": lambda m: (
-        f"this video's audio runs at {_count(m.get('sample_rate'))} Hz; stories take up to 48,000"
-    ),
-    "audio_channels": lambda m: (
-        f"this video's audio has {m.get('channels')} channels; stories take 1 or 2"
+        f"this video carries {_flat(m.get('refused_codecs')) or 'a stream'}, which"
+        " stories do not take: they take H.264 or HEVC video and AAC audio"
     ),
     "image_format": lambda m: (
         f"this image is {m.get('format') or 'another format'}, not a JPEG"
@@ -175,7 +156,6 @@ _CHECKS = {
     "malformed_container": lambda m: "this video file is damaged",
     "malformed_video": lambda m: "this video's stream is damaged",
     "external_reference": lambda m: "this video refers to media outside its own file",
-    "packet_outside_media": lambda m: "this video has data outside its media",
     "byte_limit": lambda m: (
         f"this file is {_count(m.get('bytes'))} bytes; the limit is {_count(m.get('cap'))}"
     ),

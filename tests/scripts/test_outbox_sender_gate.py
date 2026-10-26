@@ -2417,6 +2417,8 @@ class TestACardIsRenderedAgainAtClaimTime:
         `last_error -> 'error' -> 'refusal'`, and the review card it is sent as
         says it in words on a second line: the settlement's read, the render and
         the send agree, against the real column and the worker's own login."""
+        from src.services.target import refusal_evidence
+
         binding = _new_binding(outbox_db)
         intent = str(
             seed_intent(
@@ -2426,6 +2428,12 @@ class TestACardIsRenderedAgainAtClaimTime:
                 state="review_required",
             )["intent"]
         )
+        refusal = {
+            "v": 1,
+            "kind": "local_validation",
+            "check": "malformed_container",
+            "measured": {},
+        }
         recorded = _owner_exec(
             outbox_db,
             "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
@@ -2437,12 +2445,7 @@ class TestACardIsRenderedAgainAtClaimTime:
                             "type": "PastPostsEffectRefused",
                             "reason": "past_posts_content_unavailable",
                             "message": "past_posts_content_unavailable",
-                            "refusal": {
-                                "v": 1,
-                                "kind": "local_validation",
-                                "check": "edit_list",
-                                "measured": {},
-                            },
+                            "refusal": refusal,
                         },
                     }
                 ),
@@ -2462,7 +2465,7 @@ class TestACardIsRenderedAgainAtClaimTime:
         assert len(sent) == 1, "the parked story's card goes out once"
         line = sent[0]["outcome_text"]
         assert line.startswith("👀 Needs review")
-        assert line.endswith("\nRefused: this video has an edit list.")
+        assert line.endswith(f"\nRefused: {refusal_evidence.plain(refusal)}.")
 
     @pytest.mark.asyncio
     async def test_a_card_for_a_live_slot_goes_out_fresh_and_without_a_keyboard(

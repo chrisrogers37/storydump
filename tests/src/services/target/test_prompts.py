@@ -17,7 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.target import intent_ledger, prompt_rendering, prompts, vocabulary
+from src.services.target import (
+    intent_ledger,
+    prompt_rendering,
+    prompts,
+    refusal_evidence,
+    vocabulary,
+)
 from tests.src.services.target.schema_code import function_body
 
 
@@ -350,8 +356,13 @@ INTENT = "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c"
 WORKSPACE = "8d1d3a3e-0000-4000-8000-000000000001"
 #: A story's refusal as `last_error -> 'error' -> 'refusal'` holds it, and the
 #: words `refusal_evidence.plain` gives it.
-REFUSAL = {"v": 1, "kind": "local_validation", "check": "edit_list", "measured": {}}
-REFUSED = "this video has an edit list"
+REFUSAL = {
+    "v": 1,
+    "kind": "local_validation",
+    "check": "malformed_container",
+    "measured": {},
+}
+REFUSED = refusal_evidence.plain(REFUSAL)
 
 
 class TestTheCardKeyboard:
