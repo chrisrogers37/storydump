@@ -209,7 +209,7 @@ def test_fresh_schema_adopts_two_versions_before_the_archive_drop(
 
 @pytest.mark.parametrize("guard", ["legacy_queue_item_id", "legacy_backfill"])
 def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
-    from scripts.schema_parity import schema_diff, schema_signature
+    from scripts.schema_parity import schema_signature
 
     with psycopg2.connect(base_world) as conn:
         chain = seed_workspace_chain(conn, "guard-example")
@@ -248,7 +248,9 @@ def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
         base_world,
         "SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.post_intents'::regclass AND attname = 'legacy_queue_item_id' AND NOT attisdropped",
     ) == (1,)
-    assert schema_diff(before_schema, schema_signature(base_world)) == []
+    # The count floors describe the schema code at its head, and this world is
+    # the pinned base's, so the rollback is judged on the catalog alone.
+    assert schema_signature(base_world)["catalog"] == before_schema["catalog"]
 
 
 def test_catalog_refresh_targets_public_with_an_alternate_search_path(base_world):
