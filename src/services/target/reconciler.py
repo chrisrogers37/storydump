@@ -433,7 +433,9 @@ async def reconcile_intent(
     if stories is not None:
         trail.append({"stories": stories})
     await _record_evidence(conn, intent_id=intent_id, checks=checks + 1, trail=trail)
-    await _park_review_required(conn, intent_id=intent_id, workspace_id=workspace_id)
+    await _park_review_required(
+        conn, intent_id=intent_id, workspace_id=workspace_id, checks=checks + 1
+    )
     return "review_required"
 
 
@@ -535,26 +537,36 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
         )
 
 
-async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
+async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -> None:
     """Park, and put the review on the card at once: the
     workspace resolves its own `review_required` intent, so every card of it
-    is restated with the review line and the three resolution buttons. The
+    is restated with the review line and the three resolution buttons, and
+    under it why: a publish whose answer was lost, unconfirmed after *checks*
+    checks, recorded beside the trail as `last_error -> 'error'`. The
     notice keeps the notify window (`notify_parked`). A park that matched no
     row raises, as `_terminalize`'s flip does."""
     from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
 
-    from src.services.target import outbox, prompts  # noqa: PLC0415 — cycle
+    from src.services.target import outbox, prompts, refusal_evidence  # noqa: PLC0415 — cycle
 
+    error = refusal_evidence.review_error(
+        "PublishUnconfirmed",
+        "the publish answer was lost and the reconcile ladder is spent",
+        "publish_unconfirmed",
+        checks=checks,
+    )
     moved = (
         await conn.execute(
             text(
-                "UPDATE post_intents SET state = 'review_required'"
+                "UPDATE post_intents SET state = 'review_required',"
+                " last_error = COALESCE(last_error, CAST('{}' AS jsonb))"
+                "   || jsonb_build_object('error', CAST(:e AS jsonb))"
                 " WHERE id = :intent AND state = 'publishing_ambiguous'"
                 " RETURNING (SELECT COALESCE(a.tz, w.tz) FROM workspaces w"
                 "            JOIN ig_accounts a ON a.id = post_intents.ig_account_id"
                 "           WHERE w.id = post_intents.workspace_id) AS tz"
             ),
-            {"intent": str(intent_id)},
+            {"intent": str(intent_id), "e": json.dumps(error)},
         )
     ).first()
     if moved is None:
@@ -567,6 +579,7 @@ async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
         by=None,
         at=datetime.now(timezone.utc),
         tz=str(moved[0] or "UTC"),
+        refusal=error["refusal"],
     )
     await outbox.restate_everywhere(
         conn,
