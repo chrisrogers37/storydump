@@ -1067,20 +1067,39 @@ class TestTheSettledLineSaysWhyAStoryWasRefused:
 
     @pytest.mark.parametrize(
         "refusal",
-        [
-            None,
-            {},
-            {"v": 1, "kind": "unrecorded", "error": "MediaTerminalError"},
-            {"v": 1, "kind": "no_such_kind"},
-            "not a record",
-        ],
-        ids=["none", "empty", "unrecorded", "unknown-kind", "not-a-record"],
+        [None, "not a record"],
+        ids=["none", "not-a-record"],
     )
-    async def test_a_story_in_review_whose_refusal_says_nothing_keeps_its_line(
+    async def test_a_story_in_review_with_no_refusal_record_keeps_its_line(
         self, refusal
     ):
+        """No record, or a value that is not one: nothing to add, and the line
+        serves every story in review, past posts or not."""
         line = await self._line(self._settlement("review_required", refusal=refusal))
         assert line == self.IN_REVIEW
+
+    @pytest.mark.parametrize(
+        "refusal,reason",
+        [
+            ({}, "the fetch was refused (unknown) and no detail was recorded"),
+            (
+                {"v": 1, "kind": "unrecorded", "error": "MediaTerminalError"},
+                "the fetch was refused (MediaTerminalError) and no detail was recorded",
+            ),
+            (
+                {"v": 1, "kind": "no_such_kind"},
+                "the fetch was refused (no_such_kind) and no detail was recorded",
+            ),
+        ],
+        ids=["empty", "unrecorded", "unknown-kind"],
+    )
+    async def test_a_refusal_with_nothing_specific_still_says_what_it_holds(
+        self, refusal, reason
+    ):
+        """A record with no detail still gets a line: what it holds, never a
+        cause it cannot support."""
+        line = await self._line(self._settlement("review_required", refusal=refusal))
+        assert line.splitlines() == [self.IN_REVIEW, f"Refused: {reason}."]
 
     async def test_a_settlement_without_a_refusal_key_keeps_its_line(self):
         """A settlement built without the key (a caller's own) reads as no refusal."""
