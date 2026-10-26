@@ -223,6 +223,15 @@ be written. Only the empty library's notice, where nothing was minted, parks a
   publish, then ONE terminal transaction (`posted`, the counters, the recent
   lock, `finalize_job`). Each permit is a `provider_operations` row committed
   BEFORE the provider call; every checkpoint re-asserts the lease.
+- **The frame is judged before the container permit.** Once the transit
+  store's readiness probe sees the story frame serve, what it read (the
+  frame's size and, for a video, its head to the end of `moov`) is held to
+  Meta's story spec by `media_validation.judge_derivation`. A breach parks
+  the story `review_required` at once, with no container call, the check and
+  what it measured as its refusal (`last_error -> 'error' -> 'refusal'`).
+  Where `moov` sits, edit lists and the audio channel count are recorded but
+  refuse only with their `REFUSE_*` switches. Everything read rides the
+  probe's observation onto the container permit.
 - **Only the cadence spends the daily cap.** A planned story
   (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
   stamps its `cap_consumed_on` without a debit, and the refunds return nothing

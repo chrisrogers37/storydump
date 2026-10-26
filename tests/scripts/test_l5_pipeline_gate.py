@@ -377,14 +377,15 @@ class FakeTransit:
             # Another writer touching the story while the pipeline holds it.
             self._ready_hook()
         # An entry is True, False (the CDN does not know the asset: 404 and its
-        # GIF) or an int — that status, not serving.
+        # GIF), an int — that status, not serving — or a dict: serving, with
+        # what the probe read of the frame merged into its observation.
         scripted = self._ready_script.pop(0) if self._ready_script else True
         status = (
             scripted
             if isinstance(scripted, int) and not isinstance(scripted, bool)
             else None
         )
-        ok = scripted is True
+        ok = scripted is True or isinstance(scripted, dict)
         if status is not None:
             observation = {
                 "status": status,
@@ -404,6 +405,7 @@ class FakeTransit:
                 "elapsed_ms": 12,
                 "polls": 1,
                 "magic": "jpeg",
+                **(scripted if isinstance(scripted, dict) else {}),
             }
         else:
             observation = {
@@ -2159,6 +2161,36 @@ class TestTheFirstFetch:
         assert row["last_error"]["error"]["probe"]["status"] == 404
         assert row["last_error"]["error"]["probe"]["content_type"] == "image/gif"
         assert _job_row(pipe_db, job["id"])["state"] == "ready"
+
+    def test_a_frame_outside_metas_story_spec_parks_and_never_reaches_meta(
+        self, pipe_db
+    ):
+        """The probe read a frame over Meta's story size. No retry re-encodes
+        it, so the story parks for review at once: the check and both numbers
+        are its refusal, where its card reads one, and the workspace hears
+        why. The debit stays, as at every park."""
+        from src.services.target.publish_pipeline import SPEC_REFUSED_NOTICE
+
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        transit = FakeTransit(ready_script=[{"length": 8_000_001}])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POISONED
+        assert meta.create_calls == [], "a frame outside the spec must not reach Meta"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required" and row["cap_refunded_at"] is None
+        error = row["last_error"]["error"]
+        assert (error["type"], error["message"]) == (
+            "UnsupportedMedia",
+            "derivation_bytes",
+        )
+        assert error["refusal"]["kind"] == "local_validation"
+        assert error["refusal"]["check"] == "derivation_bytes"
+        assert error["refusal"]["measured"] == {"bytes": 8_000_001, "limit": 8_000_000}
+        assert _job_row(pipe_db, job["id"])["state"] == "review_required"
+        assert _notices(pipe_db, intent, binding) == [SPEC_REFUSED_NOTICE]
 
     def test_a_refused_fetch_is_retried_at_once_with_a_fresh_url_and_posts(
         self, pipe_db

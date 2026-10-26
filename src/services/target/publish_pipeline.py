@@ -110,6 +110,7 @@ from src.services.target import (
     audit,
     intent_ledger,
     jobs,
+    media_validation,
     outbox,
     prompts,
     provider_ops,
@@ -896,6 +897,7 @@ async def _retry_or_poison(
     error: Optional[dict] = None,
     poison_now: bool = False,
     wait: _Wait = _Wait(),
+    notice: Optional[str] = None,
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
@@ -977,7 +979,7 @@ async def _retry_or_poison(
                 ctx,
                 state="review_required",
                 at=now,
-                notice=_poison_notice(ctx, now),
+                notice=notice or _poison_notice(ctx, now),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1049,6 +1051,15 @@ def _poison_notice(ctx: _Ctx, now: datetime) -> str:
         "A story couldn't be posted after several tries and needs"
         " attention: choose on its card, or open the Queue on the web."
     )
+
+
+#: The sentence the workspace hears when a story's frame is outside Meta's
+#: story spec (`media_validation.judge_derivation`): its card says which line
+#: and what was measured.
+SPEC_REFUSED_NOTICE = (
+    "A story couldn't be posted: its file is outside Instagram's story"
+    " limits. Its card says why: choose there, or open the Queue on the web."
+)
 
 
 async def _bump(session, ctx: _Ctx, **changes) -> dict:
@@ -1338,6 +1349,39 @@ async def _ladder(
                     now_fn,
                     error=not_ready,
                     step_back_to="none" if gone else None,
+                )
+            # What the probe read of the frame is judged against Meta's story
+            # spec before Meta is told to fetch it. No retry re-encodes the
+            # file, so a breach parks the story at once, its reason on its
+            # card.
+            try:
+                media_validation.judge_derivation(probe, ctx.intent["media_kind"])
+            except media_validation.UnsupportedMedia as exc:
+                logger.warning(
+                    "publish_pipeline intent %s: the story frame is outside"
+                    " Meta's story spec (%s, measured %s) — parked for review"
+                    " before any container call",
+                    ctx.intent_id,
+                    exc,
+                    exc.measured,
+                )
+                # The check and its values, where the card reads a refusal.
+                refused = _error_of(exc)
+                refused["error"]["refusal"] = refusal_evidence.evidence(
+                    "local_validation",
+                    state="unsupported",
+                    check=str(exc),
+                    measured=exc.measured,
+                    matrix_version=media_validation.MATRIX_VERSION,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    error=refused,
+                    poison_now=True,
+                    notice=SPEC_REFUSED_NOTICE,
                 )
             generation = ctx.next_generation("container_create")
             permit = await _permit(
