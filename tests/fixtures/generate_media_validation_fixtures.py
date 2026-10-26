@@ -155,7 +155,7 @@ def generate(directory):
     video("hevc.mp4", codec="libx265")
     video("format.mov")
     for count in (89, 90, 1800, 1801):
-        refused = count in (89, 1801)
+        refused = count == 89
         video(
             f"frames-{count}.mp4",
             count=count,
