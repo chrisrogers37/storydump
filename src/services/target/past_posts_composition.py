@@ -38,6 +38,7 @@ from src.services.target import (
     instagram_publish,
     instagram_sync,
     oauth_states,
+    past_posts_retry,
     readers,
 )
 from src.services.target import source_read_admission as admission
@@ -218,11 +219,13 @@ def build_worker(
     env: Mapping[str, str],
     client: Optional[httpx.AsyncClient] = None,
     policy: Optional[egress.EgressPolicy] = None,
+    retry: past_posts_retry.Retry = past_posts_retry.ONCE,
 ) -> Optional[WorkerPastPosts]:
     """The worker's past-posts source, or None. Logs the activation line either way.
 
     *client* and *policy* are the test seams (a mock transport and a policy that
-    allows its host); production passes neither."""
+    allows its host); production passes neither. *retry* is `WorkerConfig`'s
+    retry for a selected post's fetch (`instagram_preparation.PastPostsPreparationPorts`)."""
     activation = past_posts_activation.resolve(env, release_sha=env.get(RELEASE_VAR))
     logger.info(activation.log_line)
     capability = activation.capability
@@ -256,7 +259,7 @@ def build_worker(
 
     preparation = instagram_preparation.SelectedPreparation(
         instagram_preparation.PastPostsPreparationPorts(
-            capability, prepare_selected, activation.keys
+            capability, prepare_selected, activation.keys, retry=retry
         )
     )
     coordinator = instagram_publish.PastPostsPipeline(

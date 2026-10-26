@@ -169,3 +169,101 @@ async def test_a_chat_gets_a_second_card_only_if_the_first_never_reached_it(
         ("approval_prompt", "pending"),
         ("notification", "pending"),
     ]
+
+
+async def test_a_changed_slide_parked_by_the_senders_last_try_says_why(
+    past_posts_engine, origin, sync_conn
+):
+    """The card sender's fetch can spend a changed slide's last try. It latches
+    the slide with the read's `slide_changed` evidence, and the sweep's park
+    that meets the latch next records that evidence and says it, never that the
+    chosen post is unavailable."""
+    _bind(sync_conn, origin["ws"])
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    # One try, so the sender's fetch spends the last one.
+    changed, _ = preparation.service(
+        past_posts_engine, origin, changed_child="456", truncated=True
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending) as spent:
+        await changed.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    evidence = spent.value.evidence
+    assert spent.value.reason == "asset_unavailable"
+    assert evidence["kind"] == "slide_changed"
+    c = instagram_publish.PastPostsPipeline(
+        capability=foundation.capability(),
+        fetch_selected=changed.fetch_selected,
+        prepare_selected=changed.selected_prepare,
+    )
+    await c.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    with sync_conn.cursor() as cur:
+        cur.execute(
+            "SELECT state, last_error -> 'error' -> 'refusal' FROM post_intents WHERE id = %s",
+            (intent,),
+        )
+        state, refusal = cur.fetchone()
+    sync_conn.commit()
+    assert state == "review_required" and refusal == evidence
+    sentence = refusal_evidence.plain(evidence)
+    assert sentence.startswith("Instagram's slide list was incomplete")
+    (notice,) = [
+        r[3] for r in _outbox_rows(sync_conn, intent) if r[1] == "notification"
+    ]
+    assert f"Refused: {sentence}." in str(notice)
+    assert "no longer available" not in str(notice)
+
+
+async def test_the_publish_jobs_park_records_and_says_its_refusal(
+    past_posts_engine, origin, sync_conn
+):
+    """A publish job whose preparation is refused with evidence parks the story
+    with that evidence beside its reason, and its notice says it."""
+    from src.services.target import publish_pipeline
+    from src.services.target.meta_adapter import StubMetaAdapter
+    from tests.scripts import test_instagram_publish_gate as publish_gate
+
+    _bind(sync_conn, origin["ws"])
+    src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        await conn.execute(
+            text("UPDATE post_intents SET state='approved' WHERE id=:id"),
+            dict(id=intent),
+        )
+    changed = {"v": 1, "kind": "slide_changed", "children": 7, "complete": False}
+
+    async def refuse(**kwargs):
+        raise source_policy.MediaAdmissionPending("asset_unavailable", evidence=changed)
+
+    async def forbidden_fetch(subject):
+        pytest.fail("a refused past post fetches no media")
+
+    c.prepare_capture = refuse
+    assert (
+        await publish_pipeline.run_publish_pipeline(
+            job,
+            engine=past_posts_engine,
+            meta=StubMetaAdapter(),
+            transit=publish_gate.Transit(),
+            media_fetch=forbidden_fetch,
+            past_posts=c,
+        )
+        == publish_pipeline.POISONED
+    )
+    with sync_conn.cursor() as cur:
+        cur.execute(
+            "SELECT state, last_error -> 'error' -> 'refusal' FROM post_intents WHERE id = %s",
+            (intent,),
+        )
+        state, refusal = cur.fetchone()
+    sync_conn.commit()
+    assert state == "review_required" and refusal == changed
+    (notice,) = [
+        r[3] for r in _outbox_rows(sync_conn, intent) if r[1] == "notification"
+    ]
+    assert (
+        "Refused: Instagram's slide list was incomplete (7 listed), so the chosen"
+        " slide could not be confirmed." in str(notice)
+    )

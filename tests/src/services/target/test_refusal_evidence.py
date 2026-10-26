@@ -29,6 +29,21 @@ SECRET = "EAAB-fake-secret-value"
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "refusal,gone",
+    [
+        ({"v": 1, "kind": "graph_error", "code": 100, "error_subcode": 33}, True),
+        ({"v": 1, "kind": "graph_error", "code": 100, "error_subcode": None}, False),
+        ({"v": 1, "kind": "graph_error", "code": 190, "error_subcode": 33}, False),
+        ({"v": 1, "kind": "cdn_refused", "code": 100, "error_subcode": 33}, False),
+        (None, False),
+    ],
+    ids=["does-not-exist", "code-100-alone", "another-code", "not-graph", "none"],
+)
+def test_only_graphs_does_not_exist_proves_a_post_gone(refusal, gone):
+    assert refusal_evidence.proves_gone(refusal) is gone
+
+
 def test_evidence_is_the_version_the_kind_and_the_facts():
     """A refusal's evidence is the version, the kind and the facts, and survives a
     JSON round trip unchanged."""
