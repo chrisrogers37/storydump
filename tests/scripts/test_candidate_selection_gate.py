@@ -6,9 +6,10 @@ from decimal import Decimal
 import json
 import pytest
 from sqlalchemy import text
-from src.services.target import category_mix, source_policy
+from src.services.target import category_mix, media_validation, source_policy
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
+from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts.test_source_suitability_gate import activate
 
 past_posts_engine = foundation.past_posts_engine
@@ -1058,12 +1059,108 @@ async def test_database_refuses_incoherent_unsupported_byte_proof(
                     )
                 )
         assert (await verdict(conn, origin, src))["suitable"]
-        await conn.execute(
-            text(
-                "UPDATE instagram_media_assets SET validation_state='unsupported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='synthetic',validated_at=now()"
-            )
-        )
+        await _stamp_refusal(conn, origin, src, item, media_validation.MATRIX_VERSION)
         assert (await verdict(conn, origin, src))["reason"] == "unsupported"
+
+
+async def _stamp_refusal(conn, chain, src, item, version):
+    """Write a stored `unsupported` verdict on the slide, its capture stamped
+    with *version*, or unstamped when *version* is None."""
+    capture = {
+        "generation_id": src["generation_id"],
+        "observation_revision": 1,
+        "selected_asset_id": "123",
+        "state": "unsupported",
+        "reason": "malformed_container",
+        **({"matrix_version": version} if version else {}),
+    }
+    await conn.execute(
+        text(
+            "UPDATE instagram_media_assets SET validation_state='unsupported',"
+            "validation_generation_id=data_generation_id,"
+            "validation_observation_revision=observation_revision,"
+            "validation_fingerprint='synthetic',validated_at=now(),"
+            "validation_capture=CAST(:capture AS jsonb)"
+            " WHERE workspace_id=CAST(:ws AS uuid) AND media_item_id=CAST(:item AS uuid)"
+        ),
+        {
+            "capture": json.dumps(capture),
+            "ws": str(chain["ws"]),
+            "item": str(item.media_item_id),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "stamp,honoured",
+    [
+        pytest.param("current", True, id="current-honoured"),
+        pytest.param("older", False, id="older-judged-again"),
+        pytest.param(None, False, id="unstamped-judged-again"),
+    ],
+)
+async def test_a_stored_refusal_counts_only_under_the_current_matrix_version(
+    past_posts_engine, origin, stamp, honoured
+):
+    """A stored `unsupported` verdict is honoured only when its capture is
+    stamped with the matrix version the validator runs now; one stamped with
+    an older version, or with none, is judged again: a candidate once more and
+    `validation_pending` in strict mode."""
+    src, item = await metadata(past_posts_engine, origin)
+    version = {
+        "current": media_validation.MATRIX_VERSION,
+        "older": "instagram-story-older",
+    }.get(stamp)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await _stamp_refusal(conn, origin, src, item, version)
+        candidate = await verdict(conn, origin, src)
+        strict = await verdict(conn, origin, src, strict=True)
+    if honoured:
+        assert (
+            candidate["reason"] == "unsupported" and strict["reason"] == "unsupported"
+        )
+    else:
+        assert candidate["suitable"]
+        assert strict["reason"] == "validation_pending"
+
+
+@pytest.mark.parametrize(
+    "version", ["instagram-story-older", None], ids=["older", "unstamped"]
+)
+async def test_a_refusal_from_an_older_matrix_version_is_judged_again(
+    past_posts_engine, origin, version
+):
+    """A slide refused under an older matrix version, or under none, is fetched
+    and judged again when its story is prepared, and lands the new verdict."""
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await _stamp_refusal(conn, origin, src, item, version)
+    prepared, calls = preparation.service(past_posts_engine, origin)
+    await prepared.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    row = await preparation.proof(past_posts_engine, origin, intent)
+    assert row["validation_state"] == "supported"
+    assert (
+        row["validation_capture"]["matrix_version"] == media_validation.MATRIX_VERSION
+    )
+    assert calls == ["graph.instagram.com", "scontent-test.cdninstagram.com"]
+
+
+async def test_a_refusal_under_the_current_matrix_version_is_returned_without_a_fetch(
+    past_posts_engine, origin
+):
+    """A slide refused under the current matrix version is not fetched again:
+    preparation returns the stored verdict."""
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await _stamp_refusal(conn, origin, src, item, media_validation.MATRIX_VERSION)
+    prepared, calls = preparation.service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "unsupported" and calls == []
 
 
 async def test_pool_rejects_supplied_expired_context_even_before_conversion(
