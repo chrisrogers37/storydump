@@ -1,0 +1,3 @@
+### Fixed
+
+- **A chat card's photo or video is no longer sent two to four times when Telegram is slow to answer its upload.** A card's upload waited 60 s for Telegram's answer; an answer later than that read as lost, and the outbox sent the card again, up to three more times, each extra copy without its buttons. The upload now has its own wait of 2 minutes (the `card_upload` timeout class), so an answer that is slow but comes is confirmed instead of sent again. The 60 s wait of the other uploads and downloads (the transit store, Drive, Instagram) is unchanged, and a slow card holds back only its own chat's next message.

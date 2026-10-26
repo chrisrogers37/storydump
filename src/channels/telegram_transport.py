@@ -41,7 +41,7 @@ from typing import Awaitable, Callable, Optional
 import httpx
 
 from src.services.target import egress, vocabulary
-from src.services.target.egress import EgressPolicy
+from src.services.target.egress import TIMEOUT_CLASSES, EgressPolicy
 from src.services.target.outbox import (
     ChannelPaced,
     ChannelRefused,
@@ -96,8 +96,9 @@ def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
     return "sendDocument", "document"
 
 
-#: A 50 MB video over a slow link needs more than the 30 s default budget.
-_UPLOAD_BUDGET_S = 120.0
+#: A card upload's whole budget: its `card_upload` wait, with room left to try
+#: again a connection that never left.
+_UPLOAD_BUDGET_S = TIMEOUT_CLASSES["card_upload"] + 30.0
 
 
 class TelegramSendError(ChannelSendError):
@@ -502,9 +503,11 @@ class TelegramTransport:
     ) -> str:
         """One `sendPhoto` / `sendVideo` / `sendDocument` upload — the card:
         the media, the caption, the keyboard.
-        Runs under the upload timeout class with a budget wide enough for the
-        bytes. Note the outbox paces inside the sender's transaction, so the
-        global rate row stays locked for the upload's duration."""
+        Runs under the `card_upload` timeout class: Telegram answers only once
+        it has taken in the file, and an answer that comes back after the wait
+        is a card the outbox sends again. The outbox commits its pacing and its
+        claim before this call, so a slow upload holds back only this chat's
+        next message, never the global rate row."""
         method, part = _method_for(kind, mime)
         data: dict = {"chat_id": chat_id, "caption": caption[:1024]}
         if reply_markup:
@@ -513,7 +516,7 @@ class TelegramTransport:
         # Never sent twice, as every message-creating call (`_once`).
         policy = _replace(
             self._once,
-            timeout_class="upload",
+            timeout_class="card_upload",
             total_budget_s=max(self._policy.total_budget_s, _UPLOAD_BUDGET_S),
         )
         result = await self._call(method, data=data, files=files, policy=policy)

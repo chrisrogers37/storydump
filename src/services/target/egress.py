@@ -120,6 +120,11 @@ TIMEOUT_CLASSES = {
     "fast": 5.0,
     "standard": 15.0,
     "upload": 60.0,
+    # A chat card's photo or video (`telegram_transport.send_media`): Telegram
+    # answers only once it has taken in the file, and the card is never sent
+    # twice inside the call, so a wait cut short makes the outbox send again
+    # a card that may already have landed.
+    "card_upload": 120.0,
 }
 
 #: The closed set of provider hosts. Additions are deliberate and reviewable.

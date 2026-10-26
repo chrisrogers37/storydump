@@ -489,6 +489,42 @@ class TestMediaCards:
         assert seen["url"].endswith("/sendVideo")
         assert b'name="video"; filename="clip.mp4"' in seen["body"]
 
+    async def test_a_card_upload_waits_out_its_own_class_not_the_shared_upload(
+        self, monkeypatch
+    ):
+        """A card's photo is uploaded under the `card_upload` wait, long enough for
+        Telegram to take in the file; the shared `upload` class keeps its 60 s."""
+        from src.services.target.egress import TIMEOUT_CLASSES
+
+        seen = {}
+
+        async def call(method, payload=None, *, data=None, files=None, policy=None):
+            seen["method"], seen["policy"] = method, policy
+            return {"message_id": 7}
+
+        def handler(request):
+            raise AssertionError("a request was made past the stand-in `_call`")
+
+        t = _transport(handler)
+        monkeypatch.setattr(t, "_call", call)
+        ref = await t.send_media(
+            "-100555",
+            kind="image",
+            content=b"jpeg",
+            filename="card.jpg",
+            mime="image/jpeg",
+            caption="caption",
+        )
+
+        policy = seen["policy"]
+        assert ref == "7"
+        assert seen["method"] == "sendPhoto"
+        assert policy.timeout_class == "card_upload"
+        assert policy.timeout_s == TIMEOUT_CLASSES["card_upload"] == 120.0
+        assert policy.total_budget_s > policy.timeout_s
+        assert policy.retry_after_send is False
+        assert TIMEOUT_CLASSES["upload"] == 60.0
+
     async def test_a_failed_fetch_falls_back_to_the_text_card(self):
         calls = []
 
