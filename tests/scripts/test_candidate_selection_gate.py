@@ -731,7 +731,9 @@ async def test_bound_card_identity_cannot_inherit_new_observation(
             )
         )
         v = await verdict(conn, origin, src, strict=True, intent=intent)
-        assert not v["suitable"] and v["reason"] == "selected_asset_changed"
+        # The story still holds slide 123, so the complete read that lacked it
+        # kept it; the new observation's proof still cannot serve the card.
+        assert not v["suitable"] and v["reason"] == "past_posts_revalidation_required"
 
 
 async def test_manual_approval_strict_uses_own_intent(past_posts_engine, origin):
