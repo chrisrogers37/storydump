@@ -250,17 +250,25 @@ async def test_the_access_provider_refuses_a_call_for_another_source_before_any_
 # --- armed: the worker's wiring ---------------------------------------------------
 
 
-def test_the_preparation_tries_again_under_the_retry_it_is_handed(client):
-    """The worker hands `WorkerConfig`'s retry to `build_worker`, which hands it
-    to the preparation; handed none, the preparation tries once."""
+def test_the_preparation_tries_again_under_the_numbers_it_is_handed(client):
+    """The worker hands `WorkerConfig`'s retry and download budgets to
+    `build_worker`, which hands them to the preparation; handed none, the
+    preparation tries once, under the adapter's own budget."""
     from src.services.target.past_posts_retry import ONCE, Retry
 
     retry = Retry(attempts=5, base_seconds=10, cap_seconds=60)
+    budgets = {"image": 12.0, "video": 34.0}
     past_posts = composition.build_worker(
-        engine=object(), env=armed(), client=client, retry=retry
+        engine=object(),
+        env=armed(),
+        client=client,
+        retry=retry,
+        download_seconds=budgets,
     )
     assert past_posts.preparation.ports.retry is retry
-    assert built(client).preparation.ports.retry is ONCE
+    assert past_posts.preparation.ports.download_seconds == budgets
+    default = built(client).preparation.ports
+    assert default.retry is ONCE and not default.download_seconds
 
 
 def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):
