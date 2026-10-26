@@ -2023,21 +2023,11 @@ def batch_graph(
             return httpx.Response(
                 401, json={"error": {"code": 190, "message": "private-grant"}}
             )
-        if mid in terminal:
-            return httpx.Response(
-                400,
-                json={
-                    "error": {
-                        "code": 100,
-                        "error_subcode": 33,
-                        "message": "private-parent",
-                    }
-                },
-            )
-        if mid in unproven:
-            return httpx.Response(
-                400, json={"error": {"code": 100, "message": "private-parent"}}
-            )
+        if mid in terminal or mid in unproven:
+            error = {"code": 100, "message": "private-parent"}
+            if mid in terminal:
+                error["error_subcode"] = 33
+            return httpx.Response(400, json={"error": error})
         if mid in throttled:
             return httpx.Response(
                 429, json={"error": {"code": 4, "message": "private-throttle"}}

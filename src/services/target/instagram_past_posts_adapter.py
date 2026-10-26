@@ -1184,6 +1184,7 @@ class InstagramPastPostsAdapter:
                         ),
                     )
                 policy = self._download_policy(url, max_bytes, download_budget_s)
+                link = refusal_evidence.link_evidence(url)
                 try:
                     # Never forward the Instagram token to the CDN.
                     self._require_plain_client()
@@ -1201,7 +1202,7 @@ class InstagramPastPostsAdapter:
                             "over_byte_cap",
                             cap=exc.cap,
                             received=exc.received,
-                            host=refusal_evidence.link_evidence(url)["host"],
+                            host=link["host"],
                         ),
                     ) from None
                 except egress.EgressBudgetExhausted:
@@ -1210,10 +1211,9 @@ class InstagramPastPostsAdapter:
                         refusal_evidence.evidence(
                             "download_budget_spent",
                             seconds=policy.total_budget_s,
-                            host=refusal_evidence.link_evidence(url)["host"],
+                            host=link["host"],
                         ),
                     ) from None
-                link = refusal_evidence.link_evidence(url)
                 if response.status_code in _EXPIRED_LINK:
                     link_statuses.append(response.status_code)
                     if attempt == 0:

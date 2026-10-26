@@ -23,7 +23,7 @@ from src.services.target.instagram_past_posts_adapter import (
     PastPostsAccess,
     InstagramPastPostsAdapter,
 )
-from src.services.target.past_posts_retry import Retry
+from src.services.target.past_posts_retry import ONCE, Retry
 from src.services.target.unit_of_work import in_transaction
 from tests.scripts import test_candidate_selection_gate as selection
 from tests.scripts import test_instagram_observations_gate as obs
@@ -575,10 +575,10 @@ RETRY = Retry(attempts=3, base_seconds=30, cap_seconds=900)
 AT_ONCE = Retry(attempts=8, base_seconds=0, cap_seconds=0)
 
 
-def refusing(error, *, retry=None, download_seconds=None, asked=None):
+def refusing(error, *, retry=ONCE, download_seconds=None, asked=None):
     """A preparation whose adapter reports `TURN`, then raises `error`. *retry*
-    and *download_seconds* are its ports' numbers (None: one try, the adapter's
-    own budget); *asked*, a list, gets each fetch's keyword arguments."""
+    and *download_seconds* are its ports' numbers (by default one try and the
+    adapter's own budget); *asked*, a list, gets each fetch's keyword arguments."""
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
         SelectedPreparation,
@@ -648,14 +648,6 @@ def serving(content):
     )
 
 
-def no_media_link():
-    """A terminal refusal carrying the evidence of a part with no link."""
-    return refusal_evidence.attach(
-        media_adapters.MediaTerminalError("synthetic"),
-        refusal_evidence.evidence("no_media_link", media_type="IMAGE", has_link=False),
-    )
-
-
 class SyntheticRefusal(media_adapters.MediaTerminalError):
     """A terminal refusal raised with no evidence attached."""
 
@@ -669,7 +661,7 @@ async def test_terminal_refusal_records_its_evidence_with_the_turn_counters(
     the reason is `asset_unavailable` and the story reads as unavailable, with
     the attempt it parked on; no proof is granted."""
     src, item, intent = await selected(past_posts_engine, origin)
-    prepared = refusing(no_media_link())
+    prepared = refusing(refused("no_media_link", media_type="IMAGE", has_link=False))
     with pytest.raises(source_policy.MediaAdmissionPending) as err:
         await prepared.selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
@@ -734,21 +726,19 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
     time of the next try, and the original error is raised again.
     `download_pending` does not latch the story."""
     src, item, intent = await selected(past_posts_engine, origin)
-    refused = refusal_evidence.attach(
-        media_adapters.MediaRetryableError("synthetic"),
-        refusal_evidence.evidence(
-            "cdn_error",
-            statuses=[503],
-            host="scontent-test.cdninstagram.com",
-            expiry="1900000000",
-        ),
+    error = refused(
+        "cdn_error",
+        media_adapters.MediaRetryableError,
+        statuses=[503],
+        host="scontent-test.cdninstagram.com",
+        expiry="1900000000",
     )
-    prepared = refusing(refused, retry=RETRY)
+    prepared = refusing(error, retry=RETRY)
     with pytest.raises(media_adapters.MediaRetryableError) as err:
         await prepared.selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
-    assert err.value is refused
+    assert err.value is error
     capture, next_at, now = await next_try(past_posts_engine, origin, intent)
     assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
     assert capture == {
@@ -1021,7 +1011,7 @@ async def test_reobservation_clears_a_recorded_refusal(past_posts_engine, origin
     the post clears it with the rest of `validation_capture`, and the story is
     eligible again."""
     src, item, intent = await selected(past_posts_engine, origin)
-    prepared = refusing(no_media_link())
+    prepared = refusing(refused("no_media_link", media_type="IMAGE", has_link=False))
     with pytest.raises(source_policy.MediaAdmissionPending):
         await prepared.selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent

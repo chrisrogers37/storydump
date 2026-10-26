@@ -565,6 +565,16 @@ FETCH_SENTENCES = [
         id="over-byte-cap",
     ),
     pytest.param(
+        fetch_refusal("download_budget_spent", seconds=240.0, host=HOST),
+        "Instagram's file did not download within the 240 s limit",
+        id="download-budget-spent",
+    ),
+    pytest.param(
+        fetch_refusal("download_budget_spent", seconds=None, host=HOST),
+        "Instagram's file did not download within its time limit",
+        id="download-budget-spent-without-its-seconds",
+    ),
+    pytest.param(
         fetch_refusal("cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY),
         "Instagram's file server refused the link twice (HTTP 403/404)",
         id="cdn-refused",

@@ -8,7 +8,7 @@ permission: callers reread the shared strict suitability authority.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Mapping
 import json
 
 from sqlalchemy import text
@@ -46,8 +46,8 @@ class PastPostsPreparationPorts:
     prepare_adapter: Callable[[admission.SourceReadCapture, dict], Awaitable[Any]]
     tombstone_keys: TombstoneKeys = field(repr=False)
     #: How a refused fetch that proves nothing is tried again (`WorkerConfig`'s
-    #: `past_posts_retry_*`). None tries once and parks.
-    retry: Optional[past_posts_retry.Retry] = None
+    #: `past_posts_retry_*`).
+    retry: past_posts_retry.Retry = past_posts_retry.ONCE
     #: The download's wall budget per kind (`WorkerConfig.past_posts_download_seconds`).
     #: A kind it does not name keeps the adapter's own budget.
     download_seconds: Mapping[str, float] = field(default_factory=dict)
@@ -298,11 +298,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         ):
             raise
         except media_adapters.MediaTerminalError as exc:
-            refusal = _refusal(exc, counters, selected)
-            if await self._failure(engine, workspace_id, intent_id, selected, refusal):
-                raise source_policy.MediaAdmissionPending(
-                    "asset_unavailable", evidence=refusal
-                ) from None
+            await self._failure(
+                engine,
+                workspace_id,
+                intent_id,
+                selected,
+                _refusal(exc, counters, selected),
+            )
             # A refusal that proves nothing waits for its next try.
             raise source_policy.MediaAdmissionPending(
                 "past_posts_revalidation_required"
@@ -311,11 +313,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             media_adapters.MediaRetryableError,
             media_adapters.MediaLostResponse,
         ) as exc:
-            refusal = _refusal(exc, counters, selected)
-            if await self._failure(engine, workspace_id, intent_id, selected, refusal):
-                raise source_policy.MediaAdmissionPending(
-                    "asset_unavailable", evidence=refusal
-                ) from None
+            await self._failure(
+                engine,
+                workspace_id,
+                intent_id,
+                selected,
+                _refusal(exc, counters, selected),
+            )
             raise
         validation = await media_validation.validate_media(
             media_validation.ValidationInput(
@@ -348,10 +352,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         )
 
     async def _failure(self, engine, ws, iid, selected, refusal):
-        """Record a refused fetch on the slide's capture. True when the story
-        parks: a proven class or a spent bound (`past_posts_retry`). Otherwise
-        the capture keeps the attempt and the time of the next try."""
-        return await self._land(engine, ws, iid, selected, None, refusal=refusal)
+        """Record a refused fetch on the slide's capture. A proven class or a
+        spent bound (`past_posts_retry`) parks the story here; otherwise the
+        capture keeps the attempt and the time of the next try."""
+        if await self._land(engine, ws, iid, selected, None, refusal=refusal):
+            raise source_policy.MediaAdmissionPending(
+                "asset_unavailable", evidence=refusal
+            ) from None
 
     async def _retire_gone(self, engine, ws, iid, selected):
         """Retire one selected asset only under fresh source and item authority.
@@ -484,9 +491,24 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 raise source_policy.MediaAdmissionPending(
                     verdict["reason"] if verdict else "past_posts_revalidation_required"
                 )
-            state = validation.state if validation else "validation_pending"
-            decision = None
-            if validation is None:
+            evidence = dict(
+                generation_id=selected.capture.generation_id,
+                observation_revision=subject["observation_revision"],
+                selected_asset_id=subject["selected_asset_id"],
+            )
+            parked = False
+            if validation:
+                state = validation.state
+                evidence.update(
+                    state=state,
+                    reason=validation.reason,
+                    fingerprint=validation.fingerprint,
+                    matrix_version=validation.matrix_version,
+                    evidence_version=validation.evidence_version,
+                    evidence=dict(validation.evidence),
+                )
+            else:
+                state = "validation_pending"
                 # Decided under the row locks, on the capture and the clock read
                 # now, so two refusals of one story count one after the other.
                 decision = past_posts_retry.decide(
@@ -495,30 +517,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                     subject["db_now"],
                     self.ports.retry,
                 )
-            evidence = dict(
-                generation_id=selected.capture.generation_id,
-                observation_revision=subject["observation_revision"],
-                selected_asset_id=subject["selected_asset_id"],
-                state=state,
-                reason=validation.reason
-                if validation
-                else "asset_unavailable"
-                if decision.park
-                else "download_pending",
-            )
-            if decision is not None:
-                evidence["attempt"] = decision.attempt
-                if decision.next_attempt_at is not None:
+                parked = decision.park
+                evidence.update(
+                    state=state,
+                    reason="asset_unavailable" if parked else "download_pending",
+                    attempt=decision.attempt,
+                )
+                if not parked:
                     evidence["next_attempt_at"] = decision.next_attempt_at.isoformat()
             if refusal is not None:
                 evidence["refusal"] = refusal
-            if validation:
-                evidence.update(
-                    fingerprint=validation.fingerprint,
-                    matrix_version=validation.matrix_version,
-                    evidence_version=validation.evidence_version,
-                    evidence=dict(validation.evidence),
-                )
             typed = state if state in ("supported", "unsupported") else "pending"
             fingerprint = validation.fingerprint if typed != "pending" else None
             changed = await conn.execute(
@@ -568,4 +576,4 @@ WHERE workspace_id=:ws AND intent_id=:id
                         policy=verdict["policy_revision"],
                     ),
                 )
-        return decision is not None and decision.park
+        return parked

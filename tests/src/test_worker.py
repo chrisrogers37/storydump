@@ -942,33 +942,41 @@ class TestTheConversionRunIsReadOnce:
     def test_main_reads_the_run_once_and_hands_it_to_compose(
         self, ring_env, monkeypatch
     ):
-        import src.worker as worker
-        from cryptography.fernet import Fernet
-
-        record, reads, handed = _a_conversion_record(), [], {}
-
-        def build_worker(**kwargs):
-            handed["past_posts"] = kwargs
-
-        def fake_compose(**kwargs):
-            handed["compose"] = kwargs
-            return "app"
-
-        ring_env(key=Fernet.generate_key().decode())
-        monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
-        monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
-        monkeypatch.setattr(
-            worker, "_conversion_evidence", lambda env: reads.append(env) or record
+        record, reads = _a_conversion_record(), []
+        handed = _run_main(
+            ring_env, monkeypatch, lambda env: reads.append(env) or record
         )
-        monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
-        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
-        monkeypatch.setattr(worker, "compose", fake_compose)
-        monkeypatch.setattr(worker, "run", lambda app: app)
-        monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
-        worker.main()
         assert len(reads) == 1
         assert "conversion" not in handed["past_posts"]
         assert handed["compose"]["conversion_evidence"] is record
+
+
+def _run_main(ring_env, monkeypatch, conversion_evidence):
+    """`main` with its engine, past-posts source, composition and run stubbed:
+    what it handed `build_worker` and `compose`."""
+    import src.worker as worker
+    from cryptography.fernet import Fernet
+
+    handed = {}
+
+    def build_worker(**kwargs):
+        handed["past_posts"] = kwargs
+
+    def fake_compose(**kwargs):
+        handed["compose"] = kwargs
+        return "app"
+
+    ring_env(key=Fernet.generate_key().decode())
+    monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
+    monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(worker, "_conversion_evidence", conversion_evidence)
+    monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
+    monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
+    monkeypatch.setattr(worker, "compose", fake_compose)
+    monkeypatch.setattr(worker, "run", lambda app: app)
+    monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
+    worker.main()
+    return handed
 
 
 class TestThePastPostsSourceTakesTheConfiguredNumbers:
@@ -977,31 +985,15 @@ class TestThePastPostsSourceTakesTheConfiguredNumbers:
     ):
         """A selected post's fetch is tried again, and downloads, under
         `WorkerConfig`'s numbers."""
-        import src.worker as worker
-        from cryptography.fernet import Fernet
-
         from src.services.target.past_posts_retry import Retry
 
-        handed = {}
-
-        def build_worker(**kwargs):
-            handed.update(kwargs)
-
-        ring_env(key=Fernet.generate_key().decode())
-        monkeypatch.setenv("TARGET_DATABASE_URL", "postgresql://nobody@localhost:1/x")
-        monkeypatch.delenv("TARGET_TELEGRAM_BOT_TOKEN", raising=False)
-        monkeypatch.setattr(
-            worker, "_conversion_evidence", lambda env: _a_conversion_record()
-        )
-        monkeypatch.setattr(worker.unit_of_work, "create_engine", lambda url: "engine")
-        monkeypatch.setattr(worker.past_posts_composition, "build_worker", build_worker)
-        monkeypatch.setattr(worker, "compose", lambda **kwargs: "app")
-        monkeypatch.setattr(worker, "run", lambda app: app)
-        monkeypatch.setattr(worker.asyncio, "run", lambda coroutine: None)
-        worker.main()
+        handed = _run_main(ring_env, monkeypatch, lambda env: _a_conversion_record())
         config = WorkerConfig()
-        assert handed["retry"] == Retry.from_config(config)
-        assert handed["download_seconds"] == config.past_posts_download_seconds
+        assert handed["past_posts"]["retry"] == Retry.from_config(config)
+        assert (
+            handed["past_posts"]["download_seconds"]
+            == config.past_posts_download_seconds
+        )
         assert config.past_posts_download_seconds == {"image": 120.0, "video": 240.0}
 
 

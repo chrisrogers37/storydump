@@ -226,6 +226,14 @@ def _plain(refusal) -> Optional[str]:
             f"this file is over the {_count(refusal.get('cap'))}-byte limit"
             f" (stopped after {_count(refusal.get('received'))} bytes)"
         )
+    if kind == "download_budget_spent":
+        seconds = refusal.get("seconds")
+        limit = (
+            f"the {_seconds(seconds)} s limit"
+            if seconds is not None
+            else "its time limit"
+        )
+        return f"Instagram's file did not download within {limit}"
     if kind in ("cdn_refused", "cdn_error"):
         statuses = "/".join(str(s) for s in refusal.get("statuses") or []) or "?"
         verb = "refused the link twice" if kind == "cdn_refused" else "failed"

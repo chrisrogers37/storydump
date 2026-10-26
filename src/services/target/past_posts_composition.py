@@ -220,7 +220,7 @@ def build_worker(
     env: Mapping[str, str],
     client: Optional[httpx.AsyncClient] = None,
     policy: Optional[egress.EgressPolicy] = None,
-    retry: Optional[past_posts_retry.Retry] = None,
+    retry: past_posts_retry.Retry = past_posts_retry.ONCE,
     download_seconds: Mapping[str, float] = MappingProxyType({}),
 ) -> Optional[WorkerPastPosts]:
     """The worker's past-posts source, or None. Logs the activation line either way.

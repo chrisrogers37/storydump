@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Mapping, Optional
 
+from src.utils.datetime_utils import ensure_utc, parse_iso_timestamp
+
 #: Graph's answer for an object that does not exist: code 100, subcode 33.
 GRAPH_NOT_FOUND = (100, 33)
 
@@ -59,6 +61,10 @@ class Retry:
         return min(self.cap_seconds, self.base_seconds * 2 ** (attempt - 1))
 
 
+#: One try: its refusal parks the story, whatever it proves.
+ONCE = Retry(attempts=1, base_seconds=0, cap_seconds=0)
+
+
 @dataclass(frozen=True)
 class Tried:
     """One slide's failed tries for one observation: how many, the last one's
@@ -71,32 +77,38 @@ class Tried:
 
 @dataclass(frozen=True)
 class Decision:
-    """Park now, or try again at `next_attempt_at`; `attempt` counts this one."""
+    """Try again at `next_attempt_at`, or park when there is none; `attempt`
+    counts this one."""
 
-    park: bool
     attempt: int
     next_attempt_at: Optional[datetime] = None
+
+    @property
+    def park(self) -> bool:
+        return self.next_attempt_at is None
+
+
+def _kind(refusal):
+    return refusal.get("kind") if isinstance(refusal, Mapping) else None
 
 
 def proves_gone(refusal) -> bool:
     """Graph's own answer that the post does not exist."""
     return (
-        isinstance(refusal, Mapping)
-        and refusal.get("kind") == "graph_error"
+        _kind(refusal) == "graph_error"
         and (refusal.get("code"), refusal.get("error_subcode")) == GRAPH_NOT_FOUND
     )
 
 
-def names_a_bound(refusal) -> bool:
+def _names_a_bound(refusal) -> bool:
     """A named technical bound the same file meets on every try: the byte cap,
     whose evidence carries the cap and the bytes read."""
-    return isinstance(refusal, Mapping) and refusal.get("kind") == "over_byte_cap"
+    return _kind(refusal) == "over_byte_cap"
 
 
 def _withheld(refusal) -> bool:
     return (
-        isinstance(refusal, Mapping)
-        and refusal.get("kind") == "no_media_link"
+        _kind(refusal) == "no_media_link"
         and refusal.get("has_link") is False
         and refusal.get("media_type") in ("IMAGE", "VIDEO")
     )
@@ -116,25 +128,23 @@ def from_capture(capture, identity) -> Tried:
     if stored != tuple(identity) or type(attempts) is not int or attempts < 1:
         return Tried()
     try:
-        next_at = datetime.fromisoformat(capture["next_attempt_at"])
+        next_at = ensure_utc(parse_iso_timestamp(capture["next_attempt_at"]))
     except (KeyError, TypeError, ValueError):
         next_at = None
     return Tried(attempts, capture.get("refusal"), next_at)
 
 
-def decide(refusal, tried: Tried, now, retry: Optional[Retry]) -> Decision:
-    """The decision for one refused fetch after `tried`; `retry` None means
-    one attempt."""
+def decide(refusal, tried: Tried, now, retry: Retry) -> Decision:
+    """The decision for one refused fetch after `tried`."""
     attempt = tried.attempts + 1
     if (
-        retry is None
-        or attempt >= retry.attempts
+        attempt >= retry.attempts
         or proves_gone(refusal)
-        or names_a_bound(refusal)
+        or _names_a_bound(refusal)
         or (_withheld(refusal) and _withheld(tried.refusal))
     ):
-        return Decision(True, attempt)
-    return Decision(False, attempt, now + timedelta(seconds=retry.delay(attempt)))
+        return Decision(attempt)
+    return Decision(attempt, now + timedelta(seconds=retry.delay(attempt)))
 
 
 def waiting(tried: Tried, now) -> bool:

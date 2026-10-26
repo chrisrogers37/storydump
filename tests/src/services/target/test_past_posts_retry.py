@@ -142,8 +142,8 @@ def test_the_last_try_parks_with_its_refusal():
     assert (decision.park, decision.attempt) == (True, 8)
 
 
-def test_no_retry_configured_parks_at_once():
-    decision = past_posts_retry.decide(None, Tried(), NOW, None)
+def test_a_single_try_parks_at_once():
+    decision = past_posts_retry.decide(None, Tried(), NOW, past_posts_retry.ONCE)
     assert (decision.park, decision.attempt) == (True, 1)
 
 
