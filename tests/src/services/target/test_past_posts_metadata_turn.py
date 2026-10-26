@@ -682,6 +682,7 @@ async def test_validation_fetch_fences_changed_selected_child_before_cdn(
             workspace_id=WS,
             max_bytes=100,
             selected_asset_id=selected,
+            expected_slide_count=2,
         )
 
     if matches:
@@ -694,7 +695,9 @@ async def test_validation_fetch_fences_changed_selected_child_before_cdn(
             await read()
         assert caught.value.reason == "selected_asset_gone"
         assert type(redacted_error(caught.value)) is type(caught.value)
-        assert len(calls) == 2
+        # The first read lacked the slide, so the parent and its children were
+        # read again before the slide was judged gone.
+        assert len(calls) == 4
 
 
 # Absence of a required kind is incomplete evidence, not exclusion.
