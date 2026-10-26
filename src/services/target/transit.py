@@ -107,6 +107,11 @@ STORY_FORMATS = {"image": "jpg", "video": "mp4"}
 #: floor's byte cap is the backstop should a range ever be ignored.
 PROBE_RANGE_BYTES = 1024
 PROBE_MAX_RESPONSE_BYTES = 64 * 1024
+#: How much of a video frame's head `ready` reads, at most, to walk its
+#: `moov` once the frame serves (`_container`). A 60 s story's `moov` is
+#: tens of kilobytes; one that ends past this is left unread, and the
+#: ledger says so.
+CONTAINER_READ_MAX_BYTES = 512 * 1024
 #: The float: a refused fetch is retried with a url Meta has never seen for
 #: this story — the same chain plus `n` of this no-op step: a distinct signed
 #: url and a distinct derived asset, identical bytes.
@@ -372,7 +377,7 @@ class TransitStore:
         resources_fn: Optional[Callable[..., dict]] = None,
         resource_fn: Optional[Callable[..., dict]] = None,
         url_fn: Optional[Callable[..., tuple]] = None,
-        probe_fn: Optional[Callable[[str], Any]] = None,
+        probe_fn: Optional[Callable[..., Any]] = None,
         probe_resolver: Optional[Callable[[str], list]] = None,
         past_posts_resolver: Optional[Callable[[str], list]] = None,
     ):
@@ -416,7 +421,8 @@ class TransitStore:
         self._url_fn = url_fn
         #: `ready`'s probe: `url -> ProbeAnswer` (or the pair
         #: `(status, content_type)`); the default is an egress-floored ranged
-        #: GET of the first bytes (tests inject a script). *probe_resolver*
+        #: GET of the first bytes, `head_bytes` of them when the container
+        #: read asks (tests inject a script). *probe_resolver*
         #: is the floor's DNS seam for that default — tests hand it a static
         #: answer so no name is looked up.
         self._probe_fn = probe_fn or self._default_probe
@@ -703,7 +709,9 @@ class TransitStore:
         kind's content type and (when it reads bytes) the kind's signature,
         or *budget_s* is spent. A probe error is "not yet", never an
         exception: the caller's ladder decides. The answer is truthy iff
-        ready and carries the last probe's observation for the ledger."""
+        ready and carries the last probe's observation for the ledger: for a
+        video that serves, with what its head says of Meta's container and
+        audio lines (`_container`)."""
         url = self.delivery_url(
             transit_asset_ref, media_kind=media_kind, variant=variant
         )
@@ -736,19 +744,51 @@ class TransitStore:
                 "magic": magic_of(answer.head) if answer.head else None,
             }
             if serves_media(answer, media_kind):
+                if media_kind == "video":
+                    observation["container"] = await self._container(url, answer)
                 return Readiness(True, observation)
             if self._now_fn() >= deadline:
                 return Readiness(False, observation)
             await sleep(READY_POLL_S)
 
-    async def _default_probe(self, url: str) -> ProbeAnswer:
+    async def _container(self, url: str, answer: ProbeAnswer) -> dict:
+        """What a video frame's head says of Meta's container and audio lines
+        (`media_validation.derivation_container`): from the probe's first
+        bytes and, when `moov` comes first and ends past them, from one more
+        ranged read to `moov`'s end. A read that fails or comes back short,
+        and a `moov` past `CONTAINER_READ_MAX_BYTES`, leave those facts unread
+        and say why."""
+        facts = media_validation.derivation_container(answer.head)
+        end = facts["moov_end"]
+        if end is None or end <= len(answer.head):
+            return facts
+        if end > CONTAINER_READ_MAX_BYTES:
+            return {**facts, "unread": "moov_past_read_cap"}
+        try:
+            read = await self._probe_fn(url, head_bytes=end)
+        except Exception as exc:  # noqa: BLE001 — what this read misses, Meta's answer judges
+            logger.warning(
+                "transit: the story frame's container read failed (%s); its"
+                " container facts are left unread, for Meta's answer to judge",
+                type(exc).__name__,
+            )
+            return {**facts, "unread": "read_failed", "read_error": type(exc).__name__}
+        head = getattr(read, "head", b"")
+        if len(head) < end:
+            return {**facts, "unread": "short_read"}
+        return media_validation.derivation_container(head[:end])
+
+    async def _default_probe(
+        self, url: str, *, head_bytes: int = PROBE_RANGE_BYTES
+    ) -> ProbeAnswer:
         """One egress-floored ranged GET of the delivery url's first bytes:
         status, content type, the bytes the signature check needs, the total
         length the range answer names, the CDN's request id and the read's
         duration. The floor owns redirects (it refuses cross-host hops); the
         host allow-list is the url's own, which the SDK built from our cloud
         name, and the private-address block still guards it. The byte cap
-        bounds the body should the range ever be ignored."""
+        bounds the body should the range ever be ignored. *head_bytes* is how
+        many: the poll's few, or the container read's whole `moov`."""
         from urllib.parse import urlparse
 
         from src.services.target import egress
@@ -758,7 +798,7 @@ class TransitStore:
             timeout_class="standard",
             total_budget_s=float(TIMEOUT_CLASSES["standard"]),
             max_attempts=1,
-            max_response_bytes=PROBE_MAX_RESPONSE_BYTES,
+            max_response_bytes=max(PROBE_MAX_RESPONSE_BYTES, head_bytes),
             allowed_hosts=frozenset({host}),
         )
         if self._probe_client is None:
@@ -773,7 +813,7 @@ class TransitStore:
                 "GET",
                 url,
                 policy=policy,
-                headers={"Range": f"bytes=0-{PROBE_RANGE_BYTES - 1}"},
+                headers={"Range": f"bytes=0-{head_bytes - 1}"},
                 **seam,
             )
             bytes_read = True
@@ -791,7 +831,7 @@ class TransitStore:
         return ProbeAnswer(
             status=int(response.status_code),
             content_type=str(response.headers.get("content-type", "")),
-            head=bytes(response.content[:PROBE_RANGE_BYTES]) if bytes_read else b"",
+            head=bytes(response.content[:head_bytes]) if bytes_read else b"",
             length=length,
             request_id=response.headers.get("x-request-id") or None,
             elapsed_ms=ms_since(started),

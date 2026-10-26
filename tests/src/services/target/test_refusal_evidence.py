@@ -749,6 +749,50 @@ CHECK_CASES = [
         "this video refers to media outside its own file",
         id="external_reference",
     ),
+    pytest.param(
+        "derivation_bytes",
+        {"bytes": 104_857_601, "limit": 100_000_000},
+        "the file Instagram fetches is 104,857,601 bytes; stories take up to"
+        " 100,000,000",
+        id="derivation_bytes",
+    ),
+    pytest.param(
+        "derivation_moov_position",
+        {"boxes": ["ftyp", "mdat"]},
+        "the video Instagram fetches has its index after its media; stories need"
+        " it at the front",
+        id="derivation_moov_position",
+    ),
+    pytest.param(
+        "derivation_edit_list",
+        {"edit_lists": 2},
+        "the video Instagram fetches has an edit list; stories take none",
+        id="derivation_edit_list",
+    ),
+    pytest.param(
+        "derivation_audio_codec",
+        {"codec": "ac-3"},
+        "the video Instagram fetches carries ac-3 audio; stories take AAC",
+        id="derivation_audio_codec",
+    ),
+    pytest.param(
+        "derivation_audio_codec",
+        {},
+        "the video Instagram fetches carries unnamed audio; stories take AAC",
+        id="derivation_audio_codec-unnamed",
+    ),
+    pytest.param(
+        "derivation_audio_channels",
+        {"channels": 6, "limit": 2},
+        "the video Instagram fetches has 6 audio channels; stories take up to 2",
+        id="derivation_audio_channels",
+    ),
+    pytest.param(
+        "derivation_audio_rate",
+        {"hz": 96_000, "limit": 48_000},
+        "the video Instagram fetches has audio at 96,000 Hz; stories take up to 48,000",
+        id="derivation_audio_rate",
+    ),
 ]
 
 DEAD_STATUS = "Error: Media upload has failed with error code 2207026"
