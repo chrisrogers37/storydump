@@ -16,12 +16,39 @@ import uuid
 from sqlalchemy import text
 
 from src.exceptions import StorydumpError
-from src.services.target import audit, instagram_artifacts, jobs, readers, source_policy
+from src.services.target import (
+    audit,
+    instagram_artifacts,
+    jobs,
+    readers,
+    refusal_evidence,
+    source_policy,
+)
 from src.services.target import source_read_admission as admission
 from src.services.target.transit import PastPostsUploadUncertain
 from src.services.target.unit_of_work import unit_of_work
 
 logger = logging.getLogger(__name__)
+
+
+#: The notice a story parked for its past-posts content gets when its refusal
+#: says nothing more specific.
+PARK_NOTICE = (
+    "This story from your Instagram past posts has selected content that is"
+    " unavailable or changed. Open the Queue to review it."
+)
+
+
+def _park_notice(evidence) -> str:
+    """The park's notice: why it was refused, in plain words, when the refusal's
+    evidence says (`refusal_evidence.plain`); otherwise the generic notice."""
+    reason = refusal_evidence.plain(evidence)
+    if reason is None:
+        return PARK_NOTICE
+    return (
+        "This story from your Instagram past posts could not be prepared."
+        f" Refused: {reason}. Open the Queue to review it."
+    )
 
 
 class PastPostsEffectRefused(StorydumpError):
@@ -418,7 +445,7 @@ class PastPostsPipeline:
                     intent_id=iid,
                     from_state=state,
                     tz=str(tz or "UTC"),
-                    notice="This story from your Instagram past posts has selected content that is unavailable or changed. Open the Queue to review it.",
+                    notice=_park_notice(exc.evidence),
                 )
 
     async def _inspect(self, conn, ws, iid, *, capture=None):

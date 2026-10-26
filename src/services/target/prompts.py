@@ -55,6 +55,7 @@ from src.services.target import (
     intent_ledger,
     outbox,
     readers,
+    refusal_evidence,
     vocabulary,
 )
 from src.services.target.prompt_rendering import (
@@ -111,7 +112,7 @@ async def settled_line(
         from src.services.target import identity  # noqa: PLC0415 — cycle
 
         by = await identity.display_name_for(session, user_id=settled["by_user_id"])
-    return outcome_line(
+    line = outcome_line(
         state or settled["state"],
         by=by,
         at=settled.get("at") or at,
@@ -119,6 +120,9 @@ async def settled_line(
         published_via=settled.get("published_via"),
         rule=settled.get("approval_rule"),
     )
+    # A story in review says why, in the words of its refusal's evidence.
+    reason = refusal_evidence.plain(settled.get("refusal"))
+    return f"{line}\nRefused: {reason}." if reason else line
 
 
 async def _still_due(session, row: dict) -> bool:
