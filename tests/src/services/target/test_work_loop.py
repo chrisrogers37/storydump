@@ -74,6 +74,10 @@ def full_deps(**over):
         # through, which is what makes the reconciliation executor live.
         past_posts_capability=PastPostsCapability(enabled=True),
         past_posts_client=object(),
+        # the past-posts coordinator and its preparation, which make the file
+        # lane's prepare executor live.
+        past_posts=object(),
+        selected_prepare=_fake_seam,
         config=WorkerConfig(**FULL_CONFIG),
     )
     base.update(over)
@@ -121,6 +125,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         "first_ingest_chunk",  # the same _run_sync, one page at a time
         "reconcile_ambiguous",  # deps.poll, the provider's verdict on an
         # ambiguous publish; each row commits alone
+        "prepare_past_post",  # the past-posts adapter: the story's file
     }
 
     #: Marked for another reason: each of its batches commits on its own.
@@ -218,6 +223,9 @@ class TestRegistryCoversTheSchema:
             # live once the past-posts source is armed with its client,
             # which `full_deps` supplies.
             "reconcile_past_posts_accounts",
+            # live once the past-posts coordinator is composed, which
+            # `full_deps` supplies.
+            "prepare_past_post",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -245,6 +253,7 @@ class TestRegistryCoversTheSchema:
             "past_posts_lifecycle_sweep",  #
             "meta_deletion_cleanup",  # , with the key ring
             "reconcile_past_posts_accounts",  # , with the past-posts source armed
+            "prepare_past_post",  # , with the past-posts coordinator
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         assert unbuilt == set(UNBUILT_KINDS)
@@ -1968,6 +1977,42 @@ class TestTheBudgetCeiling:
         assert calls["finalized"] == ["failed"]
         assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
 
+    async def test_a_prepare_job_the_loop_fails_parks_its_story_for_review(
+        self, monkeypatch
+    ):
+        """A past-posts story's prepare job whose faults spend its budget parks
+        the story it carried for review and tells, as a dead publish job's
+        story is: never a story left waiting for a file nobody fetches."""
+        from src.services.target import past_posts_preparation_job, publish_pipeline
+
+        flipped, told = [], []
+
+        async def flip_exhausted(session, job):
+            flipped.append(job["id"])
+            return {
+                "workspace_id": "ws-1",
+                "intent_id": "it-1",
+                "tz": "UTC",
+                "notice": "n",
+            }
+
+        async def tell_review(session, **parked):
+            told.append(parked["intent_id"])
+
+        async def executor(session, job):
+            raise RuntimeError("pool timeout")
+
+        monkeypatch.setattr(
+            past_posts_preparation_job, "flip_exhausted", flip_exhausted
+        )
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["prepare_past_post"] = executor
+        job = self._job(kind="prepare_past_post", lane="media", attempts=5)
+        await loop._run_job(job)
+        assert calls["finalized"] == ["failed"]
+        assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
+
     async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
         self, monkeypatch
     ):
@@ -2499,6 +2544,7 @@ class TestPerLaneWorkspaceCaps:
         cfg = WorkerConfig()
         assert cfg.ws_lane_cap_for("interactive") == 5
         assert cfg.ws_lane_cap_for("bulk") == 3
+        assert cfg.ws_lane_cap_for("media") == 1
         assert cfg.sender_hold_seconds == 15.0
 
 
@@ -2512,35 +2558,65 @@ class TestTheConcurrencyCeiling:
 
         line = assert_concurrency_fits(WorkerConfig(), pool_size=10)
         assert line == (
-            "lanes: interactive×3 bulk×2 pool=10 (tasks hold up to 7 + 3 reserved)"
+            "lanes: interactive×2 bulk×2 media×1 pool=10"
+            " (tasks hold up to 7 + 3 reserved)"
         )
 
-    def test_a_bulk_task_weighs_two_connections(self):
+    def test_a_task_weighs_what_it_holds_at_its_peak(self):
         """A bulk kind's plain executor opens its own sessions UNDER the
         loop's job transaction (a sync walk, a refresh, the reconciler's
-        poll) — the ceiling counts what a task holds, not the task."""
+        poll) — the ceiling counts what a task holds, not the task. A media
+        task's executor owns its transactions and opens one short unit of work
+        at a time: one connection."""
         from src.services.target.work_loop import (
             TASK_CONNECTIONS,
             WorkerConfig,
             task_connections,
         )
 
-        assert TASK_CONNECTIONS == {"interactive": 1, "bulk": 2}
-        assert task_connections(WorkerConfig()) == 3 * 1 + 2 * 2
+        assert TASK_CONNECTIONS == {"interactive": 1, "bulk": 2, "media": 1}
+        assert task_connections(WorkerConfig()) == 2 * 1 + 2 * 2 + 1 * 1
 
     def test_past_the_ceiling_it_refuses_by_the_numbers(self):
         from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
 
-        cfg = WorkerConfig(lane_concurrency={"interactive": 4, "bulk": 2})
+        cfg = WorkerConfig(lane_concurrency={"interactive": 4, "bulk": 2, "media": 1})
         with pytest.raises(ValueError) as info:
             assert_concurrency_fits(cfg, pool_size=10)
-        assert "4×1 + 2×2 + 3 reserved exceeds the pool of 10" in str(info.value)
+        assert "4×1 + 2×2 + 1×1 + 3 reserved exceeds the pool of 10" in str(info.value)
 
-    def test_exactly_at_the_ceiling_is_allowed(self):
+    def test_the_media_lane_counts_against_the_ceiling(self):
+        """Interactive and bulk alone fit (2×1 + 2×2 + 3 = 9 of 10), so the media
+        tasks are all that can tip this over, and the refusal names all three."""
         from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
 
-        cfg = WorkerConfig(lane_concurrency={"interactive": 3, "bulk": 2})
-        assert assert_concurrency_fits(cfg, pool_size=10).startswith("lanes:")
+        cfg = WorkerConfig(lane_concurrency={"interactive": 2, "bulk": 2, "media": 2})
+        with pytest.raises(ValueError) as info:
+            assert_concurrency_fits(cfg, pool_size=10)
+        assert str(info.value) == (
+            "lanes: interactive×2 bulk×2 media×2 pool=10"
+            " (tasks hold up to 8 + 3 reserved): 2×1 + 2×2 + 2×1 + 3 reserved"
+            " exceeds the pool of 10 — lower TARGET_WORKER_*_CONCURRENCY"
+            " or raise the pool (measure the load first)"
+        )
+
+    def test_the_start_values_fill_the_pinned_pool_exactly(self):
+        """Exactly at the ceiling is allowed, and there is no connection to
+        spare: one fewer in the pool refuses the start values, so raising one
+        lane's K without lowering another's is refused at boot."""
+        from src.services.target.work_loop import (
+            RESERVED_CONNECTIONS,
+            WorkerConfig,
+            assert_concurrency_fits,
+            task_connections,
+        )
+
+        cfg = WorkerConfig()
+        pool = unit_of_work.POOL_SIZE_SEAM
+        assert task_connections(cfg) + RESERVED_CONNECTIONS == pool
+        assert assert_concurrency_fits(cfg, pool_size=pool).startswith("lanes:")
+        with pytest.raises(ValueError):
+            assert_concurrency_fits(cfg, pool_size=pool - 1)
 
     def test_an_unknown_lane_runs_one_task(self):
         from src.services.target.work_loop import WorkerConfig

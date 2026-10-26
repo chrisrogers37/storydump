@@ -556,6 +556,7 @@ async def execute_reap_expired(
     approval_ttl_seconds: int,
     approved_ttl_seconds: int,
     capability=None,
+    past_posts_late_seconds: Optional[int] = None,
 ) -> int:
     """Reap in closed door, discovery, subject and card transactions.
 
@@ -568,6 +569,9 @@ async def execute_reap_expired(
     judge a sync job or re-arm its source: an expired past-posts sync is re-readied
     or ended by whether its source may still be read. Without it the
     three-argument door runs, which answers as an inactive past-posts source does.
+    *past_posts_late_seconds* rides with it: how long after its slot a past-posts
+    cadence story waits for its file before the cadence leg expires it. With
+    neither, that story expires at its slot, as a Drive story does.
     """
     from src.services.target import publish_pipeline, unit_of_work
     from src.services.target.instagram_sources import is_activated
@@ -581,13 +585,21 @@ async def execute_reap_expired(
                     text(
                         "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
                         " make_interval(secs => :b)"
-                        + (", CAST(:activated AS boolean))" if activated else ")")
+                        + (
+                            ", CAST(:activated AS boolean), make_interval(secs => :late))"
+                            if activated
+                            else ")"
+                        )
                     ),
                     {
                         "lim": limit,
                         "a": approval_ttl_seconds,
                         "b": approved_ttl_seconds,
-                        **({"activated": True} if activated else {}),
+                        **(
+                            {"activated": True, "late": past_posts_late_seconds}
+                            if activated
+                            else {}
+                        ),
                     },
                 )
             ).scalar()

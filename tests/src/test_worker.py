@@ -8,14 +8,24 @@ and the heartbeat/lease numbers agreeing.
 """
 
 import logging
+import re
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
 
-from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
+from src.models.target.machinery import Job
+from src.services.target import backpressure
+from src.services.target.work_loop import (
+    _UNBUILT_REASON,
+    TASK_CONNECTIONS,
+    Parked,
+    WorkerConfig,
+)
 from src.worker import (
     ACTIVATION_NUDGE_ENV,
     ACTIVATION_NUDGE_LIMIT_ENV,
+    LANE_CONCURRENCY_ENV,
     _env_flag,
     compose,
     logger as worker_logger,
@@ -198,9 +208,29 @@ def test_the_monitors_stale_threshold_spans_three_beats_of_the_fastest_kind():
     )
 
 
-def test_both_lanes_are_served():
-    app = compose(engine=object(), config=WorkerConfig(), env={})
-    assert {loop.lane for loop in app.loops} == {"interactive", "bulk"}
+def schema_lanes() -> set:
+    """The lanes the schema admits, read from the `jobs` CHECK itself."""
+    ck = next(c for c in Job.__table__.constraints if c.name == "ck_jobs_lane")
+    return set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
+
+
+def test_every_lane_the_schema_admits_is_served():
+    """The lane set is spelled out beside the schema's own CHECK: the config's
+    sizes and caps, their env names, the ceiling's weights, the queue read's
+    zero-fill and the loops `compose` starts. A lane left out of one is a queue
+    nothing claims, tasks the ceiling does not count, or a backlog the status
+    line cannot show; a lane without a cap field of its own would take bulk's."""
+    lanes = schema_lanes()
+    assert lanes, "the lane CHECK parsed to nothing — every comparison below is vacuous"
+    config = WorkerConfig()
+    app = compose(engine=object(), config=config, env={})
+    assert {loop.lane for loop in app.loops} == lanes
+    assert set(config.lane_concurrency) == lanes
+    assert set(LANE_CONCURRENCY_ENV) == lanes
+    assert set(TASK_CONNECTIONS) == lanes
+    assert set(backpressure.LANES) == lanes
+    for lane in lanes:
+        assert config.ws_lane_cap_for(lane) == getattr(config, f"ws_lane_cap_{lane}")
 
 
 def test_heartbeat_and_lease_numbers_agree():
@@ -396,11 +426,12 @@ class TestStatusLine:
             beats, short_beats, consecutive_failures = 12, 0, 0
 
         line = status_line(
-            loops=[_L("interactive"), _L("bulk")], clock=_C, heartbeat=_H
+            loops=[_L("interactive"), _L("bulk"), _L("media")], clock=_C, heartbeat=_H
         )
         for token in (
             "interactive",
             "bulk",
+            "media",
             "processed=3",
             "parked=1",
             "ticks=40",
@@ -1163,33 +1194,82 @@ class TestKTasksPerLane:
         for wl in app.loops:
             by_lane.setdefault(wl.lane, []).append(wl)
         assert {lane: len(loops) for lane, loops in by_lane.items()} == {
-            "interactive": 3,
+            "interactive": 2,
             "bulk": 2,
+            "media": 1,
         }
         assert len({wl._worker_name for wl in app.loops}) == 5, "distinct names"
         assert all(wl._registry is app.registry for wl in app.loops)
         assert all(wl._connect is app.engine.connect for wl in app.loops)
 
-    def test_an_oversubscribed_config_refuses_at_composition(self):
-        from src.services.target.work_loop import WorkerConfig
-
+    @pytest.mark.parametrize(
+        "lanes",
+        [
+            {"interactive": 4, "bulk": 2, "media": 1},
+            {"interactive": 2, "bulk": 2, "media": 2},
+        ],
+        ids=["interactive", "media"],
+    )
+    def test_an_oversubscribed_config_refuses_at_composition(self, lanes):
+        """The media case fits without its lane (2×1 + 2×2 + 3 = 9 of 10): only
+        the ceiling counting media tasks refuses it."""
         with pytest.raises(ValueError):
-            self._compose(WorkerConfig(lane_concurrency={"interactive": 4, "bulk": 2}))
+            self._compose(WorkerConfig(lane_concurrency=lanes))
+
+    def test_a_lane_the_config_leaves_out_still_starts_one_loop(self):
+        """Every lane the worker serves keeps a task whatever the config names
+        (`concurrency_for` floors a lane at one), so no lane's jobs are left
+        unclaimed, and the ceiling counted that task."""
+        app = self._compose(
+            WorkerConfig(lane_concurrency={"interactive": 2, "bulk": 2})
+        )
+        assert Counter(wl.lane for wl in app.loops) == {
+            "interactive": 2,
+            "bulk": 2,
+            "media": 1,
+        }
+
+    def test_the_env_names_set_the_loops_compose_starts(self):
+        """The knob for each lane reaches the config `main` runs with and the
+        loops `compose` starts from it: media's included (1 + 2×2 + 2 + 3 = 10)."""
+        config = worker_config_from_env(
+            {
+                "TARGET_WORKER_INTERACTIVE_CONCURRENCY": "1",
+                "TARGET_WORKER_MEDIA_CONCURRENCY": "2",
+            },
+            web_app_origin=None,
+        )
+        app = self._compose(config)
+        assert Counter(wl.lane for wl in app.loops) == {
+            "interactive": 1,
+            "bulk": 2,
+            "media": 2,
+        }
 
     def test_lane_concurrency_from_env(self):
         from src.worker import lane_concurrency_from_env
 
-        assert lane_concurrency_from_env({}) == {"interactive": 3, "bulk": 2}
+        assert lane_concurrency_from_env({}) == {
+            "interactive": 2,
+            "bulk": 2,
+            "media": 1,
+        }
         assert lane_concurrency_from_env(
             {
                 "TARGET_WORKER_INTERACTIVE_CONCURRENCY": "3",
                 "TARGET_WORKER_BULK_CONCURRENCY": " 1 ",
             }
-        ) == {"interactive": 3, "bulk": 1}
-        with pytest.raises(ValueError):
-            lane_concurrency_from_env({"TARGET_WORKER_BULK_CONCURRENCY": "two"})
-        with pytest.raises(ValueError):
-            lane_concurrency_from_env({"TARGET_WORKER_BULK_CONCURRENCY": "0"})
+        ) == {"interactive": 3, "bulk": 1, "media": 1}
+        assert lane_concurrency_from_env({"TARGET_WORKER_MEDIA_CONCURRENCY": "2"}) == {
+            "interactive": 2,
+            "bulk": 2,
+            "media": 2,
+        }
+        for name in LANE_CONCURRENCY_ENV.values():
+            with pytest.raises(ValueError, match=name):
+                lane_concurrency_from_env({name: "two"})
+            with pytest.raises(ValueError, match=name):
+                lane_concurrency_from_env({name: "0"})
 
     def test_the_status_line_sums_k_loops_into_one_lane(self):
         from src.worker import status_line
@@ -1204,12 +1284,18 @@ class TestKTasksPerLane:
             beats, short_beats, consecutive_failures = 0, 0, 0
 
         line = status_line(
-            loops=[_L("interactive", 3), _L("interactive", 4), _L("bulk", 1)],
+            loops=[
+                _L("interactive", 3),
+                _L("interactive", 4),
+                _L("bulk", 1),
+                _L("media", 5),
+            ],
             clock=None,
             heartbeat=_H,
         )
         assert "interactive[tasks=2 processed=7 parked=0 failures=2" in line
         assert "bulk[tasks=1 processed=1" in line
+        assert "media[tasks=1 processed=5" in line
         assert "waits=0" in line
 
 
@@ -1438,16 +1524,23 @@ def test_the_clock_mints_the_retention_sweep_every_hour():
     assert app.recurring["retention_sweep"] == 3600.0
 
 
-async def test_selected_prepare_runs_after_discovery_closes_and_isolates_failure():
+async def test_the_prompt_sweep_mints_a_prepare_job_per_due_story_and_fetches_nothing(
+    monkeypatch,
+):
+    """The sweep reads the door with no tenant and closes it, then mints one
+    prepare job per story under that story's tenant. It never fetches a file,
+    and one story's failure does not starve the next."""
     from src import worker
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
 
-    closed = []
+    from src.services.target import past_posts_preparation_job
+
     subjects = [
         {"workspace_id": "workspace-a", "intent_id": "pending-card"},
         {"workspace_id": "workspace-b", "intent_id": "scheduled"},
     ]
+    log = []
 
     class Result:
         def mappings(self):
@@ -1457,30 +1550,77 @@ async def test_selected_prepare_runs_after_discovery_closes_and_isolates_failure
             return subjects
 
     class Session:
+        def __init__(self, job):
+            self.job = job
+
         async def execute(self, query, binds):
+            assert self.job == {}
             assert "fn_selected_preparation_due" in str(query) and binds == {"lim": 2}
             return Result()
 
     @asynccontextmanager
     async def sessions(job):
-        assert job == {}
-        yield Session()
-        closed.append(True)
+        log.append(("open", dict(job)))
+        try:
+            yield Session(job)
+        finally:
+            log.append(("close", dict(job)))
 
-    seen = []
+    minted = []
 
-    async def prepare(**kwargs):
-        assert closed == [True]
-        assert kwargs["engine"] is engine
-        seen.append((kwargs["workspace_id"], kwargs["intent_id"]))
-        if len(seen) == 1:
-            raise RuntimeError("synthetic refusal")
+    async def enqueue(session, *, workspace_id, intent_id, config):
+        assert session.job == {"workspace_id": workspace_id}
+        assert config is app.config
+        minted.append((workspace_id, intent_id))
+        if len(minted) == 1:
+            raise RuntimeError("synthetic fault")
+        return "job-1"
 
-    engine = object()
+    async def fetch(**kwargs):
+        raise AssertionError("the sweep fetches no file")
+
+    monkeypatch.setattr(past_posts_preparation_job, "enqueue", enqueue)
     app = SimpleNamespace(
-        engine=engine,
+        engine=object(),
         config=SimpleNamespace(prompt_sweep_limit=2),
-        deps=SimpleNamespace(selected_prepare=prepare),
+        deps=SimpleNamespace(selected_prepare=fetch),
     )
     await worker.PromptSweeper(app).prepare_selected(sessions)
-    assert seen == [("workspace-a", "pending-card"), ("workspace-b", "scheduled")]
+    assert minted == [("workspace-a", "pending-card"), ("workspace-b", "scheduled")]
+    assert log == [
+        ("open", {}),
+        ("close", {}),
+        ("open", {"workspace_id": "workspace-a"}),
+        ("close", {"workspace_id": "workspace-a"}),
+        ("open", {"workspace_id": "workspace-b"}),
+        ("close", {"workspace_id": "workspace-b"}),
+    ]
+
+
+async def test_a_prepare_job_is_one_per_story_on_the_file_lane(monkeypatch):
+    """One job per story, keyed by it, on the media lane: minted unless one is
+    ready or running, with the retry's attempts as its budget."""
+    from src.services.target import past_posts_preparation_job
+
+    seen = {}
+
+    async def enqueue(session, **kwargs):
+        seen.update(kwargs)
+        return "job-1"
+
+    monkeypatch.setattr(past_posts_preparation_job.jobs, "enqueue", enqueue)
+    config = WorkerConfig()
+    minted = await past_posts_preparation_job.enqueue(
+        object(), workspace_id="workspace-a", intent_id="story-1", config=config
+    )
+    assert minted == "job-1"
+    assert seen == {
+        "kind": "prepare_past_post",
+        "workspace_id": "workspace-a",
+        "serialization_key": "prep:story-1",
+        "payload": {"v": 1, "intent_id": "story-1"},
+        "lane": "media",
+        "max_attempts": config.past_posts_retry_attempts,
+        "deadline_seconds": config.approval_ttl_seconds,
+        "unless_pending": True,
+    }

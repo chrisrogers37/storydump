@@ -93,7 +93,7 @@ ALTER FUNCTION fn_claim_job(text, text, interval, integer, boolean) OWNER TO svc
 
 ALTER FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) OWNER TO svc_clock;
 
-ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) OWNER TO svc_maintenance;
+ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) OWNER TO svc_maintenance;
 
 ALTER FUNCTION fn_mix_conversion_jobs(integer, text, text) OWNER TO svc_clock;
 

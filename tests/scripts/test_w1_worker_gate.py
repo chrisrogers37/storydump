@@ -995,14 +995,16 @@ class TestKLoopsOnOneLane:
         engine = create_async_engine(async_url(world_db), pool_size=10, max_overflow=0)
         watch = unit_of_work.PoolWatch(engine)
         try:
+            # The most bulk tasks the pinned pool admits beside the one task
+            # every other lane keeps: 1 + 2×2 + 1 + 3 reserved = 9 of 10.
             cfg = _Cfg(
-                lane_concurrency={"interactive": 1, "bulk": 3},
+                lane_concurrency={"interactive": 1, "bulk": 2, "media": 1},
                 ws_lane_cap_bulk=3,
                 claim_idle_seconds=0.05,
             )
             app = compose(engine=engine, config=cfg, env={})
             bulk = [wl for wl in app.loops if wl.lane == "bulk"]
-            assert len(bulk) == 3
+            assert len(bulk) == 2
             for wl in bulk:
                 wl._registry = {**app.registry, "sync_media_source": slow}
             tasks = [asyncio.create_task(wl.run()) for wl in bulk]
@@ -1035,10 +1037,10 @@ class TestKLoopsOnOneLane:
             )
             assert cur.fetchone()[0] == len(keys)
         _assert_no_stranded_lease(sync_conn)
-        # The measurement: with K=3 bulk tasks and no other holder
+        # The measurement: with K=2 bulk tasks and no other holder
         # (the heartbeat is built but not started here) the pool's peak is
         # exactly K — a claim's checkout returns before its job session opens.
-        assert watch.checked_out_peak <= 3, watch.checked_out_peak
+        assert watch.checked_out_peak <= 2, watch.checked_out_peak
 
 
 class TestNoLeaseExpiresDuringAWait:

@@ -444,9 +444,9 @@ REVOKE ALL ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) FROM PUB
 
 GRANT EXECUTE ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) TO svc_worker;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, interval) TO svc_worker;
 
 REVOKE ALL ON FUNCTION trg_past_posts_validation_capture_reset() FROM PUBLIC;
 

@@ -351,6 +351,7 @@ async def test_the_claim_the_reaper_and_the_clock_receive_the_capability(
 
     assert claimed["capability"] is past_posts.capability
     assert reaped["capability"] is past_posts.capability
+    assert reaped["past_posts_late_seconds"] == app.config.planned_late_seconds
     assert ticked["capability"] is past_posts.capability
 
 
@@ -460,9 +461,11 @@ class _Door:
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-async def test_the_reaper_runs_the_four_argument_door_only_when_activated(
+async def test_the_reaper_hands_the_door_the_late_window_only_when_activated(
     monkeypatch, enabled
 ):
+    """Activated, the door hears the source is on and how long a past-posts
+    story may wait after its slot; otherwise the three-argument door runs."""
     log = []
 
     @asynccontextmanager
@@ -483,16 +486,19 @@ async def test_the_reaper_runs_the_four_argument_door_only_when_activated(
         approval_ttl_seconds=60,
         approved_ttl_seconds=120,
         capability=PastPostsCapability(enabled=True) if enabled else None,
+        past_posts_late_seconds=3600,
     )
 
     sql, params = log[0]
     assert "fn_reaper_sweep" in sql
-    assert ("CAST(:activated AS boolean)" in sql) is enabled
+    assert (
+        "CAST(:activated AS boolean), make_interval(secs => :late))" in sql
+    ) is enabled
     assert params == {
         "lim": 5,
         "a": 60,
         "b": 120,
-        **({"activated": True} if enabled else {}),
+        **({"activated": True, "late": 3600} if enabled else {}),
     }
 
 

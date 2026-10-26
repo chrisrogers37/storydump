@@ -51,6 +51,7 @@ from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_preparation_job,
     past_posts_retry,
     credential_lifecycle,
     drive_credentials,
@@ -70,6 +71,7 @@ from src.services.target.vocabulary import PROVIDER_GDRIVE, PUBLISH_MAX_BYTES
 from src.services.target.work_loop import (
     assert_concurrency_fits,
     Parked,
+    TASK_CONNECTIONS,
     WorkerConfig,
     WorkerDeps,
     WorkLoop,
@@ -350,6 +352,7 @@ class WorkerApp:
 LANE_CONCURRENCY_ENV = {
     "interactive": "TARGET_WORKER_INTERACTIVE_CONCURRENCY",
     "bulk": "TARGET_WORKER_BULK_CONCURRENCY",
+    "media": "TARGET_WORKER_MEDIA_CONCURRENCY",
 }
 
 
@@ -508,6 +511,8 @@ def compose(
     name = f"{socket.gethostname()}-{os.getpid()}"
     # K claim-and-run tasks per lane, each claiming on a
     # pooled checkout it returns at once — K bounds tasks, not connections.
+    # Every lane the ceiling weighs (`TASK_CONNECTIONS`) starts its K loops, so
+    # the ceiling counts exactly what runs.
     # The ceiling is asserted HERE, at composition, so an oversubscribed
     # configuration refuses to start rather than timing out on checkouts.
     logger.info(
@@ -527,7 +532,7 @@ def compose(
             worker_name=f"{name}-{lane}-{k}",
             past_posts_capability=deps.past_posts_capability,
         )
-        for lane in ("interactive", "bulk")
+        for lane in TASK_CONNECTIONS
         for k in range(config.concurrency_for(lane))
     ]
     return WorkerApp(
@@ -730,9 +735,11 @@ class PromptSweeper:
         self.unheard = 0
 
     async def prepare_selected(self, sessions):
+        """Mint one prepare job per past-posts story whose file is due, on the
+        file lane (`past_posts_preparation_job`): the sweep fetches nothing, so
+        a slow download never holds the cards behind it."""
         deps = getattr(self._app, "deps", None)
-        prepare = getattr(deps, "selected_prepare", None)
-        if prepare is None:
+        if getattr(deps, "selected_prepare", None) is None:
             return
         # The bounded door discovers already selected subjects, never a past-posts catalog.
         async with sessions({}) as session:
@@ -747,14 +754,21 @@ class PromptSweeper:
                 .all()
             )
         for subject in subjects:
+            ws = str(subject["workspace_id"])
             try:
-                await prepare(
-                    engine=self._app.engine,
-                    workspace_id=str(subject["workspace_id"]),
-                    intent_id=str(subject["intent_id"]),
+                # The job is the story's tenant's row: mint it under that tenant.
+                async with sessions({"workspace_id": ws}) as session:
+                    await past_posts_preparation_job.enqueue(
+                        session,
+                        workspace_id=ws,
+                        intent_id=str(subject["intent_id"]),
+                        config=self._app.config,
+                    )
+            except Exception:  # noqa: BLE001 — one subject's failure cannot starve its siblings
+                logger.exception(
+                    "prompt sweep: NO prepare job was minted for story %s",
+                    subject["intent_id"],
                 )
-            except Exception:  # noqa: BLE001 — one selected failure cannot starve its siblings
-                logger.warning("selected media preparation deferred", exc_info=False)
 
     async def run(self, stop: asyncio.Event) -> None:
         # Each leg is one transaction with no tenant and the system actor —

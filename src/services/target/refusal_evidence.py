@@ -69,6 +69,16 @@ def of(exc: BaseException) -> Optional[dict]:
     return value if isinstance(value, dict) else None
 
 
+def latched(capture) -> Optional[dict]:
+    """The refusal that parked a slide, from its stored capture: kept where the
+    refusal parked it (`asset_unavailable`), so whichever caller later meets
+    the parked slide says why. None for a capture of anything else."""
+    if not isinstance(capture, dict) or capture.get("reason") != "asset_unavailable":
+        return None
+    refusal = capture.get("refusal")
+    return refusal if isinstance(refusal, dict) else None
+
+
 def graph_path(url: str) -> str:
     """A request URL's path. Its query, and so any parameter, is never read."""
     try:
@@ -308,6 +318,15 @@ def _plain(refusal) -> Optional[str]:
             else "its time limit"
         )
         return f"Instagram's file did not download within {limit}"
+    if kind == "window_closed":
+        late = whole(refusal.get("late_seconds"))
+        within = f"within {late // 60:,} minutes of its slot" if late else "in time"
+        sentence = (
+            f"its file could not be fetched {within}"
+            f" ({_count(refusal.get('tries'))} tries)"
+        )
+        last = plain(refusal.get("last_refusal"))
+        return f"{sentence}; the last was refused: {last}" if last else sentence
     if kind in ("cdn_refused", "cdn_error"):
         statuses = "/".join(str(s) for s in refusal.get("statuses") or []) or "?"
         verb = "refused the link twice" if kind == "cdn_refused" else "failed"

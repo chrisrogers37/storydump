@@ -10,20 +10,17 @@ only once its attempts are spent. A proven class parks at once:
   reads in a row.
 
 The decisions are pure: they read a count of failed tries and the last
-refusal (`Tried`), never where those are kept. The slide's capture keeps them
-today (`from_capture`, written by `instagram_preparation`); a job that keeps
-them on its own row passes the same `Tried` and runs again at the decision's
-`next_attempt_at`.
+refusal (`Tried`), never where those are kept. The story's prepare job keeps
+the count on its own row (its attempts) and runs again after `Retry.delay`;
+the slide's capture keeps the last refusal (`last_refusal`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Mapping, Optional
 
 from src.services.target.refusal_evidence import proves_gone
-from src.utils.datetime_utils import ensure_utc, parse_iso_timestamp
 
 
 @dataclass(frozen=True)
@@ -65,25 +62,20 @@ ONCE = Retry(attempts=1, base_seconds=0, cap_seconds=0)
 
 @dataclass(frozen=True)
 class Tried:
-    """One slide's failed tries for one observation: how many, the last one's
-    refusal, and when the next may start."""
+    """One slide's failed tries before this one: how many, and the last one's
+    refusal."""
 
     attempts: int = 0
     refusal: Optional[Mapping] = None
-    next_attempt_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
 class Decision:
-    """Try again at `next_attempt_at`, or park when there is none; `attempt`
+    """Park the story, or try again after `Retry.delay(attempt)`; `attempt`
     counts this one."""
 
     attempt: int
-    next_attempt_at: Optional[datetime] = None
-
-    @property
-    def park(self) -> bool:
-        return self.next_attempt_at is None
+    park: bool
 
 
 def _kind(refusal):
@@ -104,39 +96,27 @@ def _withheld(refusal) -> bool:
     )
 
 
-def from_capture(capture, identity) -> Tried:
-    """The failed tries a slide's stored capture counted for `identity` (its
-    generation, revision and slide); none for a capture of anything else."""
+def last_refusal(capture, identity) -> Optional[Mapping]:
+    """The refusal a slide's stored capture keeps from its last refused try of
+    `identity` (its generation, revision and slide); None for a capture of
+    anything else."""
     if not isinstance(capture, Mapping) or capture.get("reason") != "download_pending":
-        return Tried()
+        return None
     stored = (
         capture.get("generation_id"),
         capture.get("observation_revision"),
         capture.get("selected_asset_id"),
     )
-    attempts = capture.get("attempt")
-    if stored != tuple(identity) or type(attempts) is not int or attempts < 1:
-        return Tried()
-    try:
-        next_at = ensure_utc(parse_iso_timestamp(capture["next_attempt_at"]))
-    except (KeyError, TypeError, ValueError):
-        next_at = None
-    return Tried(attempts, capture.get("refusal"), next_at)
+    return capture.get("refusal") if stored == tuple(identity) else None
 
 
-def decide(refusal, tried: Tried, now, retry: Retry) -> Decision:
+def decide(refusal, tried: Tried, retry: Retry) -> Decision:
     """The decision for one refused fetch after `tried`."""
     attempt = tried.attempts + 1
-    if (
-        attempt >= retry.attempts
+    return Decision(
+        attempt,
+        park=attempt >= retry.attempts
         or proves_gone(refusal)
         or _names_a_bound(refusal)
-        or (_withheld(refusal) and _withheld(tried.refusal))
-    ):
-        return Decision(attempt)
-    return Decision(attempt, now + timedelta(seconds=retry.delay(attempt)))
-
-
-def waiting(tried: Tried, now) -> bool:
-    """Whether the next try is still ahead of `now`."""
-    return tried.next_attempt_at is not None and tried.next_attempt_at > now
+        or (_withheld(refusal) and _withheld(tried.refusal)),
+    )

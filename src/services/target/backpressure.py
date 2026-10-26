@@ -22,7 +22,7 @@ from sqlalchemy import text
 
 from src.services.target.rate_counters import window_start
 
-LANES = ("interactive", "bulk")
+LANES = ("interactive", "bulk", "media")
 
 
 async def snapshot(

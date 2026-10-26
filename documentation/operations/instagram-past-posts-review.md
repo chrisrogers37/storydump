@@ -379,6 +379,11 @@ link, generation and revision, and its validation evidence.
 - **A selected item.** Its bytes are read twice: to prepare its approval card, and
   again for publishing transit. Each read first makes a fresh Graph lookup, and retries
   once if the CDN link proves expired.
+  - The card's read runs in the story's own `prepare_past_post` job, on the worker's
+    `media` lane, never in the prompt sweep. A refusal that proves nothing is tried
+    again after a wait that doubles from 30 s to 15 min. The story parks for review
+    with its evidence on a proven refusal, on its eighth try, or when a download could
+    no longer finish within an hour of its slot.
   - The CDN request never carries the Instagram token. It goes only to
     `*.cdninstagram.com` or `*.fbcdn.net`, over HTTPS.
   - The real validator judges the bytes before a card or any publishing effect.

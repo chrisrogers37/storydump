@@ -60,6 +60,9 @@ class _Selected:
     provenance: dict = field(repr=False)
     ready: bool
     policy_revision: int
+    #: Which try of the story's file this turn is, 1 for the first: the prepare
+    #: job's attempts (`past_posts_preparation_job`).
+    attempt: int = 1
 
 
 _SUBJECT = """
@@ -68,7 +71,7 @@ SELECT i.id AS intent_id,i.state AS intent_state,i.cancel_requested,
  x.parent_media_id,x.data_generation_id,x.observation_revision,a.validation_fingerprint AS current_fingerprint,
  pol.revision AS policy_revision,
  a.asset_media_id AS selected_asset_id,x.slide_count,
- a.validation_capture AS current_capture,clock_timestamp() AS db_now
+ a.validation_capture AS current_capture
 FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
 JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
 LEFT JOIN instagram_media_assets a ON a.workspace_id=m.workspace_id AND a.source_id=m.source_id AND a.media_item_id=m.id
@@ -81,11 +84,19 @@ FOR UPDATE OF m,i
 """
 
 
-def _tried(generation_id, subject):
-    """The failed tries the slide's capture counted for this observation."""
-    return past_posts_retry.from_capture(
-        subject["current_capture"],
-        (generation_id, subject["observation_revision"], subject["selected_asset_id"]),
+def _tried(generation_id, subject, attempt):
+    """The tries before try `attempt`, and the last one's refusal the slide's
+    capture keeps for this observation."""
+    return past_posts_retry.Tried(
+        attempt - 1,
+        past_posts_retry.last_refusal(
+            subject["current_capture"],
+            (
+                generation_id,
+                subject["observation_revision"],
+                subject["selected_asset_id"],
+            ),
+        ),
     )
 
 
@@ -95,14 +106,11 @@ def _unsuitable(verdict, subject):
     meets the latch, its park says why. No verdict proves nothing: the story
     waits."""
     reason = verdict["reason"] if verdict else "past_posts_revalidation_required"
-    capture = subject["current_capture"]
-    latched = (
-        reason == "asset_unavailable"
-        and isinstance(capture, dict)
-        and capture.get("reason") == "asset_unavailable"
-    )
     return source_policy.MediaAdmissionPending(
-        reason, evidence=capture.get("refusal") if latched else None
+        reason,
+        evidence=refusal_evidence.latched(subject["current_capture"])
+        if reason == "asset_unavailable"
+        else None,
     )
 
 
@@ -164,7 +172,7 @@ class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
 
-    async def _start(self, engine, workspace_id, intent_id):
+    async def _start(self, engine, workspace_id, intent_id, attempt=1):
         ws, iid = str(workspace_id), str(intent_id)
         async with unit_of_work(engine, ws, actor_kind="worker").begin() as conn:
             context = await source_policy.suitability_context(
@@ -177,14 +185,6 @@ class SelectedPreparation:
                 or subject["cancel_requested"]
             ):
                 raise source_policy.MediaAdmissionPending("asset_unavailable")
-            if past_posts_retry.waiting(
-                _tried(str(subject["data_generation_id"]), subject), subject["db_now"]
-            ):
-                # The slide's next try is still ahead: the story waits, before any
-                # source read, Graph request or download.
-                raise source_policy.MediaAdmissionPending(
-                    "past_posts_revalidation_required"
-                )
             capture = await admission.capture_source_read(
                 conn,
                 workspace_id=ws,
@@ -275,10 +275,15 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 provenance,
                 bool(strict and strict["suitable"]),
                 candidate["policy_revision"],
+                attempt,
             )
 
-    async def selected_prepare(self, *, engine, workspace_id, intent_id) -> None:
-        selected = await self._start(engine, workspace_id, intent_id)
+    async def selected_prepare(
+        self, *, engine, workspace_id, intent_id, attempt=1
+    ) -> None:
+        """Fetch and judge the story's file unless its bytes are already proven.
+        *attempt* is which try this is (the prepare job's attempts)."""
+        selected = await self._start(engine, workspace_id, intent_id, attempt)
         if not selected.ready:
             await self._fetch(engine, workspace_id, intent_id, selected)
 
@@ -316,15 +321,10 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         except media_adapters.MediaSelectedAssetChanged as exc:
             # A truncated children read cannot prove the selected slide left:
             # like any refusal that proves nothing, it waits for its next try.
-            await self._failure(
-                engine,
-                workspace_id,
-                intent_id,
-                selected,
-                _refusal(exc, counters, selected),
-            )
+            refusal = _refusal(exc, counters, selected)
+            await self._failure(engine, workspace_id, intent_id, selected, refusal)
             raise source_policy.MediaAdmissionPending(
-                "past_posts_revalidation_required"
+                "past_posts_revalidation_required", evidence=refusal
             ) from None
         except media_adapters.MediaSelectedAssetGone as exc:
             # The retirement deletes the asset row, so the story's park is the
@@ -341,16 +341,12 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         ):
             raise
         except media_adapters.MediaTerminalError as exc:
-            await self._failure(
-                engine,
-                workspace_id,
-                intent_id,
-                selected,
-                _refusal(exc, counters, selected),
-            )
-            # A refusal that proves nothing waits for its next try.
+            refusal = _refusal(exc, counters, selected)
+            await self._failure(engine, workspace_id, intent_id, selected, refusal)
+            # A refusal that proves nothing waits for its next try, and says
+            # what refused this one.
             raise source_policy.MediaAdmissionPending(
-                "past_posts_revalidation_required"
+                "past_posts_revalidation_required", evidence=refusal
             ) from None
         except (
             media_adapters.MediaRetryableError,
@@ -547,12 +543,11 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             state = validation.state if validation else "validation_pending"
             decision = reason = None
             if validation is None:
-                # Decided under the row locks, on the capture and the clock read
-                # now, so two refusals of one story count one after the other.
+                # Decided under the row locks, on the try the prepare job counts
+                # and the last refusal the slide's capture keeps.
                 decision = past_posts_retry.decide(
                     refusal,
-                    _tried(selected.capture.generation_id, subject),
-                    subject["db_now"],
+                    _tried(selected.capture.generation_id, subject, selected.attempt),
                     self.ports.retry,
                 )
                 reason = "asset_unavailable" if decision.park else "download_pending"
@@ -565,8 +560,6 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if decision is not None:
                 evidence["attempt"] = decision.attempt
-                if not decision.park:
-                    evidence["next_attempt_at"] = decision.next_attempt_at.isoformat()
             if refusal is not None:
                 evidence["refusal"] = refusal
             if passed is not None:

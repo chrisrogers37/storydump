@@ -7,7 +7,13 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from src.services.target import jobs, provider_ops, publish_cap, source_policy
+from src.services.target import (
+    jobs,
+    provider_ops,
+    publish_cap,
+    refusal_evidence,
+    source_policy,
+)
 from src.services.target.transit import (
     PastPostsUploadEvidence,
     PastPostsUploadUncertain,
@@ -16,6 +22,7 @@ from src.services.target.unit_of_work import in_transaction
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_sources_gate as foundation
+from tests.scripts import test_past_posts_composition_gate as composition
 
 past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
@@ -925,6 +932,95 @@ async def test_park_without_refusal_evidence_writes_no_refusal_key(
     }
     assert row["has_evidence"] is False
     assert details == [{"reason": "past_posts_content_unavailable"}]
+
+
+async def test_a_latched_slide_parks_the_publish_job_at_once_with_its_refusal(
+    past_posts_engine, origin
+):
+    """A slide a refused fetch parked is refused by `authorize` with the refusal
+    that parked it, and the publish job that meets it parks its story at once,
+    saying what refused the file."""
+    from src.services.target import publish_pipeline
+    from src.services.target.meta_adapter import StubMetaAdapter
+
+    m = module()
+    _, _, intent = await preparation.selected(past_posts_engine, origin)
+    prepared = preparation.refusing(
+        preparation.refused("cdn_refused", **preparation.CDN_404)
+    )
+    with pytest.raises(source_policy.MediaAdmissionPending) as latching:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    refusal = {
+        "v": 1,
+        "kind": "cdn_refused",
+        **preparation.CDN_404,
+        "counters": preparation.TURN,
+    }
+    capture = await preparation.capture_of(past_posts_engine, origin, intent)
+    assert latching.value.reason == "asset_unavailable"
+    assert (capture["state"], capture["reason"], capture["refusal"]) == (
+        "validation_pending",
+        "asset_unavailable",
+        refusal,
+    )
+    job = await composition.approved_job(past_posts_engine, origin, intent)
+
+    async with observations.uow(past_posts_engine, origin) as conn:
+        with pytest.raises(m.PastPostsEffectRefused) as refused:
+            await m.authorize(
+                conn,
+                workspace_id=str(origin["ws"]),
+                intent_id=intent,
+                capability=foundation.capability(),
+            )
+    assert refused.value.reason == "past_posts_content_unavailable"
+    assert refusal_evidence.of(refused.value) == refusal
+
+    async def forbidden(*args):
+        raise AssertionError("a parked slide reached a media request")
+
+    transit, meta = Transit(), StubMetaAdapter()
+    outcome = await publish_pipeline.run_publish_pipeline(
+        job,
+        engine=past_posts_engine,
+        meta=meta,
+        transit=transit,
+        media_fetch=forbidden,
+        past_posts=m.PastPostsPipeline(
+            capability=foundation.capability(), fetch_selected=prepared.fetch_selected
+        ),
+        sleep=no_sleep,
+    )
+    assert outcome == publish_pipeline.POISONED
+    assert not transit.calls and not meta.create_calls and not meta.publish_calls
+    async with observations.uow(past_posts_engine, origin) as conn:
+        story = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT state,last_error->'error'->>'reason' AS reason,"
+                        "last_error->'error'->'refusal' AS refusal,"
+                        "attempts_by_step->'past_posts_waits' AS waits"
+                        " FROM post_intents WHERE id=:id"
+                    ),
+                    dict(id=intent),
+                )
+            )
+            .mappings()
+            .one()
+        )
+        job_state = await conn.scalar(
+            text("SELECT state FROM jobs WHERE id=:id"), dict(id=job["id"])
+        )
+    assert dict(story) == {
+        "state": "review_required",
+        "reason": "past_posts_content_unavailable",
+        "refusal": refusal,
+        "waits": 1,
+    }
+    assert job_state == "review_required"
 
 
 async def test_truncated_missing_slide_defers_early_card_without_review(

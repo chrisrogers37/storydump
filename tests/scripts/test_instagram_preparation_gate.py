@@ -1,7 +1,7 @@
 """Selected-only preparation through actual tenant roles, real local JPEG proof."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from io import BytesIO
 import json
 import uuid
@@ -177,13 +177,9 @@ def service(
 RETRY = Retry(attempts=3, base_seconds=30, cap_seconds=900)
 
 
-async def next_try(engine, chain, intent):
-    """The slide's capture without its next try, that next try, and the
-    database's clock now."""
-    capture = dict((await proof(engine, chain, intent))["validation_capture"])
-    async with obs.uow(engine, chain) as conn:
-        now = await conn.scalar(text("SELECT clock_timestamp()"))
-    return capture, datetime.fromisoformat(capture.pop("next_attempt_at")), now
+async def capture_of(engine, chain, intent):
+    """The story's slide's stored capture."""
+    return (await proof(engine, chain, intent))["validation_capture"]
 
 
 async def test_selected_bytes_bind_before_dispatch_and_real_proof_is_strict(
@@ -728,8 +724,8 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
     past_posts_engine, origin
 ):
     """A retryable fetch refusal's evidence lands in the asset's
-    `validation_capture` under `download_pending`, with its attempt and the
-    time of the next try, and the original error is raised again.
+    `validation_capture` under `download_pending`, with its attempt, and the
+    original error is raised again for the prepare job's next try.
     `download_pending` does not latch the story."""
     src, item, intent = await selected(past_posts_engine, origin)
     error = refused(
@@ -745,9 +741,7 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert err.value is error
-    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
-    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
-    assert capture == {
+    assert await capture_of(past_posts_engine, origin, intent) == {
         "generation_id": src["generation_id"],
         "observation_revision": 1,
         "selected_asset_id": "123",
@@ -767,49 +761,60 @@ async def test_retryable_refusal_records_its_evidence_under_download_pending(
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
 
 
-async def test_an_unproven_refusal_waits_for_its_next_try_and_is_not_parked(
+async def test_an_unproven_refusal_is_not_parked_and_says_what_refused_it(
     past_posts_engine, origin
 ):
     """A terminal refusal that proves nothing (the CDN refused the link twice)
-    records `download_pending` with its class, the attempt and the time of the
-    next try, and the story waits: no `asset_unavailable`, so nothing latches."""
+    records `download_pending` with its class and the attempt, and the story
+    waits with that refusal as its evidence: no `asset_unavailable`, so
+    nothing latches."""
     src, _, intent = await selected(past_posts_engine, origin)
     with pytest.raises(source_policy.MediaAdmissionPending) as err:
         await refusing(refused("cdn_refused", **CDN_404), retry=RETRY).selected_prepare(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
+    refusal = {"v": 1, "kind": "cdn_refused", **CDN_404, "counters": TURN}
     assert err.value.reason == "past_posts_revalidation_required"
-    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
-    assert capture == {
+    assert err.value.evidence == refusal
+    assert await capture_of(past_posts_engine, origin, intent) == {
         "generation_id": src["generation_id"],
         "observation_revision": 1,
         "selected_asset_id": "123",
         "state": "validation_pending",
         "reason": "download_pending",
         "attempt": 1,
-        "refusal": {"v": 1, "kind": "cdn_refused", **CDN_404, "counters": TURN},
+        "refusal": refusal,
     }
-    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
 
 
-async def test_a_story_inside_its_wait_is_deferred_without_a_fetch(
+async def test_the_try_is_the_attempt_the_prepare_job_hands_it(
     past_posts_engine, origin
 ):
-    """Before its next try a story waits for revalidation and nothing is read:
-    no Graph request, no download."""
+    """The prepare job's attempts count the tries: handed an attempt before its
+    last, an unproven refusal waits; handed its last, it parks the story with
+    that refusal."""
     _, _, intent = await selected(past_posts_engine, origin)
-    with pytest.raises(source_policy.MediaAdmissionPending):
-        await refusing(refused("cdn_refused", **CDN_404), retry=RETRY).selected_prepare(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
-        )
-    prepared, calls = service(past_posts_engine, origin)
-    with pytest.raises(source_policy.MediaAdmissionPending) as err:
-        await prepared.selected_prepare(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
-        )
-    assert err.value.reason == "past_posts_revalidation_required" and calls == []
+    refusal = {"v": 1, "kind": "cdn_refused", **CDN_404, "counters": TURN}
+    caught = []
+    for attempt in (RETRY.attempts - 1, RETRY.attempts):
+        with pytest.raises(source_policy.MediaAdmissionPending) as err:
+            await refusing(
+                refused("cdn_refused", **CDN_404), retry=RETRY
+            ).selected_prepare(
+                engine=past_posts_engine,
+                workspace_id=str(origin["ws"]),
+                intent_id=intent,
+                attempt=attempt,
+            )
+        capture = await capture_of(past_posts_engine, origin, intent)
+        caught.append((err.value.reason, capture["reason"], capture["attempt"]))
+    assert caught == [
+        ("past_posts_revalidation_required", "download_pending", RETRY.attempts - 1),
+        ("asset_unavailable", "asset_unavailable", RETRY.attempts),
+    ]
+    assert err.value.evidence == refusal and capture["refusal"] == refusal
 
 
 async def test_the_last_try_parks_the_story_with_its_refusal(past_posts_engine, origin):
@@ -824,7 +829,10 @@ async def test_the_last_try_parks_the_story_with_its_refusal(past_posts_engine, 
     facts = dict(http_status=500, code=1, error_subcode=None)
     with pytest.raises(source_policy.MediaAdmissionPending) as err:
         await refusing(refused("graph_error", **facts), retry=twice).selected_prepare(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+            engine=past_posts_engine,
+            workspace_id=str(origin["ws"]),
+            intent_id=intent,
+            attempt=2,
         )
     last = {"v": 1, "kind": "graph_error", **facts, "counters": TURN}
     assert first.value.reason == "past_posts_revalidation_required"
@@ -1204,8 +1212,8 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
     past_posts_engine, origin
 ):
     """A truncated children read cannot prove the selected slide left: the story
-    waits for its next try with the read's `slide_changed` evidence, and nothing
-    is retired."""
+    waits for its next try with the read's `slide_changed` evidence on the
+    capture and on the wait, and nothing is retired."""
     src, item, intent = await selected(past_posts_engine, origin)
     prepared, calls = service(
         past_posts_engine, origin, changed_child="456", truncated=True, retry=RETRY
@@ -1216,12 +1224,13 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
     assert error.value.reason == "past_posts_revalidation_required"
     assert calls == ["graph.instagram.com"] * 2
-    capture, next_at, now = await next_try(past_posts_engine, origin, intent)
+    capture = await capture_of(past_posts_engine, origin, intent)
     assert (capture["reason"], capture["attempt"]) == ("download_pending", 1)
     assert {
         key: capture["refusal"][key] for key in ("kind", "children", "complete")
     } == {"kind": "slide_changed", "children": 1, "complete": False}
-    assert now < next_at <= now + timedelta(seconds=RETRY.base_seconds)
+    assert error.value.evidence == capture["refusal"]
+    assert "next_attempt_at" not in capture
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
     async with obs.uow(past_posts_engine, origin) as conn:
@@ -1252,27 +1261,6 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
 
 
-async def test_a_changed_slide_inside_its_wait_is_deferred_without_a_read(
-    past_posts_engine, origin
-):
-    """Before its next try a story waits for revalidation and nothing is read:
-    no Graph request, no download."""
-    _, _, intent = await selected(past_posts_engine, origin)
-    changed, _ = service(
-        past_posts_engine, origin, changed_child="456", truncated=True, retry=RETRY
-    )
-    with pytest.raises(source_policy.MediaAdmissionPending):
-        await changed.fetch_selected(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
-        )
-    prepared, calls = service(past_posts_engine, origin, retry=RETRY)
-    with pytest.raises(source_policy.MediaAdmissionPending) as error:
-        await prepared.fetch_selected(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
-        )
-    assert error.value.reason == "past_posts_revalidation_required" and calls == []
-
-
 async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
     past_posts_engine, origin
 ):
@@ -1288,8 +1276,11 @@ async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     with pytest.raises(source_policy.MediaAdmissionPending) as last:
-        await changed.fetch_selected(
-            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        await changed.selected_prepare(
+            engine=past_posts_engine,
+            workspace_id=str(origin["ws"]),
+            intent_id=intent,
+            attempt=2,
         )
     assert first.value.reason == "past_posts_revalidation_required"
     assert last.value.reason == "asset_unavailable"

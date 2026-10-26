@@ -122,6 +122,39 @@ def test_of_hands_back_an_empty_dict_rather_than_none():
     assert refusal_evidence.of(error) == {}
 
 
+# --- latched -------------------------------------------------------------------
+
+#: A slide's capture once a refused fetch parked it.
+PARKED = {
+    "state": "validation_pending",
+    "reason": "asset_unavailable",
+    "attempt": 8,
+    "refusal": refusal_evidence.evidence("cdn_refused", statuses=[404, 404]),
+}
+
+
+@pytest.mark.unit
+def test_a_parked_slide_keeps_the_refusal_that_parked_it():
+    assert refusal_evidence.latched(PARKED) == PARKED["refusal"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "capture",
+    [
+        {**PARKED, "reason": "download_pending"},
+        {**PARKED, "refusal": "text"},
+        {key: value for key, value in PARKED.items() if key != "refusal"},
+        None,
+        "asset_unavailable",
+    ],
+    ids=["a-try-still-waiting", "not-evidence", "no-refusal", "no-capture", "text"],
+)
+def test_anything_but_a_parked_slide_has_no_latched_refusal(capture):
+    """Only a capture the refusal parked says why the slide is parked."""
+    assert refusal_evidence.latched(capture) is None
+
+
 # --- graph_path ----------------------------------------------------------------
 
 
@@ -601,6 +634,27 @@ FETCH_SENTENCES = [
         fetch_refusal("download_budget_spent", seconds=None, host=HOST),
         "Instagram's file did not download within its time limit",
         id="download-budget-spent-without-its-seconds",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed",
+            late_seconds=3600,
+            tries=7,
+            last_refusal=fetch_refusal(
+                "cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY
+            ),
+        ),
+        "its file could not be fetched within 60 minutes of its slot (7 tries);"
+        " the last was refused: Instagram's file server refused the link twice"
+        " (HTTP 403/404)",
+        id="window-closed",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed", late_seconds=3600, tries=0, last_refusal=None
+        ),
+        "its file could not be fetched within 60 minutes of its slot (0 tries)",
+        id="window-closed-before-a-try",
     ),
     pytest.param(
         fetch_refusal("cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY),

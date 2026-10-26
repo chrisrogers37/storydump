@@ -160,7 +160,8 @@ Each layer is isolated. Do not violate the boundaries:
   (below).
 - **Worker** (`src/worker.py`, the composition root `src/main.py` dispatches
   to) → runs the same services as jobs: the elected clock (`scheduler.py`),
-  the two claim lanes `interactive` and `bulk` over the kind→executor registry
+  the three claim lanes (`interactive` 2, `bulk` 2, `media` 1 tasks; `media`
+  prepares past-posts files) over the kind→executor registry
   (`work_loop.py`, `jobs.py`), the publish pipeline (`publish_pipeline.py`)
   and the outbox sender (`outbox.py`). A kind whose seam the deployment lacks
   is parked by name, never run against a fake.
@@ -405,7 +406,7 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
 The `Procfile` names the two deployed processes; both run the one tier.
 
 - **Worker:** `python -m src.main` — see the safety rules. `src/main.py` only
-  dispatches to `src.worker.main`, which elects the clock, claims jobs on two
+  dispatches to `src.worker.main`, which elects the clock, claims jobs on three
   lanes, runs the publish pipeline and sends the Telegram cards. It reads
   `TARGET_DATABASE_URL` from the process environment and exits 2 without it,
   or when it names a pooled host, no host, or cannot be read
