@@ -20,6 +20,7 @@ probe reads a time, never a post, so it changes no coverage claim.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -137,6 +138,9 @@ class _Turn:
     #: of an app-scoped owner when no verified id is recorded. Never persisted.
     profile: Optional[dict] = None
     profile_read: bool = False
+    #: The HTTP status of this turn's last Graph answer that was not an error,
+    #: for the evidence of a fetch that succeeded.
+    last_graph_status: Optional[int] = None
 
     @property
     def remaining(self):
@@ -447,6 +451,7 @@ class InstagramPastPostsAdapter:
             ) from None
         if not isinstance(body, dict):
             raise MediaRetryableError("Instagram returned an invalid response")
+        turn.last_graph_status = response.status_code
         error = body.get("error") or {}
         if error or response.is_error:
             code = error.get("code") if isinstance(error, dict) else None
@@ -1115,6 +1120,7 @@ class InstagramPastPostsAdapter:
         max_bytes: int,
         selected_asset_id: Optional[str] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
+        on_evidence: Optional[Callable[[dict], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
         """Fetch current bytes; bound validation/effect callers supply selection.
 
@@ -1123,7 +1129,11 @@ class InstagramPastPostsAdapter:
         inherit the previous child's evidence. No consumer is wired here. A
         preview is :meth:`fetch_preview`, never this full fetch.
         on_counters is a synchronous local observer (no I/O), called once even
-        on failure/cancellation. Observer exceptions cannot alter read outcomes.
+        on failure/cancellation. on_evidence is one too, called once with a
+        successful fetch's evidence (`refusal_evidence`, kind "fetched"): each
+        answer's status and media type, the children read, and the file's
+        status, content type, size, sha256, host and expiry. Observer exceptions
+        cannot alter read outcomes.
         """
         turn = None
         try:
@@ -1137,6 +1147,7 @@ class InstagramPastPostsAdapter:
             link_statuses = []
             for attempt in range(2):
                 parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
+                post_status = turn.last_graph_status
                 ownership = await self._ownership(parent.get("owner"), turn)
                 if not ownership.ok:
                     raise refusal_evidence.attach(
@@ -1156,7 +1167,9 @@ class InstagramPastPostsAdapter:
                             "identity_mismatch", id_matches=False
                         ),
                     )
+                turn.last_graph_status = None
                 parts, complete = await self._children(parent, turn)
+                children_status = turn.last_graph_status
                 part = self._selected_part(parts, complete, selected_asset_id)
                 kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
                 url = part.get("media_url")
@@ -1234,6 +1247,39 @@ class InstagramPastPostsAdapter:
                             host=link["host"],
                         ),
                     )
+                if on_evidence is not None:
+                    fetched = refusal_evidence.evidence(
+                        "fetched",
+                        post={
+                            "http_status": post_status,
+                            "media_type": refusal_evidence.short(
+                                parent.get("media_type")
+                            ),
+                        },
+                        children=None
+                        if children_status is None
+                        else {
+                            "http_status": children_status,
+                            "returned": len(parts),
+                            "complete": complete,
+                        },
+                        part={
+                            "media_type": refusal_evidence.short(part.get("media_type"))
+                        },
+                        file={
+                            "http_status": response.status_code,
+                            "content_type": refusal_evidence.short(mime),
+                            "bytes": len(response.content),
+                            "sha256": hashlib.sha256(response.content).hexdigest(),
+                            **link,
+                        },
+                        link_statuses=list(link_statuses),
+                    )
+                    try:
+                        on_evidence(fetched)
+                    except Exception:  # noqa: BLE001 - a diagnostic observer
+                        # cannot replace a successful read.
+                        pass
                 # This is a byte fetch, not video eligibility. Ingest activation
                 # must validate duration/codec before admitting video candidates.
                 return (

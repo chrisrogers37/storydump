@@ -1,0 +1,3 @@
+### Added
+
+- **A past post's successful fetch at preparation is recorded too.** The asset's `validation_capture -> 'fetch'` now keeps what the fetch that got its bytes read, whatever the validation then found. That is the HTTP status and media type of the post's answer and, for a carousel, of the children read with how many came back and whether the list was complete, plus the chosen part's media type. For the file it keeps the status, content type, byte count and sha256 with the link's host and expiry, any CDN status of a first attempt that was refused, and the turn's Instagram and CDN attempt counters. No token, link path, signature or bytes are kept.

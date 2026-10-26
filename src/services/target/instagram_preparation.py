@@ -233,10 +233,15 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected.capture, selected.subject["config"]
         )
         counters = media_adapters.MediaTurnCounters()
+        fetched = None
 
         def observe(value):
             nonlocal counters
             counters = value
+
+        def observe_fetch(value):
+            nonlocal fetched
+            fetched = value
 
         try:
             content, _, _ = await adapter.fetch_bytes(
@@ -249,6 +254,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                     selected.subject["media_kind"]
                 ],
                 on_counters=observe,
+                on_evidence=observe_fetch,
             )
         except media_adapters.MediaSelectedAssetChanged:
             # A truncated children read cannot prove the selected slide left.
@@ -306,7 +312,15 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         )
         refusal = _validation_refusal(validation, counters)
         await self._land(
-            engine, workspace_id, intent_id, selected, validation, refusal=refusal
+            engine,
+            workspace_id,
+            intent_id,
+            selected,
+            validation,
+            refusal=refusal,
+            fetch=None
+            if fetched is None
+            else {**fetched, "counters": asdict(counters)},
         )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
@@ -395,7 +409,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 )
 
     async def _land(
-        self, engine, ws, iid, selected, validation, *, reason=None, refusal=None
+        self,
+        engine,
+        ws,
+        iid,
+        selected,
+        validation,
+        *,
+        reason=None,
+        refusal=None,
+        fetch=None,
     ):
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
@@ -473,6 +496,10 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if refusal is not None:
                 evidence["refusal"] = refusal
+            # What the fetch that got these bytes read (`refusal_evidence`, kind
+            # "fetched"), whatever the validation then found.
+            if fetch is not None:
+                evidence["fetch"] = fetch
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,
