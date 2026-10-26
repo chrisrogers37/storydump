@@ -159,6 +159,30 @@ _CHECKS = {
     "byte_limit": lambda m: (
         f"this file is {_count(m.get('bytes'))} bytes; the limit is {_count(m.get('cap'))}"
     ),
+    # The story derivation, the file Instagram fetches (`judge_derivation`).
+    "derivation_bytes": lambda m: (
+        f"the file Instagram fetches is {_count(m.get('bytes'))} bytes;"
+        f" stories take up to {_count(m.get('limit'))}"
+    ),
+    "derivation_moov_position": lambda m: (
+        "the video Instagram fetches has its index after its media;"
+        " stories need it at the front"
+    ),
+    "derivation_edit_list": lambda m: (
+        "the video Instagram fetches has an edit list; stories take none"
+    ),
+    "derivation_audio_codec": lambda m: (
+        f"the video Instagram fetches carries {_flat(m.get('codec')) or 'unnamed'}"
+        " audio; stories take AAC"
+    ),
+    "derivation_audio_channels": lambda m: (
+        f"the video Instagram fetches has {_count(m.get('channels'))} audio"
+        f" channels; stories take up to {_count(m.get('limit'))}"
+    ),
+    "derivation_audio_rate": lambda m: (
+        f"the video Instagram fetches has audio at {_count(m.get('hz'))} Hz;"
+        f" stories take up to {_count(m.get('limit'))}"
+    ),
 }
 
 
