@@ -222,6 +222,9 @@ class _Ctx:
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
+        #: The status a readiness poll met when it answers "dead": Meta's
+        #: `status_code`, and its own reason (`ContainerStatus.reason`).
+        self.dead_status: Optional[str] = None
         #: The job payload's dry-run snapshot (see `_load`).
         self.dry_run: bool = False
         self.past_posts = job.get("_past_posts_pipeline")
@@ -1181,6 +1184,8 @@ async def _route_readiness(
                     "code": None,
                     "message": "Meta reported the container ERROR or EXPIRED —"
                     " the media at the delivery URL could not be processed",
+                    "status_code": str(ctx.dead_status),
+                    "status": getattr(ctx.dead_status, "reason", None),
                 },
             },
         )
@@ -1769,6 +1774,7 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
         if status in _READY_STATUSES:
             return "ready"
         if status in _DEAD_STATUSES:
+            ctx.dead_status = status
             return "dead"
         if attempt + 1 < POLL_BUDGET:
             await sleep(POLL_INTERVAL_S)

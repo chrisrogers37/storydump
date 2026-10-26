@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import struct
+import subprocess
 import sys
 from dataclasses import replace
 from types import SimpleNamespace
@@ -108,8 +109,6 @@ async def test_exact_byte_ceiling_cannot_be_relaxed(kind, cap):
     "kwargs,reason,state",
     [
         ({"external": True}, "external_reference", "unsupported"),
-        ({"edits": True}, "edit_list", "unsupported"),
-        ({"late": True}, "moov_not_front", "unsupported"),
         ({"fragmented": True}, "container_evidence_incomplete", "validation_pending"),
     ],
 )
@@ -125,9 +124,13 @@ async def test_container_preflight_before_tools(kwargs, reason, state, tmp_path)
     assert "private-secret" not in repr(result)
 
 
-async def test_missing_tools_never_proves_unsupported(tmp_path):
+@pytest.mark.parametrize("kwargs", [{}, {"edits": True}, {"late": True}])
+async def test_missing_tools_never_proves_unsupported(kwargs, tmp_path):
+    """The source's edit list and `moov` position are the story derivation's,
+    not judged: such a container passes the walker and the probe decides."""
+    assert v.inspect_container(movie(**kwargs)).reason is None
     result = await v.validate_media(
-        request(movie(), "video"),
+        request(movie(**kwargs), "video"),
         limits=v.ValidationLimits(
             ffprobe="/missing/tool", temporary_root=str(tmp_path)
         ),
@@ -191,197 +194,149 @@ async def test_cancellation_kills_reaps_owned_process_and_removes_temp(tmp_path)
     assert list(tmp_path.iterdir()) == [executable]
 
 
-def video_facts(
-    *,
-    count=90,
-    fps=30,
-    width=320,
-    height=568,
-    codec="h264",
-    sample_rate=48000,
-    channels=2,
-    audio=False,
-):
-    stream = {
-        "index": 0,
-        "codec_type": "video",
-        "codec_name": codec,
-        "time_base": f"1/{fps}",
-        "nb_frames": str(count),
-        "duration_ts": count,
-        "sample_aspect_ratio": "1:1",
-    }
-    frames = [
-        {
-            "stream_index": 0,
-            "pts": n,
-            "duration": 1,
-            "width": width,
-            "height": height,
-            "pix_fmt": "yuv420p",
-            "interlaced_frame": 0,
-            "sample_aspect_ratio": "1:1",
-        }
-        for n in range(count)
-    ]
-    packets = [
-        {"stream_index": 0, "pts": n, "duration": 1, "size": "1", "pos": "10"}
-        for n in range(count)
-    ]
-    streams = [stream]
-    if audio:
-        streams.append(
+def probe_facts(*, duration="10.000000", fps="30/1", format_duration=None, video=True):
+    """ffprobe's JSON for one file, in the entries the validator asks for."""
+    streams = [{"codec_type": "audio", "codec_name": "aac", "duration": duration}]
+    if video:
+        streams.insert(
+            0,
             {
-                "index": 1,
-                "codec_type": "audio",
-                "codec_name": "aac",
-                "sample_rate": str(sample_rate),
-                "channels": channels,
-            }
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 720,
+                "height": 1280,
+                "avg_frame_rate": fps,
+                "duration": duration,
+            },
         )
-    return {"streams": streams, "packets": packets, "frames": frames}, {
-        "yuv420p": (1, 1)
+    return {
+        "streams": streams,
+        "format": {} if format_duration is None else {"duration": format_duration},
     }
 
 
-def facts_result(*, limits=None, mutate=None, **kwargs):
-    facts, formats = video_facts(**kwargs)
-    if mutate:
-        mutate(facts, formats)
-    return v.inspect_video_facts(
-        facts,
-        formats,
-        v.ContainerEvidence(None, media_extents=((0, 100),)),
-        limits or v.ValidationLimits(),
-    )
-
-
 @pytest.mark.parametrize(
-    "count,fps,reason",
-    [
-        (89, 30, "duration"),
-        (90, 30, None),
-        (1800, 30, None),
-        (1801, 30, "duration"),
-        (66, 22, "fps"),
-        (69, 23, None),
-        (180, 60, None),
-        (183, 61, "fps"),
-    ],
+    "duration,reason",
+    [("2.999", "duration"), ("3", None), ("60", None), ("60.001", "duration")],
 )
-def test_exact_video_duration_and_fps_boundaries(count, fps, reason):
+def test_exact_video_duration_boundaries(duration, reason):
     if reason:
         with pytest.raises(v.UnsupportedMedia, match=f"^{reason}$"):
-            facts_result(count=count, fps=fps)
+            v.inspect_video_facts(probe_facts(duration=duration))
     else:
-        assert facts_result(count=count, fps=fps)["video_frames"] == count
+        facts = v.inspect_video_facts(probe_facts(duration=duration))
+        assert facts["duration_seconds"] == duration
 
 
 @pytest.mark.parametrize(
-    "width,height,reason",
+    "fps,judged",
     [
-        (1920, 1080, None),
-        (1921, 1080, "width"),
-        (100, 1000, None),
-        (99, 1000, "aspect"),
-        (1000, 100, None),
-        (1001, 100, "aspect"),
+        ("22/1", None),
+        ("23/1", "23"),
+        ("30000/1001", "30000/1001"),
+        ("60/1", "60"),
+        ("61/1", None),
     ],
 )
-def test_exact_video_geometry_boundaries(width, height, reason):
-    if reason:
-        with pytest.raises(v.UnsupportedMedia, match=f"^{reason}$"):
-            facts_result(width=width, height=height)
+def test_a_stated_frame_rate_outside_the_matrix_is_refused(fps, judged):
+    if judged is None:
+        with pytest.raises(v.UnsupportedMedia, match="^fps$"):
+            v.inspect_video_facts(probe_facts(fps=fps))
     else:
-        assert facts_result(width=width, height=height)["width"] == width
+        assert v.inspect_video_facts(probe_facts(fps=fps))["fps"] == judged
 
 
-@pytest.mark.parametrize(
-    "sample_rate,channels,reason",
-    [
-        (48000, 1, None),
-        (48000, 2, None),
-        (48001, 2, "audio_sample_rate"),
-        (48000, 3, "audio_channels"),
-    ],
-)
-def test_audio_configuration_boundaries(sample_rate, channels, reason):
-    if reason:
-        with pytest.raises(v.UnsupportedMedia, match=f"^{reason}$"):
-            facts_result(audio=True, sample_rate=sample_rate, channels=channels)
-    else:
-        assert (
-            facts_result(audio=True, sample_rate=sample_rate, channels=channels)[
-                "audio_bitrate"
-            ]
-            == "unproven"
-        )
+def test_a_frame_rate_the_probe_does_not_state_is_not_judged():
+    assert v.inspect_video_facts(probe_facts(fps="0/0"))["fps"] == "unstated"
 
 
-@pytest.mark.parametrize(
-    "mutation,reason",
-    [
-        ("missing_frames", "incomplete_evidence"),
-        ("vfr", "timing_evidence_incomplete"),
-        ("rotation", "transform_evidence_incomplete"),
-        ("extra_track", "stream_topology"),
-        ("unknown_pixel", "color_evidence_incomplete"),
-    ],
-)
-def test_unknown_or_incomplete_video_evidence_is_pending(mutation, reason):
-    facts, formats = video_facts()
-    if mutation == "missing_frames":
-        facts["frames"].pop()
-    elif mutation == "vfr":
-        facts["frames"][40]["pts"] += 1
-    elif mutation == "rotation":
-        facts["streams"][0]["side_data_list"] = [{"rotation": 90}]
-    elif mutation == "extra_track":
-        facts["streams"].append(dict(facts["streams"][0]))
-    else:
-        facts["frames"][-1]["pix_fmt"] = "unrecognized"
-    with pytest.raises(v.ValidationPending, match=f"^{reason}$"):
-        v.inspect_video_facts(
-            facts,
-            formats,
-            v.ContainerEvidence(None, media_extents=((0, 100),)),
-            v.ValidationLimits(),
-        )
+def test_the_duration_falls_back_to_the_containers_and_none_is_pending():
+    facts = probe_facts(duration=None, format_duration="12.5")
+    assert v.inspect_video_facts(facts)["duration_seconds"] == "25/2"
+    with pytest.raises(v.ValidationPending, match="^timing_evidence_incomplete$"):
+        v.inspect_video_facts(probe_facts(duration=None))
 
 
-def test_header_trace_proves_each_gop_start_not_just_first_keyframe():
-    prefix = "[trace_headers @ 0x1] "
-    valid = (
-        prefix
-        + "Packet: 10 bytes, key frame, pts 0.\n"
-        + prefix
-        + "3 nal_unit_type 00101 = 5\n"
-        + prefix
-        + "9 slice_type 0001 = 7\n"
+def test_a_file_with_no_video_stream_is_refused():
+    with pytest.raises(v.UnsupportedMedia, match="^stream_topology$"):
+        v.inspect_video_facts(probe_facts(video=False))
+
+
+def test_what_the_story_derivation_sets_is_not_judged():
+    """The source's codec, frame size and further tracks are the derivation's to
+    settle: the first video stream is judged on its duration and rate only."""
+    facts = probe_facts()
+    facts["streams"][0].update(codec_name="hevc", width=3840, height=2160)
+    facts["streams"].append(
+        {"codec_type": "video", "avg_frame_rate": "120/1", "duration": "10"}
     )
-    valid += (
-        prefix
-        + "Packet: 10 bytes, pts 1.\n"
-        + prefix
-        + "3 nal_unit_type 00001 = 1\n"
-        + prefix
-        + "9 slice_type 001 = 5\n"
+    evidence = v.inspect_video_facts(facts)
+    assert (evidence["codec"], evidence["width"], evidence["fps"]) == (
+        "hevc",
+        3840,
+        "30",
     )
-    result = v.inspect_headers(valid, "h264", 2)
-    assert result["closed_gop"] == "idr_starts_proven"
-    bad = (
-        valid
-        + prefix
-        + "Packet: 10 bytes, key frame, pts 2.\n"
-        + prefix
-        + "3 nal_unit_type 00001 = 1\n"
-        + prefix
-        + "9 slice_type 0001 = 7\n"
+    assert evidence["audio"] is True
+
+
+def encoded_video(tmp_path, *, seconds=4, rate=30):
+    """An H.264 + AAC MP4 written with ffmpeg's defaults, which put an edit
+    list on each track and `moov` after the media."""
+    _requires_linux()
+    out = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size=64x64:rate={rate}",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            str(seconds),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(out),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
     )
-    with pytest.raises(v.ValidationPending, match="closed_gop_unproven"):
-        v.inspect_headers(bad, "h264", 3)
-    with pytest.raises(v.ValidationPending, match="header_evidence_incomplete"):
-        v.inspect_headers(valid, "h264", 3)
+    return out.read_bytes()
+
+
+async def test_a_real_video_with_edit_lists_and_a_late_moov_is_supported(tmp_path):
+    data = encoded_video(tmp_path)
+    assert b"elst" in data and data.find(b"mdat") < data.find(b"moov"), (
+        "the stimulus carries an edit list and a late moov"
+    )
+    result = await v.validate_media(
+        request(data, "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    assert (result.state, result.reason) == ("supported", "validated")
+    assert (result.evidence["codec"], result.evidence["fps"]) == ("h264", "30")
+
+
+@pytest.mark.parametrize("seconds,rate,reason", [(2, 30, "duration"), (4, 120, "fps")])
+async def test_a_real_video_outside_the_matrix_is_refused(
+    tmp_path, seconds, rate, reason
+):
+    result = await v.validate_media(
+        request(encoded_video(tmp_path, seconds=seconds, rate=rate), "video"),
+        limits=v.ValidationLimits(temporary_root=str(tmp_path)),
+    )
+    assert (result.state, result.reason) == ("unsupported", reason)
 
 
 def test_linux_probe_tools_are_required_in_ci():
@@ -460,17 +415,12 @@ async def test_cancellation_during_process_creation_still_reaps_group(
 
 async def test_malformed_tool_json_and_timeout_clean_owned_temporary_files(tmp_path):
     executable = tmp_path / "fixture-tool"
-    executable.write_text(
-        "#!"
-        + sys.executable
-        + '\nimport sys\nif "-version" in sys.argv: print("ffprobe version 7.1")\nelse: print("{")\n'
-    )
+    executable.write_text("#!" + sys.executable + '\nprint("{")\n')
     executable.chmod(0o700)
     result = await v.validate_media(
         request(movie(), "video"),
         limits=v.ValidationLimits(
             ffprobe=str(executable),
-            ffmpeg=str(executable),
             temporary_root=str(tmp_path),
         ),
     )
@@ -672,11 +622,10 @@ async def test_repeated_cancellation_during_finally_finishes_reaping(
     assert cancellation_seen == [("first-cancellation",)]
 
 
-def refusal_of(error, **kwargs):
-    """The `error` that `inspect_video_facts` raises for the facts
-    `facts_result` builds from `kwargs`."""
+def refusal_of(error, facts):
+    """The `error` that `inspect_video_facts` raises for *facts*."""
     with pytest.raises(error) as raised:
-        facts_result(**kwargs)
+        v.inspect_video_facts(facts)
     return raised.value
 
 
@@ -698,171 +647,38 @@ def assert_plain(value):
         assert value is None or type(value) in (bool, int), repr(value)
 
 
-def interlace_first_frame(facts, formats):
-    facts["frames"][0]["interlaced_frame"] = 1
-
-
-def subsample_first_frame_444(facts, formats):
-    facts["frames"][0]["pix_fmt"] = "yuv444p"
-    formats["yuv444p"] = (0, 0)
-
-
-def stretch_every_frame(facts, formats):
-    for frame in facts["frames"]:
-        frame["sample_aspect_ratio"] = "1:2"
-
-
-def stray_fourth_packet(facts, formats):
-    facts["packets"][3]["pos"] = "500"
-
-
-def mp3_audio(facts, formats):
-    facts["streams"][1]["codec_name"] = "mp3"
-
-
-def second_audio_stream(facts, formats):
-    facts["streams"].append({**facts["streams"][1], "index": 2})
-
-
-def unnamed_video_codec(facts, formats):
-    del facts["streams"][0]["codec_name"]
-
-
-#: Every refusal `inspect_video_facts` makes after reading values: the error it
-#: raises, the check it names, how its facts are built, and the values it measured.
+#: Every refusal `inspect_video_facts` makes: the error, the check, the
+#: probe's facts, and the values it measured.
 VIDEO_REFUSALS = [
     pytest.param(
         v.UnsupportedMedia,
-        "video_codec",
-        {"codec": "vp9"},
-        {"video_codec": "vp9"},
-        id="video_codec",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "video_codec",
-        {"mutate": unnamed_video_codec},
-        {"video_codec": None},
-        id="video_codec_unnamed",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "video_codec",
-        {"codec": "x" * 300},
-        {"video_codec": "x" * 64},
-        id="video_codec_text_bound",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "width",
-        {"width": 1921, "height": 1080},
-        {"width": 1921, "height": 1080},
-        id="width",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "aspect",
-        {"width": 1001, "height": 100},
-        {
-            "width": 1001,
-            "height": 100,
-            "sample_aspect_ratio": "1",
-            "aspect": "1001/100",
-        },
-        id="aspect",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "aspect",
-        {"width": 100, "height": 1000, "mutate": stretch_every_frame},
-        {
-            "width": 100,
-            "height": 1000,
-            "sample_aspect_ratio": "1/2",
-            "aspect": "1/20",
-        },
-        id="aspect_with_sample_aspect_ratio",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "interlaced",
-        {"mutate": interlace_first_frame},
-        {"width": 320, "height": 568},
-        id="interlaced",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "chroma_subsampling",
-        {"mutate": subsample_first_frame_444},
-        {"pix_fmt": "yuv444p"},
-        id="chroma_subsampling",
+        "stream_topology",
+        probe_facts(video=False),
+        {"streams": 1, "video_streams": 0},
+        id="stream_topology",
     ),
     pytest.param(
         v.UnsupportedMedia,
         "duration",
-        {"count": 89, "fps": 30},
-        {"duration_seconds": "89/30", "fps": "30", "video_frames": 89},
+        probe_facts(duration="61.5"),
+        {"duration_seconds": "123/2", "fps": "30"},
         id="duration",
     ),
     pytest.param(
         v.UnsupportedMedia,
         "fps",
-        {"count": 671, "fps": 22},
-        {"duration_seconds": "61/2", "fps": "22", "video_frames": 671},
+        probe_facts(fps="120/1"),
+        {"duration_seconds": "10", "fps": "120"},
         id="fps",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "packet_outside_media",
-        {"mutate": stray_fourth_packet},
-        {"packet_pos": 500, "packet_size": 1},
-        id="packet_outside_media",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "audio_codec",
-        {"audio": True, "mutate": mp3_audio},
-        {"audio_codec": "mp3"},
-        id="audio_codec",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "audio_sample_rate",
-        {"audio": True, "sample_rate": 48001},
-        {"sample_rate": 48001},
-        id="audio_sample_rate",
-    ),
-    pytest.param(
-        v.UnsupportedMedia,
-        "audio_channels",
-        {"audio": True, "channels": 3},
-        {"channels": 3},
-        id="audio_channels",
-    ),
-    pytest.param(
-        v.ValidationPending,
-        "stream_topology",
-        {"audio": True, "mutate": second_audio_stream},
-        {"streams": 3, "video_streams": 1, "audio_streams": 2},
-        id="stream_topology",
-    ),
-    pytest.param(
-        v.ValidationPending,
-        "pixel_budget",
-        {"limits": v.ValidationLimits(pixels=100_000)},
-        {"width": 320, "height": 568, "pixel_limit": 100_000},
-        id="pixel_budget",
     ),
 ]
 
 
-@pytest.mark.parametrize("error,check,build,measured", VIDEO_REFUSALS)
-def test_video_check_carries_the_values_it_read(error, check, build, measured):
-    """A video check that read values refuses with exactly those values as
-    `exc.measured`: whole numbers stay numbers, a ratio is its exact text, any
-    other value is text cut to 64 characters, and a field the probe left out
-    stays None."""
-    raised = refusal_of(error, **build)
+@pytest.mark.parametrize("error,check,facts,measured", VIDEO_REFUSALS)
+def test_video_check_carries_the_values_it_read(error, check, facts, measured):
+    """A video check refuses with the values it read as `exc.measured`: whole
+    numbers stay numbers and a duration or a rate is its exact text."""
+    raised = refusal_of(error, facts)
     assert str(raised) == check
     assert raised.measured == measured
     assert_plain(raised.measured)
@@ -871,26 +687,6 @@ def test_video_check_carries_the_values_it_read(error, check, build, measured):
 #: Every refusal `inspect_container` makes: the bytes, the limits (None for the
 #: defaults), the reason, whether it is pending, and the values it measured.
 CONTAINER_REFUSALS = [
-    pytest.param(
-        movie(edits=True),
-        None,
-        "edit_list",
-        False,
-        {"boxes": ["ftyp", "moov"], "box_count": 13, "sample_codecs": ["avc1"]},
-        id="edit_list",
-    ),
-    pytest.param(
-        movie(late=True),
-        None,
-        "moov_not_front",
-        False,
-        {
-            "boxes": ["ftyp", "mdat", "moov"],
-            "box_count": 12,
-            "sample_codecs": ["avc1"],
-        },
-        id="moov_not_front",
-    ),
     pytest.param(
         movie().replace(b"avc1", b"vp09"),
         None,
@@ -940,9 +736,9 @@ CONTAINER_REFUSALS = [
         id="container_budget",
     ),
     pytest.param(
-        b"".join(box(b"free") for _ in range(40)) + movie(late=True),
+        b"".join(box(b"free") for _ in range(40)) + movie()[:-1],
         None,
-        "moov_not_front",
+        "malformed_container",
         False,
         {"boxes": ["free"] * 32, "box_count": 52, "sample_codecs": ["avc1"]},
         id="boxes_are_bounded",
@@ -1069,7 +865,7 @@ async def test_failed_check_is_plain_json(tmp_path):
     numbers or lists of text. (The result holds it as a read-only mapping;
     `dict(...)` is what the record takes.)"""
     limits = v.ValidationLimits(ffprobe="/missing/tool", temporary_root=str(tmp_path))
-    for data, kind in ((bytes(8_000_001), "image"), (movie(edits=True), "video")):
+    for data, kind in ((bytes(8_000_001), "image"), (movie(external=True), "video")):
         result = await v.validate_media(request(data, kind), limits=limits)
         failed = dict(result.failed_check)
         assert failed["measured"], "a check that measured nothing proves nothing here"
@@ -1112,7 +908,7 @@ def refused_container(boxes):
 
     def inspect(data, limits=None):
         return v.ContainerEvidence(
-            "edit_list",
+            "malformed_container",
             measured={"boxes": boxes, "box_count": len(boxes), "sample_codecs": []},
         )
 
