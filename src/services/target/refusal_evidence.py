@@ -407,10 +407,15 @@ def _plain(refusal) -> Optional[str]:
             f" ({_count(refusal.get('length'))} bytes) instead of a story's image or video"
         )
     if kind == "slide_changed":
+        listed = _count(refusal.get("children"))
+        if refusal.get("complete") is True:
+            return (
+                f"Instagram's slide list was complete ({listed} listed) but did not"
+                " include the chosen slide"
+            )
         return (
-            "Instagram's slide list was incomplete"
-            f" ({_count(refusal.get('children'))} listed), so the chosen slide could"
-            " not be confirmed"
+            f"Instagram's slide list was incomplete ({listed} listed), so the chosen"
+            " slide could not be confirmed"
         )
     if kind == "container_dead":
         code = short(refusal.get("status_code"))

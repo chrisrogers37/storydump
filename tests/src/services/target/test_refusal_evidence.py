@@ -1017,7 +1017,13 @@ HELD_SENTENCES = [
         fetch_refusal("slide_changed", children=2, complete=False),
         "Instagram's slide list was incomplete (2 listed), so the chosen slide"
         " could not be confirmed",
-        id="slide-changed",
+        id="slide-changed-incomplete",
+    ),
+    pytest.param(
+        fetch_refusal("slide_changed", children=3, complete=True),
+        "Instagram's slide list was complete (3 listed) but did not include the"
+        " chosen slide",
+        id="slide-changed-complete",
     ),
     pytest.param(
         {"v": 1, "kind": "local_validation", "state": "unsupported"},
