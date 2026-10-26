@@ -1882,8 +1882,9 @@ async def _tell_ops(ctx: _Ctx, ops_notice) -> None:
 
 
 def _drift_notice(ctx: _Ctx, drift: dict) -> tuple[str, str]:
-    """A drift's latch key and the operators' message: Meta's answer, and
-    what our checks read."""
+    """A drift's latch key and the operators' message: Meta's answer, as a
+    chat line carries Meta's words (`refusal_evidence.chat_words`), and what
+    our checks read."""
     meta, ours = drift["meta"], drift["ours"]
     if meta.get("type") == "ContainerDead":
         key = f"spec_drift:container:{meta.get('status_code')}"
@@ -1902,7 +1903,7 @@ def _drift_notice(ctx: _Ctx, drift: dict) -> tuple[str, str]:
     text = (
         "Instagram refused a story file that passed storydump's checks: its"
         " spec may have moved under one of our numbers.\n\n"
-        f"Meta: {said}\n"
+        f"Meta: {refusal_evidence.chat_words(said)}\n"
         f"Ours: {ours.get('length')} bytes; moov first {container.get('moov_first')};"
         f" edit lists {container.get('edit_lists')}; audio {audio}\n\n"
         f"Story {ctx.intent_id}: `storydump story {ctx.intent_id}` shows the"
