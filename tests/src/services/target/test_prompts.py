@@ -17,7 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.target import prompt_rendering, prompts, vocabulary
+from src.services.target import (
+    intent_ledger,
+    prompt_rendering,
+    prompts,
+    refusal_evidence,
+    vocabulary,
+)
 from tests.src.services.target.schema_code import function_body
 
 
@@ -347,6 +353,16 @@ def test_a_posted_dry_run_row_words_as_a_dry_run_everywhere():
 
 
 INTENT = "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c"
+WORKSPACE = "8d1d3a3e-0000-4000-8000-000000000001"
+#: A story's refusal as `last_error -> 'error' -> 'refusal'` holds it, and the
+#: words `refusal_evidence.plain` gives it.
+REFUSAL = {
+    "v": 1,
+    "kind": "local_validation",
+    "check": "malformed_container",
+    "measured": {},
+}
+REFUSED = refusal_evidence.plain(REFUSAL)
 
 
 class TestTheCardKeyboard:
@@ -517,8 +533,10 @@ class TestARendersAgainForAResend:
     }
 
     @staticmethod
-    def _settled(state, rule, *, at=None, published_via=None):
-        """A settlement row (`intent_ledger.settlement`'s read)."""
+    def _settled(state, rule, *, at=None, published_via=None, refusal=None):
+        """A settlement row (`intent_ledger.settlement`'s read). *refusal* is what
+        the story's `last_error -> 'error' -> 'refusal'` holds, NULL when it has
+        none."""
         return {
             "state": state,
             "published_via": published_via,
@@ -526,6 +544,7 @@ class TestARendersAgainForAResend:
             "approval_rule": rule,
             "actor_user_id": None,
             "created_at": at,
+            "refusal": refusal,
         }
 
     class _Session:
@@ -639,6 +658,42 @@ class TestARendersAgainForAResend:
         assert f"v1:post:{INTENT}" not in tokens
         assert not any("has_login" in sql for sql, _ in s.sql), (
             "a parked story asks no approval rule and no media admission"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_parked_storys_card_says_why_it_was_refused(self):
+        """The review card's line carries the refusal the park recorded, in
+        words, on a second line under the state's line."""
+        at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        s = self._Session(
+            {
+                **self.LIVE,
+                "state": "review_required",
+                "source_provider": "instagram_past_posts",
+            },
+            settled=self._settled("review_required", None, at=at, refusal=REFUSAL),
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload["outcome_text"] == (
+            f"👀 Needs review · 2026-09-12 09:02 America/New_York\nRefused: {REFUSED}."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_parked_story_with_no_refusal_keeps_its_plain_line(self):
+        """A story parked with nothing recorded about a refused fetch (a dead job,
+        a lost answer) says only which state it is in."""
+        at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        s = self._Session(
+            {
+                **self.LIVE,
+                "state": "review_required",
+                "source_provider": "instagram_past_posts",
+            },
+            settled=self._settled("review_required", None, at=at),
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload["outcome_text"] == (
+            "👀 Needs review · 2026-09-12 09:02 America/New_York"
         )
 
     @pytest.mark.asyncio
@@ -869,6 +924,212 @@ class TestTheLineNamesTheMechanism:
             )
             == "✅ Approved by YOLO · posts tomorrow"
         )
+
+
+class _Answer:
+    """What `session.execute(...)` answers a read of one row: its
+    `.mappings().first()`."""
+
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._row
+
+
+class _ReadSession:
+    """A session whose one read answers *row*, and which keeps the statement and
+    the parameters it was asked with."""
+
+    def __init__(self, row):
+        self.row = row
+        self.asked = []
+
+    async def execute(self, statement, params=None):
+        self.asked.append((str(statement), params))
+        return _Answer(self.row)
+
+
+def _settlement_row(state, refusal):
+    """The settlement read's row, as the database hands it: the story's state, its
+    last move, and the refusal its `last_error` holds."""
+    return {
+        "state": state,
+        "published_via": None,
+        "entered_state_at": datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc),
+        "approval_rule": None,
+        "actor_user_id": None,
+        "created_at": None,
+        "refusal": refusal,
+    }
+
+
+class TestTheSettlementCarriesTheRefusal:
+    """`intent_ledger.settlement` hands on the refusal in the story's
+    `last_error -> 'error' -> 'refusal'` only while the story is in review. A
+    story that has left review keeps the refusal in its `last_error` and is no
+    longer refused."""
+
+    @staticmethod
+    async def _read(row):
+        session = _ReadSession(row)
+        found = await intent_ledger.settlement(
+            session, workspace_id=WORKSPACE, intent_id=INTENT
+        )
+        return found, session
+
+    @pytest.mark.parametrize(
+        "stored", [REFUSAL, json.dumps(REFUSAL)], ids=["decoded", "json-text"]
+    )
+    async def test_a_story_in_review_carries_its_refusal(self, stored):
+        """The database hands a JSON value over decoded or as its text, by driver;
+        either way the settlement carries the object."""
+        found, _ = await self._read(_settlement_row("review_required", stored))
+        assert found["refusal"] == REFUSAL
+
+    async def test_a_story_in_review_with_no_refusal_carries_none(self):
+        found, _ = await self._read(_settlement_row("review_required", None))
+        assert found["state"] == "review_required"
+        assert found["refusal"] is None
+
+    @pytest.mark.parametrize(
+        "state", [s for s in vocabulary.INTENT_STATES if s != "review_required"]
+    )
+    async def test_a_story_that_is_not_in_review_carries_no_refusal(self, state):
+        found, _ = await self._read(_settlement_row(state, REFUSAL))
+        assert found["state"] == state
+        assert found["refusal"] is None
+
+    async def test_a_story_the_session_cannot_see_has_no_refusal(self):
+        found, _ = await self._read(None)
+        assert found["state"] is None
+        assert found["refusal"] is None
+
+    async def test_the_read_selects_the_refusal_under_the_story_and_its_tenant(self):
+        _, session = await self._read(_settlement_row("review_required", REFUSAL))
+        ((sql, params),) = session.asked
+        assert "i.last_error -> 'error' -> 'refusal' AS refusal" in sql
+        assert "WHERE i.id = :i AND i.workspace_id = :ws" in sql
+        assert params == {"i": INTENT, "ws": WORKSPACE}
+
+
+class TestTheSettledLineSaysWhyAStoryWasRefused:
+    """`settled_line` is the one spelling of a settled card's line. A story in
+    review gains a second line, "Refused: …", in the words of its refusal
+    (`refusal_evidence.plain`); every other line, and the line of a story in
+    review whose refusal says nothing, is the state's line alone."""
+
+    AT = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+    IN_REVIEW = "👀 Needs review · 2026-09-12 13:02 UTC"
+
+    @staticmethod
+    def _settlement(state, *, rule=None, refusal=None):
+        """What `intent_ledger.settlement` answers when nobody moved the story
+        and it has no time of its own: the line asks no one's name."""
+        return {
+            "state": state,
+            "published_via": None,
+            "approval_rule": rule,
+            "by_user_id": None,
+            "at": None,
+            "refusal": refusal,
+        }
+
+    async def _line(self, settled):
+        return await prompts.settled_line(None, settled, tz="UTC", at=self.AT)
+
+    async def test_a_story_in_review_says_why_on_a_second_line(self):
+        line = await self._line(self._settlement("review_required", refusal=REFUSAL))
+        assert line == f"{self.IN_REVIEW}\nRefused: {REFUSED}."
+
+    @pytest.mark.parametrize(
+        "refusal, reason",
+        [
+            (
+                {
+                    "v": 1,
+                    "kind": "cdn_refused",
+                    "statuses": [403, 404],
+                    "host": "scontent-test.fbcdn.net",
+                    "expiry": None,
+                },
+                "Instagram's file server refused the link twice (HTTP 403/404)",
+            ),
+            (
+                {
+                    "v": 1,
+                    "kind": "slide_gone",
+                    "children": 2,
+                    "complete": True,
+                    "slide_count": 4,
+                },
+                "the chosen slide is no longer in the post: Instagram listed"
+                " 2 slide(s) of the 4 indexed",
+            ),
+        ],
+        ids=["cdn-refused", "slide-gone"],
+    )
+    async def test_the_second_line_is_the_refusals_own_sentence(self, refusal, reason):
+        line = await self._line(self._settlement("review_required", refusal=refusal))
+        assert line.splitlines() == [self.IN_REVIEW, f"Refused: {reason}."]
+
+    @pytest.mark.parametrize(
+        "refusal",
+        [None, "not a record"],
+        ids=["none", "not-a-record"],
+    )
+    async def test_a_story_in_review_with_no_refusal_record_keeps_its_line(
+        self, refusal
+    ):
+        """No record, or a value that is not one: nothing to add, and the line
+        serves every story in review, past posts or not."""
+        line = await self._line(self._settlement("review_required", refusal=refusal))
+        assert line == self.IN_REVIEW
+
+    @pytest.mark.parametrize(
+        "refusal,reason",
+        [
+            ({}, "the fetch was refused (unknown) and no detail was recorded"),
+            (
+                {"v": 1, "kind": "unrecorded", "error": "MediaTerminalError"},
+                "the fetch was refused (MediaTerminalError) and no detail was recorded",
+            ),
+            (
+                {"v": 1, "kind": "no_such_kind"},
+                "the fetch was refused (no_such_kind) and no detail was recorded",
+            ),
+        ],
+        ids=["empty", "unrecorded", "unknown-kind"],
+    )
+    async def test_a_refusal_with_nothing_specific_still_says_what_it_holds(
+        self, refusal, reason
+    ):
+        """A record with no detail still gets a line: what it holds, never a
+        cause it cannot support."""
+        line = await self._line(self._settlement("review_required", refusal=refusal))
+        assert line.splitlines() == [self.IN_REVIEW, f"Refused: {reason}."]
+
+    async def test_a_settlement_without_a_refusal_key_keeps_its_line(self):
+        """A settlement built without the key (a caller's own) reads as no refusal."""
+        settled = self._settlement("review_required")
+        del settled["refusal"]
+        assert await self._line(settled) == self.IN_REVIEW
+
+    @pytest.mark.parametrize(
+        "state, rule, line",
+        [
+            ("approved", "auto", "✅ Approved by YOLO · 2026-09-12 13:02 UTC"),
+            ("approved", None, "✅ Approved · 2026-09-12 13:02 UTC"),
+            ("posted", "auto", "✅ Posted by YOLO · 2026-09-12 13:02 UTC"),
+        ],
+    )
+    async def test_a_story_that_is_not_in_review_keeps_its_line(
+        self, state, rule, line
+    ):
+        assert await self._line(self._settlement(state, rule=rule)) == line
 
 
 class TestWaitingLine:
