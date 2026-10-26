@@ -388,7 +388,13 @@ async def run_publish_pipeline(
                 SourceReadRefused,
             ) as exc:
                 return await _past_posts_refusal(
-                    uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+                    uow,
+                    ctx,
+                    exc.reason,
+                    backoff_seconds,
+                    now_fn,
+                    transit=transit,
+                    evidence=refusal_evidence.of(exc),
                 )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
             # Pause Posting holds an approved intent here, before the cap is
@@ -488,7 +494,13 @@ async def run_publish_pipeline(
         SourceReadRefused,
     ) as exc:
         return await _past_posts_refusal(
-            uow, ctx, exc.reason, backoff_seconds, now_fn, transit=transit
+            uow,
+            ctx,
+            exc.reason,
+            backoff_seconds,
+            now_fn,
+            transit=transit,
+            evidence=refusal_evidence.of(exc),
         )
 
 
@@ -2539,9 +2551,24 @@ async def _confirm(
     return POSTED
 
 
+def _review_notice(evidence) -> str:
+    """The notice of a past post parked for review: why it was refused, in
+    plain words, when its refusal says (`refusal_evidence.plain`)."""
+    said = refusal_evidence.plain(evidence)
+    refused = f" Refused: {said}." if said else ""
+    return (
+        "This story from your Instagram past posts needs review before another"
+        f" attempt.{refused} Open the Queue to choose."
+    )
+
+
 async def _past_posts_refusal(
-    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None
+    uow, ctx, reason, backoff_seconds, now_fn, *, transit=None, evidence=None
 ):
+    """Wait, or park the story for review, on a past post's refusal. The
+    refused fetch's evidence, when the refusal carries one, rides with the
+    reason: `last_error -> 'error' -> 'refusal'`, the audit detail's `refusal`
+    and the review notice (`refusal_evidence`)."""
     if reason == "selected_asset_changed":
         reason = "past_posts_content_changed"
     if reason == "asset_unavailable":
@@ -2560,12 +2587,14 @@ async def _past_posts_refusal(
         "past_posts_pipeline_not_configured",
     )
     count = ctx.count("past_posts_waits") + 1
+    refusal = {"refusal": evidence} if evidence else {}
     error = {
         "v": 1,
         "error": {
             "type": "PastPostsEffectRefused",
             "reason": reason,
             "message": reason,
+            **refusal,
         },
     }
     now = now_fn()
@@ -2611,7 +2640,7 @@ async def _past_posts_refusal(
                 intent=ctx.intent_id,
                 from_state=current,
                 to_state=current,
-                detail={"reason": reason},
+                detail={"reason": reason, **refusal},
             )
             if immediate or count > len(backoff_seconds):
                 await park_for_review(
@@ -2620,7 +2649,7 @@ async def _past_posts_refusal(
                     intent_id=ctx.intent_id,
                     from_state=current,
                     tz=ctx.tz,
-                    notice="This story from your Instagram past posts needs review before another attempt. Open the Queue to choose.",
+                    notice=_review_notice(evidence),
                 )
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "review_required"
