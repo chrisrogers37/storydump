@@ -230,6 +230,12 @@ class _Ctx:
         #: The job payload's dry-run snapshot (see `_load`).
         self.dry_run: bool = False
         self.past_posts = job.get("_past_posts_pipeline")
+        #: The operators' notice (`WorkerDeps.ops_notice`), or None.
+        self.ops_notice = job.get("_ops_notice")
+        #: What this run's readiness probe read of the story frame.
+        self.probe: Optional[dict] = None
+        #: The drift this run recorded (`_drift`), told after the run.
+        self.drift: Optional[dict] = None
 
     @property
     def intent_id(self) -> str:
@@ -308,6 +314,7 @@ async def run_publish_pipeline(
     media_fetch: Callable[[dict], Any],
     precheck=None,
     past_posts=None,
+    ops_notice=None,
     backoff_seconds: tuple = DEFAULT_BACKOFF_SECONDS,
     now_fn: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Any] = asyncio.sleep,
@@ -316,12 +323,14 @@ async def run_publish_pipeline(
 
     *job* is the claimed row (as `fn_claim_job` returns it). *meta*,
     *transit* and *media_fetch* are the injected provider seams (module
-    docstring). Returns one of the outcome constants; raises on anything
-    unexpected — a crashed run must look crashed.
+    docstring), and *ops_notice* tells the operators a drift the run
+    records (`_tell_ops`). Returns one of the outcome constants; raises on
+    anything unexpected — a crashed run must look crashed.
     """
     job = dict(job)
     job["_past_posts_pipeline"] = past_posts
     job["_past_posts_engine"] = engine
+    job["_ops_notice"] = ops_notice
     uow = unit_of_work(engine, str(job["workspace_id"]), actor_kind="system")
     ctx = await _load(uow, job)
     if ctx is None:
@@ -462,7 +471,7 @@ async def run_publish_pipeline(
                     engine=engine, job=job, intent_id=ctx.intent_id, transit=transit
                 )
                 ctx = await _load(uow, job)
-        return await _ladder(
+        outcome = await _ladder(
             uow,
             ctx,
             engine=engine,
@@ -473,6 +482,8 @@ async def run_publish_pipeline(
             now_fn=now_fn,
             sleep=sleep,
         )
+        await _tell_ops(ctx)
+        return outcome
     except (
         instagram_publish.PastPostsEffectRefused,
         media_adapters.MediaSourceFenceDrop,
@@ -898,6 +909,7 @@ async def _retry_or_poison(
     poison_now: bool = False,
     wait: _Wait = _Wait(),
     notice: Optional[str] = None,
+    drift: Optional[dict] = None,
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
@@ -919,6 +931,15 @@ async def _retry_or_poison(
     if spent is None:
         spent = attempts >= int(ctx.job["max_attempts"])
     exhausted = poison_now or spent
+    if drift is not None and exhausted:
+        # The story ends on a refusal of Meta's about its file (*drift*): it
+        # is recorded on the permit, else beside the reason, and the run
+        # tells the operators (`_tell_ops`).
+        ctx.drift = drift
+        if resolve_op_id is not None:
+            resolve_response = {**(resolve_response or {}), "spec_drift": drift}
+        elif error is not None:
+            error = {**error, "error": {**error["error"], "spec_drift": drift}}
     now = now_fn()
     async with _leased_tx(uow, ctx.job) as session:
         if error is not None:
@@ -1200,6 +1221,17 @@ async def _route_readiness(
                     "status": getattr(ctx.dead_status, "reason", None),
                 },
             },
+            # A container Meta would not process; an EXPIRED one only waited
+            # too long.
+            drift=_drift(
+                ctx,
+                {
+                    "status": str(ctx.dead_status),
+                    "reason": getattr(ctx.dead_status, "reason", None),
+                },
+            )
+            if str(ctx.dead_status) == "ERROR"
+            else None,
         )
     if verdict == "unauthorized":
         return await _retry_or_poison(
@@ -1315,6 +1347,7 @@ async def _ladder(
             # What the worker itself saw of the frame, kept beside Meta's
             # answer on the permit.
             probe = getattr(readiness, "observation", None)
+            ctx.probe = probe
             if ready is not None and not readiness:
                 logger.warning(
                     "publish_pipeline intent %s: the story frame is not serving yet —"
@@ -1481,6 +1514,9 @@ async def _ladder(
                             },
                             restore_attempt=True,
                         ),
+                        # Only once its waits are spent: before that, a refused
+                        # first fetch is the routine race the float rides out.
+                        drift=_drift_of(ctx, exc),
                     )
                 return await _fail_terminal(
                     uow,
@@ -1518,6 +1554,7 @@ async def _ladder(
                     ),
                     error=_error_of(exc),
                     poison_now=_dead_credential(exc),
+                    drift=_drift_of(ctx, exc),
                 )
             except MetaLostResponse:
                 # Lost response on a RECOVERABLE effect: resolve it
@@ -1701,6 +1738,7 @@ async def _ladder(
                 resolve_response=_permit_record({"v": 1, "error": exc.code}, exc=exc),
                 error=_error_of(exc),
                 poison_now=_dead_credential(exc),
+                drift=_drift_of(ctx, exc),
             )
         except MetaLostResponse:
             # Lost response on the IRREVERSIBLE effect. The call may have
@@ -1785,6 +1823,100 @@ def _error_of(exc: BaseException) -> dict:
     if trace:
         error["fbtrace_id"] = trace
     return {"v": 1, "error": error}
+
+
+#: Meta's error codes that say nothing about the file: a dead or missing
+#: token, and throttling (Graph's 4, 17, 32 and 613, and Instagram's 80002).
+#: Any other refusal that ends a story whose frame passed our checks is a
+#: drift (`_drift_of`).
+NOT_ABOUT_THE_FILE = frozenset({OAUTH_ERROR_CODE, 4, 17, 32, 613, 80002})
+
+
+def _drift(ctx: _Ctx, answer: dict) -> dict:
+    """`spec_drift`: what our checks read of the story's frame and the limits
+    they held it to, beside Meta's *answer* — the sign that Meta's spec moved
+    under a number of ours. The frame is this run's probe, else the one the
+    story's container permit recorded."""
+    probe = ctx.probe
+    if probe is None:
+        ref = (ctx.latest("container_create") or {}).get("response_ref") or {}
+        if isinstance(ref, str):
+            ref = json.loads(ref)
+        probe = ref.get("probe") or {}
+    return {
+        "ours": {
+            "length": probe.get("length"),
+            "container": probe.get("container"),
+            "derivation": probe.get("derivation"),
+            "limits": media_validation.derivation_limits(ctx.intent["media_kind"]),
+        },
+        "meta": answer,
+    }
+
+
+def _drift_of(ctx: _Ctx, exc: BaseException) -> Optional[dict]:
+    """The drift a refusal of Meta's is, or None for one that says nothing
+    about the file."""
+    if not isinstance(exc, MetaError) or exc.code in NOT_ABOUT_THE_FILE:
+        return None
+    return _drift(
+        ctx,
+        {
+            "code": exc.code,
+            "subcode": exc.subcode,
+            "message": str(exc).replace("\x00", "")[:500],
+            "fbtrace_id": exc.detail.get("fbtrace_id"),
+        },
+    )
+
+
+async def _tell_ops(ctx: _Ctx) -> None:
+    """After the run, its drift for the operators: at most once a window per
+    Meta answer (`telegram_ops_notice`), and always one log line, which is
+    all there is without an ops notice."""
+    drift = ctx.drift
+    if drift is None:
+        return
+    meta = drift["meta"]
+    if "status" in meta:
+        key = f"spec_drift:container:{meta['status']}"
+    else:
+        key = f"spec_drift:{meta['code']}/{meta['subcode']}"
+    logger.warning(
+        "publish_pipeline intent %s: Meta refused a file our checks passed (%s)"
+        " — recorded with our facts; %s",
+        ctx.intent_id,
+        key,
+        "telling the operators" if ctx.ops_notice else "no ops notice on this worker",
+    )
+    if ctx.ops_notice is not None:
+        await ctx.ops_notice(key, _drift_notice(ctx, drift))
+
+
+def _drift_notice(ctx: _Ctx, drift: dict) -> str:
+    """The operators' message for a drift: Meta's answer, and what we read."""
+    meta, ours = drift["meta"], drift["ours"]
+    if "status" in meta:
+        said = f"container {meta['status']}: {meta.get('reason') or 'no reason given'}"
+    else:
+        said = meta.get("message") or f"code {meta.get('code')}"
+    container = ours.get("container") or {}
+    audio = (
+        ", ".join(
+            f"{a.get('codec')} {a.get('channels')} ch {a.get('hz')} Hz"
+            for a in container.get("audio") or ()
+        )
+        or "none read"
+    )
+    return (
+        "Instagram refused a story file that passed storydump's checks: its"
+        " spec may have moved under one of our numbers.\n\n"
+        f"Meta: {said}\n"
+        f"Ours: {ours.get('length')} bytes; moov first {container.get('moov_first')};"
+        f" edit lists {container.get('edit_lists')}; audio {audio}\n\n"
+        f"Story {ctx.intent_id}: `storydump story {ctx.intent_id}` shows the"
+        " whole record."
+    )
 
 
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
@@ -1926,6 +2058,12 @@ async def _fail_terminal(
     posted one's is: a failed story is not retried from its asset, and the
     sweep would otherwise hold it for up to two days."""
     at = now_fn() if now_fn is not None else datetime.now(timezone.utc)
+    drift = _drift_of(ctx, exc)
+    if drift is not None:
+        # Meta refused the file for good: recorded on the permit, and the run
+        # tells the operators (`_tell_ops`).
+        ctx.drift = drift
+        record = {**(record or {}), "spec_drift": drift}
     async with _leased_tx(uow, ctx.job) as session:
         if op_id is not None:
             await provider_ops.resolve_permit(

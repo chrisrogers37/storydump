@@ -963,6 +963,20 @@ def _aac_config(data: bytes, start: int, end: int) -> tuple:
     return rate, _AAC_CHANNELS.get(field(4))
 
 
+def derivation_limits(media_kind: str) -> dict:
+    """The matrix's limits a story derivation of *media_kind* is held to
+    (`judge_derivation`): its size and, for a video, its audio's."""
+    matrix = SUPPORTED_MEDIA_MATRIX
+    if media_kind != "video":
+        return {"bytes": matrix["provider_image_bytes"]}
+    return {
+        "bytes": matrix["provider_video_bytes"],
+        "audio_codec": matrix["audio_codec"],
+        "audio_hz": matrix["audio_hz"],
+        "audio_channels": matrix["audio_channels"],
+    }
+
+
 def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
     """Raise `UnsupportedMedia` for a story derivation that breaks a line of
     Meta's the matrix holds, from what the transit store's readiness probe
@@ -972,9 +986,7 @@ def judge_derivation(observation: Mapping | None, media_kind: str) -> None:
     if not observation:
         return
     matrix = SUPPORTED_MEDIA_MATRIX
-    limit = matrix[
-        "provider_video_bytes" if media_kind == "video" else "provider_image_bytes"
-    ]
+    limit = derivation_limits(media_kind)["bytes"]
     size = observation.get("length")
     if isinstance(size, int) and size > limit:
         raise _measured(UnsupportedMedia("derivation_bytes"), bytes=size, limit=limit)

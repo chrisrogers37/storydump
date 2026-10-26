@@ -195,6 +195,12 @@ says so in one line under its slot (`prompt_rendering.block_note`).
 
 ## Outbound: the outbox (`outbox.py`) and the transport
 
+- **Two sends go outside it, to operators, never to a workspace:** the API's
+  waitlist ping (`telegram_waitlist_ping`) and the worker's ops notice
+  (`telegram_ops_notice`), a direct message to each person in `OPS_USER_IDS`
+  who has linked Telegram. An operator's private chat is no workspace's, so
+  neither is an outbox row; the ops notice is latched once per key per window
+  in `rate_counters` (scope `ops_notice`).
 - **The outbox row is the delivery record** and the only authority on "did this
   send". Kinds: `approval_prompt`, `prompt_supersede`, `notification`, `ack`,
   `invitation`. States: `pending`, `sending`, `sent`, `ambiguous`, `failed`,

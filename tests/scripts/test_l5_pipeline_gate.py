@@ -3978,3 +3978,131 @@ class TestTheSweepsLegOrder:
 
         assert _sweep(pipe_db, 500) == 3
         assert _states(pipe_db, flagged) == ["cancelled"] * 3
+
+
+class _Told:
+    """The operators' notice, recording each (key, text) it is handed."""
+
+    def __init__(self):
+        self.told = []
+
+    async def __call__(self, key, text):
+        self.told.append((key, text))
+        return True
+
+
+class TestARefusalOfACheckedFileIsRecordedAndTold:
+    """When Meta refuses a file our checks passed and the refusal ends the
+    story, its `spec_drift` (our facts beside Meta's answer) is recorded on
+    the permit, or beside a dead container's reason, and the run tells the
+    operators. A refusal that says nothing about the file, or one the story
+    still retries, records and tells nothing."""
+
+    def _container_permit(self, pipe_db, intent):
+        return [o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"][
+            -1
+        ]
+
+    def test_a_create_refusal_that_ends_the_story_is_recorded_and_told(self, pipe_db):
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        class _Refuses(StubMetaAdapter):
+            async def create_container(self, *args, **kwargs):
+                raise MetaRetryableError(
+                    code=36003,
+                    subcode=2207009,
+                    message="The aspect ratio is not supported.",
+                    detail={"fbtrace_id": "trace-1"},
+                )
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, _Refuses(), FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        drift = self._container_permit(pipe_db, intent)["response"]["spec_drift"]
+        assert drift["meta"] == {
+            "code": 36003,
+            "subcode": 2207009,
+            "message": "meta error 36003/2207009: The aspect ratio is not supported.",
+            "fbtrace_id": "trace-1",
+        }
+        assert drift["ours"]["length"] == 137673
+        assert drift["ours"]["limits"] == {"bytes": 8_000_000}
+        assert [key for key, _ in told.told] == ["spec_drift:36003/2207009"]
+        assert "The aspect ratio is not supported." in told.told[0][1]
+
+    def test_throttling_that_ends_the_story_is_not_a_drift(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        told = _Told()
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        assert "spec_drift" not in self._container_permit(pipe_db, intent)["response"]
+        assert told.told == []
+
+    def test_a_refusal_the_story_still_retries_records_nothing_yet(self, pipe_db):
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        class _Refuses(StubMetaAdapter):
+            async def create_container(self, *args, **kwargs):
+                raise MetaRetryableError(code=36003, message="aspect ratio")
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, _Refuses(), FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == RETRY_SCHEDULED
+        assert "spec_drift" not in self._container_permit(pipe_db, intent)["response"]
+        assert told.told == []
+
+    def test_a_dead_container_that_ends_the_story_records_it_beside_its_reason(
+        self, pipe_db
+    ):
+        from src.services.target.instagram_graph import ContainerStatus
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        reason = "Error: Media upload has failed with error code 2207026"
+        meta = StubMetaAdapter(status_script=[ContainerStatus("ERROR", reason)])
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        error = _intent_row(pipe_db, intent)["last_error"]["error"]
+        assert error["spec_drift"]["meta"] == {"status": "ERROR", "reason": reason}
+        assert error["spec_drift"]["ours"]["length"] == 137673
+        assert [key for key, _ in told.told] == ["spec_drift:container:ERROR"]
+
+    def test_the_latch_claims_a_key_once_a_window_under_the_worker_login(self, pipe_db):
+        """The `ops_notice` scope is one `rate_counters` admits, and its first
+        claim in a window is the only one that wins."""
+        from src.channels.telegram_ops_notice import SCOPE
+        from src.services.target import rate_counters
+
+        window = rate_counters.window_start(datetime.now(timezone.utc), 86400)
+        key = f"spec_drift:test/{uuid.uuid4()}"
+
+        async def claim():
+            async with pipe_db["engine"].begin() as conn:
+                return await rate_counters.increment(
+                    conn, scope=SCOPE, key=key, window_start=window, limit=1
+                )
+
+        assert [_run(claim()), _run(claim())] == [1, None]

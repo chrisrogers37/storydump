@@ -1269,6 +1269,84 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
         assert seen["precheck"] is sentinel
 
 
+_OPERATOR = "00000000-0000-4000-8000-000000000001"
+
+
+class _Bot:
+    """A transport with the operator-facing `send_text` the ops notice uses."""
+
+    async def send_text(self, chat_id, text, *, reply_markup=None):
+        return "1"
+
+
+class TestTheOpsNoticeIsComposedFromTheBotAndTheOperators:
+    """The operators' notice (`telegram_ops_notice`) needs the bot and
+    `OPS_USER_IDS`. Without either, the seam is None and the deploy log says
+    which is missing once, so a refusal nobody was told of is explained."""
+
+    def _compose(self, env, transport):
+        return compose(
+            engine=object(),
+            config=WorkerConfig(),
+            env=env,
+            transport=transport,
+            adapters={"gdrive": object()},
+        )
+
+    def test_the_bot_and_the_operators_compose_it(self):
+        from src.channels.telegram_ops_notice import OpsNotice
+
+        app = self._compose({"OPS_USER_IDS": _OPERATOR}, _Bot())
+        assert isinstance(app.deps.ops_notice, OpsNotice)
+
+    @pytest.mark.parametrize(
+        "env,transport,missing",
+        [
+            ({}, _Bot(), "OPS_USER_IDS"),
+            ({"OPS_USER_IDS": _OPERATOR}, None, "TARGET_TELEGRAM_BOT_TOKEN"),
+        ],
+        ids=["no-operators", "no-bot"],
+    )
+    def test_without_either_it_is_off_and_says_which(
+        self, env, transport, missing, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="target.worker"):
+            app = self._compose(env, transport)
+        assert app.deps.ops_notice is None
+        assert any(
+            "ops notice: off" in r.getMessage() and missing in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_pipeline_receives_the_composed_ops_notice(self, monkeypatch):
+        from src.services.target import publish_pipeline, work_loop
+
+        seen = {}
+
+        async def run_publish_pipeline(job, **kw):
+            seen.update(kw)
+            return "posted"
+
+        monkeypatch.setattr(
+            publish_pipeline, "run_publish_pipeline", run_publish_pipeline
+        )
+        sentinel = object()
+        deps = work_loop.WorkerDeps(
+            meta=object(),
+            transit=object(),
+            media_fetch=lambda row: None,
+            ops_notice=sentinel,
+            engine=object(),
+        )
+        await work_loop.build_registry(deps)["publish_pipeline"](
+            None, {"id": "j", "kind": "publish_pipeline"}
+        )
+        assert seen["ops_notice"] is sentinel
+
+
 def _documented_numbers(label: str, pattern: str) -> tuple:
     """The numbers *pattern* captures in the row of
     `tests/fixtures/design_rows/05-operational-numbers.md` that names *label*,
