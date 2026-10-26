@@ -20,6 +20,7 @@ import datetime
 import gzip
 import ipaddress
 import json
+import logging
 import socket
 import ssl
 
@@ -209,6 +210,73 @@ class TestACreatingCallIsNeverSentTwice:
                 client, "POST", ALLOWED, policy=EgressPolicy(retry_after_send=False)
             )
         assert response.status_code == 200 and calls["n"] == 2
+
+    def _egress_warnings(self, caplog) -> list[str]:
+        """The floor's own warnings, as printed."""
+        return [r.getMessage() for r in caplog.records if r.name == egress_mod.__name__]
+
+    @pytest.mark.asyncio
+    async def test_a_lost_answer_logs_how_it_failed_and_the_host_only(self, caplog):
+        """One warning for the attempt: the host, the transport's failure and that
+        the request may have landed. Never the path, which can carry a secret."""
+        caplog.set_level(logging.WARNING, logger=egress_mod.__name__)
+
+        async def answer_lost(request):
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressAnswerLost):
+                await request(
+                    client,
+                    "POST",
+                    ALLOWED,
+                    policy=EgressPolicy(retry_after_send=False),
+                )
+        logged = self._egress_warnings(caplog)
+        assert len(logged) == 1, logged
+        url = httpx.URL(ALLOWED)
+        assert "ReadTimeout" in logged[0] and "may have landed" in logged[0]
+        assert url.host in logged[0]
+        assert url.path not in logged[0]
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_that_never_left_logs_that_it_never_left(self, caplog):
+        """Each attempt of a request that never left says so, and it is attempted
+        again until the attempts are spent."""
+        caplog.set_level(logging.WARNING, logger=egress_mod.__name__)
+
+        async def refused(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(refused)) as client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(
+                    client,
+                    "POST",
+                    ALLOWED,
+                    policy=EgressPolicy(retry_after_send=False, max_attempts=2),
+                )
+        logged = self._egress_warnings(caplog)
+        assert len(logged) == 2, logged
+        assert all("ConnectError" in m and "never sent" in m for m in logged), logged
+
+    @pytest.mark.asyncio
+    async def test_at_the_default_the_same_lost_answer_logs_nothing(self, caplog):
+        """The negative half: it really is the flag that makes the floor say so."""
+        caplog.set_level(logging.WARNING, logger=egress_mod.__name__)
+
+        async def answer_lost(request):
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        async with httpx.AsyncClient(transport=_transport(answer_lost)) as client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(
+                    client,
+                    "POST",
+                    ALLOWED,
+                    policy=EgressPolicy(max_attempts=1),
+                )
+        assert self._egress_warnings(caplog) == []
 
 
 class TestProofThreeAnOversizedResponseCutsAtTheByteCap:
