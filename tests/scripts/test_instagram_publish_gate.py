@@ -976,7 +976,11 @@ async def test_truncated_missing_slide_defers_early_card_without_review(
 ):
     src, item, intent = await preparation.selected(past_posts_engine, origin)
     selected, calls = preparation.service(
-        past_posts_engine, origin, changed_child="456", truncated=True
+        past_posts_engine,
+        origin,
+        changed_child="456",
+        truncated=True,
+        retry=preparation.RETRY,
     )
     c = module().PastPostsPipeline(
         capability=foundation.capability(),
