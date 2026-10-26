@@ -1151,3 +1151,20 @@ def test_the_closed_set_is_every_check_the_validator_names():
     source = Path(v.__file__).read_text(encoding="utf-8")
     named = set(re.findall(r'UnsupportedMedia\(\s*"([a-z_]+)"', source))
     assert named == v.UNSUPPORTED_CHECKS
+
+
+async def test_a_video_longer_than_a_story_passes_its_duration_check_trimmed(
+    monkeypatch, tmp_path
+):
+    """A video past the longest story is kept and trimmed, and its duration
+    check says so beside the value it measured and the bounds it held."""
+    result = await validated_video(monkeypatch, tmp_path, probe_facts(duration="72"))
+    shortest, longest = v.SUPPORTED_MEDIA_MATRIX["duration_seconds"]
+    (duration,) = [c for c in result.passed_checks if c["check"] == "duration"]
+    assert result.state == "supported"
+    assert dict(duration["measured"]) == {
+        "duration_seconds": "72",
+        "trimmed_to_seconds": str(longest),
+        "min_seconds": shortest,
+        "max_seconds": longest,
+    }

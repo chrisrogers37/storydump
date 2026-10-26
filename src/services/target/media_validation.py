@@ -141,6 +141,8 @@ def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
     checks = [_check_record("byte_limit", kind, {"bytes": evidence["bytes"]})]
     if kind == "video":
         duration = {"duration_seconds": evidence["duration_seconds"]}
+        if evidence["trimmed_to_seconds"] is not None:
+            duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
         checks.append(_check_record("duration", kind, duration))
         if _positive_fraction(evidence["fps"]) is not None:
             checks.append(_check_record("fps", kind, {"fps": evidence["fps"]}))
