@@ -369,15 +369,21 @@ class Gate:
         return ran
 
     async def sweep_prompts(self):
-        """One pass of the worker's prompt sweep: each selected story's media is
-        prepared, then every due story gains its card. The sweeper's own loop,
-        stopped at its first wait."""
+        """The worker's prompt sweep as it serves a past post: one pass mints
+        each due story's prepare job, the media lane runs them (each story's
+        file fetched and judged), and the next pass gives every due story its
+        card. The sweeper's own loop, stopped at its first wait, each time."""
         if sys.platform != "linux":
             pytest.fail(
                 "the selected-media validator runs only on Linux"
                 " (`media_validation.run_bounded`): run this gate on the Linux lane",
                 pytrace=False,
             )
+        await self._sweep_once()
+        await self.prepare_files()
+        await self._sweep_once()
+
+    async def _sweep_once(self):
         stop = asyncio.Event()
 
         async def at_the_wait(event, seconds):
@@ -386,6 +392,17 @@ class Gate:
         with self.monkeypatch.context() as patch:
             patch.setattr(jobs, "wait_or_stop", at_the_wait)
             await worker.PromptSweeper(self.app).run(stop)
+
+    async def prepare_files(self, limit=100):
+        """The media lane's jobs, one at a time, until it has none it may run:
+        the prepare jobs the sweep minted. A job put back for a later try is
+        not run again here."""
+        media = [loop for loop in self.app.loops if loop.lane == "media"]
+        assert media, "the composed worker serves no media lane"
+        for _ in range(limit):
+            if not any([await loop.run_once() for loop in media]):
+                return
+        raise AssertionError(f"the media lane was still finding jobs after {limit}")
 
     async def deliver(self):
         """The sender sweep's one pass, and the `deliver_outbox` jobs it mints."""
