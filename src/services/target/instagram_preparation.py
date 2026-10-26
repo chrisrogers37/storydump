@@ -90,19 +90,40 @@ def _refusal(exc, counters, selected) -> dict:
     return facts
 
 
+def _local_validation(validation, counters, **decided) -> dict:
+    """A validation result as evidence: its state, what *decided* it, the byte
+    count, the matrix version and the turn's counters. One shape for a refusal
+    and a pass."""
+    return refusal_evidence.evidence(
+        "local_validation",
+        state=validation.state,
+        **decided,
+        bytes=validation.evidence.get("bytes"),
+        matrix_version=validation.matrix_version,
+        counters=asdict(counters),
+    )
+
+
 def _validation_refusal(validation, counters) -> dict | None:
     """A result that is not supported, as refusal evidence: the check that
     decided it and the values it measured, with the turn's counters."""
     if validation.state == "supported" or not validation.failed_check:
         return None
-    return refusal_evidence.evidence(
-        "local_validation",
-        state=validation.state,
+    return _local_validation(
+        validation,
+        counters,
         check=validation.failed_check["check"],
         measured=dict(validation.failed_check["measured"]),
-        bytes=validation.evidence.get("bytes"),
-        matrix_version=validation.matrix_version,
-        counters=asdict(counters),
+    )
+
+
+def _validation_pass(validation, counters) -> dict | None:
+    """A supported result, as evidence in a refusal's shape: each check it
+    passed with what it measured and the bound it held."""
+    if validation.state != "supported":
+        return None
+    return _local_validation(
+        validation, counters, checks=[dict(check) for check in validation.passed_checks]
     )
 
 
@@ -306,7 +327,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         )
         refusal = _validation_refusal(validation, counters)
         await self._land(
-            engine, workspace_id, intent_id, selected, validation, refusal=refusal
+            engine,
+            workspace_id,
+            intent_id,
+            selected,
+            validation,
+            refusal=refusal,
+            passed=_validation_pass(validation, counters),
         )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
@@ -395,7 +422,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 )
 
     async def _land(
-        self, engine, ws, iid, selected, validation, *, reason=None, refusal=None
+        self,
+        engine,
+        ws,
+        iid,
+        selected,
+        validation,
+        *,
+        reason=None,
+        refusal=None,
+        passed=None,
     ):
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
@@ -473,6 +509,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if refusal is not None:
                 evidence["refusal"] = refusal
+            if passed is not None:
+                evidence["passed"] = passed
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,

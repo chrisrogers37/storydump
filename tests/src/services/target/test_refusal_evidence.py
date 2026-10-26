@@ -15,13 +15,11 @@ the park notice built from them.
 from __future__ import annotations
 
 import json
-import re
 import traceback
-from pathlib import Path
 
 import pytest
 
-from src.services.target import instagram_publish, refusal_evidence
+from src.services.target import instagram_publish, media_validation, refusal_evidence
 from tests.src.services.target.conftest import SIGNED, SIGNED_PARTS
 
 SECRET = "EAAB-fake-secret-value"
@@ -625,6 +623,10 @@ FETCH_SENTENCES = [
     ),
 ]
 
+#: The bounds a timing check records beside its value (`media_validation._bounds`).
+DURATION_BOUNDS = {"min_seconds": 3, "max_seconds": 60}
+FPS_BOUNDS = {"min_fps": 23, "max_fps": 60}
+
 #: One local-validation refusal per `_CHECKS` entry, and a second where an entry
 #: reads its measurements differently: (check, what it measured, the sentence).
 CHECK_CASES = [
@@ -636,39 +638,39 @@ CHECK_CASES = [
     ),
     pytest.param(
         "duration",
-        {"duration_seconds": "145/2", "fps": "30/1", "video_frames": 2175},
+        {"duration_seconds": "145/2", "fps": "30/1", **DURATION_BOUNDS},
         "this video is 72.5 s long; stories take 3 to 60 s",
         id="duration",
     ),
     pytest.param(
         "duration",
-        {"duration_seconds": "2", "fps": "30/1", "video_frames": 60},
+        {"duration_seconds": "2", "fps": "30/1", **DURATION_BOUNDS},
         "this video is 2 s long; stories take 3 to 60 s",
         id="duration-whole-seconds",
     ),
     pytest.param(
         "duration",
         {"duration_seconds": "7/3", "fps": "30/1", "video_frames": 70},
-        "this video is 2.33 s long; stories take 3 to 60 s",
-        id="duration-to-a-hundredth",
+        "this video is 2.33 s long",
+        id="duration-recorded-without-its-bounds",
     ),
     pytest.param(
         "fps",
-        {"duration_seconds": "10", "fps": "20/1", "video_frames": 200},
+        {"duration_seconds": "10", "fps": "20/1", **FPS_BOUNDS},
         "this video runs at 20 fps; stories take 23 to 60",
         id="fps",
     ),
     pytest.param(
         "fps",
-        {"duration_seconds": "10", "fps": "121/2", "video_frames": 605},
+        {"duration_seconds": "10", "fps": "121/2", **FPS_BOUNDS},
         "this video runs at 60.5 fps; stories take 23 to 60",
         id="fps-fractional",
     ),
     pytest.param(
         "fps",
         {"duration_seconds": "10", "fps": "15000/1001", "video_frames": 150},
-        "this video runs at 14.99 fps; stories take 23 to 60",
-        id="fps-ntsc",
+        "this video runs at 14.99 fps",
+        id="fps-recorded-without-its-bounds",
     ),
     pytest.param(
         "video_codec",
@@ -868,17 +870,6 @@ HELD_SENTENCES = [
     ),
 ]
 
-#: Every reason the validator refuses a file with, read from its source.
-VALIDATOR_REASONS = set(
-    re.findall(
-        r'UnsupportedMedia\(\s*"([a-z_]+)"',
-        (
-            Path(__file__).resolve().parents[4]
-            / "src/services/target/media_validation.py"
-        ).read_text(),
-    )
-)
-
 #: Every kind `plain` speaks of: those with a case above, and local validation.
 KINDS = sorted(
     {case.values[0]["kind"] for case in FETCH_SENTENCES + PUBLISH_SENTENCES}
@@ -934,8 +925,8 @@ def test_every_check_the_table_has_words_for_has_a_case_above():
 def test_plain_keeps_a_timing_it_cannot_read_as_a_number_as_the_text_it_is(value):
     """A duration or a frame rate that is not a fraction (ffprobe's `N/A` and
     `0/0`) is said as it was recorded: not dropped, and not an error."""
-    duration = validation_refusal("duration", duration_seconds=value)
-    fps = validation_refusal("fps", fps=value)
+    duration = validation_refusal("duration", duration_seconds=value, **DURATION_BOUNDS)
+    fps = validation_refusal("fps", fps=value, **FPS_BOUNDS)
     assert refusal_evidence.plain(duration) == (
         f"this video is {value} s long; stories take 3 to 60 s"
     )
@@ -976,11 +967,11 @@ def test_plain_says_what_a_record_with_nothing_specific_holds(refusal, sentence)
 
 
 @pytest.mark.unit
-def test_the_table_has_words_for_every_reason_the_validator_refuses():
-    """Each unsupported reason `media_validation` raises has its sentence, and
-    the table holds no other."""
-    assert VALIDATOR_REASONS, "the source read found no reason"
-    assert set(refusal_evidence._CHECKS) == VALIDATOR_REASONS
+def test_the_table_has_words_for_every_check_the_validator_refuses_by():
+    """Each check a file can be refused by (`media_validation.UNSUPPORTED_CHECKS`,
+    the closed set `UnsupportedMedia` carries) has its sentence, and the table
+    holds no other."""
+    assert set(refusal_evidence._CHECKS) == media_validation.UNSUPPORTED_CHECKS
 
 
 @pytest.mark.unit
