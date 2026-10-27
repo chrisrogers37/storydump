@@ -1162,6 +1162,31 @@ class TestKTasksPerLane:
         assert all(wl._registry is app.registry for wl in app.loops)
         assert all(wl._connect is app.engine.connect for wl in app.loops)
 
+    def test_each_loop_name_ends_with_the_deployments_commit(self):
+        """The claimer name lands in `jobs.locked_by`, so stamping the commit
+        LAST lets `/health/scheduling` say what the worker runs. A hostname may
+        hold `-` but never `@`, so the stamp parses unambiguously; with no
+        commit configured the name carries none."""
+        import re
+        from types import SimpleNamespace
+
+        from src.config.release import COMMIT_VAR
+        from src.services.target.work_loop import WorkerConfig
+        from src.worker import compose
+
+        engine = SimpleNamespace(connect=lambda: None)
+        app = compose(
+            engine=engine,
+            config=WorkerConfig(),
+            env={COMMIT_VAR: "abc1234def5678abc1234def5678abc1234def56"},
+        )
+        assert app.loops and all(
+            re.fullmatch(r".+-(interactive|bulk)-\d+@abc1234", wl._worker_name)
+            for wl in app.loops
+        )
+        plain = self._compose(WorkerConfig())
+        assert not any("@" in wl._worker_name for wl in plain.loops)
+
     def test_an_oversubscribed_config_refuses_at_composition(self):
         from src.services.target.work_loop import WorkerConfig
 
