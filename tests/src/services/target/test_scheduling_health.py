@@ -48,6 +48,7 @@ async def test_worker_freshness_reports_success_age_and_overdue_backlog():
             "last_success_age_seconds": 4021.9,
             "overdue_ready": 0,
             "max_overdue_seconds": None,
+            "worker_commit": "abc1234",
         }
     )
 
@@ -58,6 +59,7 @@ async def test_worker_freshness_reports_success_age_and_overdue_backlog():
         "last_success_age_seconds": 4021,
         "overdue_ready": 0,
         "max_overdue_seconds": None,
+        "commit": "abc1234",
     }
 
 
@@ -77,6 +79,7 @@ async def test_a_system_that_has_never_run_reports_none_rather_than_a_zero_age()
             "last_success_age_seconds": None,
             "overdue_ready": 0,
             "max_overdue_seconds": None,
+            "worker_commit": "abc1234",
         }
     )
 

@@ -693,6 +693,7 @@ class TestSchedulingHealthIsASecondSurface:
                 "last_success_age_seconds": 30,
                 "overdue_ready": 0,
                 "max_overdue_seconds": None,
+                "commit": None,
             }
 
         async def fake_freshness(executor):
@@ -720,8 +721,12 @@ class TestSchedulingHealthIsASecondSurface:
         monkeypatch.setattr(posting_health, "destinations", fake_destinations)
 
         scheduling = client.get("/health/scheduling").json()
-        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER}
-        assert set(scheduling[sm._WORKER]) == {*sm._WORKER_COUNTS, *sm._WORKER_AGES}
+        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER, sm._API_COMMIT}
+        assert set(scheduling[sm._WORKER]) == {
+            *sm._WORKER_COUNTS,
+            *sm._WORKER_AGES,
+            *sm._WORKER_TEXT,
+        }
         posting = client.get("/health/posting").json()
         assert set(posting) == set(pm._COUNTS + pm._AGES)
 

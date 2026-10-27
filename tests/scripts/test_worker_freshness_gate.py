@@ -43,7 +43,14 @@ def conn(world_db):
 
 
 def _seed_system_job(
-    conn, *, kind: str, state: str, run_at: str, created_at: str, updated_at: str
+    conn,
+    *,
+    kind: str,
+    state: str,
+    run_at: str,
+    created_at: str,
+    updated_at: str,
+    locked_by: str | None = None,
 ):
     """One system job (`workspace_id IS NULL`, per `ck_jobs_system_kinds`).
 
@@ -62,14 +69,15 @@ def _seed_system_job(
         cur.execute("SET app.actor_kind = 'migration'")
         cur.execute(
             "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
-            " run_at, max_attempts, payload, state, created_at, updated_at)"
+            " run_at, max_attempts, payload, state, locked_by, created_at,"
+            " updated_at)"
             f" VALUES (%s, NULL, 'bulk', %s, now() {run_at}, 3,"
-            " '{\"v\": 1}'::jsonb, %s, now() "
+            " '{\"v\": 1}'::jsonb, %s, %s, now() "
             + created_at
             + ", now() "
             + updated_at
             + ") RETURNING id",
-            (kind, f"{kind}:{uuid.uuid4()}", state),
+            (kind, f"{kind}:{uuid.uuid4()}", state, locked_by),
         )
         job_id = cur.fetchone()[0]
     conn.commit()
@@ -220,7 +228,41 @@ class TestTheBacklogIsComputedFromRealTimestamps:
             "last_success_age_seconds": None,
             "overdue_ready": 0,
             "max_overdue_seconds": None,
+            "commit": None,
         }
+
+    @pytest.mark.asyncio
+    async def test_the_freshest_success_names_the_commit_its_claimer_ran(
+        self, conn, world_db
+    ):
+        """`commit` is the stamp the worker puts last on its claimer name,
+        read from the freshest succeeded system job. A row claimed by an
+        unstamped worker, or before the stamp, reads None, never a guess.
+        Future-dated, so a sibling's row can never be the fresher one."""
+        for minutes, name in (
+            (1, "host-7-bulk-0@aaaaaaa"),
+            (2, "host-7-bulk-0@abc1234"),
+        ):
+            _seed_system_job(
+                conn,
+                kind="reap_expired",
+                state="succeeded",
+                run_at=f"+ interval '{minutes} minutes'",
+                created_at=f"+ interval '{minutes} minutes'",
+                updated_at=f"+ interval '{minutes} minutes'",
+                locked_by=name,
+            )
+        assert (await _freshness(world_db))["commit"] == "abc1234"
+        _seed_system_job(
+            conn,
+            kind="reap_expired",
+            state="succeeded",
+            run_at="+ interval '3 minutes'",
+            created_at="+ interval '3 minutes'",
+            updated_at="+ interval '3 minutes'",
+            locked_by="host-7-bulk-0",
+        )
+        assert (await _freshness(world_db))["commit"] is None
 
 
 class TestTheColumnChoiceRestsOnATriggerThatIsMeasuredHere:
