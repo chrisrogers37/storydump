@@ -62,7 +62,7 @@ from uvicorn.middleware.proxy_headers import (
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.admissions import router as admissions_router
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
+from src.api.routes.health import VERSION, AnswerCache
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -886,15 +886,16 @@ def create_app(
         openapi_url="/openapi.json" if docs else None,
     )
     # The deployed commit, for `/health` (Railway sets it on a Git deploy).
+    from src.config import release
     from src.services.target import mix_conversion
 
     app.state.mix_conversion_evidence = mix_conversion.release_evidence(
-        env.get(COMMIT_VAR)
+        env.get(release.COMMIT_VAR)
     )
     app.state.source_mix_capability = mix_conversion.capability(
         env, "api", app.state.mix_conversion_evidence
     )
-    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
+    app.state.commit = release.short_commit(env)
     app.state.engine = engine if engine is not None else _engine_from_env(env)
     # The past-posts source, armed wherever the key ring loads (a deletion receipt is
     # durable with the ring, and only with it); the capability and the preview

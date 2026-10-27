@@ -44,8 +44,6 @@ from src.services.target.work_loop import WorkerConfig
 #: Read from the package rather than typed.
 #: A number that has to be remembered in two places is a number that drifts.
 VERSION = __version__
-#: The commit Railway deployed, which it sets on every Git-triggered deploy.
-COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
 #: How long `/health/scheduling`, `/health/posting`, `/health/delivery` and the
