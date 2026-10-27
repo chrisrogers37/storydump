@@ -123,10 +123,11 @@ TIMEOUT_CLASSES = {
     "fast": 5.0,
     "standard": 15.0,
     "upload": 60.0,
-    # A chat card's photo or video (`telegram_transport.send_media`): Telegram
-    # answers only once it has taken in the file, and the card is never sent
-    # twice inside the call, so a wait cut short makes the outbox send again
-    # a card that may already have landed.
+    # A chat card's photo or video (`telegram_transport.edit_media`): Telegram
+    # answers only once it has taken in the file, and the edit is never sent
+    # twice inside the call, so a wait cut short is a lost answer: the outbox
+    # gives the card's media up and the card stays text with its line and
+    # keyboard — never a second card, and never a second upload.
     "card_upload": 120.0,
 }
 
@@ -502,19 +503,20 @@ async def request(
                 # A call that creates something is the one a lost answer can
                 # copy, so each failed attempt says how long it waited and how
                 # it failed. Only the host: a provider's path can carry a secret.
+                never_sent = isinstance(exc, _NEVER_SENT)
                 logger.warning(
                     "egress: %s %s failed after %.1fs: %s (%s)",
                     method,
                     target.host,
                     time.monotonic() - sent_at,
                     type(exc).__name__,
-                    "never sent" if isinstance(exc, _NEVER_SENT) else "may have landed",
+                    "never sent" if never_sent else "may have landed",
                 )
-            if not policy.retry_after_send and not isinstance(exc, _NEVER_SENT):
-                raise EgressAnswerLost(
-                    f"the request may have reached the provider and its answer"
-                    f" was lost; not attempted again (#857): {exc!r}"
-                ) from None
+                if not never_sent:
+                    raise EgressAnswerLost(
+                        f"the request may have reached the provider and its answer"
+                        f" was lost; not attempted again (#857): {exc!r}"
+                    ) from None
             continue
         finally:
             if admission is not None:

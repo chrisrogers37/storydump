@@ -135,7 +135,18 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
 chat only as an edit of a message whose id the ledger holds: a card is sent
 with no keyboard, and settling its send queues the edit that brings one
 (`outbox._edit_sent_card`), so a copy a lost answer left behind has no
-buttons. `prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to an
+buttons. A card with a `media` block is sent as its TEXT; that same edit
+carries its photo or video (`editMessageMedia`, which turns the text message
+into the media and takes the keyboard), so the upload names the message it
+lands on and a late answer can never leave a second card. The upload is made
+ONCE per card: the sender gives the edit the card's block at claim while the
+card's record holds one (`payload.sent_as` is not `media`), records `media` on
+the card when the edit lands, and drops the block when the edit that carried
+it is refused, fetches nothing, or loses its answer, so the text card stands
+and the next edit brings its line and keyboard alone
+(`outbox._with_the_storys_keyboard`, `_record_cards_media`); a flood wait holds
+the chat and the same upload goes again after it.
+`prompt_rendering.card_keyboard` is the one spelling, and the sender applies it to an
 edit of a card once the row's pacing has passed (`outbox._with_the_storys_keyboard`
 over `prompts.card_facts`, one read of the story and its item). No outbox door
 takes a keyboard, so no caller picks one, and a rejected card loses its
@@ -222,9 +233,15 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   Telegram confirms it, for at most `EDIT_RESEND_HORIZON_SECONDS`. Each lost
   answer waits `AMBIGUOUS_RESOLVE_AFTER_SECONDS` times its attempts
   (`fn_sender_sweep` mints the sender on the same schedule).
-  A card's resend leaves no second live card, since a card leaves without its
-  keyboard; what a lost answer can leave is one inert copy, which no tap
-  reaches. A duplicate notification is bounded at one.
+  A card's resend leaves no second live card, since a card leaves as its text
+  without its keyboard; what the lost answers can leave is up to
+  `MAX_PROMPT_RESENDS + 1` inert text copies, which no tap reaches. A card
+  whose every send loses its answer ends `failed`; when its chat holds no
+  other card of the story (`chats_without_card`), the chat is told once that
+  the story waits in the Queue (`CARD_UNCONFIRMED_NOTICE`). Every give-up and
+  every lost answer logs a WARNING naming its row; a give-up that a paced
+  claim rolls back is logged again when the next tick redoes it. A duplicate
+  notification is bounded at one.
 - **Edits go supersede-then-send**, never edit-in-place on an ambiguous ref. A
   flip writes `prompt_supersede` rows for every known card of the intent in
   every binding (`supersede_all`, `:610`); that paced edit writes the outcome
@@ -237,7 +254,9 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   after one call: the message is gone.
 - Pacing is two `rate_counters` scopes, `tg_chat` per binding and `tg_global`.
   Over budget is a deferral (the row stays `pending`), and a 429 writes the
-  provider's `retry_after` as a durable hold — never an in-task sleep.
+  provider's `retry_after` as a durable hold — never an in-task sleep. A 400
+  whose description reads "Too Many Requests: retry after N" is the same flood
+  wait and is paced the same way, never refused.
 - A gone chat (`DestinationGone`: kicked, blocked, deleted, migrated) fails the
   row outright, and the sender re-points the binding at the successor chat or
   revokes it (`bindings.follow_or_retire`, the rule the migration notice uses
@@ -252,10 +271,16 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   start: a dead token, or a token for a bot other than
   `TARGET_TELEGRAM_BOT_USERNAME`, parks `deliver_outbox` with the reason. The
   bot token never appears in an exception or a log line — every raise path is
-  redacted. A card with a `media` block is sent as the photo or video; when the
-  file cannot be fetched, or Telegram DEFINITIVELY refuses the upload, the text
-  card goes instead. A lost upload answer is not a refusal: it propagates as
-  ambiguous, like any send (`for_chat`, `:612`).
+  redacted. A card with a `media` block is sent as its text; its photo or
+  video lands on that message by the edit that brings its keyboard
+  (`_supersede` → `edit_media`), under the `card_upload` wait (120 s), once. A
+  lost answer on that edit is not a refusal: it propagates as ambiguous, like
+  any send, and the edit is resent without the media, so the text card gets
+  its line and its keyboard and no second upload is made (`for_chat`,
+  `_supersede`, `outbox.settle`). When the file cannot be fetched, or Telegram
+  definitively refuses the media, the text card stands and the edit brings its
+  line and keyboard alone. A past-posts card whose block cannot be trusted
+  sends nothing.
 
 ## Registration
 

@@ -128,6 +128,15 @@ CASES = [
         id="a 429 is recorded as rate_limited and still goes back to pending",
     ),
     pytest.param(
+        dict(
+            status=400,
+            body=_refusal(400, "Bad Request: too Many Requests: retry after 3"),
+        ),
+        ("rate_limited", 400),
+        "pending",
+        id="a flood wait sent as a 400 is rate_limited and goes back to pending",
+    ),
+    pytest.param(
         dict(status=502, body=_refusal(502, "Bad Gateway")),
         ("ambiguous", 502),
         "ambiguous",
@@ -264,13 +273,27 @@ class TestTheErrorCarriesItsClassAndCode:
         )
 
 
+#: The columns `resolve_ambiguous` selects after the policy's four (kind,
+#: attempts, newer edit, fresh): the row's workspace, binding and story, and
+#: its last failure's class and code.
+_RESOLVED_ROW_TAIL = ("ws", "b-1", None, "ambiguous", None)
+
+
 class TestTheOtherWriters:
     @pytest.mark.parametrize(
         "row, to_state",
         [
-            (("notification", outbox.MAX_NOTIFICATION_RESENDS + 1, False), "failed"),
-            (("notification", outbox.MAX_NOTIFICATION_RESENDS, False), "pending"),
-            (("prompt_supersede", 1, True), "superseded"),
+            (
+                ("notification", outbox.MAX_NOTIFICATION_RESENDS + 1, False, True)
+                + _RESOLVED_ROW_TAIL,
+                "failed",
+            ),
+            (
+                ("notification", outbox.MAX_NOTIFICATION_RESENDS, False, True)
+                + _RESOLVED_ROW_TAIL,
+                "pending",
+            ),
+            (("prompt_supersede", 1, True, True) + _RESOLVED_ROW_TAIL, "superseded"),
         ],
         ids=["failed", "resent", "superseded"],
     )

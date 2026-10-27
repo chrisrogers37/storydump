@@ -2,10 +2,10 @@
 
 It answers the methods the two real processes call — `getMe`,
 `getWebhookInfo`, `answerCallbackQuery`, `editMessageReplyMarkup`,
-`editMessageCaption`, `editMessageText`, `sendMessage`/`sendPhoto`/`sendVideo`/
-`sendDocument`, `setWebhook`/`deleteWebhook` — and RECORDS every call with the
-monotonic time it arrived, so the harness can measure tap → answer and edit
-landed end to end. A per-chat delay makes one chat slow (`one_slow_chat`).
+`editMessageCaption`, `editMessageText`, `editMessageMedia`, `sendMessage`,
+`setWebhook`/`deleteWebhook` — and RECORDS every call with the monotonic time
+it arrived, so the harness can measure tap → answer and edit landed end to
+end. A per-chat delay makes one chat slow (`one_slow_chat`).
 
 Served by uvicorn on a background thread on a loopback port; the processes
 reach it through `TARGET_TELEGRAM_API_BASE` (loopback only, never in

@@ -1414,9 +1414,14 @@ async def test_posted_rule_past_posts_card_sends_text_outcome_without_selected_f
         assert tuple(row) == ("superseded", 1, "987")
 
 
-async def test_claim_then_terminal_late_no_send_finishes_on_next_rerender(
+async def test_a_story_posted_while_its_cards_picture_is_fetched_keeps_the_text_card(
     past_posts_engine, origin
 ):
+    """The card goes out as its text and fetches nothing; its picture is
+    fetched for the edit that follows. A story that is posted while that
+    fetch runs has no bytes to give, so no picture is sent: the edit lands
+    the card's line on its text, the card's record gives the upload up, and
+    nothing is left to send."""
     from src import worker
     from src.channels.telegram_transport import TelegramTransport
     from src.services.target import outbox
@@ -1461,26 +1466,25 @@ async def test_claim_then_terminal_late_no_send_finishes_on_next_rerender(
         past_posts_capability=foundation.capability(),
     )
     first = await poller.tick()
-    assert first["state"] == "media_deferred" and sent == [] and fetched == [intent]
-    async with obs.uow(past_posts_engine, origin) as conn:
-        assert tuple(
-            (
-                await conn.execute(
-                    text(
-                        "SELECT state,attempts,last_failure_class FROM channel_outbox WHERE id=:id"
-                    ),
-                    {"id": oid},
-                )
-            ).one()
-        ) == ("pending", 0, None)
+    assert first["state"] == "sent" and first["kind"] == "approval_prompt"
+    assert fetched == [] and len(sent) == 1 and sent[0].endswith("/sendMessage")
     second = await poller.tick()
-    assert (
-        second["state"] == "sent"
-        and fetched == [intent]
-        and len(sent) == 1
-        and sent[0].endswith("/sendMessage")
-    )
-    assert poller.sent == 1 and poller.deferred == 1 and len(calls) == 2
+    assert second["state"] == "sent" and second["kind"] == "prompt_supersede"
+    assert fetched == [intent], "the edit's one fetch, during which the story posted"
+    assert len(sent) == 2 and sent[1].endswith("/editMessageText")
+    async with obs.uow(past_posts_engine, origin) as conn:
+        owed, sent_as = (
+            await conn.execute(
+                text(
+                    "SELECT payload->'media' IS NOT NULL, payload->>'sent_as'"
+                    " FROM channel_outbox WHERE id=:id"
+                ),
+                {"id": oid},
+            )
+        ).one()
+    assert (owed, sent_as) == (False, "text"), "the upload is given up"
+    assert await poller.tick() is None
+    assert poller.sent == 2 and poller.deferred == 0 and len(calls) == 2
 
 
 async def _selected_discovery(world_db, limit=2):

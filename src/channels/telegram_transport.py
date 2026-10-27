@@ -23,7 +23,9 @@ rejected token with no loud surface leaves outbound dead for an unknown period
 Payload contract (what the prompt production emits): ``{"v": 1, "text":
 str, "reply_markup": optional dict}``. A payload without text is a definitive
 send error — there is nothing to send, and inventing a rendering would be a
-quiet wrong message.
+quiet wrong message. A payload with a ``media`` block is still sent as its
+text; the block rides the edit that follows (`_supersede`), which puts the
+photo or video on that message by ``editMessageMedia``.
 
 All HTTP goes through the egress floor (`api.telegram.org` is already in its
 default allowlist). The outbox tick's open transaction is by design
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import replace as _replace
 from typing import Awaitable, Callable, Optional
 
@@ -55,6 +58,10 @@ logger = logging.getLogger("channels.telegram")
 
 _API_BASE = vocabulary.TELEGRAM_BOT_API_BASE
 
+
+#: Telegram's flood wait as it sometimes arrives: a 400 whose description
+#: names the wait, with no `parameters.retry_after`.
+_FLOOD = re.compile(r"too many requests: retry after (\d+)", re.IGNORECASE)
 
 _CHAT_GONE_MARKERS = (
     "bot was kicked",
@@ -78,7 +85,7 @@ def _chat_gone(code, description: str) -> Optional[str]:
     return None
 
 
-#: The upload method and its multipart part name, by what Telegram will take
+#: The `InputMedia` type and its multipart part name, by what Telegram will take
 #: as a photo or a video; anything else (HEIC, GIF, BMP, TIFF, a codec Telegram
 #: will not play) goes as a document, which still previews inline and never
 #: earns a refusal for its dimensions or its container.
@@ -87,13 +94,15 @@ _VIDEO_MIMES = frozenset({"video/mp4", "video/quicktime"})
 _MEDIA_KINDS = frozenset({"image", "video"})
 
 
-def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
+def _media_type_for(kind: str, mime: Optional[str]) -> str:
+    """The `InputMedia` type (and the multipart part name) Telegram will take
+    the card's file as, by the MIME sets above."""
     m = (mime or "").lower()
     if kind == "image" and m in _PHOTO_MIMES:
-        return "sendPhoto", "photo"
+        return "photo"
     if kind == "video" and m in _VIDEO_MIMES:
-        return "sendVideo", "video"
-    return "sendDocument", "document"
+        return "video"
+    return "document"
 
 
 #: A card upload's whole budget: its `card_upload` wait, with room left to try
@@ -114,34 +123,37 @@ class TelegramChatGone(DestinationGone, TelegramSendError):
 
 
 class TelegramPaced(ChannelPaced, TelegramSendError):
-    """429 Too Many Requests with Telegram's `retry_after`:
-    the message did not go; the outbox writes the budget as a durable hold
-    and the sender comes back when Telegram said to. Telegram does not say
-    whether the flood limit is the bot's or the chat's; the hold is written
-    on the GLOBAL row (bounded) and, for a chat-addressed call, the chat's."""
+    """Telegram's flood wait — a 429 with `retry_after`, or a 400 whose
+    description says "Too Many Requests: retry after N": the message did not
+    go; the outbox writes the budget as a durable hold and the sender comes
+    back when Telegram said to. Telegram does not say whether the flood limit
+    is the bot's or the chat's; the hold is written on the GLOBAL row
+    (bounded) and, for a chat-addressed call, the chat's."""
 
 
 class TelegramRefused(ChannelRefused, TelegramSendError):
     """Telegram answered, and said no for good: `ok: false` with a 4xx that is
-    neither a gone chat, a dead token nor 429 — a DEFINITIVE refusal, so a
+    neither a gone chat, a dead token nor a flood wait (a 429, or a 400 that
+    says "Too Many Requests: retry after N") — a DEFINITIVE refusal, so a
     caller may try another shape of the same message, and one that escapes
     to the outbox fails the row (`ChannelRefused`). A transport failure, a
-    429 or a 5xx is NOT this: the message may have landed, and only the
+    flood wait or a 5xx is NOT this: the message may have landed, and only the
     outbox's ambiguity policy may decide what happens next."""
 
 
 class MediaUnavailable(Exception):
     """A card's media cannot be fetched for a reason that is the FILE's and
-    will not change — too large, gone, refused by the provider. The text card
-    goes, at WARNING."""
+    will not change — too large, gone, refused by the provider. The card stays
+    text: its edit brings the line and the keyboard without the media, at
+    WARNING."""
 
 
 class MediaTransient(Exception):
     """The fetch got no usable answer (the provider is rate-limiting, erroring
-    or not answering). Nothing reached Telegram, so the send propagates as
-    ambiguous and the outbox's policy resends later — the photo card is not
-    given up for a blip. Anything else a fetch raises (a dead grant, a bug)
-    is loud: ERROR, counted, and the text card goes."""
+    or not answering). Nothing reached Telegram, and the card's upload is made
+    once: the card stays text, at WARNING, and its edit brings the line and
+    the keyboard without the media. Anything else a fetch raises (a dead
+    grant, a bug) is loud: ERROR, counted, and the card stays text."""
 
 
 class TelegramAuthDead(CredentialDead, TelegramSendError):
@@ -152,10 +164,13 @@ class TelegramAuthDead(CredentialDead, TelegramSendError):
 
 class SendReceipt(str):
     """The message ref a send returned, carrying HOW the card went out —
-    ``sent_as`` is ``"media"`` (a photo or video with a caption), ``"text"``
-    or ``"edit"`` — so the outbox can record it and a later edit knows whether
-    to call `editMessageCaption` or `editMessageText`. A `str`, so every
-    consumer can store the ref as a string."""
+    ``sent_as`` is ``"text"`` (a text message: every card's create, or an edit
+    after which the card stays text for good and no media is owed),
+    ``"media"`` (an edit that put the card's photo or video on the message, or
+    found it there) or ``"edit"`` (a line or keyboard edit) — so the outbox
+    can record it and a later edit knows whether to call `editMessageCaption`
+    or `editMessageText`. A `str`, so every consumer can store the ref as a
+    string."""
 
     sent_as: Optional[str]
 
@@ -168,6 +183,10 @@ class SendReceipt(str):
 _NOT_MODIFIED = "message is not modified"
 #: Telegram's answer to an edit of a message that no longer exists.
 _EDIT_GONE = "message to edit not found"
+#: Telegram's answer to `editMessageText` on a photo or video message.
+_NO_TEXT = "there is no text in the message to edit"
+#: Telegram's answer to `editMessageCaption` on a text message.
+_NO_CAPTION = "there is no caption in the message to edit"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
 
 
@@ -178,6 +197,25 @@ def _with_line(body: Optional[str], line: Optional[str]) -> str:
     if body and line:
         return f"{body}\n{line}"
     return str(body or line or "")
+
+
+def _line_edit(
+    chat_id: str, message_id, body: str, markup: dict, *, caption: bool
+) -> tuple[str, dict]:
+    """The call that writes a card's header and line, *body*, onto its message
+    with the keyboard: the caption of a photo or video (*caption*), the text of
+    a text message otherwise, each within Telegram's limit."""
+    method, field, limit = (
+        ("editMessageCaption", "caption", 1024)
+        if caption
+        else ("editMessageText", "text", 4096)
+    )
+    return method, {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        field: body[:limit],
+        "reply_markup": markup,
+    }
 
 
 def _message_id(ref: str):
@@ -296,9 +334,10 @@ class TelegramTransport:
             return body.get("result") or {}
         code = body.get("error_code", response.status_code)
         description = self._redact(str(body.get("description", "")))
+        parameters = body.get("parameters") or {}
         gone = _chat_gone(code, description)
         if gone is not None:
-            migrate_to = (body.get("parameters") or {}).get("migrate_to_chat_id")
+            migrate_to = parameters.get("migrate_to_chat_id")
             raise TelegramChatGone(
                 f"{method}: {code} {description}",
                 migrate_to=None if migrate_to is None else str(migrate_to),
@@ -317,13 +356,14 @@ class TelegramTransport:
                     description,
                 )
             raise TelegramAuthDead(f"{method}: {code} {description}", code=code)
-        if code in (400, 413):
-            # Bad Request / Payload Too Large: the message as shaped will
-            # never be accepted. 429 and 5xx are NOT this — the card may have
-            # landed, and only the outbox's policy may decide.
-            raise TelegramRefused(f"{method}: {code} {description}", code=code)
-        if code == 429:
-            retry_after = (body.get("parameters") or {}).get("retry_after")
+        flood = _FLOOD.search(description)
+        if code == 429 or flood is not None:
+            # Telegram's flood wait: a 429 carrying `retry_after`, or the same
+            # wait re-coded as a 400 whose description names it. Either way
+            # the message did not go, and the sender comes back when told.
+            retry_after = parameters.get("retry_after")
+            if retry_after is None and flood is not None:
+                retry_after = flood.group(1)
             try:
                 retry_after_s = max(1.0, float(retry_after))
             except (TypeError, ValueError):
@@ -332,11 +372,16 @@ class TelegramTransport:
                 isinstance(data, dict) and "chat_id" in data
             )
             raise TelegramPaced(
-                f"{method}: 429 retry_after={retry_after_s:g}s {description}",
+                f"{method}: {code} retry_after={retry_after_s:g}s {description}",
                 retry_after_s=retry_after_s,
                 scope="chat" if has_chat else "global",
                 code=code,
             )
+        if code in (400, 413):
+            # Bad Request / Payload Too Large: the message as shaped will
+            # never be accepted. A flood wait (above), a 5xx and a lost answer
+            # are NOT this — the message may have landed, or may still go.
+            raise TelegramRefused(f"{method}: {code} {description}", code=code)
         raise TelegramSendError(f"{method}: {code} {description}", code=code)
 
     async def answer_callback(
@@ -385,21 +430,33 @@ class TelegramTransport:
             raise
 
     async def _supersede(self, external_ref: str, row: dict) -> SendReceipt:
-        """A `prompt_supersede` row edits the card it names in ONE call: the
-        original header plus the outcome line — a caption for a media card,
-        text otherwise — with the keyboard the sender gave the row in the same
-        request: the story's ( — ⚙️ Configure alone on a settled
-        card), or an empty one for a rejected story, a removed item or an
-        invitation. So the decision buttons go as the line lands (one Telegram
-        message per tap per binding; the bot's 30/s is the fleet's ceiling).
-        A row without an outcome edits the keyboard alone. If the
-        combined edit is refused (a caption Telegram will not take), the
-        keyboard still lands by the type-agnostic `editMessageReplyMarkup` —
-        the call that must land. Only a definitive refusal takes the fallback,
-        and not one saying the message is gone: a 429, a 5xx or a transport
-        failure escapes, and the outbox settles it (paced, or ambiguous →
-        resent until confirmed). A refusal of the fallback escapes too, and
-        fails the row."""
+        """A `prompt_supersede` row edits the card it names. When the card's
+        photo or video is not yet on its message — the sender gave the row the
+        card's `media` block at claim, and `sent_as` is not `media` — ONE
+        `editMessageMedia` brings it, with the card's header and its line as
+        the caption and the keyboard the sender gave the row. The edit names
+        the message, so whatever a lost answer leaves there — the photo or
+        the text — the next edit lands on that same message, never as a second
+        card, and the upload is made once: a lost answer is settled ambiguous
+        and the outbox gives the card's media up, so the resent edit brings
+        the line and the keyboard alone. Otherwise one call writes the header
+        plus the outcome line (a caption for a media card, text otherwise)
+        with the keyboard, or the keyboard alone for a row without an outcome.
+        The keyboard is the story's (Configure alone on a settled card), or an
+        empty one for a rejected story, a removed item or an invitation. If
+        the media is refused (a file Telegram will not take) or cannot be
+        fetched, the card stays text: the line and the keyboard land without
+        it, and the receipt says `text`, so the sender records that no media
+        is owed. When the message is not the type the record says (a text edit
+        refused because the message is a photo or video, or a caption edit
+        refused because it is text), the other edit is tried once and the
+        receipt says how the message stands, so the sender corrects the card's
+        record. If a combined edit is refused, the keyboard still lands by the
+        type-agnostic `editMessageReplyMarkup`. Only a definitive refusal
+        takes a fallback, and not one saying the message is gone: a flood
+        wait escapes and the same edit, media included, goes again after the
+        hold; a 5xx or a transport failure escapes as ambiguous. A refusal of
+        the fallback escapes too, and fails the row."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
@@ -407,28 +464,65 @@ class TelegramTransport:
         # The story's keyboard, which the sender gave the edit at claim;
         # an invitation's edit leaves none.
         markup = payload.get("reply_markup") or _EMPTY_KEYBOARD
+        sent_as = payload.get("sent_as")
+        media = payload.get("media")
+        body = _with_line(payload.get("header"), outcome)
+        done = SendReceipt(ref, sent_as="edit")
+        if media and sent_as != "media":
+            fetched = None
+            if self._media_fetch is not None and media.get("kind") in _MEDIA_KINDS:
+                fetched = await self._card_media(row, media)
+            if fetched is not None:
+                content, filename, mime = fetched
+                try:
+                    await self.edit_media(
+                        external_ref,
+                        ref,
+                        kind=str(media["kind"]),
+                        content=content,
+                        filename=filename,
+                        mime=mime,
+                        caption=body,
+                        reply_markup=markup,
+                    )
+                    return SendReceipt(ref, sent_as="media")
+                except TelegramRefused as exc:
+                    if _EDIT_GONE in str(exc):
+                        raise
+                    logger.warning(
+                        "outbox row %s: media refused on the edit (%s) — the card"
+                        " stays text; its line and keyboard land without it",
+                        row.get("id"),
+                        self._redact(str(exc)),
+                    )
+            # The card stays text, and no later edit brings the media.
+            sent_as, done = "text", SendReceipt(ref, sent_as="text")
         if outcome:
-            body = _with_line(payload.get("header"), outcome)
-            if payload.get("sent_as") == "media":
-                method, field, limit = "editMessageCaption", "caption", 1024
-            else:
-                method, field, limit = "editMessageText", "text", 4096
+            caption = sent_as == "media"
+            method, call = _line_edit(
+                external_ref, message_id, body, markup, caption=caption
+            )
             try:
-                await self._edit(
-                    method,
-                    {
-                        "chat_id": external_ref,
-                        "message_id": message_id,
-                        field: body[:limit],
-                        "reply_markup": markup,
-                    },
-                )
-                return SendReceipt(ref, sent_as="edit")
+                await self._edit(method, call)
+                return done
             except TelegramRefused as exc:
                 if _EDIT_GONE in str(exc):
                     # The message is gone (deleted from the chat): no edit can
                     # land on it, so the keyboard-only call is not made.
                     raise
+                if _NO_TEXT in str(exc) or _NO_CAPTION in str(exc):
+                    # Not the type the record says: the other edit, once.
+                    caption = _NO_TEXT in str(exc)
+                    method, call = _line_edit(
+                        external_ref, message_id, body, markup, caption=caption
+                    )
+                    try:
+                        await self._edit(method, call)
+                        return SendReceipt(ref, sent_as="media" if caption else "text")
+                    except TelegramRefused as again:
+                        if _EDIT_GONE in str(again):
+                            raise
+                        exc = again
                 logger.warning(
                     "%s refused for a supersede (%s); stripping the keyboard alone",
                     method,
@@ -442,7 +536,7 @@ class TelegramTransport:
                 "reply_markup": markup,
             },
         )
-        return SendReceipt(ref, sent_as="edit")
+        return done
 
     async def probe(self) -> str:
         """`getMe` — the composition-time liveness check. Returns the bot
@@ -490,52 +584,96 @@ class TelegramTransport:
         else:
             await self._edit("editMessageReplyMarkup", body)
 
-    async def send_media(
+    async def edit_media(
         self,
         chat_id: str,
+        message_id: str,
         *,
         kind: str,
         content: bytes,
         filename: str,
         mime: Optional[str],
         caption: str,
-        reply_markup: Optional[dict] = None,
-    ) -> str:
-        """One `sendPhoto` / `sendVideo` / `sendDocument` upload — the card:
-        the media, the caption, the keyboard.
-        Runs under the `card_upload` timeout class: Telegram answers only once
-        it has taken in the file, and an answer that comes back after the wait
-        is a card the outbox sends again. The outbox commits its pacing and its
-        claim before this call, so a slow upload holds back only this chat's
-        next message, never the global rate row."""
-        method, part = _method_for(kind, mime)
-        data: dict = {"chat_id": chat_id, "caption": caption[:1024]}
-        if reply_markup:
-            data["reply_markup"] = json.dumps(reply_markup)
-        files = {part: (filename, content, mime or "application/octet-stream")}
-        # Never sent twice, as every message-creating call (`_once`).
+        reply_markup: Optional[dict],
+    ) -> dict:
+        """One `editMessageMedia`: the card's photo or video uploaded onto the
+        message *message_id* names — a text message becomes the media — with
+        *caption* and the keyboard, in one request. The upload runs under the
+        `card_upload` wait and is never sent twice inside the call (`_once`).
+        A lost answer is the outbox's: it settles the edit ambiguous, gives the
+        card's media up and resends the edit without it, to the same message
+        id, so the upload is made once per card and a second one here would
+        hold this chat's sender longer for nothing. The outbox commits its
+        pacing and its claim before this call, so a slow upload holds back only
+        this chat's next message, never the global rate row. "Message is not
+        modified" is success. Returns Telegram's edited message."""
+        media_type = _media_type_for(kind, mime)
+        data = {
+            "chat_id": chat_id,
+            "message_id": _message_id(message_id),
+            "media": json.dumps(
+                {
+                    "type": media_type,
+                    "media": f"attach://{media_type}",
+                    "caption": caption[:1024],
+                }
+            ),
+            "reply_markup": json.dumps(
+                reply_markup if reply_markup is not None else _EMPTY_KEYBOARD
+            ),
+        }
+        files = {media_type: (filename, content, mime or "application/octet-stream")}
         policy = _replace(
             self._once,
             timeout_class="card_upload",
             total_budget_s=max(self._policy.total_budget_s, _UPLOAD_BUDGET_S),
         )
-        result = await self._call(method, data=data, files=files, policy=policy)
-        message_id = (result or {}).get("message_id")
-        if message_id is None:
-            raise TelegramSendError(f"{method}: ok response without a message_id")
-        return str(message_id)
+        try:
+            return await self._call(
+                "editMessageMedia", data=data, files=files, policy=policy
+            )
+        except TelegramRefused as exc:
+            if _NOT_MODIFIED in str(exc):
+                return {}
+            raise
+
+    async def _card_media(
+        self, row: dict, media: dict
+    ) -> Optional[tuple[bytes, str, Optional[str]]]:
+        """The bytes a card's edit carries, or None when the card stays text.
+        The media block is written in-process, but the grant it selects must
+        agree with the outbox row's workspace: a row whose block names another
+        workspace — or a row that cannot vouch for one at all — is refused,
+        loudly, before any fetch. The guard stays HERE, on the one path that
+        fetches: a guard that lives elsewhere is a guard a reader misses."""
+        row_ws = row.get("workspace_id")
+        if row_ws is None or str(media.get("workspace_id")) != str(row_ws):
+            self.media_fetch_failures += 1
+            logger.error(
+                "outbox row %s: media block names workspace %s but the row"
+                " belongs to %s — fetch refused; the card stays text",
+                row.get("id"),
+                media.get("workspace_id"),
+                row_ws,
+            )
+            return None
+        return await self._fetch_media(row, media)
 
     async def _fetch_media(
         self, row: dict, media: dict
     ) -> Optional[tuple[bytes, str, Optional[str]]]:
-        """The media block's bytes, or None when the card must go as text.
+        """The media block's bytes for the edit that carries them, or None
+        when the card stays text.
 
-        THE THREE ARMS ARE THE DEGRADATION BEHAVIOUR and none is
-        interchangeable with another: an unavailable file is the file's own
-        fault and degrades quietly, a transient blip is ambiguous and is
-        re-raised so the outbox resends WITH the photo — once — and anything
-        else is a bug or a dead grant and is counted as such. `MediaTransient`
-        is the only arm that can leave this method by raising.
+        THE FOUR ARMS ARE THE DEGRADATION BEHAVIOUR, each with the log line
+        that names its cause: an unavailable file is the file's own fault; a
+        transient blip, and a past-posts story whose bytes are not admitted
+        now, cost the picture, not the card, because the card's upload is made
+        once (a raise here would be settled as a lost answer, and the resent
+        edit would bring no media anyway) — all three at WARNING; anything else
+        is a bug or a dead grant and is counted as such (ERROR), as is a
+        past-posts preparation that failed. Nothing leaves this method by
+        raising: the edit goes on to bring the line and the keyboard alone.
         """
         try:
             return await self._media_fetch(media)
@@ -545,80 +683,30 @@ class TelegramTransport:
                 logger.error(
                     "past-posts media preparation failed before channel dispatch"
                 )
-            # The past-posts source has not authorized these bytes; no text fallback or
-            # channel request has occurred, regardless of earlier attempts.
-            raise
+            logger.warning(
+                "outbox row %s: media not admitted (%s) — the card stays text",
+                row.get("id"),
+                exc.reason,
+            )
         except MediaUnavailable as exc:
             logger.warning(
-                "outbox row %s: media unavailable (%s) — sending the text card",
+                "outbox row %s: media unavailable (%s) — the card stays text",
                 row.get("id"),
                 self._redact(str(exc)),
             )
         except MediaTransient as exc:
-            # Nothing reached Telegram: ambiguous by the outbox's
-            # book, resent later with the photo intact — ONCE.
-            # An ambiguous approval_prompt returns to pending with
-            # no attempts cap, so a provider outage would otherwise
-            # loop the card forever; the second attempt sends the
-            # text card.
-            if int(row.get("attempts") or 1) < 2:
-                raise TelegramSendError(
-                    f"media fetch got no answer: {self._redact(str(exc))}"
-                ) from exc
             logger.warning(
-                "outbox row %s: media fetch got no answer again (%s) —"
-                " sending the text card",
+                "outbox row %s: media fetch got no answer (%s) — the card stays text",
                 row.get("id"),
                 self._redact(str(exc)),
             )
         except Exception as exc:  # noqa: BLE001 — degraded, but never quietly
             self.media_fetch_failures += 1
             logger.error(
-                "outbox row %s: media fetch FAILED (%s: %s) — sending the"
-                " text card; this is not the file's fault",
+                "outbox row %s: media fetch FAILED (%s: %s) — the card stays"
+                " text; this is not the file's fault",
                 row.get("id"),
                 type(exc).__name__,
-                self._redact(str(exc)),
-            )
-        return None
-
-    async def _send_media_card(
-        self,
-        external_ref: str,
-        row: dict,
-        payload: dict,
-        media: dict,
-        fetched: tuple[bytes, str, Optional[str]],
-    ) -> Optional[SendReceipt]:
-        """The upload and its receipt, or None when Telegram DEFINITIVELY
-        refused it and the text card should go instead.
-
-        Only `TelegramRefused` is caught, and that is the whole point: a
-        transport failure may have landed the card, so it propagates for the
-        outbox's ambiguity policy. A gone chat and a dead token propagate too,
-        and `outbox.settle` decides what each means for the row.
-        """
-        content, filename, mime = fetched
-        try:
-            return SendReceipt(
-                await self.send_media(
-                    external_ref,
-                    kind=str(media["kind"]),
-                    content=content,
-                    filename=filename,
-                    mime=mime,
-                    caption=_with_line(
-                        payload.get("caption") or payload.get("text"),
-                        payload.get("outcome_text"),
-                    ),
-                    reply_markup=payload.get("reply_markup"),
-                ),
-                sent_as="media",
-            )
-        except TelegramRefused as exc:
-            logger.warning(
-                "outbox row %s: upload refused (%s) — sending the text card",
-                row.get("id"),
                 self._redact(str(exc)),
             )
         return None
@@ -626,12 +714,13 @@ class TelegramTransport:
     def for_chat(self, external_ref: str):
         """The per-binding sender deliver() takes: row in, message ref out.
 
-        A payload with a `media` block is sent as the photo or video with its
-        `caption` when the bytes can be fetched and Telegram accepts them;
-        otherwise the `text` card goes. Only a DEFINITIVE refusal of the
-        upload falls back — a transport failure may have landed the card, and
-        propagates for the outbox's ambiguity policy, as every send does; a
-        gone chat and a dead token propagate too.
+        Every card is sent as its `text`, with no keyboard; a card with a
+        `media` block gets its photo or video, and its keyboard, by the edit
+        the sender queues once this send is confirmed (`_supersede`), so the
+        upload names the message it lands on and a late answer can never leave
+        a second card. A past-posts card whose block cannot be trusted sends
+        nothing. A gone chat and a dead token propagate; a lost answer
+        propagates as ambiguous, as every send does.
         """
 
         async def send(row: dict) -> SendReceipt:
@@ -651,41 +740,13 @@ class TelegramTransport:
                     or str(media["intent_id"]) != str(row.get("intent_id"))
                 )
             ):
+                # A past-posts card's bytes are the server-selected intent's:
+                # a block that names no fetch, another workspace or another
+                # story sends nothing, not even the text its edit would arm.
                 self.media_fetch_failures += 1
                 raise MediaAdmissionNotSent(
                     "past_posts_revalidation_required", preparation_failed=True
                 )
-            if (
-                media
-                and self._media_fetch is not None
-                and media.get("kind") in _MEDIA_KINDS
-            ):
-                fetched = None
-                row_ws = row.get("workspace_id")
-                if row_ws is None or str(media.get("workspace_id")) != str(row_ws):
-                    # The media block is written in-process, but the grant it
-                    # selects must agree with the outbox row's workspace: a row
-                    # whose block names another workspace — or a row that
-                    # cannot vouch for one at all — is refused, loudly.
-                    #
-                    # The guard stays HERE, in `send`: a guard that lives
-                    # elsewhere is a guard a reader misses.
-                    self.media_fetch_failures += 1
-                    logger.error(
-                        "outbox row %s: media block names workspace %s but the row"
-                        " belongs to %s — fetch refused; sending the text card",
-                        row.get("id"),
-                        media.get("workspace_id"),
-                        row_ws,
-                    )
-                else:
-                    fetched = await self._fetch_media(row, media)
-                if fetched is not None:
-                    receipt = await self._send_media_card(
-                        external_ref, row, payload, media, fetched
-                    )
-                    if receipt is not None:
-                        return receipt
             if not text_body:
                 raise TelegramSendError(
                     f"outbox row {row.get('id')}: payload carries no text —"
