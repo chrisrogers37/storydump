@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 from datetime import datetime
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ from src.services.target.media_adapters import (
     MEDIA_FAILURES,
 )
 from src.services.target.unit_of_work import unit_of_work
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -704,7 +707,7 @@ async def _capture_helper_terminal(conn, capture, candidate):
     )
     if moved.rowcount != 1:
         return False
-    await conn.execute(
+    removed = await conn.execute(
         text(
             "UPDATE media_items m SET state='removed' FROM instagram_media_assets a "
             "WHERE a.workspace_id=:ws AND a.source_id=:sid AND a.parent_media_id=:parent "
@@ -725,6 +728,12 @@ async def _capture_helper_terminal(conn, capture, candidate):
             "AND data_generation_id=CAST(:gid AS uuid) AND observation_revision=:rev"
         ),
         params,
+    )
+    logger.warning(
+        "instagram sync: post %s retired on a terminal answer to its parent read;"
+        " %d slide item(s) removed",
+        candidate.parent_media_id,
+        removed.rowcount,
     )
     return True
 
