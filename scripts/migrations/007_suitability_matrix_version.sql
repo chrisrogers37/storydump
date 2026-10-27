@@ -1,16 +1,19 @@
 -- A stored verdict that a past post's file is unsupported counts only while
 -- the rules that refused it are the ones the validator runs now. Both overloads
--- of fn_source_asset_suitability take the current matrix version as a
--- parameter, p_matrix_version, after p_past_posts_enabled, and honour a stored
--- unsupported verdict, in the validation_state column and in the validation
--- capture, only when the capture's matrix_version equals it. An older or
--- unstamped verdict leaves the slide a candidate again, validation_pending in
--- strict mode, so its story's preparation fetches and judges the file again.
+-- of fn_source_asset_suitability take the current matrix version as their last
+-- parameter, p_matrix_version, which defaults to NULL. A stored unsupported
+-- verdict, in the validation_state column and in the validation capture, counts
+-- only when the capture's matrix_version equals the version the caller passes.
+-- An older or unstamped verdict leaves the slide a candidate again,
+-- validation_pending in strict mode, so its story's preparation fetches and
+-- judges the file again. A call that passes no version (NULL), as a call
+-- written before the parameter existed does, honours every stored verdict, as
+-- before.
 -- The catalog's own unsupported_media exclusion is unchanged. The signatures
 -- change, so both functions are dropped and made again, the core before the
 -- wrapper that calls it, with the grants schema code gives them.
 -- The runner wraps this file and its ledger row in one transaction.
--- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_source_asset_suitability' AND 'p_matrix_version' = ANY (p.proargnames))
+-- runner:postcondition SELECT to_regprocedure('public.fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,text)') IS NOT NULL AND to_regprocedure('public.fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean,text)') IS NOT NULL
 -- runner:postcondition SELECT to_regprocedure('public.fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid)') IS NULL AND to_regprocedure('public.fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean)') IS NULL
 
 SET LOCAL search_path = public, pg_temp;
@@ -20,9 +23,10 @@ DROP FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with ti
 
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_past_posts_enabled boolean, p_matrix_version text,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid, p_media_item_id uuid,
-  p_existing_intent_id uuid, p_require_validation boolean)
+  p_existing_intent_id uuid, p_require_validation boolean,
+  p_matrix_version text DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
   suitable boolean, base_suitable boolean, reason text,
   data_generation_id uuid, observation_revision bigint, policy_revision bigint,
@@ -87,12 +91,12 @@ WITH source_facts AS (
       WHEN a.availability IS NOT NULL AND a.availability<>'available' THEN 'unavailable'
       WHEN m.id IS NOT NULL AND m.state<>'available' THEN 'unavailable'
       WHEN s.carousel_slides='first' AND a.position>1 THEN 'slide_not_first'
-      WHEN (a.validation_state='unsupported' AND a.validation_capture->>'matrix_version'=p_matrix_version) OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
+      WHEN (a.validation_state='unsupported' AND (p_matrix_version IS NULL OR a.validation_capture->>'matrix_version'=p_matrix_version)) OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id
         AND a.validation_capture->>'state'='unsupported'
-        AND a.validation_capture->>'matrix_version'=p_matrix_version THEN 'unsupported'
+        AND (p_matrix_version IS NULL OR a.validation_capture->>'matrix_version'=p_matrix_version) THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id
@@ -156,9 +160,9 @@ $$;
 
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
-  p_evaluated_at timestamptz, p_past_posts_enabled boolean, p_matrix_version text,
+  p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid DEFAULT NULL, p_media_item_id uuid DEFAULT NULL,
-  p_existing_intent_id uuid DEFAULT NULL)
+  p_existing_intent_id uuid DEFAULT NULL, p_matrix_version text DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
   suitable boolean, base_suitable boolean, reason text,
   data_generation_id uuid, observation_revision bigint, policy_revision bigint,
@@ -167,11 +171,11 @@ RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
 LANGUAGE sql STABLE SECURITY INVOKER
 SET search_path=pg_catalog,public,pg_temp AS $$
  SELECT * FROM fn_source_asset_suitability(p_workspace_id,p_destination_id,
-  p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_matrix_version,
-  p_source_id,p_media_item_id,p_existing_intent_id,true)
+  p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_source_id,
+  p_media_item_id,p_existing_intent_id,true,p_matrix_version)
 $$;
 
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid) TO svc_ingress, svc_worker;
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid, boolean) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, text, uuid, uuid, uuid, boolean) TO svc_ingress, svc_worker;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, text) TO svc_ingress, svc_worker;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean, text) TO svc_ingress, svc_worker;

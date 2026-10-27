@@ -347,8 +347,8 @@ async def test_self_intent_context_and_lock_facts_leave_duplicate_arbiter_intact
 @pytest.mark.parametrize(
     "signature",
     [
-        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,text,uuid,uuid,uuid)",
-        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,text,uuid,uuid,uuid,boolean)",
+        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,text)",
+        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean,text)",
     ],
 )
 async def test_invoker_grants_and_foreign_arguments_cannot_read(

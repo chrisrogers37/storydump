@@ -385,12 +385,19 @@ def require_context(executor, context, workspace_id):
 SUITABILITY_SQL = (
     "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
     "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
-    "CAST(:matrix AS text),"
-    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid))"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid),"
+    "CAST(:matrix AS text))"
 )
 
 
-CANDIDATE_SQL = SUITABILITY_SQL[:-1] + ",false)"
+#: The same verdict without the byte proof, from the overload that takes the
+#: validation flag, which sits ahead of the matrix version.
+CANDIDATE_SQL = (
+    "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
+    "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid),false,"
+    "CAST(:matrix AS text))"
+)
 
 
 async def suitability(
