@@ -122,9 +122,11 @@ names.
    (its size against what the transit store takes, a well-formed self-contained
    container, its video stream, its duration, which is the container's or
    its longest stream's, and its frame rate). A container the walker cannot read
-   whole, a stream `ffprobe` does not decode, a file with more streams than the probe
-   opens (16) and a duration nothing states are left to the derivation and recorded,
-   never left pending. The
+   whole, a stream `ffprobe` does not decode (`closed_decoders` names the decoders it
+   declined, as it names them), a file with more streams than the probe opens (16, by
+   the walker's count of tracks or at the probe's own stream bound, where an attached
+   picture is one more) and a duration nothing states are left to the derivation and
+   recorded, never left pending. The
    transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
