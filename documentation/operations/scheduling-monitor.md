@@ -105,6 +105,20 @@ surface and is judged with its own state. One axis never masks the other.
   missing counts) is skipped for that poll and changes nothing. The scheduling
   axis already says when the API cannot be reached.
 
+## A version split
+
+The scheduling reading carries the API's commit (`api_commit`) beside the
+worker's (`worker.commit`). The two services deploy one after the other, so they
+disagree for a deploy's length.
+
+- **Pages:** a split that lasts `SPLIT_AFTER_S` (30 minutes) pages with both
+  commits. A deploy then reached one service and not the other.
+- **Repeats:** daily while it lasts, and `VERSION SPLIT RESOLVED` once the
+  commits match.
+- **Never said:** a split that ends inside the window.
+- **Changes nothing:** a reading without both commits, such as an unreachable
+  one or rows written before the worker stamped its commit.
+
 ## A broken instrument is not a clean bill of health
 
 The classifier reads a missing or mistyped field as `unreachable`, never as
@@ -151,6 +165,8 @@ and what a human last heard:
   reads as one that never had any, until a reading shows one again.
 - `delivery`: the delivery axis's own `state`, `observed_at`, `announced` and
   `spoke_at`, kept apart from the scheduling axis's.
+- `split`: the version split's `state` (`split` or `same`), `since`, the two
+  commits, `announced` and `spoke_at`.
 
 `announced` and `spoke_at` describe the last *delivered* message and move only
 when the notify command exits 0. A failed delivery leaves them where they were,

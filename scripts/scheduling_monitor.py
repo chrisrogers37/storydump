@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -312,6 +313,76 @@ def announce_delivery(state: dict, now: float) -> dict:
     return state
 
 
+#: How long the API and the worker may run different commits before it pages:
+#: longer than a deploy, which moves the two services one after the other.
+SPLIT_AFTER_S = 30 * 60
+#: A split that lasts repeats daily.
+RENOTICE_SPLIT_AFTER_S = 24 * 3600
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+SPLIT, SAME = "split", "same"
+
+
+def commits(payload: dict) -> tuple[str, str] | None:
+    """The API's and the worker's short commits from a scheduling reading
+    (`api_commit`, `worker.commit`), or None while either is unknown: an
+    unreachable reading, or rows the worker wrote before it stamped its
+    commit."""
+    api = payload.get("api_commit")
+    worker = payload.get("worker")
+    worker = worker.get("commit") if isinstance(worker, dict) else None
+    known = [c for c in (api, worker) if isinstance(c, str) and _COMMIT.fullmatch(c)]
+    if len(known) != 2:
+        return None
+    return api[:7], worker[:7]
+
+
+def decide_split(payload: dict, prior: dict, now: float) -> tuple[dict, str | None]:
+    """A scheduling reading's two commits + the split's own history → (its
+    state, a message or None). Pure, like `decide`; only `announce_split`
+    records that a human was told. A split pages once it has lasted
+    `SPLIT_AFTER_S`, repeats daily, and says RESOLVED when the two match again;
+    one that ends sooner is never said. A reading without both commits changes
+    nothing."""
+    pair = commits(payload)
+    if pair is None:
+        return dict(prior), None
+    api, worker = pair
+    announced = prior.get("announced")
+    state = {
+        "observed_at": now,
+        "announced": announced,
+        "spoke_at": prior.get("spoke_at", 0.0),
+    }
+    if api == worker:
+        state["state"] = SAME
+        if announced == SPLIT:
+            return state, (
+                f"VERSION SPLIT RESOLVED: the API and the worker both run {api}."
+            )
+        return state, None
+    since = prior.get("since", now) if prior.get("state") == SPLIT else now
+    state.update(state=SPLIT, since=since, api=api, worker=worker)
+    if now - since < SPLIT_AFTER_S:
+        return state, None
+    spoke_at = prior.get("spoke_at", 0.0) if announced == SPLIT else 0.0
+    if spoke_at and now - spoke_at < RENOTICE_SPLIT_AFTER_S:
+        return state, None
+    return state, (
+        f"FLEET ALERT: storydump VERSION SPLIT — the API runs {api}, the worker "
+        f"{worker}, for {int((now - since) // 60)} min. A deploy reached one "
+        f"service and not the other."
+    )
+
+
+def announce_split(state: dict, now: float) -> dict:
+    """Record that a human was told the split's state. Called ONLY after the
+    message was delivered, for `announce`'s reason."""
+    state = dict(state)
+    state["announced"] = state.get("state")
+    state["spoke_at"] = now
+    return state
+
+
 def fetch(url: str, timeout_s: float) -> tuple[int, str]:
     """The endpoint, or a status that says why not. Never raises."""
     try:
@@ -436,6 +507,12 @@ def main(argv: list[str] | None = None) -> int:
             now,
         )
 
+    # The API's commit beside the worker's, from the same reading, under "split".
+    prior_split = prior.get("split")
+    state["split"], split_message = decide_split(
+        verdict.payload, prior_split if isinstance(prior_split, dict) else {}, now
+    )
+
     # Always visible, even when silent — `NO_SIGNAL` must never be something a
     # reader has to go looking for.
     print(f"{verdict.state}: {verdict.detail}")
@@ -446,6 +523,10 @@ def main(argv: list[str] | None = None) -> int:
         (
             delivery_message,
             lambda s: {**s, "delivery": announce_delivery(s["delivery"], time.time())},
+        ),
+        (
+            split_message,
+            lambda s: {**s, "split": announce_split(s["split"], time.time())},
         ),
     ):
         if said is None:
