@@ -145,7 +145,14 @@ async def worker_freshness(executor) -> dict[str, Any]:
                     "   ) AS overdue_ready,"
                     "   max(EXTRACT(EPOCH FROM now() - run_at)) FILTER ("
                     "     WHERE state = 'ready' AND run_at <= now()"
-                    "   ) AS max_overdue_seconds"
+                    "   ) AS max_overdue_seconds,"
+                    # The commit the freshest success ran, from the claimer
+                    # name the worker stamps last (`@<commit>`): NULL for a
+                    # row claimed before the stamp, or by an unstamped worker.
+                    "   (SELECT substring(j.locked_by FROM '@([0-9a-f]{7})$')"
+                    "      FROM jobs j"
+                    "     WHERE j.workspace_id IS NULL AND j.state = 'succeeded'"
+                    "     ORDER BY j.updated_at DESC LIMIT 1) AS worker_commit"
                     " FROM jobs WHERE workspace_id IS NULL"
                 )
             )
@@ -160,4 +167,5 @@ async def worker_freshness(executor) -> dict[str, Any]:
         "last_success_age_seconds": None if age is None else int(age),
         "overdue_ready": int(row["overdue_ready"]),
         "max_overdue_seconds": None if overdue is None else int(overdue),
+        "commit": row["worker_commit"],
     }

@@ -73,6 +73,11 @@ _LAG = "max_lag_seconds"
 _WORKER = "worker"
 _WORKER_COUNTS = ("succeeded_ever", "overdue_ready")
 _WORKER_AGES = ("last_success_age_seconds", "max_overdue_seconds")
+#: Published beside the readings for the scheduling monitor's version split:
+#: the API's commit and the worker's. `classify` ignores both, because a
+#: reading from before either was published must not read as unreachable.
+_API_COMMIT = "api_commit"
+_WORKER_TEXT = ("commit",)
 
 
 class Verdict:

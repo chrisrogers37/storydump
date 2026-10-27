@@ -239,9 +239,14 @@ async def scheduling_health_check(request: Request):
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
             # Exactly what `storydump_cli/health_classify/scheduling.py` reads,
-            # and nothing else: the queue's backpressure is in the operating
-            # details (`queue_pressure`).
-            return {**lag, "worker": worker}
+            # plus the API's own commit beside the worker's, which the
+            # scheduling monitor compares for a version split. The queue's
+            # backpressure is in the operating details (`queue_pressure`).
+            return {
+                **lag,
+                "worker": worker,
+                "api_commit": request.app.state.commit,
+            }
 
     return await request.app.state.health_cache.answer("scheduling", read)
 
