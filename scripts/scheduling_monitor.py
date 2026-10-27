@@ -56,10 +56,24 @@ REALERT_AFTER_S = 6 * 3600
 #: monitoring coverage" must not fade from memory just because it was said once.
 RENOTICE_NO_SIGNAL_AFTER_S = 7 * 24 * 3600
 
+#: An estate that HAD destinations and now has none repeats daily: nothing is
+#: scheduled or posted until one comes back, which is not the quiet a new,
+#: empty estate's notice describes.
+RENOTICE_LOST_DESTINATIONS_AFTER_S = 24 * 3600
+
 #: Nothing to say, said it, and had something to say but could not deliver it.
 #: Distinct codes so a supervisor can route on them without parsing text; the
 #: unit counts 0 and 10 as success, so 11 is a failed unit.
 EXIT_QUIET, EXIT_SPOKE, EXIT_NOTIFY_FAILED = 0, 10, 11
+
+
+def _count(value) -> int:
+    """A destination count as the state file or a payload holds it: a positive
+    whole number, else 0. A corrupt value means no history, which only ever
+    makes this speak sooner."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
 
 
 def announce(state: dict, verdict: Verdict, now: float) -> dict:
@@ -93,6 +107,13 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
     # they have not been told, whatever the endpoint has been saying.
     spoke_at = prior.get("spoke_at", 0.0) if announced == verdict.state else 0.0
     run = prior.get("consecutive", 0) + 1 if prior.get("state") == verdict.state else 1
+    # The most destinations any reading has shown. A reading with no counts (an
+    # unreachable one) never lowers it, or a network blip would turn a lost
+    # destination back into the notice for an estate that never had one.
+    seen = max(
+        _count(prior.get("max_active_seen")),
+        _count(verdict.payload.get("accounts_active")),
+    )
     state = {
         "state": verdict.state,
         "detail": verdict.detail,
@@ -101,7 +122,18 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
         "announced": announced,
         "spoke_at": prior.get("spoke_at", 0.0),
         "payload": verdict.payload,
+        "max_active_seen": seen,
     }
+
+    def closed(text: str) -> str:
+        """A fault the human was told about, closed in words by a reading that
+        can see nothing. A stall's evidence going away is not the stall ending:
+        pausing the only workspace does exactly that."""
+        if announced == STALLED:
+            return f"the stall is no longer observable; {text}"
+        if announced in (UNREACHABLE, WORKER_DOWN):
+            return f"RECOVERED from {announced}; {text}"
+        return text
 
     def repeat_due(interval: float) -> bool:
         """Never told, or told long enough ago that silence would read as fixed."""
@@ -139,6 +171,17 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
             f"so this is an outage whether or not any workspace is set up."
         )
 
+    if verdict.state in (WORKER_UNKNOWN, NO_SIGNAL) and seen:
+        # The estate had destinations and has none now: nothing will be
+        # scheduled or posted, which is worth saying daily, not weekly.
+        if not repeat_due(RENOTICE_LOST_DESTINATIONS_AFTER_S):
+            return state, None
+        return state, closed(
+            f"storydump scheduling: NO ACTIVE DESTINATIONS — the estate had {seen}; "
+            f"nothing will be scheduled or posted until one is re-authorized or "
+            f"resumed ({verdict.detail})."
+        )
+
     if verdict.state == WORKER_UNKNOWN:
         # NOT an alert. Nothing is known to be wrong — but nothing is known to
         # be right either, and that must be said out loud rather than left to
@@ -146,7 +189,7 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
         # have no coverage" must not fade from memory just because it was said.
         if not repeat_due(RENOTICE_NO_SIGNAL_AFTER_S):
             return state, None
-        return state, (
+        return state, closed(
             f"storydump monitoring: NO COVERAGE — {verdict.detail}. Neither axis "
             f"can answer: there are no destinations to stall, and the worker has "
             f"left no proof of life. This is not an alert and not an all-clear — "
@@ -156,7 +199,7 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
     if verdict.state == NO_SIGNAL:
         if not repeat_due(RENOTICE_NO_SIGNAL_AFTER_S):
             return state, None
-        return state, (
+        return state, closed(
             f"storydump scheduling: NO SIGNAL — {verdict.detail}. This is not an "
             f"alert and not an all-clear: the check is answering correctly and "
             f"has nothing to watch, so it CANNOT detect an outage right now. "

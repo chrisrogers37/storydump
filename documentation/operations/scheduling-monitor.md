@@ -73,6 +73,18 @@ Both repeat weekly, since "we have no coverage" must not fade because it was sai
 once. They never render like `healthy`: "nothing is late" and "nothing exists to
 be late" have opposite remedies.
 
+An estate that HAD destinations and now has none is not that empty estate.
+Either notice then says `NO ACTIVE DESTINATIONS`, with the most destinations any
+reading has shown, because nothing will be scheduled or posted until one is
+re-authorized or resumed. That one repeats daily.
+
+A fault a human was told about, followed by a reading that can see nothing, is
+closed in the notice's first words:
+- after `worker-down` or `unreachable`, `RECOVERED from <state>`;
+- after `stalled`, "the stall is no longer observable", never `RECOVERED`,
+  because pausing the only workspace takes away the stall's evidence, not the
+  stall.
+
 `healthy` is silent except for `RECOVERED`, after an alert, and `SIGNAL ACQUIRED`,
 after a notice. Both key on what a human was last told, not on the last reading,
 so one `unreachable` reading that never paged ends in silence.
@@ -117,6 +129,10 @@ and what a human last heard:
 - `observed_at`: when that reading was taken, in Unix time
 - `announced` and `spoke_at`: the state of the last message a human was actually
   told, and when it was delivered, in Unix time
+- `max_active_seen`: the most active destinations any reading has shown. A
+  reading with no counts, such as an `unreachable` one, never lowers it. Losing
+  the file makes the monitor speak LESS about a lost destination: the estate then
+  reads as one that never had any, until a reading shows one again.
 
 `announced` and `spoke_at` describe the last *delivered* message and move only
 when the notify command exits 0. A failed delivery leaves them where they were,
