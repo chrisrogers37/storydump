@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts import scheduling_monitor as monitor
 from storydump_cli.health_classify.scheduling import (
     DEFAULT_STALL_THRESHOLD_S,
@@ -634,3 +636,74 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
 
     assert rc == monitor.EXIT_SPOKE, "the flag did not reach classify"
     assert sent and "WORKER IS NOT ADVANCING" in sent[0]
+
+
+# ── pins: these pass on main by design ──────────────────────────────────────
+#
+# Each one fixes a value or a transition a mutant could change while every
+# test above stays green.
+
+
+def test_the_exit_codes_are_the_ones_a_supervisor_routes_on():
+    assert (monitor.EXIT_QUIET, monitor.EXIT_SPOKE, monitor.EXIT_NOTIFY_FAILED) == (
+        0,
+        10,
+        11,
+    )
+
+
+@pytest.mark.parametrize(
+    "fault,readings",
+    [
+        pytest.param(
+            lambda: classify(200, body(2, 5, 5000), threshold_s=T), 1, id="stalled"
+        ),
+        pytest.param(
+            lambda: Verdict(WORKER_DOWN, "no system job has finished for 90000s"),
+            1,
+            id="worker-down",
+        ),
+        pytest.param(lambda: classify(0, "boom", threshold_s=T), 2, id="unreachable"),
+    ],
+)
+def test_every_fault_repeats_while_it_lasts_and_announces_recovery(fault, readings):
+    """Not only the stall: each fault pages, repeats on the fault cadence, and
+    ends in RECOVERED, so its alerts stopping never reads as the monitor dying."""
+    v, state, msg = fault(), {}, None
+    for i in range(readings):
+        state, msg = step(v, state, now=1000.0 + i)
+    assert msg is not None and "FLEET ALERT" in msg
+    t = 1000.0 + readings - 1
+    _, soon = step(v, state, now=t + monitor.REALERT_AFTER_S - 1)
+    assert soon is None
+    _, later = step(v, state, now=t + monitor.REALERT_AFTER_S + 1)
+    assert later is not None
+    _, recovered = step(classify(200, body(0, 5, 3), threshold_s=T), state, now=t + 60)
+    assert recovered is not None and "RECOVERED" in recovered
+
+
+def test_the_stall_threshold_is_reachable_from_the_command_line(monkeypatch, tmp_path):
+    """A lag that is healthy under the default and a stall only under the flag:
+    it can only page if the value travelled into `classify`."""
+    sent = []
+    lag = DEFAULT_STALL_THRESHOLD_S // 2
+    raw = body(1, 5, lag)
+    monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: (200, raw))
+    monkeypatch.setattr(
+        monitor, "notify", lambda command, message: sent.append(message) or True
+    )
+    assert classify(200, raw, threshold_s=DEFAULT_STALL_THRESHOLD_S).state == HEALTHY
+    rc = monitor.main(
+        [
+            "--url",
+            "http://x/health/scheduling",
+            "--state-file",
+            str(tmp_path / "s.json"),
+            "--notify-command",
+            "/bin/true",
+            "--stall-threshold",
+            str(lag - 1),
+        ]
+    )
+    assert rc == monitor.EXIT_SPOKE, "the flag did not reach classify"
+    assert sent and "SCHEDULING IS STALLED" in sent[0]
