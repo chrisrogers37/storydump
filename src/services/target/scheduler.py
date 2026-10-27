@@ -557,7 +557,7 @@ async def execute_reap_expired(
     approved_ttl_seconds: int,
     capability=None,
     park_late=None,
-    past_posts_late_seconds: Optional[int] = None,
+    late_seconds: Optional[int] = None,
 ) -> int:
     """Reap in closed door, discovery, subject and card transactions.
 
@@ -566,26 +566,36 @@ async def execute_reap_expired(
     carries that prefix into a later workspace. Cleanup does not authorize
     new media effects, so an Off source still receives terminal healing.
 
-    *capability* is the past-posts source's activation. It reaches only the legs that
-    judge a sync job or re-arm its source: an expired past-posts sync is re-readied
-    or ended by whether its source may still be read. Without it the
-    three-argument door runs, which answers as an inactive past-posts source does.
+    *late_seconds* is the worker's late window. The door's cadence leg
+    expires a cadence story only once it is still waiting that long after its
+    slot. A cadence story is minted once its slot has come, so without the
+    window the leg could expire one the prompt sweep has not reached yet.
+    With no window the leg expires a story at its slot.
+
+    *capability* is the past-posts source's activation. The door judges an
+    expired past-posts sync by it, re-readied or ended by whether its source may
+    still be read, and without it answers as an inactive past-posts source does.
 
     *park_late* is the armed past-posts pipeline's park
-    (`PastPostsPipeline.park_late`). With it and the activation, the reaper
-    never expires a past-posts cadence story of an active, unpaused workspace:
-    the door's cadence leg leaves it, and once it is still waiting
-    *past_posts_late_seconds* after its slot with no prepare job running
+    (`PastPostsPipeline.park_late`). With it and the activation, the cadence
+    leg never expires a past-posts cadence story of an active, unpaused
+    workspace: it leaves the story, and once it is still waiting
+    *late_seconds* after its slot with no prepare job running
     (`fn_reaper_late_past_posts`), it is parked for review, saying so, in a
-    transaction of its own. Without them, it expires at its slot, as a Drive
-    story does.
+    transaction of its own. Without them, it expires as a Drive story does.
+    A park needs the window, so one given without it is refused before
+    anything runs.
     """
     from src.services.target import publish_pipeline, unit_of_work
     from src.services.target.instagram_sources import is_activated
 
     activated = is_activated(capability)
     parks = activated and park_late is not None
-    late_seconds = int(past_posts_late_seconds) if parks else None
+    if parks and late_seconds is None:
+        raise TypeError(
+            "a reaper that parks late past-posts stories needs late_seconds"
+        )
+    window = int(late_seconds or 0)
     system = unit_of_work.poller_session_factory(engine, "")
     async with system() as session:
         swept = int(
@@ -593,18 +603,16 @@ async def execute_reap_expired(
                 await session.execute(
                     text(
                         "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
-                        " make_interval(secs => :b)"
-                        + (
-                            ", CAST(:activated AS boolean), CAST(:parks AS boolean))"
-                            if activated
-                            else ")"
-                        )
+                        " make_interval(secs => :b), CAST(:activated AS boolean),"
+                        " CAST(:parks AS boolean), make_interval(secs => :late))"
                     ),
                     {
                         "lim": limit,
                         "a": approval_ttl_seconds,
                         "b": approved_ttl_seconds,
-                        **({"activated": True, "parks": parks} if activated else {}),
+                        "activated": activated,
+                        "parks": parks,
+                        "late": window,
                     },
                 )
             ).scalar()
@@ -632,7 +640,7 @@ async def execute_reap_expired(
                             "SELECT o_intent_id, o_workspace_id, o_tries FROM "
                             "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)"
                         ),
-                        {"late": late_seconds, "lim": remaining - len(subjects)},
+                        {"late": window, "lim": remaining - len(subjects)},
                     )
                 ).all()
             await session.commit()
@@ -662,7 +670,7 @@ async def execute_reap_expired(
                 workspace_id=str(workspace_id),
                 intent_id=str(intent_id),
                 tries=int(tries),
-                late_seconds=late_seconds,
+                late_seconds=window,
                 actor_kind="reaper",
             )
         except Exception:  # noqa: BLE001 — one story rolls back alone

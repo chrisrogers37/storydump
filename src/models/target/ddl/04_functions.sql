@@ -1725,12 +1725,15 @@ BEGIN
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
 
--- The cadence leg expires a cadence story still waiting after its slot. A
--- caller that passes p_past_posts_park_late parks the stories
--- fn_reaper_parks_late names itself once their late window closes
--- (fn_reaper_late_past_posts), so the leg leaves them to it. Without it, the
--- default, such a story expires at its slot, as a Drive story does.
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false)
+-- The cadence leg expires a cadence story still waiting p_late, the caller's
+-- late window, after its slot; with no window, the default, it expires it at
+-- its slot. A story is minted once its slot has come, so the window is what
+-- keeps the leg off a story the prompt sweep has not reached yet. A caller
+-- that passes p_past_posts_park_late parks the stories fn_reaper_parks_late
+-- names itself once their late window closes (fn_reaper_late_past_posts), so
+-- the leg leaves them to it. Without it, the default, such a story expires as
+-- a Drive story does.
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false,p_late interval DEFAULT NULL)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -1743,7 +1746,7 @@ BEGIN
    UNION (SELECT workspace_id FROM post_intents WHERE cancel_requested AND cap_consumed_on IS NULL
     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved') ORDER BY id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i WHERE i.state IN ('scheduled','prompt_pending')
-    AND i.schedule_slot_at<now() AND i.origin='cadence'
+    AND i.schedule_slot_at<now()-COALESCE(p_late,interval '0') AND i.origin='cadence'
     AND NOT (p_past_posts_park_late AND fn_reaper_parks_late(i.workspace_id,i.media_item_id))
     ORDER BY i.id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
@@ -1778,7 +1781,7 @@ BEGIN
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents SET state = 'expired'
    WHERE id IN (SELECT i.id FROM post_intents i
-                 WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now()
+                 WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now() - COALESCE(p_late, interval '0')
                    AND i.origin = 'cadence'
                    AND NOT (p_past_posts_park_late
                             AND fn_reaper_parks_late(i.workspace_id, i.media_item_id))

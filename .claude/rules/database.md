@@ -60,7 +60,10 @@ Thirty-three are tenant-keyed: a `workspace_id` column, or `workspaces` itself.
   planned row that is due is served by `fn_prompts_due` only while it can be
   served and within the worker's late window, or expired with its reason by
   the miss leg (`fn_planned_misses`), which tells the bound chats; the reaper's
-  slot expiry takes cadence rows only. A past-posts cadence row of an active,
+  slot expiry takes cadence rows only. A cadence row is minted once its slot
+  has come, so the expiry waits the late window the worker passes
+  (`fn_reaper_sweep`'s `p_late`; with none it expires the row at its slot),
+  and a row the prompt sweep has not reached yet is not expired. A past-posts cadence row of an active,
   unpaused workspace is left to a worker that parks late ones
   (`fn_reaper_sweep`'s `p_past_posts_park_late`): its reaper parks the row for
   review, told, once it is still waiting a late window after its slot

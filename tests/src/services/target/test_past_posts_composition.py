@@ -357,7 +357,7 @@ async def test_the_claim_the_reaper_and_the_clock_receive_the_capability(
     assert claimed["capability"] is past_posts.capability
     assert reaped["capability"] is past_posts.capability
     assert reaped["park_late"] == past_posts.coordinator.park_late
-    assert reaped["past_posts_late_seconds"] == app.config.planned_late_seconds
+    assert reaped["late_seconds"] == app.config.planned_late_seconds
     assert ticked["capability"] is past_posts.capability
 
 
@@ -451,6 +451,14 @@ async def test_a_spent_job_is_settled_under_the_loops_capability(monkeypatch):
 
 # --- the reaper's door ------------------------------------------------------------
 
+#: The sweep as the reaper calls it: the activation, whether it parks, and the
+#: late window its cadence leg waits.
+REAPER_SWEEP = (
+    "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
+    " make_interval(secs => :b), CAST(:activated AS boolean),"
+    " CAST(:parks AS boolean), make_interval(secs => :late))"
+)
+
 
 class _Door:
     """A session that records each statement and answers every read empty."""
@@ -475,8 +483,8 @@ async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
     """Activated and handed the pipeline's park, the door hears that the caller
     parks a late past-posts story itself, and the reaper lists the stories whose
     window closed, from the budget the door left. Activated without a park, the
-    door hears it does not; not activated, the three-argument door runs. Neither
-    lists a late story."""
+    door hears it does not; not activated, it hears the source is inactive.
+    Neither lists a late story. Every call hands the door the late window."""
     log = []
 
     @asynccontextmanager
@@ -501,17 +509,18 @@ async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
         approved_ttl_seconds=120,
         capability=PastPostsCapability(enabled=True) if enabled else None,
         park_late=park_late if parker else None,
-        past_posts_late_seconds=3600,
+        late_seconds=3600,
     )
 
     sql, params = log[0]
-    assert "fn_reaper_sweep" in sql
-    assert ("CAST(:activated AS boolean), CAST(:parks AS boolean))" in sql) is enabled
+    assert sql == REAPER_SWEEP
     assert params == {
         "lim": 5,
         "a": 60,
         "b": 120,
-        **({"activated": True, "parks": parker} if enabled else {}),
+        "activated": enabled,
+        "parks": enabled and parker,
+        "late": 3600,
     }
     late = [(q, p) for q, p in log if "fn_reaper_late_past_posts" in q]
     if enabled and parker:
@@ -524,6 +533,66 @@ async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
         ]
     else:
         assert late == []
+
+
+async def test_with_no_window_the_door_expires_a_cadence_story_at_its_slot(
+    monkeypatch,
+):
+    """A caller that gives no late window hands the door a window of none, so
+    its cadence leg expires a cadence story at its slot, as an older worker's
+    call does; nothing parks."""
+    log = []
+
+    @asynccontextmanager
+    async def system():
+        yield _Door(log)
+
+    async def settled(session, *, limit):
+        return None
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+    monkeypatch.setattr(scheduler.prompts, "sweep_settled_cards", settled)
+
+    await scheduler.execute_reap_expired(
+        object(), limit=5, approval_ttl_seconds=60, approved_ttl_seconds=120
+    )
+
+    sql, params = log[0]
+    assert sql == REAPER_SWEEP
+    assert (params["activated"], params["parks"], params["late"]) == (False, False, 0)
+
+
+async def test_a_park_without_its_late_window_is_refused_before_the_door_runs(
+    monkeypatch,
+):
+    """A park needs the window: with none, the late door would list every
+    past-posts story whose slot has come, so the reaper refuses to run."""
+    log = []
+
+    @asynccontextmanager
+    async def system():
+        yield _Door(log)
+
+    async def park_late(**kwargs):
+        raise AssertionError("refused before anything is listed")
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+
+    with pytest.raises(TypeError, match="late_seconds"):
+        await scheduler.execute_reap_expired(
+            object(),
+            limit=5,
+            approval_ttl_seconds=60,
+            approved_ttl_seconds=120,
+            capability=PastPostsCapability(enabled=True),
+            park_late=park_late,
+        )
+
+    assert log == []
 
 
 async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
@@ -568,7 +637,7 @@ async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
         approved_ttl_seconds=120,
         capability=PastPostsCapability(enabled=True),
         park_late=park_late,
-        past_posts_late_seconds=3600,
+        late_seconds=3600,
     )
 
     assert parked == [

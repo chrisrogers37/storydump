@@ -5,9 +5,11 @@ prepare job and the executor that runs it.
 `fn_reaper_sweep` leaves a past-posts cadence story of an active, unpaused
 workspace to a caller that parks it (`p_past_posts_park_late`), and that
 caller's reaper parks it for review once its window has closed with no prepare
-job running (`fn_reaper_late_past_posts`). Any other call, the four-argument
-one an older worker makes included, expires it at its slot, as it expires a
-Drive story. `fn_selected_preparation_due` leaves out a story whose
+job running (`fn_reaper_late_past_posts`). The same caller hands the sweep its
+late window (`p_late`), so every other cadence story, a Drive story included,
+waits that window before it expires. Any other call, the four-argument one an
+older worker makes included, expires a cadence story at its slot.
+`fn_selected_preparation_due` leaves out a story whose
 prepare_past_post job is ready or leased. The prompt sweep mints the job under
 the story's tenant, a worker claims it from the media lane, and the executor
 ends it by what one try at the file decides. The doors are called as
@@ -45,11 +47,12 @@ past_posts_engine = foundation.past_posts_engine
 origin = foundation.origin
 worker = composition.worker
 
-#: The sweep as a worker that parks late past-posts stories calls it, and the
-#: calls that expire them at their slot: the four-argument one an older worker
-#: makes, and the three-argument door.
+#: The sweep as a worker that parks late past-posts stories calls it, with its
+#: late window, and the calls that expire a cadence story at its slot: the
+#: four-argument one an older worker makes, and the three-argument door.
 PARKS = (
-    "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours', true, true)"
+    "SELECT fn_reaper_sweep(50, interval '24 hours', interval '72 hours', true, true,"
+    " interval '1 hour')"
 )
 EXPIRES = {
     "four-arguments": (
@@ -324,7 +327,7 @@ async def reap(deps):
         approved_ttl_seconds=config.approved_ttl_seconds,
         capability=foundation.capability(),
         park_late=deps.past_posts.park_late,
-        past_posts_late_seconds=config.planned_late_seconds,
+        late_seconds=config.planned_late_seconds,
     )
 
 
@@ -333,9 +336,10 @@ async def test_a_caller_that_parks_leaves_a_late_past_posts_story_waiting(
 ):
     """A sweep from a worker that parks late past-posts stories leaves a
     past-posts cadence story 61 minutes past its slot `scheduled`, while it
-    expires the Drive story beside it, so the cadence leg ran."""
+    expires the Drive story beside it, as late, so the cadence leg ran."""
     _, _, intent = await preparation.selected(past_posts_engine, origin)
     assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
+    assert slip(sync_conn, origin["intent"], "61 minutes") == DRIVE_STORY
 
     as_worker(world_db, PARKS)
 
@@ -348,21 +352,32 @@ async def test_any_other_call_expires_it_at_its_slot(
     world_db, sync_conn, past_posts_engine, origin, call
 ):
     """The four-argument call an older worker makes, and the three-argument
-    door, expire a past-posts cadence story 30 seconds past its slot, as they
-    expire a Drive story: the new argument's default keeps what they did."""
+    door, expire a past-posts cadence story and a Drive one 30 seconds past
+    their slots: the new arguments' defaults keep what they did."""
     _, _, intent = await preparation.selected(past_posts_engine, origin)
     assert slip(sync_conn, intent, "30 seconds") == PAST_POSTS_STORY
+    assert slip(sync_conn, origin["intent"], "30 seconds") == DRIVE_STORY
 
     as_worker(world_db, EXPIRES[call])
 
     assert state_of(sync_conn, intent) == "expired"
+    assert state_of(sync_conn, origin["intent"]) == "expired"
 
 
-async def test_a_drive_cadence_story_is_expired_at_its_slot(world_db, sync_conn):
-    """Only a past-posts story is left to the caller: a sweep from a worker
-    that parks expires a Drive cadence story 30 seconds past its slot."""
+async def test_a_drive_cadence_story_waits_its_late_window_then_expires(
+    world_db, sync_conn
+):
+    """The late window is every cadence story's: a sweep from a worker that
+    hands it over leaves a Drive cadence story 30 seconds past its slot
+    waiting for the prompt sweep, and expires it once it is still waiting a
+    window past its slot."""
     chain = seed_workspace_chain(sync_conn, "drive-late")
     assert slip(sync_conn, chain["intent"], "30 seconds") == DRIVE_STORY
+
+    as_worker(world_db, PARKS)
+
+    assert state_of(sync_conn, chain["intent"]) == "scheduled"
+    assert slip(sync_conn, chain["intent"], "61 minutes") == DRIVE_STORY
 
     as_worker(world_db, PARKS)
 
@@ -374,7 +389,7 @@ async def test_a_paused_workspaces_story_expires_and_is_never_listed(
 ):
     """A paused workspace's past-posts cadence story is neither served nor
     parked: the late door never lists it, and a sweep from a worker that parks
-    expires it at its slot, as before."""
+    expires it once its late window has passed, as it does a Drive story."""
     _, _, intent = await preparation.selected(past_posts_engine, origin)
     assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
     assert intent in late(world_db), "listed while its workspace posts"

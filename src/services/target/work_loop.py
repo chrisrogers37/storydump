@@ -115,9 +115,11 @@ class WorkerConfig:
     prompt_sweep_limit: int = 50  # sweep batch (`prompts.sweep_due_prompts`)
     # The late window: a planned story is still served up to
     # an hour after its time — the worker down, or a pause that ended inside
-    # the hour; past it, it is missed and its bound chats are told. Passed to
-    # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
-    # no migration.
+    # the hour; past it, it is missed and its bound chats are told. A cadence
+    # story has the same hour before the reaper expires it, or parks it when its
+    # file is a past post's. Passed to each door that judges lateness
+    # (`fn_prompts_due`, `fn_planned_misses`, `fn_reaper_sweep`,
+    # `fn_reaper_late_past_posts`), so a new value needs no migration.
     planned_late_seconds: int = 3600
     # A past post whose fetch is refused without proof (`past_posts_retry`) is
     # tried again after a wait that doubles from the base to the cap, up to the
@@ -425,7 +427,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             approved_ttl_seconds=cfg.approved_ttl_seconds,
             capability=deps.past_posts_capability,
             park_late=deps.past_posts.park_late if deps.past_posts else None,
-            past_posts_late_seconds=cfg.planned_late_seconds,
+            late_seconds=cfg.planned_late_seconds,
         )
 
     @own_transactions

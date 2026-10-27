@@ -1,12 +1,15 @@
 -- A past-posts story's file is fetched by a prepare_past_post job on a media
 -- lane, so jobs takes the kind and the lane: ck_jobs_kind and ck_jobs_lane are
 -- rebuilt with the lists the model declares (machinery.py), in their order.
--- The reaper door takes a fifth argument, p_past_posts_park_late, false by
--- default. A caller that passes true parks a late past-posts cadence story of
--- an active, unpaused workspace itself, so the cadence leg leaves that story to
--- it; any other call, a four-argument one included, expires it at its slot as
--- before. The four-argument door is dropped and the five-argument one made in
--- its place, and the three-argument door's call reaches it unchanged.
+-- The reaper door takes two more arguments, each with a default:
+-- p_past_posts_park_late, false, and p_late, the caller's late window, none.
+-- Its cadence leg expires a cadence story once it is still waiting p_late after
+-- its slot, and with no window at its slot, as before. A caller that passes
+-- p_past_posts_park_late true parks a late past-posts cadence story of an
+-- active, unpaused workspace itself, so the cadence leg leaves that story to
+-- it. Any other call, a four-argument one included, expires as before. The
+-- four-argument door is dropped and the six-argument one made in its place,
+-- and the three-argument door's call reaches it unchanged.
 -- fn_reaper_late_past_posts lists the stories such a caller parks, and the
 -- leg and that door read which stories those are from one rule,
 -- fn_reaper_parks_late. The functions are owned and granted as the schema
@@ -15,7 +18,7 @@
 -- The runner wraps this file and its ledger row in one transaction.
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_jobs_kind' AND conrelid = to_regclass('public.jobs') AND pg_get_constraintdef(oid) LIKE '%prepare_past_post%')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_jobs_lane' AND conrelid = to_regclass('public.jobs') AND pg_get_constraintdef(oid) LIKE '%media%')
--- runner:postcondition SELECT to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean,boolean)') IS NOT NULL AND to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean)') IS NULL
+-- runner:postcondition SELECT to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean,boolean,interval)') IS NOT NULL AND to_regprocedure('public.fn_reaper_sweep(integer,interval,interval,boolean)') IS NULL
 -- runner:postcondition SELECT to_regprocedure('public.fn_reaper_late_past_posts(interval,integer)') IS NOT NULL
 -- runner:postcondition SELECT to_regprocedure('public.fn_reaper_parks_late(uuid,uuid)') IS NOT NULL
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('public.fn_selected_preparation_due(integer)') AND prosrc LIKE '%prepare_past_post%')
@@ -39,7 +42,7 @@ ALTER TABLE jobs
   ADD CONSTRAINT ck_jobs_lane CHECK (lane IN ('interactive','bulk','media'));
 
 -- The reaper door changes signature, so it is dropped and made again. Its new
--- argument has a default, so a four-argument call still reaches it.
+-- arguments have defaults, so a four-argument call still reaches it.
 DROP FUNCTION fn_reaper_sweep(integer, interval, interval, boolean);
 
 -- The rule the cadence leg and the late door share
@@ -53,7 +56,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalo
                     AND w.state = 'active' AND NOT w.is_paused)
 $$;
 
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false)
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false,p_late interval DEFAULT NULL)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -66,7 +69,7 @@ BEGIN
    UNION (SELECT workspace_id FROM post_intents WHERE cancel_requested AND cap_consumed_on IS NULL
     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved') ORDER BY id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i WHERE i.state IN ('scheduled','prompt_pending')
-    AND i.schedule_slot_at<now() AND i.origin='cadence'
+    AND i.schedule_slot_at<now()-COALESCE(p_late,interval '0') AND i.origin='cadence'
     AND NOT (p_past_posts_park_late AND fn_reaper_parks_late(i.workspace_id,i.media_item_id))
     ORDER BY i.id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
@@ -101,7 +104,7 @@ BEGIN
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents SET state = 'expired'
    WHERE id IN (SELECT i.id FROM post_intents i
-                 WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now()
+                 WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now() - COALESCE(p_late, interval '0')
                    AND i.origin = 'cadence'
                    AND NOT (p_past_posts_park_late
                             AND fn_reaper_parks_late(i.workspace_id, i.media_item_id))
@@ -216,11 +219,11 @@ $$;
 -- The two doors are owned, and all three functions granted, as the schema code
 -- has them.
 GRANT CREATE ON SCHEMA public TO svc_maintenance;
-ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) OWNER TO svc_maintenance;
+ALTER FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) OWNER TO svc_maintenance;
 ALTER FUNCTION fn_reaper_late_past_posts(interval, integer) OWNER TO svc_maintenance;
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
-REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean) TO svc_worker;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) TO svc_worker;
 REVOKE ALL ON FUNCTION fn_reaper_parks_late(uuid, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_reaper_parks_late(uuid, uuid) TO svc_maintenance;
 REVOKE ALL ON FUNCTION fn_reaper_late_past_posts(interval, integer) FROM PUBLIC;

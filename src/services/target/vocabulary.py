@@ -110,7 +110,8 @@ TERMINAL_STATES: tuple[str, ...] = (
 
 #: The states a story waits in before it is approved: before its card is
 #: served (``UNSERVED_STATES``, which the reaper's cadence leg expires a story
-#: from once its slot is past), and while its card waits for a decision.
+#: from once it is still waiting its worker's late window after its slot), and
+#: while its card waits for a decision.
 UNSERVED_STATES: tuple[str, ...] = ("scheduled", "prompt_pending")
 WAITING_STATES: tuple[str, ...] = (*UNSERVED_STATES, "awaiting_approval")
 
