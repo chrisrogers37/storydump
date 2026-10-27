@@ -484,22 +484,13 @@ class PastPostsPipeline:
                     or subject.get("provenance") is None
                 ):
                     raise
-                evidence = exc.evidence
-                if evidence is None and exc.reason == "unsupported":
-                    # The check that judged the slide unsupported, read here,
-                    # under the story's lock: meeting the latch asked Instagram
-                    # nothing, and the prepare job counts a try spent by any
-                    # evidence the pending carries.
-                    evidence = refusal_evidence.latched(
-                        await _slide_capture(conn, ws, subject)
-                    )
                 await _record_park(
                     conn,
                     ws=ws,
                     iid=iid,
                     state=subject["state"],
                     admission_reason=exc.reason,
-                    evidence=evidence or _not_admitted(exc.reason, subject),
+                    evidence=exc.evidence or _not_admitted(exc.reason, subject),
                 )
             return True
 

@@ -19,7 +19,12 @@ import traceback
 
 import pytest
 
-from src.services.target import instagram_publish, media_validation, refusal_evidence
+from src.services.target import (
+    instagram_preparation,
+    instagram_publish,
+    media_validation,
+    refusal_evidence,
+)
 from tests.src.services.target.conftest import SIGNED, SIGNED_PARTS
 
 SECRET = "EAAB-fake-secret-value"
@@ -157,6 +162,25 @@ def test_a_slide_judged_unsupported_keeps_the_check_that_judged_it():
     """A local check's verdict latches the slide too, so a later park says the
     check, not only that the media is one stories do not take."""
     assert refusal_evidence.latched(JUDGED) == JUDGED["refusal"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reason,capture",
+    [("asset_unavailable", PARKED), ("unsupported", JUDGED)],
+    ids=["fetch-refused", "judged-unsupported"],
+)
+def test_a_story_meeting_a_latched_slide_carries_the_refusal_that_latched_it(
+    reason, capture
+):
+    """The pending for a story whose verdict meets a parked slide carries the
+    refusal that parked the slide, a refused fetch's or a local check's, so its
+    park says why."""
+    pending = instagram_preparation._unsuitable(
+        {"reason": reason}, {"current_capture": capture}
+    )
+    assert pending.reason == reason
+    assert refusal_evidence.of(pending) == capture["refusal"]
 
 
 @pytest.mark.unit

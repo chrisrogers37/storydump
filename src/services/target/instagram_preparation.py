@@ -89,14 +89,14 @@ FOR UPDATE OF m,i
 
 def _unsuitable(verdict, subject):
     """The pending for a story its suitability verdict refuses. A slide parked
-    by an earlier refusal keeps that refusal on its capture, so whichever caller
-    meets the latch, its park says why. No verdict proves nothing: the story
-    waits."""
+    by an earlier refusal, a refused fetch's or a local check's, keeps that
+    refusal on its capture, so whichever caller meets the latch, its park says
+    why. No verdict proves nothing: the story waits."""
     reason = verdict["reason"] if verdict else "past_posts_revalidation_required"
     return source_policy.MediaAdmissionPending(
         reason,
         evidence=refusal_evidence.latched(subject["current_capture"])
-        if reason == "asset_unavailable"
+        if reason in ("asset_unavailable", "unsupported")
         else None,
     )
 
