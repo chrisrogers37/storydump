@@ -2540,8 +2540,12 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
     that brings one, for the ref Telegram answered with. So the copy a lost
     answer leaves behind has no buttons; an edit Telegram refuses leaves an
     inert card on a story that stays decidable; and an edit that is lost or
-    paced is sent again until it lands. Driven through `OutboxPoller.tick`
-    over a transport double."""
+    paced is sent again until it lands. A card with a `media` block is sent as
+    its text, and the same edit brings its photo or video, once: a flood wait
+    holds the chat and the upload goes again after it, where a refusal, a file
+    that cannot be fetched or a lost answer leaves the text card, which still
+    gets its line and its keyboard. Driven through `OutboxPoller.tick` over a
+    transport double."""
 
     def _pending_card(self, outbox_db, *, chat=None):
         """A binding of its own, a story awaiting its decision, and its card
@@ -2584,11 +2588,22 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
             fetch=True,
         )
 
+    def _card_payload(self, outbox_db, card):
+        """The card row's payload as the ledger holds it: the card as sent,
+        its `media` block while the picture is owed, and how it stands
+        (`sent_as`)."""
+        return _owner_exec(
+            outbox_db,
+            "SELECT payload FROM channel_outbox WHERE id = %s",
+            (card,),
+            fetch=True,
+        )[0][0]
+
     @contextlib.asynccontextmanager
-    async def _sender(self, outbox_db, binding, transport):
+    async def _sender(self, outbox_db, binding, transport, *, clock=None):
         """The binding's poller over *transport*, on the worker's login and a
-        clock window of its own, with the tenant session factory it writes
-        through."""
+        clock window of its own (or *clock*, for a test that moves time), with
+        the tenant session factory it writes through."""
         from sqlalchemy.ext.asyncio import async_sessionmaker
 
         from src.services.target.outbox import OutboxPoller
@@ -2604,7 +2619,7 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
                     tenant,
                     binding_id=binding,
                     transport=transport,
-                    clock=lambda: now,
+                    clock=clock or (lambda: now),
                     interval_seconds=0.05,
                     chat_limit=CHAT_LIMIT,
                     chat_window_seconds=CHAT_WINDOW_S,
@@ -2653,6 +2668,63 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
             for b in r
         ]
         assert f"v1:cfg:{intent}" in tokens, "the edit brings the story's keyboard"
+
+    @pytest.mark.asyncio
+    async def test_a_card_whose_every_send_is_lost_fails_and_the_chat_is_told_once(
+        self, outbox_db, caplog
+    ):
+        """A card is resent `MAX_PROMPT_RESENDS` times and then fails. No copy
+        of it is known to the ledger, so the chat holds nothing it can decide
+        from: it is told once, in a notification, that the story's card could
+        not be confirmed and the story waits in the Queue, and the worker log
+        gives the row up once."""
+        from src.channels.telegram_transport import SendReceipt, TelegramSendError
+        from src.services.target import outbox
+
+        binding, intent, card = self._pending_card(outbox_db)
+        sends = outbox.MAX_PROMPT_RESENDS + 1
+        telegram = _ScriptedTransport(
+            *[TelegramSendError("sendMessage: transport failure")] * sends,
+            SendReceipt("tg-notice", sent_as="text"),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, _):
+            for n in range(1, sends + 1):
+                lost = await poller.tick()
+                assert lost is not None and lost["state"] == "ambiguous"
+                _backdate(
+                    outbox_db, card, outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS * n + 1
+                )
+            caplog.clear()
+            with caplog.at_level("WARNING", logger=outbox.__name__):
+                told = await poller.tick()
+        assert told is not None and told["kind"] == "notification"
+        assert told["state"] == "sent"
+        assert _state(outbox_db, card) == ("failed", sends, None)
+        notices = _owner_exec(
+            outbox_db,
+            "SELECT payload->>'text', state, intent_id FROM channel_outbox"
+            " WHERE binding_id = %s AND kind = 'notification'",
+            (binding,),
+            fetch=True,
+        )
+        assert [(t, s, str(i)) for t, s, i in notices] == [
+            (outbox.CARD_UNCONFIRMED_NOTICE, "sent", intent)
+        ], "the chat is told once"
+        assert len(telegram.sent("approval_prompt")) == sends
+        assert self._edits(outbox_db, binding) == [], "no copy had a ref to edit"
+        (gave_up,) = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == outbox.__name__ and r.levelname == "WARNING"
+        ]
+        for part in (
+            str(card),
+            binding,
+            "approval_prompt",
+            f"gave up after {sends} sends",
+            "ambiguous",
+        ):
+            assert part in gave_up
 
     @pytest.mark.asyncio
     async def test_a_refused_edit_leaves_an_inert_card_and_the_next_change_repaints_it(
@@ -2873,6 +2945,257 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
         assert held >= 1, "the chat's row is spent for the wait"
         (sent_card,) = telegram.sent("approval_prompt")
         assert "reply_markup" not in sent_card["payload"]
+
+    @pytest.mark.asyncio
+    async def test_a_media_cards_edit_carries_its_media_until_telegram_confirms_it(
+        self, outbox_db
+    ):
+        """A card with a `media` block is sent as its text. The picture rides
+        the edit that follows: the sender gives the edit the card's block at
+        claim, from the card's record, and never stores it on the edit. Once an
+        edit has put the picture on the message the record says so, and the
+        edits after it are caption edits."""
+        from src.channels.telegram_transport import SendReceipt
+        from src.services.target.outbox import supersede_all
+
+        binding, intent, card = self._pending_card(outbox_db)
+        line = "⏭️ Skipped by Ada · now"
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            SendReceipt("tg-1", sent_as="media"),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, tenant):
+            sent = await poller.tick()
+            landed = await poller.tick()
+            assert sent is not None and sent["state"] == "sent"
+            assert landed is not None and landed["state"] == "sent"
+
+            (sent_card,) = telegram.sent("approval_prompt")
+            block = sent_card["payload"]["media"]
+            assert "reply_markup" not in sent_card["payload"]
+            (edit,) = telegram.sent("prompt_supersede")
+            assert edit["payload"]["media"] == block, "the card's block rides the edit"
+            assert edit["payload"]["sent_as"] == "text"
+            tokens = [
+                b.get("callback_data")
+                for r in edit["payload"]["reply_markup"]["inline_keyboard"]
+                for b in r
+            ]
+            assert f"v1:cfg:{intent}" in tokens, "and the story's keyboard"
+            ((stored, state, _),) = self._edits(outbox_db, binding)
+            assert state == "sent" and "media" not in stored, "never stored on the edit"
+            assert self._card_payload(outbox_db, card)["sent_as"] == "media"
+
+            async with tenant() as session:
+                await supersede_all(
+                    session,
+                    workspace_id=outbox_db["ws"],
+                    binding_id=binding,
+                    intent_id=intent,
+                    outcome_text=line,
+                )
+                await session.commit()
+            await poller.tick()
+        caption_edit = telegram.rows[-1]
+        assert caption_edit["kind"] == "prompt_supersede"
+        assert caption_edit["payload"]["outcome_text"] == line
+        assert "media" not in caption_edit["payload"], "the picture is on the message"
+        assert caption_edit["payload"]["sent_as"] == "media"
+
+    @pytest.mark.asyncio
+    async def test_a_media_edit_whose_answer_is_lost_is_resent_without_its_media_and_no_second_upload_is_made(
+        self, outbox_db, caplog
+    ):
+        """The upload is made once. When its answer is lost the outbox gives
+        the card's media up, in the card's record and in one WARNING, and the
+        same edit is sent again to the same message with the line and the
+        keyboard alone: never a second card, never a second upload."""
+        from src.channels.telegram_transport import SendReceipt, TelegramSendError
+        from src.services.target import outbox
+
+        binding, intent, card = self._pending_card(outbox_db)
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            TelegramSendError("editMessageMedia: transport failure"),
+        )
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            async with self._sender(outbox_db, binding, telegram) as (poller, _):
+                await poller.tick()
+                lost = await poller.tick()
+                assert lost is not None and lost["state"] == "ambiguous"
+                attempts = self._edits(outbox_db, binding)[0][2]
+                _backdate(
+                    outbox_db,
+                    lost["id"],
+                    outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS * attempts + 1,
+                )
+                resent = await poller.tick()
+        assert resent is not None and resent["state"] == "sent"
+
+        (sent_card,) = telegram.sent("approval_prompt")
+        first, second = telegram.sent("prompt_supersede")
+        assert first["id"] == second["id"], "the same edit, sent again"
+        assert first["payload"]["media"] == sent_card["payload"]["media"]
+        assert first["payload"]["sent_as"] == "text"
+        assert "media" not in second["payload"], "no second upload"
+        assert second["payload"]["sent_as"] == "text"
+        assert [
+            (p["supersedes_ref"], s, a) for p, s, a in self._edits(outbox_db, binding)
+        ] == [("tg-1", "sent", 2)]
+        stored = self._card_payload(outbox_db, card)
+        assert "media" not in stored and stored["sent_as"] == "text"
+        (warned,) = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == outbox.__name__ and r.levelname == "WARNING"
+        ]
+        assert str(lost["id"]) in warned and "media is given up" in warned
+
+    @pytest.mark.asyncio
+    async def test_a_refused_media_leaves_the_text_card_with_its_keyboard_and_later_edits_are_text(
+        self, outbox_db
+    ):
+        """Telegram refusing the file, or the file not being fetchable, is a
+        receipt of `text`: the card stays text, its record drops the block and
+        the edits after it are text edits, with no upload tried again."""
+        from src.channels.telegram_transport import SendReceipt
+        from src.services.target.outbox import supersede_all
+
+        binding, intent, card = self._pending_card(outbox_db)
+        line = "⏭️ Skipped by Ada · now"
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            SendReceipt("tg-1", sent_as="text"),
+        )
+        async with self._sender(outbox_db, binding, telegram) as (poller, tenant):
+            await poller.tick()
+            landed = await poller.tick()
+            assert landed is not None and landed["state"] == "sent"
+            (media_edit,) = telegram.sent("prompt_supersede")
+            assert "media" in media_edit["payload"], "positive control: it was tried"
+            stored = self._card_payload(outbox_db, card)
+            assert "media" not in stored and stored["sent_as"] == "text"
+
+            async with tenant() as session:
+                await supersede_all(
+                    session,
+                    workspace_id=outbox_db["ws"],
+                    binding_id=binding,
+                    intent_id=intent,
+                    outcome_text=line,
+                )
+                await session.commit()
+            await poller.tick()
+        later = telegram.rows[-1]
+        assert later["kind"] == "prompt_supersede"
+        assert later["payload"]["outcome_text"] == line
+        assert "media" not in later["payload"], "no later edit uploads again"
+        assert later["payload"]["sent_as"] == "text"
+
+    @pytest.mark.asyncio
+    async def test_a_paced_media_edit_uploads_again_after_the_hold(self, outbox_db):
+        """A flood wait is not a lost answer: the media edit goes back to
+        `pending` with its attempt given back, the card's record keeps its
+        block, and once the hold has passed the same upload goes again."""
+        from src.channels.telegram_transport import SendReceipt, TelegramPaced
+
+        binding, intent, card = self._pending_card(outbox_db)
+        telegram = _ScriptedTransport(
+            SendReceipt("tg-1", sent_as="text"),
+            TelegramPaced(
+                "editMessageMedia: 400 retry_after=2s",
+                retry_after_s=2,
+                scope="chat",
+                code=400,
+            ),
+            SendReceipt("tg-1", sent_as="media"),
+        )
+        now = _now()
+        clock = [now]
+        async with self._sender(
+            outbox_db, binding, telegram, clock=lambda: clock[0]
+        ) as (poller, _):
+            sent = await poller.tick()
+            paced = await poller.tick()
+            assert sent is not None and sent["state"] == "sent"
+            assert paced is not None and paced["state"] == "paced"
+            assert self._card_payload(outbox_db, card).get("media"), "block kept"
+            clock[0] = now + timedelta(seconds=CHAT_WINDOW_S + 5)
+            landed = await poller.tick()
+        assert landed is not None and landed["state"] == "sent"
+        (sent_card,) = telegram.sent("approval_prompt")
+        first, second = telegram.sent("prompt_supersede")
+        block = sent_card["payload"]["media"]
+        assert first["payload"]["media"] == block, "the upload that met the flood"
+        assert second["payload"]["media"] == block, "and the same upload again"
+        assert [(s, a) for _, s, a in self._edits(outbox_db, binding)] == [("sent", 1)]
+        assert self._card_payload(outbox_db, card)["sent_as"] == "media"
+
+    @pytest.mark.asyncio
+    async def test_a_media_cards_photo_lands_on_its_text_message_by_the_edit_that_brings_its_keyboard(
+        self, outbox_db
+    ):
+        """The real transport over a mock Bot API: the card goes out as a
+        `sendMessage` of its text with no keyboard, and the edit that follows
+        is ONE `editMessageMedia` to that same message, carrying the picture,
+        the card's header and slot as its caption, and the story's keyboard."""
+        import httpx
+
+        from src.channels.telegram_transport import TelegramTransport
+        from tests.fixtures.fake_providers import OFFLINE, Call, multipart_field
+
+        chat = f"-100{uuid.uuid4().int % 10**10:010d}"
+        binding, intent, card = self._pending_card(outbox_db, chat=chat)
+        calls, fetched = [], []
+
+        def handler(request):
+            method = request.url.path.rsplit("/", 1)[-1]
+            calls.append(Call(method, request.read()))
+            result = {"message_id": 7}
+            if method == "editMessageMedia":
+                result["photo"] = []
+            return httpx.Response(200, json={"ok": True, "result": result})
+
+        async def fetch(media):
+            fetched.append(media)
+            return b"JPEGBYTES", media["file_name"], "image/jpeg"
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = TelegramTransport(
+            "synthetic-bot-token", client=client, policy=OFFLINE, media_fetch=fetch
+        )
+        send = transport.for_chat(chat)
+        try:
+            async with self._sender(outbox_db, binding, send) as (poller, _):
+                sent = await poller.tick()
+                landed = await poller.tick()
+                idle = await poller.tick()
+        finally:
+            await client.aclose()
+        assert [c.method for c in calls] == ["sendMessage", "editMessageMedia"]
+        create, edit = calls
+        assert create.json["text"].startswith("📸 f.jpg")
+        assert "reply_markup" not in create.json, "the card went out with no keyboard"
+        assert multipart_field(edit, "message_id") == "7", "the card's own message"
+        media = json.loads(multipart_field(edit, "media"))
+        assert (media["type"], media["media"]) == ("photo", "attach://photo")
+        assert media["caption"].startswith("📸 f.jpg\nSlot: ")
+        assert b'name="photo"; filename="f.jpg"' in edit.body
+        assert b"JPEGBYTES" in edit.body
+        keyboard = json.loads(multipart_field(edit, "reply_markup"))
+        tokens = [b["callback_data"] for r in keyboard["inline_keyboard"] for b in r]
+        assert f"v1:cfg:{intent}" in tokens and f"v1:posted:{intent}" in tokens
+        (block,) = fetched
+        assert block["workspace_id"] == outbox_db["ws"], "fetched once, as its tenant"
+        assert block["ref"].startswith("ref-arm-"), "the story's own file"
+        assert sent is not None and sent["state"] == "sent"
+        assert landed is not None and landed["state"] == "sent"
+        assert idle is None, "nothing is left to send"
+        assert _state(outbox_db, card) == ("sent", 1, "7")
+        assert self._card_payload(outbox_db, card)["sent_as"] == "media"
+        assert [
+            (p["supersedes_ref"], s) for p, s, _ in self._edits(outbox_db, binding)
+        ] == [("7", "sent")]
 
     @pytest.mark.asyncio
     async def test_edits_are_claimed_before_cards(self, outbox_db):
