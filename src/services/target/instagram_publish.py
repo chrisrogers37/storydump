@@ -32,26 +32,11 @@ from src.services.target.unit_of_work import unit_of_work
 logger = logging.getLogger(__name__)
 
 
-#: What a park says when it holds no refusal evidence, by the reason its
-#: preparation was not admitted (`MediaAdmissionPending.reason`): the chosen
-#: post is gone, what was chosen changed, or its media was judged one stories
-#: do not take.
-_ADMISSION_SENTENCES = {
-    "asset_unavailable": "the chosen post is no longer available",
-    "selected_asset_changed": "the chosen post's content changed",
-    "unsupported": "the chosen post's media is not one stories take",
-}
-
-
-def _park_notice(evidence, admission_reason=None) -> str:
+def _park_notice(evidence) -> str:
     """The park's notice: why it was refused, in plain words
-    (`refusal_evidence.plain`), else what its admission reason says, or that
-    no reason was recorded. Never a cause the record cannot support."""
-    reason = (
-        refusal_evidence.plain(evidence)
-        or _ADMISSION_SENTENCES.get(admission_reason)
-        or "no reason was recorded"
-    )
+    (`refusal_evidence.plain`), or that no reason was recorded. Never a cause
+    the record cannot support."""
+    reason = refusal_evidence.plain(evidence) or "no reason was recorded"
     return (
         "This story from your Instagram past posts could not be prepared."
         f" Refused: {reason}. Open the Queue to review it."
@@ -317,6 +302,15 @@ async def _slide_capture(conn, workspace_id, subject):
     )
 
 
+def _not_admitted(reason, subject) -> dict:
+    """Why the locked subject's preparation was not admitted, as a refusal
+    (`not_admitted`), for a park no refusal backs: *reason* and the item's
+    state, so the card and the notice say the same."""
+    return refusal_evidence.evidence(
+        "not_admitted", reason=reason, item_state=subject["media_item_state"]
+    )
+
+
 async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> bool:
     """Park a waiting past-posts story for review, in the caller's
     transaction, on the reason its preparation was not admitted. The refusal's
@@ -366,7 +360,7 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> b
         intent_id=iid,
         from_state=state,
         tz=str(tz or "UTC"),
-        notice=_park_notice(evidence, admission_reason),
+        notice=_park_notice(evidence),
     )
     if parked:
         logger.info(
@@ -491,13 +485,22 @@ class PastPostsPipeline:
                     or subject.get("provenance") is None
                 ):
                     raise
+                evidence = exc.evidence
+                if evidence is None and exc.reason == "unsupported":
+                    # The check that judged the slide unsupported, read here,
+                    # under the story's lock: meeting the latch asked Instagram
+                    # nothing, and the prepare job counts a try spent by any
+                    # evidence the pending carries.
+                    evidence = refusal_evidence.latched(
+                        await _slide_capture(conn, ws, subject)
+                    )
                 await _record_park(
                     conn,
                     ws=ws,
                     iid=iid,
                     state=subject["state"],
                     admission_reason=exc.reason,
-                    evidence=exc.evidence,
+                    evidence=evidence or _not_admitted(exc.reason, subject),
                 )
             return True
 
@@ -516,9 +519,11 @@ class PastPostsPipeline:
         leg passes its own). Its evidence says so (`window_closed`): the *tries*
         its prepare jobs spent, and the refusal its slide last recorded, read
         under the story's lock. That is any refusal the capture holds, a
-        waiting one (`download_pending`) included, so not `latched`'s. No fetch
-        decides it, so no fetch's fence is needed: only that the story still
-        waits for its slot. False when it no longer does."""
+        waiting one (`download_pending`) included, so not `latched`'s; a
+        retired slide, which has no asset row left to hold one, says it is no
+        longer indexed (`not_admitted`). No fetch decides it, so no fetch's
+        fence is needed: only that the story still waits for its slot. False
+        when it no longer does."""
         ws, iid = str(workspace_id), str(intent_id)
         async with self._uow(engine, ws, actor_kind).begin() as conn:
             subject, _ = await lock_pipeline(
@@ -532,6 +537,9 @@ class PastPostsPipeline:
             ):
                 return False
             capture = await _slide_capture(conn, ws, subject)
+            last = capture.get("refusal") if isinstance(capture, dict) else None
+            if last is None and subject["media_item_state"] == "removed":
+                last = _not_admitted("asset_unavailable", subject)
             return await _record_park(
                 conn,
                 ws=ws,
@@ -542,9 +550,7 @@ class PastPostsPipeline:
                     "window_closed",
                     late_seconds=late_seconds,
                     tries=tries,
-                    last_refusal=(
-                        capture.get("refusal") if isinstance(capture, dict) else None
-                    ),
+                    last_refusal=last,
                 ),
             )
 

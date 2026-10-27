@@ -9,7 +9,9 @@ anyone reading the provider again. It is attached to the raised error as its
 'refusal'` and the park's audit detail. An error's message stays constant; the
 evidence never reaches a log line or a traceback. A dead container's evidence,
 a `container_dead` refusal, is written by the publish pipeline straight into
-the story's `last_error -> 'error' -> 'refusal'`.
+the story's `last_error -> 'error' -> 'refusal'`. A past post parked on a
+reason no refusal backs records that reason as a `not_admitted` refusal, with
+the item's state, so its card and its notice say the same.
 
 Redacted where it is captured, never later:
 
@@ -70,13 +72,22 @@ def of(exc: BaseException) -> Optional[dict]:
 
 
 def latched(capture) -> Optional[dict]:
-    """The refusal that parked a slide, from its stored capture: kept where the
-    refusal parked it (`asset_unavailable`), so whichever caller later meets
-    the parked slide says why. None for a capture of anything else."""
-    if not isinstance(capture, dict) or capture.get("reason") != "asset_unavailable":
+    """The refusal that parked a slide, from its stored capture: kept where a
+    refused fetch parked it (`asset_unavailable`), or where a local check
+    judged its file one stories do not take (`unsupported`), so whichever
+    caller later meets the parked slide says why. None for a capture of
+    anything else."""
+    if not isinstance(capture, dict):
         return None
     refusal = capture.get("refusal")
-    return refusal if isinstance(refusal, dict) else None
+    if not isinstance(refusal, dict):
+        return None
+    if capture.get("reason") == "asset_unavailable" or (
+        capture.get("state") == "unsupported"
+        and refusal.get("kind") == "local_validation"
+    ):
+        return refusal
+    return None
 
 
 def graph_path(url: str) -> str:
@@ -327,7 +338,14 @@ def _plain(refusal) -> Optional[str]:
             f" ({_count(tries)} {'try' if whole(tries) == 1 else 'tries'})"
         )
         last = plain(refusal.get("last_refusal"))
-        return f"{sentence}; the last was refused: {last}" if last else sentence
+        if not last:
+            return sentence
+        # With no try spent, what the slide last recorded was no try's refusal.
+        return (
+            f"{sentence}; the last was refused: {last}"
+            if whole(tries)
+            else f"{sentence}; {last}"
+        )
     if kind in ("cdn_refused", "cdn_error"):
         statuses = "/".join(str(s) for s in refusal.get("statuses") or []) or "?"
         verb = "refused the link twice" if kind == "cdn_refused" else "failed"
@@ -375,6 +393,25 @@ def _plain(refusal) -> Optional[str]:
         )
         return f"this file failed the {check} check" + (
             f" ({values})" if values else ""
+        )
+    if kind == "not_admitted":
+        # Only what the reason and the item's state support: `removed` does not
+        # say why the item was retired, and the post may still be on Instagram.
+        reason = refusal.get("reason")
+        if reason == "asset_unavailable":
+            if refusal.get("item_state") == "removed":
+                return (
+                    "the chosen slide or post is no longer in the index of"
+                    " your past posts"
+                )
+            return "the chosen post could not be fetched, and no detail was recorded"
+        if reason == "unsupported":
+            return "this media was judged one stories do not take"
+        if reason == "selected_asset_changed":
+            return "the chosen post's content changed"
+        return (
+            f"the chosen post was not prepared ({short(reason) or 'unknown'}),"
+            " and no detail was recorded"
         )
     # A record with nothing specific still says what it holds: its error's
     # class for a refusal raised without evidence, else its kind.
