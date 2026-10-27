@@ -610,6 +610,57 @@ async def test_the_reaper_parks_a_late_story_saying_why_and_tells_it_once(
     assert parked(sync_conn, intent)["state"] == "review_required"
 
 
+async def test_a_story_the_reaper_meets_before_any_try_waits_then_parks_told_once(
+    world_db, worker, origin, sync_conn
+):
+    """A cadence story is minted once its slot has come, so the reaper can meet a
+    past-posts story seconds after its slot, before any prepare job holds it.
+    The reaper of a worker that parks leaves it waiting and due for its first
+    preparation, and tells nothing. Still untried a window past its slot, it is
+    parked for review, its evidence saying it had no try, and its chat is told
+    once; nothing is asked of Instagram."""
+    config = WorkerConfig()
+    _, _, intent = await preparation.selected(worker, origin)
+    assert slip(sync_conn, intent, "2 seconds") == PAST_POSTS_STORY
+    assert prep_jobs(sync_conn, intent) == []
+    prepared, calls = preparation.service(worker, origin)
+    binding = await bind(worker, origin)
+
+    async def reap():
+        await scheduler.execute_reap_expired(
+            worker,
+            limit=50,
+            approval_ttl_seconds=config.approval_ttl_seconds,
+            approved_ttl_seconds=config.approved_ttl_seconds,
+            capability=foundation.capability(),
+            park_late=deps_of(worker, prepared).past_posts.park_late,
+            past_posts_late_seconds=config.planned_late_seconds,
+        )
+
+    await reap()
+
+    assert state_of(sync_conn, intent) == "scheduled"
+    assert is_due(world_db, intent), "its first preparation is still owed"
+    assert await notices(worker, origin, intent, binding) == []
+
+    assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
+    await reap()
+
+    story = parked(sync_conn, intent)
+    assert story["state"] == "review_required"
+    assert story["reason"] == "past_posts_content_unavailable"
+    assert story["refusal"] == {
+        "v": 1,
+        "kind": "window_closed",
+        "late_seconds": config.planned_late_seconds,
+        "tries": 0,
+        "last_refusal": None,
+    }
+    (told,) = await notices(worker, origin, intent, binding)
+    assert "could not be fetched within 60 minutes of its slot (0 tries)" in told
+    assert calls == []
+
+
 async def test_a_workspace_holds_one_file_task_at_a_time(worker, origin, sync_conn):
     """The media lane's claim leaves a second job of the same workspace waiting
     while the first holds its lease, and hands it over once the first has ended."""
