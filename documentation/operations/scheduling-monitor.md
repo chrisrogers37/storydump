@@ -89,6 +89,22 @@ closed in the notice's first words:
 after a notice. Both key on what a human was last told, not on the last reading,
 so one `unreachable` reading that never paged ends in silence.
 
+## Delivery, its own axis
+
+Each poll also reads `/health/delivery`: the one beside `--url`, or
+`--delivery-url`. Cards can fail while posts land, so delivery keeps its own
+surface and is judged with its own state. One axis never masks the other.
+
+- **Pages:** any send in the last hour that failed or is ambiguous, the
+  endpoint's `failed_or_ambiguous`, pages with its count, the hour's sends and
+  the alerting classes with their provider codes. A deferral (a 429) is never a
+  failure.
+- **Repeats:** every 6 hours while it lasts, and `RECOVERED` once an hour passes
+  with none.
+- **Skips:** a reading that is not a whole one (a non-200, not a JSON object,
+  missing counts) is skipped for that poll and changes nothing. The scheduling
+  axis already says when the API cannot be reached.
+
 ## A broken instrument is not a clean bill of health
 
 The classifier reads a missing or mistyped field as `unreachable`, never as
@@ -133,6 +149,8 @@ and what a human last heard:
   reading with no counts, such as an `unreachable` one, never lowers it. Losing
   the file makes the monitor speak LESS about a lost destination: the estate then
   reads as one that never had any, until a reading shows one again.
+- `delivery`: the delivery axis's own `state`, `observed_at`, `announced` and
+  `spoke_at`, kept apart from the scheduling axis's.
 
 `announced` and `spoke_at` describe the last *delivered* message and move only
 when the notify command exits 0. A failed delivery leaves them where they were,

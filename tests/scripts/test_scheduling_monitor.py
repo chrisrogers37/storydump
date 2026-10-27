@@ -278,6 +278,37 @@ class TestDeliveryIsItsOwnAxis:
         )
         assert monitor.delivery_url("https://api.example/elsewhere") is None
 
+    def test_main_reads_delivery_beside_scheduling_and_pages_it_alone(
+        self, monkeypatch, tmp_path
+    ):
+        """`main` fetches the delivery surface beside --url and sends its page
+        as its own message, recorded on the delivery axis alone."""
+        pages = {
+            "http://x/health/scheduling": (200, body(0, 5, 3)),
+            "http://x/health/delivery": (200, json.dumps(DELIVERY_FAILING)),
+        }
+        monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: pages[url])
+        sent = []
+        monkeypatch.setattr(
+            monitor, "notify", lambda command, message: sent.append(message) or True
+        )
+        state_file = str(tmp_path / "s.json")
+        code = monitor.main(
+            [
+                "--url",
+                "http://x/health/scheduling",
+                "--state-file",
+                state_file,
+                "--notify-command",
+                "/bin/true",
+            ]
+        )
+        assert code == monitor.EXIT_SPOKE
+        assert len(sent) == 1 and "DELIVERY IS FAILING" in sent[0]
+        st = monitor.load_state(state_file)
+        assert st["delivery"]["announced"] == monitor.DELIVERY_FAILING
+        assert st.get("announced") is None
+
 
 class TestTheStateFile:
     def test_a_corrupt_file_reads_as_no_history(self, tmp_path):

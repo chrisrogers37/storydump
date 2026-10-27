@@ -221,6 +221,97 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
     return state, None
 
 
+#: Delivery's own surface, beside the scheduling one. It is read and judged as
+#: its own axis: cards can fail while posts land, so neither may mask the other.
+SCHEDULING_PATH, DELIVERY_PATH = "/health/scheduling", "/health/delivery"
+DELIVERY_FAILING, DELIVERY_OK = "failing", "ok"
+
+
+def delivery_url(url: str) -> str | None:
+    """The delivery surface beside a scheduling URL, or None when the URL does
+    not end in `/health/scheduling`."""
+    if not url.endswith(SCHEDULING_PATH):
+        return None
+    return url[: -len(SCHEDULING_PATH)] + DELIVERY_PATH
+
+
+def read_delivery(status: int, body: str) -> dict | None:
+    """A whole `/health/delivery` reading, else None: a non-200, a body that is
+    not a JSON object, or one missing its counts. None skips the axis for the
+    run; the scheduling axis already says when the API cannot be reached."""
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("by_class"), dict):
+        return None
+    for key in ("sent_in_window", "failed_or_ambiguous"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+    return data
+
+
+def _failures(by_class: dict) -> str:
+    """The alerting failures by class and provider code, as one clause. A
+    deferral (a 429) is context, never a failure, so a class with nothing
+    alerting is left out."""
+    parts = []
+    for name in sorted(by_class):
+        entry = by_class[name] if isinstance(by_class[name], dict) else {}
+        if not _count(entry.get("alerting")):
+            continue
+        codes = entry.get("codes") if isinstance(entry.get("codes"), dict) else {}
+        said = ", ".join(f"{code}×{n}" for code, n in sorted(codes.items()))
+        parts.append(f"{name}: {said}" if said else str(name))
+    return "; ".join(parts) or "no class recorded"
+
+
+def decide_delivery(
+    reading: dict | None, prior: dict, now: float
+) -> tuple[dict, str | None]:
+    """A delivery reading + the axis's own history → (its state, a message or
+    None). Pure, like `decide`; only `announce_delivery` records that a human
+    was told. Any failed or ambiguous send in the last hour pages, the number
+    `/health/delivery` publishes for its poller, and repeats while it lasts."""
+    if reading is None:
+        return dict(prior), None
+    failing = reading["failed_or_ambiguous"] >= 1
+    announced = prior.get("announced")
+    state = {
+        **prior,
+        "state": DELIVERY_FAILING if failing else DELIVERY_OK,
+        "observed_at": now,
+    }
+    if failing:
+        spoke_at = prior.get("spoke_at", 0.0) if announced == DELIVERY_FAILING else 0.0
+        if spoke_at and now - spoke_at < REALERT_AFTER_S:
+            return state, None
+        return state, (
+            f"FLEET ALERT: storydump DELIVERY IS FAILING — "
+            f"{reading['failed_or_ambiguous']} of the last hour's sends failed or "
+            f"are ambiguous ({reading['sent_in_window']} sent; "
+            f"{_failures(reading['by_class'])})."
+        )
+    if announced == DELIVERY_FAILING:
+        return state, (
+            f"RECOVERED: storydump delivery — no send failed or is ambiguous in "
+            f"the last hour ({reading['sent_in_window']} sent)."
+        )
+    return state, None
+
+
+def announce_delivery(state: dict, now: float) -> dict:
+    """Record that a human was told the delivery axis's state. Called ONLY
+    after the message was delivered, for `announce`'s reason."""
+    state = dict(state)
+    state["announced"] = state.get("state")
+    state["spoke_at"] = now
+    return state
+
+
 def fetch(url: str, timeout_s: float) -> tuple[int, str]:
     """The endpoint, or a status that says why not. Never raises."""
     try:
@@ -282,6 +373,10 @@ def notify(command: str, message: str) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", required=True, help="the /health/scheduling endpoint")
+    ap.add_argument(
+        "--delivery-url",
+        help="the /health/delivery endpoint; by default the one beside --url",
+    )
     ap.add_argument("--state-file", required=True)
     ap.add_argument(
         "--notify-command", help="executable given one argument: the message"
@@ -327,30 +422,51 @@ def main(argv: list[str] | None = None) -> int:
         worker_overdue_s=args.worker_overdue_threshold,
     )
     prior = load_state(args.state_file)
-    state, message = decide(verdict, prior, time.time())
+    now = time.time()
+    state, message = decide(verdict, prior, now)
+
+    # Delivery: its own surface, judged with its own state under "delivery".
+    delivery_message = None
+    url = args.delivery_url or delivery_url(args.url)
+    if url:
+        prior_delivery = prior.get("delivery")
+        state["delivery"], delivery_message = decide_delivery(
+            read_delivery(*fetch(url, args.timeout)),
+            prior_delivery if isinstance(prior_delivery, dict) else {},
+            now,
+        )
 
     # Always visible, even when silent — `NO_SIGNAL` must never be something a
     # reader has to go looking for.
     print(f"{verdict.state}: {verdict.detail}")
 
-    if message is None:
-        save_state(args.state_file, state)
-        return EXIT_QUIET
-
-    delivered = args.notify_command is None or notify(args.notify_command, message)
-    if not delivered:
-        # A monitor cannot page about its own paging failure. What it CAN do is
-        # leave `announced` where it was, so the next poll re-derives the same
-        # message and tries again, and exit nonzero so the supervisor logs a
-        # failed unit.
+    spoke = failed = False
+    for said, mark in (
+        (message, lambda s: announce(s, verdict, time.time())),
+        (
+            delivery_message,
+            lambda s: {**s, "delivery": announce_delivery(s["delivery"], time.time())},
+        ),
+    ):
+        if said is None:
+            continue
+        if args.notify_command is None or notify(args.notify_command, said):
+            state = mark(state)
+            print(said)
+            spoke = True
+        else:
+            # A monitor cannot page about its own paging failure. What it CAN do
+            # is leave that axis's `announced` where it was, so the next poll
+            # re-derives the same message and tries again, and exit nonzero so
+            # the supervisor logs a failed unit.
+            failed = True
+            print(f"NOTIFY FAILED, message not delivered: {said}", file=sys.stderr)
+    if failed:
         state["notify_failed_at"] = time.time()
-        save_state(args.state_file, state)
-        print(f"NOTIFY FAILED, message not delivered: {message}", file=sys.stderr)
+    save_state(args.state_file, state)
+    if failed:
         return EXIT_NOTIFY_FAILED
-
-    save_state(args.state_file, announce(state, verdict, time.time()))
-    print(message)
-    return EXIT_SPOKE
+    return EXIT_SPOKE if spoke else EXIT_QUIET
 
 
 if __name__ == "__main__":  # pragma: no cover
