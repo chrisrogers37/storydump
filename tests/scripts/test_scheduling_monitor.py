@@ -157,6 +157,55 @@ class TestItRepeatsWhileBrokenAndAnnouncesRecovery:
         assert msg is None
 
 
+class TestLosingTheLastDestinationSpeaks:
+    """An estate that HAD destinations and now has none is not the empty estate
+    the first `NO_SIGNAL` describes: nothing will be scheduled or posted until
+    one comes back, and that is said daily, not once a week."""
+
+    def test_an_estate_that_had_destinations_says_so_and_repeats_daily(self):
+        state, _ = step(classify(200, body(0, 1, 3), threshold_s=T), {}, now=1.0)
+        v = classify(200, body(active=0), threshold_s=T)
+        state, msg = step(v, state, now=2.0)
+        assert msg is not None and "NO ACTIVE DESTINATIONS" in msg
+        assert "had 1" in msg
+        after = monitor.RENOTICE_LOST_DESTINATIONS_AFTER_S
+        _, soon = step(v, state, now=2.0 + after - 1)
+        assert soon is None
+        _, later = step(v, state, now=2.0 + after + 1)
+        assert later is not None and "NO ACTIVE DESTINATIONS" in later
+        assert after < monitor.RENOTICE_NO_SIGNAL_AFTER_S
+
+    def test_a_reading_with_no_payload_does_not_forget_the_estate(self):
+        # An unreachable reading carries no counts; what the estate had must
+        # outlive it, or a network blip turns a lost destination back into the
+        # weekly notice for an estate that never had one.
+        state, _ = step(classify(200, body(0, 1, 3), threshold_s=T), {}, now=1.0)
+        for now in (2.0, 3.0):
+            state, _ = step(classify(0, "boom", threshold_s=T), state, now=now)
+        _, msg = step(classify(200, body(active=0), threshold_s=T), state, now=4.0)
+        assert msg is not None and "had 1" in msg
+
+
+class TestAFaultThatEndsInBlindnessIsSaidHonestly:
+    """A fault the human was told about, followed by a reading that can see
+    nothing, closes that fault in words: the human must not be left holding an
+    alert that no longer describes anything."""
+
+    def test_a_dead_worker_that_goes_blind_says_it_recovered(self):
+        down = Verdict(WORKER_DOWN, "no system job has finished for 90000s")
+        state, _ = step(down, {}, now=1.0)
+        _, msg = step(Verdict(WORKER_UNKNOWN, "no baseline"), state, now=2.0)
+        assert msg is not None and msg.startswith(f"RECOVERED from {WORKER_DOWN}")
+
+    def test_a_stall_that_goes_blind_is_not_called_recovered(self):
+        # Pausing the only workspace stops the stall's evidence, not the stall.
+        state, _ = step(classify(200, body(2, 5, 900), threshold_s=T), {}, now=1.0)
+        _, msg = step(classify(200, body(active=0), threshold_s=T), state, now=2.0)
+        assert msg is not None
+        assert "the stall is no longer observable" in msg
+        assert "RECOVERED" not in msg
+
+
 class TestTheStateFile:
     def test_a_corrupt_file_reads_as_no_history(self, tmp_path):
         p = tmp_path / "s.json"
