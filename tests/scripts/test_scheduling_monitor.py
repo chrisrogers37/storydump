@@ -310,6 +310,73 @@ class TestDeliveryIsItsOwnAxis:
         assert st.get("announced") is None
 
 
+def with_commits(api="abc1234", worker="abc1234"):
+    """A healthy scheduling reading carrying the API's and the worker's short
+    commits. `None` leaves that commit out, as a pre-rollout reading does."""
+    worker_block = dict(ALIVE_WORKER)
+    if worker is not None:
+        worker_block["commit"] = worker
+    data = {"stalled": 0, "accounts_active": 5, "max_lag_seconds": 3}
+    data["worker"] = worker_block
+    if api is not None:
+        data["api_commit"] = api
+    return data
+
+
+def sstep(payload, prior, now):
+    """`decide_split`, then record the announcement ONLY if a message went out."""
+    state, msg = monitor.decide_split(payload, prior, now)
+    if msg is not None:
+        state = monitor.announce_split(state, now)
+    return state, msg
+
+
+class TestAVersionSplitPagesOnceItOutlastsADeploy:
+    """The API and the worker deploy one after the other, so they disagree for
+    a deploy's length. A split that outlasts that is a deploy that reached one
+    service and not the other."""
+
+    def test_matching_commits_say_nothing(self):
+        _, msg = sstep(with_commits(), {}, now=1.0)
+        assert msg is None
+
+    def test_a_split_is_silent_inside_the_window_then_pages(self):
+        split = with_commits(worker="def5678")
+        state, msg = sstep(split, {}, now=1.0)
+        assert msg is None
+        state, msg = sstep(split, state, now=1.0 + monitor.SPLIT_AFTER_S - 1)
+        assert msg is None
+        _, msg = sstep(split, state, now=1.0 + monitor.SPLIT_AFTER_S)
+        assert msg is not None and "VERSION SPLIT" in msg
+        assert "abc1234" in msg and "def5678" in msg
+
+    def test_it_repeats_daily_and_says_when_it_is_resolved(self):
+        split, t = with_commits(worker="def5678"), monitor.SPLIT_AFTER_S
+        state, _ = sstep(split, {}, now=0.0)
+        state, first = sstep(split, state, now=t)
+        assert first is not None
+        _, soon = sstep(split, state, now=t + monitor.RENOTICE_SPLIT_AFTER_S - 1)
+        assert soon is None
+        _, later = sstep(split, state, now=t + monitor.RENOTICE_SPLIT_AFTER_S + 1)
+        assert later is not None
+        _, resolved = sstep(with_commits(), state, now=t + 60)
+        assert resolved is not None and "RESOLVED" in resolved
+
+    def test_a_split_that_ends_inside_the_window_is_never_said(self):
+        state, _ = sstep(with_commits(worker="def5678"), {}, now=0.0)
+        _, msg = sstep(with_commits(), state, now=60.0)
+        assert msg is None
+
+    def test_a_reading_without_both_commits_neither_resets_nor_speaks(self):
+        split = with_commits(worker="def5678")
+        state, _ = sstep(split, {}, now=0.0)
+        for unknown in ({}, with_commits(worker=None), with_commits(api=None)):
+            kept, msg = sstep(unknown, state, now=60.0)
+            assert msg is None and kept == state
+        _, paged = sstep(split, state, now=monitor.SPLIT_AFTER_S)
+        assert paged is not None, "the window counts from the first split reading"
+
+
 class TestTheStateFile:
     def test_a_corrupt_file_reads_as_no_history(self, tmp_path):
         p = tmp_path / "s.json"
