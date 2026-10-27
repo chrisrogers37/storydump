@@ -54,6 +54,7 @@ from src.services.target.publish_pipeline import (
 )
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.services.target.usage_precheck import UsagePrecheck
+from src.services.target.work_loop import WorkerConfig
 from tests.scripts.conftest import (
     _scratch,
     async_url,
@@ -3469,6 +3470,11 @@ class TestTheFloatsSafetyNets:
 WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
 
 
+#: A slot far enough behind for the worker's reaper to expire its cadence
+#: story: the worker's late window, and a minute.
+PAST_ITS_WINDOW_S = -(WorkerConfig().planned_late_seconds + 60)
+
+
 def _waiting(pipe_db, state, *, flagged, slot_in_s=3600, age_s=0):
     """An undebited intent in *state*, its slot an hour ahead unless a test
     moves it, so no expiry leg reaches it by accident."""
@@ -3538,12 +3544,14 @@ class TestTheReapersCancelLeg:
         assert _states(pipe_db, intents) == list(WAITING_STATES)
 
     def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
-        """A flagged row past its slot or its approval TTL ends `cancelled`,
-        the label the reaper's cancel leg applies. Its unflagged twin
-        still expires — the expiry legs' positive control."""
+        """A flagged row past its late window or its approval TTL ends
+        `cancelled`, the label the reaper's cancel leg applies. Its unflagged
+        twin still expires — the expiry legs' positive control."""
         past = {
             flagged: [
-                _waiting(pipe_db, "scheduled", flagged=flagged, slot_in_s=-60),
+                _waiting(
+                    pipe_db, "scheduled", flagged=flagged, slot_in_s=PAST_ITS_WINDOW_S
+                ),
                 _waiting(
                     pipe_db, "awaiting_approval", flagged=flagged, age_s=2 * 86400
                 ),
@@ -3707,7 +3715,9 @@ class TestEveryLegRunsInTheFinalBody:
             (lease,),
         )
         flagged = _waiting(pipe_db, "scheduled", flagged=True)
-        late = _waiting(pipe_db, "prompt_pending", flagged=False, slot_in_s=-60)
+        late = _waiting(
+            pipe_db, "prompt_pending", flagged=False, slot_in_s=PAST_ITS_WINDOW_S
+        )
         stale = _waiting(pipe_db, "awaiting_approval", flagged=False, age_s=2 * 86400)
         lock = _exec(
             pipe_db,
@@ -3761,7 +3771,7 @@ class TestEveryLegRunsInTheFinalBody:
     def test_the_cancel_leg_ends_a_flagged_waiting_story(self, pipe_db, swept):
         assert _intent_row(pipe_db, swept["flagged"])["state"] == "cancelled"
 
-    def test_the_slot_leg_expires_a_story_past_its_slot(self, pipe_db, swept):
+    def test_the_slot_leg_expires_a_story_past_its_late_window(self, pipe_db, swept):
         assert _intent_row(pipe_db, swept["late"])["state"] == "expired"
 
     def test_the_approval_leg_expires_a_card_past_its_ttl(self, pipe_db, swept):
