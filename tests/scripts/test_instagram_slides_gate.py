@@ -454,6 +454,7 @@ async def test_terminal_parent_read_retires_every_known_slide_and_keeps_empty_po
     capture = SimpleNamespace(
         workspace_id=str(origin["ws"]), source_id=source["source_id"]
     )
+    removed = {}
     for parent in ("900", "901"):
         async with obs.uow(past_posts_engine, origin) as conn:
             index = await obs.row(
@@ -464,10 +465,11 @@ async def test_terminal_parent_read_retires_every_known_slide_and_keeps_empty_po
             candidate = instagram_sync._ParentCapture(
                 parent, source["generation_id"], index["observation_revision"]
             )
-            assert (
-                await instagram_sync._capture_helper_terminal(conn, capture, candidate)
-                == 10
+            removed[parent] = await instagram_sync._capture_helper_terminal(
+                conn, capture, candidate
             )
+    # Each post is retired; the empty one had no slide item to remove.
+    assert removed == {"900": 10, "901": 0}
     current = await assets(past_posts_engine, origin)
     assert len(current) == 10
     assert all(
