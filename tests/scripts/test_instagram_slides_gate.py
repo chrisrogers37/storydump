@@ -317,16 +317,12 @@ async def test_ten_slides_reorder_truncation_and_removal_keep_independent_histor
     held_out = await assets(past_posts_engine, origin)
     assert len(held_out) == 10
     out = next(row for row in held_out if row["asset_media_id"] == "105")
-    assert (out["position"], out["availability"], out["exclusion_reason"]) == (
-        10,
-        "unavailable",
-        "unlisted",
-    )
-    async with obs.uow(past_posts_engine, origin) as conn:
-        state = await obs.row(
-            conn, "SELECT state FROM media_items WHERE id=:item", item=ids["105"]
-        )
-        assert state["state"] == "missing"
+    assert (
+        out["position"],
+        out["availability"],
+        out["exclusion_reason"],
+        out["state"],
+    ) == (10, "unavailable", "unlisted", "missing")
     again = await obs.observe(past_posts_engine, origin, source, lacking)
     assert again.observation_revision == 5
     after_removal = await assets(past_posts_engine, origin)
@@ -468,8 +464,9 @@ async def test_terminal_parent_read_retires_every_known_slide_and_keeps_empty_po
             candidate = instagram_sync._ParentCapture(
                 parent, source["generation_id"], index["observation_revision"]
             )
-            assert await instagram_sync._capture_helper_terminal(
-                conn, capture, candidate
+            assert (
+                await instagram_sync._capture_helper_terminal(conn, capture, candidate)
+                == 10
             )
     current = await assets(past_posts_engine, origin)
     assert len(current) == 10

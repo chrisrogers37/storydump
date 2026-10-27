@@ -10,9 +10,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import logging
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping
@@ -23,12 +22,12 @@ from src.services.target import intent_ledger, readers, source_state, vocabulary
 from src.services.target.instagram_past_posts_adapter import identity
 from src.services.target.instagram_sources import PastPostsRefused, require_activation
 
-logger = logging.getLogger(__name__)
-
-#: The exclusion reason of a slide one complete read lacked: it is held out of
-#: the draw, a second complete read that lacks it too retires it, and a read
-#: that lists it again brings it back.
-UNLISTED = "unlisted"
+#: The exclusion reason of a slide one complete read of its carousel lacked:
+#: it is held out of the draw (its item `missing`), the next complete read that
+#: lacks it too retires it, and a read that lists it again brings it back.
+#: `fn_planned_misses` takes `missing` as final; that is safe because no live
+#: story's slide is ever held out (`_held_slides`).
+_UNLISTED = "unlisted"
 
 _ID = re.compile(r"[0-9]{1,64}\Z")
 _PERMALINK = re.compile(
@@ -76,6 +75,11 @@ class ObservationResult:
     reason: str | None = None
     media_item_id: str | None = None
     observation_revision: int | None = None
+    #: What the landing did with the slides the read lacked: kept for the live
+    #: stories that hold them, held out of the draw, and retired.
+    kept: tuple[str, ...] = ()
+    unlisted: tuple[str, ...] = ()
+    retired: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -325,7 +329,7 @@ async def write_observation(
 def _bundle_assets(o, previous, held=frozenset(), unlisted=frozenset()):
     """Keep unseen slides after a partial response; after a complete one,
     keep the `held` slides it lacks as they were, and the `unlisted` ones it
-    lacks out of the draw (`UNLISTED`), without position collisions."""
+    lacks out of the draw (`_UNLISTED`), without position collisions."""
     observed_ids = {a.selected_asset_id for a in o.assets}
     # The response's positions win. Kept rows follow it, in their old order,
     # so the deferrable position key never collides.
@@ -353,7 +357,7 @@ def _bundle_assets(o, previous, held=frozenset(), unlisted=frozenset()):
                 row["file_size"],
                 position=len(assets) + 1,
                 availability="unavailable" if out else row["availability"],
-                exclusion_reason=UNLISTED if out else row["exclusion_reason"],
+                exclusion_reason=_UNLISTED if out else row["exclusion_reason"],
             )
         )
     return assets
@@ -376,7 +380,46 @@ def expected_slide_count(slide_count, position):
     return slide_count
 
 
-async def _held_slides(executor, ws, sid, o, missing):
+def _lacking(o, previous, missing, held):
+    """What a read does with the slides it lacks that the index holds an item
+    for (`missing`, id to item; empty for a partial read), beside the `held`
+    ones a live story keeps: the slides it holds out of the draw, and the ones
+    it retires (id to item).
+
+    The two-read rule at sync: the first complete read of a carousel that lacks
+    a drawable slide holds it out (`_UNLISTED`), and the next one that lacks it
+    too retires it. An excluded slide is never drawn, so it retires on the
+    first; so does a single post's asset, which is the post itself."""
+    drawable = {
+        r["asset_media_id"]
+        for r in previous
+        if r["availability"] != "excluded" and r["exclusion_reason"] != _UNLISTED
+    }
+    unlisted = (
+        frozenset(mid for mid in missing if mid not in held and mid in drawable)
+        if o.slide_count
+        else frozenset()
+    )
+    retiring = {
+        mid: item
+        for mid, item in missing.items()
+        if mid not in held and mid not in unlisted
+    }
+    return unlisted, retiring
+
+
+def _item_state(asset, conflict):
+    """The state a landed slide gives its item: available while it may be
+    drawn, `missing` while a complete read holds it out (`_UNLISTED`), and
+    unsupported otherwise."""
+    if conflict:
+        return "unsupported"
+    if asset.availability == "available":
+        return "available"
+    return "missing" if asset.exclusion_reason == _UNLISTED else "unsupported"
+
+
+async def _held_slides(executor, ws, missing):
     """The slides a complete read lacks (`missing`, id to item) whose item a
     live story holds.
 
@@ -387,7 +430,7 @@ async def _held_slides(executor, ws, sid, o, missing):
     full carousel's and a first-slide source's included. No sync reply
     retires a slide a live story holds.
     """
-    if not missing or not o.slides_complete:
+    if not missing:
         return frozenset()
     rows = await readers.rows(
         executor,
@@ -428,15 +471,6 @@ async def _land(executor, ws, sid, gid, o, keys):
         sid=sid,
         parent=o.parent_media_id,
     )
-    if o.slides_complete and o.slide_count == 0:
-        # A carousel always has slides, so a read that lists none proves
-        # nothing about any of them: the index keeps what it holds.
-        logger.warning(
-            "instagram sync: post %s listed no slides; its %d indexed slide(s) stay",
-            o.parent_media_id,
-            len(previous),
-        )
-        o = replace(o, slides_complete=False)
     observed_ids = {a.selected_asset_id for a in o.assets}
     # Every slide the bundle can hold was observed now or held before.
     wanted_ids = sorted(
@@ -501,25 +535,15 @@ async def _land(executor, ws, sid, gid, o, keys):
             previous_ids[mid] = str(row["media_item_id"])
         elif found is not None and str(found["source_id"]) == sid:
             previous_ids[mid] = str(found["id"])
-    # The slides the read lacks that the index holds an item for.
-    missing = {
-        mid: item for mid, item in previous_ids.items() if mid not in observed_ids
-    }
-    held = await _held_slides(executor, ws, sid, o, missing)
-    # The two-read rule at sync: the first complete read that lacks a slide no
-    # story holds only holds it out of the draw; the next one that lacks it
-    # too retires it below. An excluded slide is never drawn, so there is
-    # nothing to hold: it retires on one read, as before.
-    drawable = {
-        r["asset_media_id"]
-        for r in previous
-        if r["availability"] != "excluded" and r["exclusion_reason"] != UNLISTED
-    }
-    unlisted = (
-        frozenset(mid for mid in missing if mid not in held and mid in drawable)
+    # The slides a complete read lacks that the index holds an item for; a
+    # partial read proves nothing about the slides it did not reach.
+    missing = (
+        {mid: item for mid, item in previous_ids.items() if mid not in observed_ids}
         if o.slides_complete
-        else frozenset()
+        else {}
     )
+    held = await _held_slides(executor, ws, missing)
+    unlisted, retiring = _lacking(o, previous, missing, held)
     assets = _bundle_assets(o, previous, held, unlisted)
     # A list that keeps a slide the read lacked is no longer one complete read;
     # its count stays what the read listed.
@@ -584,6 +608,7 @@ async def _land(executor, ws, sid, gid, o, keys):
                 "reason": "origin_identity_conflict"
                 if conflict
                 else asset.exclusion_reason,
+                "state": _item_state(asset, conflict),
                 "item": item,
                 "project_item": project_item,
                 "hash": identity(mid),
@@ -637,18 +662,6 @@ async def _land(executor, ws, sid, gid, o, keys):
         },
     )
     if o.slides_complete:
-        retiring = {mid: item for mid, item in missing.items() if mid not in kept_ids}
-        if held or unlisted or retiring:
-            logger.warning(
-                "instagram sync: post %s, a complete read of %d slide(s): kept %s"
-                " that a story holds, held %s out of the draw, retired %s that"
-                " the read before lacked too",
-                o.parent_media_id,
-                len(o.assets),
-                sorted(held),
-                sorted(unlisted),
-                sorted(retiring),
-            )
         for mid, item in retiring.items():
             if any(
                 str(t["source_id"]) != sid or str(t["media_item_id"]) != item
@@ -707,15 +720,15 @@ async def _land(executor, ws, sid, gid, o, keys):
                 "source_projection_redacted=false,content_hash=x.hash,provider_file_ref=x.asset_id,"
                 "file_name=x.name,media_kind=CASE WHEN x.kind IN ('image','video') "
                 "THEN x.kind ELSE m.media_kind END,mime_type=x.mime,file_size=x.size,"
-                "state=CASE WHEN x.availability='available' THEN 'available' WHEN x.reason=:unlisted THEN 'missing' ELSE 'unsupported' END,"
+                "state=x.state,"
                 "last_listed_at=now(),thumbnail_url=NULL,category=NULL,folder_path=NULL,"
                 "title=NULL,caption=NULL,generated_caption=NULL,link_url=NULL,tags=NULL,"
                 "custom_metadata=NULL FROM jsonb_to_recordset(CAST(:items AS jsonb)) "
                 "AS x(asset_id text,kind text,mime text,size bigint,availability text,"
-                "reason text,item uuid,project_item uuid,hash text,name text) WHERE m.workspace_id=:ws "
+                "state text,item uuid,project_item uuid,hash text,name text) WHERE m.workspace_id=:ws "
                 "AND m.source_id=:sid AND m.id=x.project_item"
             ),
-            {**params, "items": payload, "unlisted": UNLISTED},
+            {**params, "items": payload},
         )
         await executor.execute(
             text(
@@ -789,7 +802,15 @@ async def _land(executor, ws, sid, gid, o, keys):
             {**params, "revision": revision, "assets": json.dumps(rows)},
         )
     first_item = next((row["item"] for row in rows if row["item"]), None)
-    return ObservationResult(True, post_reason, first_item, revision)
+    return ObservationResult(
+        True,
+        post_reason,
+        first_item,
+        revision,
+        kept=tuple(sorted(held)),
+        unlisted=tuple(sorted(unlisted)),
+        retired=tuple(sorted(retiring)),
+    )
 
 
 async def retire_selected_asset(

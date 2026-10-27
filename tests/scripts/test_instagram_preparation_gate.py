@@ -4,7 +4,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
-import logging
 import uuid
 
 import httpx
@@ -438,18 +437,18 @@ async def test_a_complete_read_keeps_the_slide_a_live_story_holds(
     assert await listed(past_posts_engine, origin, src) == (1, False)
 
 
-async def test_a_second_complete_read_that_lacks_a_held_out_slide_retires_it(
-    past_posts_engine, origin, caplog
+async def test_a_second_complete_read_that_lacks_an_unlisted_slide_retires_it(
+    past_posts_engine, origin
 ):
     """Two complete reads that lack a slide no story holds retire it: the
     first holds it out of the draw, the second writes its tombstone and
-    removes it, and the sync logs the slide it retired. The held slide stays."""
+    removes it. Each landing says what it did with the slides it lacked, and
+    the slide a story holds stays through both."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
-    await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
-    with caplog.at_level(
-        logging.WARNING, logger="src.services.target.instagram_catalog"
-    ):
-        await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    first = await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    assert (first.kept, first.unlisted, first.retired) == (("123",), ("456",), ())
+    second = await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    assert (second.kept, second.unlisted, second.retired) == (("123",), (), ("456",))
     assert await slide(past_posts_engine, origin, src, "456") == {
         "state": "removed",
         "position": None,
@@ -460,17 +459,17 @@ async def test_a_second_complete_read_that_lacks_a_held_out_slide_retires_it(
         "position": 2,
         "tombstones": 0,
     }
-    assert any("retired ['456']" in r.getMessage() for r in caplog.records)
 
 
-async def test_a_read_that_lists_a_held_out_slide_again_brings_it_back(
+async def test_a_read_that_lists_an_unlisted_slide_again_brings_it_back(
     past_posts_engine, origin
 ):
     """A slide one complete read held out comes back when the next read lists
     it: its item is available again and nothing is retired."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
     await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
-    await obs.observe(past_posts_engine, origin, src, lacking_123("789", "456"))
+    back = await obs.observe(past_posts_engine, origin, src, lacking_123("789", "456"))
+    assert back.retired == ()
     assert await slide(past_posts_engine, origin, src, "456") == {
         "state": "available",
         "position": 2,
@@ -480,10 +479,17 @@ async def test_a_read_that_lists_a_held_out_slide_again_brings_it_back(
 
 async def test_a_read_that_lists_no_slides_keeps_every_slide(past_posts_engine, origin):
     """A read that lists none of a carousel's slides proves nothing about any
-    of them: every slide stays where it was, held or not, and the list is
-    marked incomplete."""
+    of them, so it lands as one not yet read (the adapter's shape for it):
+    every slide stays where it was, held or not, and the post stays
+    available."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
-    await obs.observe(past_posts_engine, origin, src, lacking_123())
+    unread = replace(
+        lacking_123(),
+        slides_complete=False,
+        exclusion_reason="incomplete_observation",
+    )
+    landed = await obs.observe(past_posts_engine, origin, src, unread)
+    assert (landed.kept, landed.unlisted, landed.retired) == ((), (), ())
     assert await slide(past_posts_engine, origin, src, "123") == {
         "state": "available",
         "position": 1,

@@ -688,7 +688,8 @@ class _ParentCapture:
 
 
 async def _capture_helper_terminal(conn, capture, candidate):
-    """One terminal parent answer retires all known slide items, atomically."""
+    """One terminal parent answer retires all known slide items, atomically.
+    The number of items it removed, or None when the index moved meanwhile."""
     params = dict(
         ws=capture.workspace_id,
         sid=capture.source_id,
@@ -706,7 +707,7 @@ async def _capture_helper_terminal(conn, capture, candidate):
         params,
     )
     if moved.rowcount != 1:
-        return False
+        return None
     removed = await conn.execute(
         text(
             "UPDATE media_items m SET state='removed' FROM instagram_media_assets a "
@@ -729,13 +730,7 @@ async def _capture_helper_terminal(conn, capture, candidate):
         ),
         params,
     )
-    logger.warning(
-        "instagram sync: post %s retired on a terminal answer to its parent read;"
-        " %d slide item(s) removed",
-        candidate.parent_media_id,
-        removed.rowcount,
-    )
-    return True
+    return removed.rowcount
 
 
 async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
@@ -751,8 +746,10 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
             return _attempt_result(
                 "dropped", lane, job=job, page=page, drop_reason="checkpoint_changed"
             )
+        retired_posts, told = [], []
         for candidate in failed:
-            if not await _capture_helper_terminal(conn, capture, candidate):
+            removed = await _capture_helper_terminal(conn, capture, candidate)
+            if removed is None:
                 await conn.rollback()
                 return _attempt_result(
                     "dropped",
@@ -761,6 +758,7 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
                     page=page,
                     drop_reason="helper_capture_changed",
                 )
+            retired_posts.append((candidate.parent_media_id, removed))
         # A parent the turn could not read waits for the next restart; one it did
         # not reach stays queued.
         for parent in page.failed:
@@ -790,6 +788,8 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
                     "source_capture_mismatch", capture.source_id
                 )
             committed += 1
+            if landed.kept or landed.unlisted or landed.retired:
+                told.append((observation, landed))
             parent = observation.parent_media_id
             if parent in envelope["deferred_helpers"]:
                 envelope["deferred_helpers"].remove(parent)
@@ -869,6 +869,25 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
         await _fault(fault, "continuation")
         await _fault(fault, "before_commit")
         await _guard(conn, capture, job, ports)
+    # Told once the turn has committed, so no line names a change it rolled back.
+    for parent, removed in retired_posts:
+        logger.warning(
+            "instagram sync: post %s retired on a terminal answer to its parent"
+            " read; %d slide item(s) removed",
+            parent,
+            removed,
+        )
+    for observation, landed in told:
+        logger.warning(
+            "instagram sync: post %s, a complete read of %d slide(s): kept %s for"
+            " the stories that hold them, unlisted %s out of the draw, retired %s"
+            " that the read before lacked too",
+            observation.parent_media_id,
+            len(observation.assets),
+            list(landed.kept),
+            list(landed.unlisted),
+            list(landed.retired),
+        )
     return _attempt_result("committed", lane, job=job, page=page, committed=committed)
 
 

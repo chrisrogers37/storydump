@@ -396,7 +396,8 @@ def test_observation_validation_rejects_duplicate_slide_identity_and_position():
 @pytest.mark.parametrize(
     "children,paging,expected_complete",
     [
-        ([], None, True),
+        # A read that lists no slides proves nothing: it lands incomplete.
+        ([], None, False),
         (
             [{"id": "11", "media_type": "IMAGE", "media_url": URL}],
             {"next": "opaque"},

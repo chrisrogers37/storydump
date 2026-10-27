@@ -812,9 +812,20 @@ async def test_complete_missing_url_and_empty_child_responses_keep_index_only_co
     a, _ = make(handler)
     result = await listing(a)
     assert len(result.observations) == 1 and result.checkpoint["seen"] == 1
-    assert not any(a.availability == "available" for a in result.observations[0].assets)
-    assert result.observations[0].availability == "unavailable"
-    assert result.observations[0].exclusion_reason == "media_unavailable"
+    observation = result.observations[0]
+    assert not any(a.availability == "available" for a in observation.assets)
+    if form == "empty_children":
+        # A carousel read that lists no slides proves nothing about them: the
+        # post lands as one not yet read, so the index keeps what it holds.
+        assert (
+            observation.availability,
+            observation.exclusion_reason,
+            observation.slide_count,
+            observation.slides_complete,
+        ) == ("available", "incomplete_observation", 0, False)
+    else:
+        assert observation.availability == "unavailable"
+        assert observation.exclusion_reason == "media_unavailable"
 
 
 def resumed_checkpoint():
