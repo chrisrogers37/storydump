@@ -508,12 +508,15 @@ async def _land(executor, ws, sid, gid, o, keys):
     held = await _held_slides(executor, ws, sid, o, missing)
     # The two-read rule at sync: the first complete read that lacks a slide no
     # story holds only holds it out of the draw; the next one that lacks it
-    # too retires it below.
-    before = {
-        r["asset_media_id"] for r in previous if r["exclusion_reason"] == UNLISTED
+    # too retires it below. An excluded slide is never drawn, so there is
+    # nothing to hold: it retires on one read, as before.
+    drawable = {
+        r["asset_media_id"]
+        for r in previous
+        if r["availability"] != "excluded" and r["exclusion_reason"] != UNLISTED
     }
     unlisted = (
-        frozenset(mid for mid in missing if mid not in held and mid not in before)
+        frozenset(mid for mid in missing if mid not in held and mid in drawable)
         if o.slides_complete
         else frozenset()
     )

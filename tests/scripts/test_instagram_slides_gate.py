@@ -310,13 +310,25 @@ async def test_ten_slides_reorder_truncation_and_removal_keep_independent_histor
             status["carousel_children_truncated"],
         ) == (1, 10, 10, 1)
 
-    complete = await obs.observe(
-        past_posts_engine,
-        origin,
-        source,
-        carousel(ids=(109, 108, 107, 106, 104, 103, 102, 101, 100)),
-    )
+    lacking = carousel(ids=(109, 108, 107, 106, 104, 103, 102, 101, 100))
+    complete = await obs.observe(past_posts_engine, origin, source, lacking)
     assert complete.observation_revision == 4
+    # One complete read that lacks a slide only holds it out of the draw.
+    held_out = await assets(past_posts_engine, origin)
+    assert len(held_out) == 10
+    out = next(row for row in held_out if row["asset_media_id"] == "105")
+    assert (out["position"], out["availability"], out["exclusion_reason"]) == (
+        10,
+        "unavailable",
+        "unlisted",
+    )
+    async with obs.uow(past_posts_engine, origin) as conn:
+        state = await obs.row(
+            conn, "SELECT state FROM media_items WHERE id=:item", item=ids["105"]
+        )
+        assert state["state"] == "missing"
+    again = await obs.observe(past_posts_engine, origin, source, lacking)
+    assert again.observation_revision == 5
     after_removal = await assets(past_posts_engine, origin)
     assert len(after_removal) == 9
     assert {row["asset_media_id"]: row["media_item_id"] for row in after_removal} == {
@@ -340,7 +352,7 @@ async def test_ten_slides_reorder_truncation_and_removal_keep_independent_histor
             "SELECT observation_revision FROM instagram_item_tombstones WHERE media_item_id=:item",
             item=ids["105"],
         )
-        assert tomb["observation_revision"] >= 4
+        assert tomb["observation_revision"] >= 5
 
 
 async def test_cross_origin_slide_conflict_excludes_only_the_conflicting_asset(
