@@ -2,12 +2,14 @@
 
 Pure functions over the endpoint's JSON: a cursor axis (stalled destinations
 and the worst lag) and a worker axis (the age of the last finished system job
-and the worst overdue one). `classify` is the entry point.
+and the worst overdue one). `classify` is the entry point; `commits` reads the
+two services' commits from the same reading.
 """
 
 from __future__ import annotations
 
 import json
+import re
 
 
 #: 40x the clock cadence (`work_loop.py` `clock_interval_seconds = 15.0`). The
@@ -65,19 +67,21 @@ DEFAULT_WORKER_STALE_S = 600
 DEFAULT_WORKER_OVERDUE_S = 900
 
 
-#: What `classify` reads, and so all `/health/scheduling` publishes (a test
-#: holds the route to these): the cursor axis's counts and its lag, and the
-#: worker block's counts and ages.
+#: What `classify` and `commits` read, and so all `/health/scheduling`
+#: publishes (a test holds the route to these): the cursor axis's counts and
+#: its lag, and the worker block's counts and ages, which `classify` reads.
 _COUNTS = ("stalled", "accounts_active")
 _LAG = "max_lag_seconds"
 _WORKER = "worker"
 _WORKER_COUNTS = ("succeeded_ever", "overdue_ready")
 _WORKER_AGES = ("last_success_age_seconds", "max_overdue_seconds")
-#: Published beside the readings for the scheduling monitor's version split:
-#: the API's commit and the worker's. `classify` ignores both, because a
-#: reading from before either was published must not read as unreachable.
+#: The API's commit and the worker's, which `commits` reads for the scheduling
+#: monitor's version split. `classify` ignores both, because a reading from
+#: before either was published must not read as unreachable.
 _API_COMMIT = "api_commit"
-_WORKER_TEXT = ("commit",)
+_WORKER_COMMIT = "commit"
+#: A commit as either service publishes it, compared on its first seven.
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 
 
 class Verdict:
@@ -232,3 +236,17 @@ def classify(
             data,
         )
     return Verdict(HEALTHY, f"{active} active, worst lag {lag if lag else 0}s", data)
+
+
+def commits(data: dict) -> tuple[str, str] | None:
+    """The API's and the worker's short commits from one reading's payload, or
+    None while either is unknown: an unreachable reading, or rows the worker
+    wrote before it stamped its commit."""
+    worker = data.get(_WORKER)
+    pair = (
+        data.get(_API_COMMIT),
+        worker.get(_WORKER_COMMIT) if isinstance(worker, dict) else None,
+    )
+    if not all(isinstance(c, str) and _COMMIT.fullmatch(c) for c in pair):
+        return None
+    return pair[0][:7], pair[1][:7]

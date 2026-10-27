@@ -10,9 +10,12 @@ none of the clock, the outbox, `channel_bindings` or the worker process.
 
 What one reading means is `storydump_cli.health_classify.scheduling`, the same
 classifier `storydump health` uses: the cursor axis (due cursors the clock has
-not advanced) and the worker axis (system jobs the worker has not finished). This
-file adds only what a poller needs on top of it: the request, the history that
-decides when to speak, the state file, and the command that reaches a human.
+not advanced), the worker axis (system jobs the worker has not finished), and
+the commits the API and the worker run. `/health/delivery` is read beside it as
+an axis of its own, by `read_delivery` here. This file adds what a poller needs
+on top: the requests, the history that decides when to speak, the state file,
+and the command that reaches a human. `storydump health` judges neither delivery
+nor a commit split: they are this poller's alone.
 
 It runs on the system Python from a checkout, with nothing installed: it imports
 only the standard library and that classifier, which does the same. The
@@ -24,7 +27,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -47,6 +49,7 @@ from storydump_cli.health_classify.scheduling import (
     WORKER_UNKNOWN,
     Verdict,
     classify,
+    commits,
 )
 
 #: While a fault persists, repeat rather than going quiet — a long outage must not
@@ -77,18 +80,23 @@ def _count(value) -> int:
     return max(value, 0)
 
 
-def announce(state: dict, verdict: Verdict, now: float) -> dict:
+def announce(state: dict, now: float) -> dict:
     """Record that a human was actually told. Called ONLY after delivery succeeds.
 
     `announced` is deliberately separate from `state`: the first is what a human
     knows, the second is what the endpoint last said. With one field, a failed
     notify would still advance the history, so the next poll would see "same as
-    last time" and stay quiet about a message nobody received.
+    last time" and stay quiet about a message nobody received. Each axis keeps
+    its own pair, and this is the one writer for all of them.
     """
-    state = dict(state)
-    state["announced"] = verdict.state
-    state["spoke_at"] = now
-    return state
+    return {**state, "announced": state["state"], "spoke_at": now}
+
+
+def _repeat_due(prior: dict, told: str, now: float, interval: float) -> bool:
+    """Whether `told` is due to be said: never told it, or told it long enough
+    ago that silence would read as fixed."""
+    spoke_at = prior.get("spoke_at", 0.0) if prior.get("announced") == told else 0.0
+    return not spoke_at or now - spoke_at >= interval
 
 
 def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]:
@@ -104,9 +112,6 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
     because the day this monitor first gains sight is worth saying out loud.
     """
     announced = prior.get("announced")
-    # A run of the SAME state the human already knows about; anything else means
-    # they have not been told, whatever the endpoint has been saying.
-    spoke_at = prior.get("spoke_at", 0.0) if announced == verdict.state else 0.0
     run = prior.get("consecutive", 0) + 1 if prior.get("state") == verdict.state else 1
     # The most destinations any reading has shown. A reading with no counts (an
     # unreachable one) never lowers it, or a network blip would turn a lost
@@ -137,8 +142,9 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
         return text
 
     def repeat_due(interval: float) -> bool:
-        """Never told, or told long enough ago that silence would read as fixed."""
-        return not spoke_at or now - spoke_at >= interval
+        # A run of the SAME state the human already knows about; anything else
+        # means they have not been told, whatever the endpoint has been saying.
+        return _repeat_due(prior, verdict.state, now, interval)
 
     if verdict.state == UNREACHABLE:
         # One failed request is a dropped packet. Two is a fact.
@@ -274,21 +280,19 @@ def decide_delivery(
     reading: dict | None, prior: dict, now: float
 ) -> tuple[dict, str | None]:
     """A delivery reading + the axis's own history → (its state, a message or
-    None). Pure, like `decide`; only `announce_delivery` records that a human
-    was told. Any failed or ambiguous send in the last hour pages, the number
+    None). Pure, like `decide`; only `announce` records that a human was
+    told. Any failed or ambiguous send in the last hour pages, the number
     `/health/delivery` publishes for its poller, and repeats while it lasts."""
     if reading is None:
         return dict(prior), None
     failing = reading["failed_or_ambiguous"] >= 1
-    announced = prior.get("announced")
     state = {
         **prior,
         "state": DELIVERY_FAILING if failing else DELIVERY_OK,
         "observed_at": now,
     }
     if failing:
-        spoke_at = prior.get("spoke_at", 0.0) if announced == DELIVERY_FAILING else 0.0
-        if spoke_at and now - spoke_at < REALERT_AFTER_S:
+        if not _repeat_due(prior, DELIVERY_FAILING, now, REALERT_AFTER_S):
             return state, None
         return state, (
             f"FLEET ALERT: storydump DELIVERY IS FAILING — "
@@ -296,7 +300,7 @@ def decide_delivery(
             f"are ambiguous ({reading['sent_in_window']} sent; "
             f"{_failures(reading['by_class'])})."
         )
-    if announced == DELIVERY_FAILING:
+    if prior.get("announced") == DELIVERY_FAILING:
         return state, (
             f"RECOVERED: storydump delivery — no send failed or is ambiguous in "
             f"the last hour ({reading['sent_in_window']} sent)."
@@ -304,45 +308,20 @@ def decide_delivery(
     return state, None
 
 
-def announce_delivery(state: dict, now: float) -> dict:
-    """Record that a human was told the delivery axis's state. Called ONLY
-    after the message was delivered, for `announce`'s reason."""
-    state = dict(state)
-    state["announced"] = state.get("state")
-    state["spoke_at"] = now
-    return state
-
-
 #: How long the API and the worker may run different commits before it pages:
 #: longer than a deploy, which moves the two services one after the other.
 SPLIT_AFTER_S = 30 * 60
 #: A split that lasts repeats daily.
 RENOTICE_SPLIT_AFTER_S = 24 * 3600
-_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 SPLIT, SAME = "split", "same"
-
-
-def commits(payload: dict) -> tuple[str, str] | None:
-    """The API's and the worker's short commits from a scheduling reading
-    (`api_commit`, `worker.commit`), or None while either is unknown: an
-    unreachable reading, or rows the worker wrote before it stamped its
-    commit."""
-    api = payload.get("api_commit")
-    worker = payload.get("worker")
-    worker = worker.get("commit") if isinstance(worker, dict) else None
-    known = [c for c in (api, worker) if isinstance(c, str) and _COMMIT.fullmatch(c)]
-    if len(known) != 2:
-        return None
-    return api[:7], worker[:7]
 
 
 def decide_split(payload: dict, prior: dict, now: float) -> tuple[dict, str | None]:
     """A scheduling reading's two commits + the split's own history → (its
-    state, a message or None). Pure, like `decide`; only `announce_split`
-    records that a human was told. A split pages once it has lasted
-    `SPLIT_AFTER_S`, repeats daily, and says RESOLVED when the two match again;
-    one that ends sooner is never said. A reading without both commits changes
-    nothing."""
+    state, a message or None). Pure, like `decide`; only `announce` records
+    that a human was told. A split pages once it has lasted `SPLIT_AFTER_S`,
+    repeats daily, and says RESOLVED when the two match again; one that ends
+    sooner is never said. A reading without both commits changes nothing."""
     pair = commits(payload)
     if pair is None:
         return dict(prior), None
@@ -364,23 +343,13 @@ def decide_split(payload: dict, prior: dict, now: float) -> tuple[dict, str | No
     state.update(state=SPLIT, since=since, api=api, worker=worker)
     if now - since < SPLIT_AFTER_S:
         return state, None
-    spoke_at = prior.get("spoke_at", 0.0) if announced == SPLIT else 0.0
-    if spoke_at and now - spoke_at < RENOTICE_SPLIT_AFTER_S:
+    if not _repeat_due(prior, SPLIT, now, RENOTICE_SPLIT_AFTER_S):
         return state, None
     return state, (
         f"FLEET ALERT: storydump VERSION SPLIT — the API runs {api}, the worker "
         f"{worker}, for {int((now - since) // 60)} min. A deploy reached one "
         f"service and not the other."
     )
-
-
-def announce_split(state: dict, now: float) -> dict:
-    """Record that a human was told the split's state. Called ONLY after the
-    message was delivered, for `announce`'s reason."""
-    state = dict(state)
-    state["announced"] = state.get("state")
-    state["spoke_at"] = now
-    return state
 
 
 def fetch(url: str, timeout_s: float) -> tuple[int, str]:
@@ -518,21 +487,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{verdict.state}: {verdict.detail}")
 
     spoke = failed = False
-    for said, mark in (
-        (message, lambda s: announce(s, verdict, time.time())),
-        (
-            delivery_message,
-            lambda s: {**s, "delivery": announce_delivery(s["delivery"], time.time())},
-        ),
-        (
-            split_message,
-            lambda s: {**s, "split": announce_split(s["split"], time.time())},
-        ),
+    # Scheduling's history is the top level of the state; each other axis
+    # keeps its own under its key.
+    for axis, said in (
+        (None, message),
+        ("delivery", delivery_message),
+        ("split", split_message),
     ):
         if said is None:
             continue
         if args.notify_command is None or notify(args.notify_command, said):
-            state = mark(state)
+            if axis is None:
+                state = announce(state, time.time())
+            else:
+                state[axis] = announce(state[axis], time.time())
             print(said)
             spoke = True
         else:

@@ -34,18 +34,18 @@ from storydump_cli.health_classify.scheduling import (
 T = 600
 
 
-def step(verdict, prior, now):
-    """Exactly what `main` does: decide, then record the announcement ONLY if a
-    message actually went out.
+def step(reading, prior, now, decide=monitor.decide):
+    """Exactly what `main` does on each axis: decide, then record the
+    announcement ONLY if a message actually went out.
 
     Mirrored here rather than hand-rolled, because the two-field split
     (`state` = what the endpoint said, `announced` = what a human was told) is
     the thing under test. A test that advanced `announced` unconditionally would
     pass against a poller that records speaking whether or not delivery worked.
     """
-    state, msg = monitor.decide(verdict, prior, now)
+    state, msg = decide(reading, prior, now)
     if msg is not None:
-        state = monitor.announce(state, verdict, now)
+        state = monitor.announce(state, now)
     return state, msg
 
 
@@ -68,6 +68,45 @@ def body(stalled=0, active=0, lag=None, worker=ALIVE_WORKER):
     if worker is not None:
         data["worker"] = worker
     return json.dumps(data)
+
+
+def run_main(
+    monkeypatch,
+    tmp_path,
+    status,
+    raw,
+    *,
+    delivery=(404, ""),
+    notify_ok=True,
+    calls=None,
+    extra=(),
+):
+    """`main` with the network and the notifier stubbed at the seam, keyed by
+    URL: `(status, raw)` at --url and `delivery` beside it, by default a
+    reading the delivery axis skips. The state file is `tmp_path / "s.json"`."""
+    pages = {
+        "http://x/health/scheduling": (status, raw),
+        "http://x/health/delivery": delivery,
+    }
+    monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: pages[url])
+    monkeypatch.setattr(
+        monitor,
+        "notify",
+        lambda command, message: (
+            (calls.append(message) if calls is not None else None) or notify_ok
+        ),
+    )
+    return monitor.main(
+        [
+            "--url",
+            "http://x/health/scheduling",
+            "--state-file",
+            str(tmp_path / "s.json"),
+            "--notify-command",
+            "/bin/true",
+            *extra,
+        ]
+    )
 
 
 #: A worker that has never finished a system job: no baseline and no backlog.
@@ -185,30 +224,29 @@ class TestItRepeatsWhileBrokenAndAnnouncesRecovery:
 
 class TestLosingTheLastDestinationSpeaks:
     """An estate that HAD destinations and now has none is not the empty estate
-    the first `NO_SIGNAL` describes: nothing will be scheduled or posted until
-    one comes back, and that is said daily, not once a week."""
+    the first notice describes: nothing will be scheduled or posted until one
+    comes back, and that is said daily, not once a week."""
 
-    def test_an_estate_that_had_destinations_says_so_and_repeats_daily(self):
+    def test_an_estate_that_had_destinations_says_so_and_repeats_daily(self, notice):
         state, _ = step(classify(200, body(0, 1, 3), threshold_s=T), {}, now=1.0)
-        v = classify(200, body(active=0), threshold_s=T)
-        state, msg = step(v, state, now=2.0)
+        state, msg = step(notice, state, now=2.0)
         assert msg is not None and "NO ACTIVE DESTINATIONS" in msg
         assert "had 1" in msg
         after = monitor.RENOTICE_LOST_DESTINATIONS_AFTER_S
-        _, soon = step(v, state, now=2.0 + after - 1)
+        _, soon = step(notice, state, now=2.0 + after - 1)
         assert soon is None
-        _, later = step(v, state, now=2.0 + after + 1)
+        _, later = step(notice, state, now=2.0 + after + 1)
         assert later is not None and "NO ACTIVE DESTINATIONS" in later
         assert after < monitor.RENOTICE_NO_SIGNAL_AFTER_S
 
-    def test_a_reading_with_no_payload_does_not_forget_the_estate(self):
+    def test_a_reading_with_no_payload_does_not_forget_the_estate(self, notice):
         # An unreachable reading carries no counts; what the estate had must
         # outlive it, or a network blip turns a lost destination back into the
         # weekly notice for an estate that never had one.
         state, _ = step(classify(200, body(0, 1, 3), threshold_s=T), {}, now=1.0)
         for now in (2.0, 3.0):
             state, _ = step(classify(0, "boom", threshold_s=T), state, now=now)
-        _, msg = step(classify(200, body(active=0), threshold_s=T), state, now=4.0)
+        _, msg = step(notice, state, now=4.0)
         assert msg is not None and "had 1" in msg
 
 
@@ -234,13 +272,13 @@ class TestAFaultThatEndsInBlindnessIsSaidHonestly:
 
 #: `/health/delivery`'s body: the last hour's sends, and those that failed or
 #: are ambiguous, by class and code.
-DELIVERY_OK = {
+QUIET_HOUR = {
     "window_seconds": 3600,
     "sent_in_window": 40,
     "failed_or_ambiguous": 0,
     "by_class": {},
 }
-DELIVERY_FAILING = {
+FAILING_HOUR = {
     "window_seconds": 3600,
     "sent_in_window": 40,
     "failed_or_ambiguous": 3,
@@ -252,12 +290,8 @@ DELIVERY_FAILING = {
 
 
 def dstep(reading, prior, now):
-    """`decide_delivery`, then record the announcement ONLY if a message went
-    out: the same split as `step`, on the delivery axis's own state."""
-    state, msg = monitor.decide_delivery(reading, prior, now)
-    if msg is not None:
-        state = monitor.announce_delivery(state, now)
-    return state, msg
+    """`step` on the delivery axis's own state."""
+    return step(reading, prior, now, decide=monitor.decide_delivery)
 
 
 class TestDeliveryIsItsOwnAxis:
@@ -266,33 +300,33 @@ class TestDeliveryIsItsOwnAxis:
     masks the other."""
 
     def test_failing_sends_page_with_their_counts(self):
-        _, msg = dstep(DELIVERY_FAILING, {}, now=1.0)
+        _, msg = dstep(FAILING_HOUR, {}, now=1.0)
         assert msg is not None and "FLEET ALERT" in msg and "DELIVERY" in msg
         assert "3 of the last hour's sends" in msg and "40 sent" in msg
         assert "ambiguous" in msg and "400" in msg
 
     def test_a_quiet_hour_says_nothing(self):
-        _, msg = dstep(DELIVERY_OK, {}, now=1.0)
+        _, msg = dstep(QUIET_HOUR, {}, now=1.0)
         assert msg is None
 
     def test_it_repeats_while_failing_and_announces_recovery(self):
-        state, _ = dstep(DELIVERY_FAILING, {}, now=1.0)
-        _, soon = dstep(DELIVERY_FAILING, state, now=1.0 + monitor.REALERT_AFTER_S - 1)
+        state, _ = dstep(FAILING_HOUR, {}, now=1.0)
+        _, soon = dstep(FAILING_HOUR, state, now=1.0 + monitor.REALERT_AFTER_S - 1)
         assert soon is None
-        _, later = dstep(DELIVERY_FAILING, state, now=1.0 + monitor.REALERT_AFTER_S + 1)
+        _, later = dstep(FAILING_HOUR, state, now=1.0 + monitor.REALERT_AFTER_S + 1)
         assert later is not None
-        _, recovered = dstep(DELIVERY_OK, state, now=2.0)
+        _, recovered = dstep(QUIET_HOUR, state, now=2.0)
         assert recovered is not None and recovered.startswith("RECOVERED")
 
     def test_an_unreadable_reading_changes_nothing_and_says_nothing(self):
         # The scheduling axis already says when the API cannot be reached.
-        state, _ = dstep(DELIVERY_FAILING, {}, now=1.0)
+        state, _ = dstep(FAILING_HOUR, {}, now=1.0)
         after, msg = dstep(None, state, now=2.0)
         assert msg is None and after == state
 
     def test_only_a_whole_reading_is_read(self):
-        good = json.dumps(DELIVERY_FAILING)
-        assert monitor.read_delivery(200, good) == DELIVERY_FAILING
+        good = json.dumps(FAILING_HOUR)
+        assert monitor.read_delivery(200, good) == FAILING_HOUR
         assert monitor.read_delivery(503, good) is None
         assert monitor.read_delivery(200, "not json") is None
         assert monitor.read_delivery(200, json.dumps({"sent_in_window": 1})) is None
@@ -309,29 +343,14 @@ class TestDeliveryIsItsOwnAxis:
     ):
         """`main` fetches the delivery surface beside --url and sends its page
         as its own message, recorded on the delivery axis alone."""
-        pages = {
-            "http://x/health/scheduling": (200, body(0, 5, 3)),
-            "http://x/health/delivery": (200, json.dumps(DELIVERY_FAILING)),
-        }
-        monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: pages[url])
         sent = []
-        monkeypatch.setattr(
-            monitor, "notify", lambda command, message: sent.append(message) or True
-        )
-        state_file = str(tmp_path / "s.json")
-        code = monitor.main(
-            [
-                "--url",
-                "http://x/health/scheduling",
-                "--state-file",
-                state_file,
-                "--notify-command",
-                "/bin/true",
-            ]
+        delivery = (200, json.dumps(FAILING_HOUR))
+        code = run_main(
+            monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=delivery, calls=sent
         )
         assert code == monitor.EXIT_SPOKE
         assert len(sent) == 1 and "DELIVERY IS FAILING" in sent[0]
-        st = monitor.load_state(state_file)
+        st = monitor.load_state(str(tmp_path / "s.json"))
         assert st["delivery"]["announced"] == monitor.DELIVERY_FAILING
         assert st.get("announced") is None
 
@@ -350,11 +369,8 @@ def with_commits(api="abc1234", worker="abc1234"):
 
 
 def sstep(payload, prior, now):
-    """`decide_split`, then record the announcement ONLY if a message went out."""
-    state, msg = monitor.decide_split(payload, prior, now)
-    if msg is not None:
-        state = monitor.announce_split(state, now)
-    return state, msg
+    """`step` on the split's own state."""
+    return step(payload, prior, now, decide=monitor.decide_split)
 
 
 class TestAVersionSplitPagesOnceItOutlastsADeploy:
@@ -402,6 +418,32 @@ class TestAVersionSplitPagesOnceItOutlastsADeploy:
         _, paged = sstep(split, state, now=monitor.SPLIT_AFTER_S)
         assert paged is not None, "the window counts from the first split reading"
 
+    def test_main_reads_the_split_from_the_scheduling_reading(
+        self, monkeypatch, tmp_path
+    ):
+        """`main` takes both commits from the one scheduling reading, keeps the
+        split's history under "split", and records that axis alone as told.
+        The first poll opens the window; back-dating its start stands in for
+        the half hour."""
+        sent = []
+        raw = json.dumps(with_commits(worker="def5678"))
+        assert run_main(monkeypatch, tmp_path, 200, raw, calls=sent) == (
+            monitor.EXIT_QUIET
+        )
+        path = str(tmp_path / "s.json")
+        st = monitor.load_state(path)
+        assert st["split"]["state"] == monitor.SPLIT
+        st["split"]["since"] -= monitor.SPLIT_AFTER_S
+        monitor.save_state(path, st)
+
+        assert run_main(monkeypatch, tmp_path, 200, raw, calls=sent) == (
+            monitor.EXIT_SPOKE
+        )
+        assert len(sent) == 1 and "VERSION SPLIT" in sent[0]
+        st = monitor.load_state(path)
+        assert st["split"]["announced"] == monitor.SPLIT
+        assert st.get("announced") is None
+
 
 class TestTheStateFile:
     def test_a_corrupt_file_reads_as_no_history(self, tmp_path):
@@ -428,34 +470,14 @@ class TestMainEndToEnd:
     seam, so the argument parsing, exit codes and state persistence are exercised
     rather than assumed."""
 
-    def _run(self, monkeypatch, tmp_path, status, raw, notify_ok=True, calls=None):
-        monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: (status, raw))
-        monkeypatch.setattr(
-            monitor,
-            "notify",
-            lambda command, message: (
-                (calls.append(message) if calls is not None else None) or notify_ok
-            ),
-        )
-        return monitor.main(
-            [
-                "--url",
-                "http://x/health/scheduling",
-                "--state-file",
-                str(tmp_path / "s.json"),
-                "--notify-command",
-                "/bin/true",
-            ]
-        )
-
     def test_no_signal_speaks_once_then_is_quiet(self, monkeypatch, tmp_path):
         sent = []
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(active=0), calls=sent)
+            run_main(monkeypatch, tmp_path, 200, body(active=0), calls=sent)
             == monitor.EXIT_SPOKE
         )
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(active=0), calls=sent)
+            run_main(monkeypatch, tmp_path, 200, body(active=0), calls=sent)
             == monitor.EXIT_QUIET
         )
         assert len(sent) == 1
@@ -463,7 +485,7 @@ class TestMainEndToEnd:
     def test_a_stall_reaches_the_notifier(self, monkeypatch, tmp_path):
         sent = []
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(3, 9, 4000), calls=sent)
+            run_main(monkeypatch, tmp_path, 200, body(3, 9, 4000), calls=sent)
             == monitor.EXIT_SPOKE
         )
         assert "FLEET ALERT" in sent[0]
@@ -474,13 +496,13 @@ class TestMainEndToEnd:
         # A monitor cannot page about its own paging failure. What it CAN do is
         # refuse to believe it spoke, so the next poll tries again instead of
         # de-duplicating against a message nobody received.
-        rc = self._run(monkeypatch, tmp_path, 200, body(active=0), notify_ok=False)
+        rc = run_main(monkeypatch, tmp_path, 200, body(active=0), notify_ok=False)
         assert rc == monitor.EXIT_NOTIFY_FAILED
         st = monitor.load_state(str(tmp_path / "s.json"))
         assert st["spoke_at"] == 0.0
         assert "notify_failed_at" in st
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(active=0)) == monitor.EXIT_SPOKE
+            run_main(monkeypatch, tmp_path, 200, body(active=0)) == monitor.EXIT_SPOKE
         )
 
     def test_a_failed_recovery_notice_is_retried_on_the_next_poll(
@@ -498,17 +520,17 @@ class TestMainEndToEnd:
         """
         sent = []
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(2, 5, 4000), calls=sent)
+            run_main(monkeypatch, tmp_path, 200, body(2, 5, 4000), calls=sent)
             == monitor.EXIT_SPOKE
         )
         assert "FLEET ALERT" in sent[0]
 
-        rc = self._run(monkeypatch, tmp_path, 200, body(0, 5, 2), notify_ok=False)
+        rc = run_main(monkeypatch, tmp_path, 200, body(0, 5, 2), notify_ok=False)
         assert rc == monitor.EXIT_NOTIFY_FAILED
         assert monitor.load_state(str(tmp_path / "s.json"))["announced"] == STALLED
 
         assert (
-            self._run(monkeypatch, tmp_path, 200, body(0, 5, 2), calls=sent)
+            run_main(monkeypatch, tmp_path, 200, body(0, 5, 2), calls=sent)
             == monitor.EXIT_SPOKE
         )
         assert "RECOVERED" in sent[-1]
@@ -554,14 +576,14 @@ class TestMainEndToEnd:
         alert = "FLEET ALERT: storydump scheduling check UNREACHABLE"
         sent = []
 
-        rc = self._run(monkeypatch, tmp_path, 200, raw, calls=sent)
+        rc = run_main(monkeypatch, tmp_path, 200, raw, calls=sent)
         out = capsys.readouterr().out
         assert rc == monitor.EXIT_QUIET
         assert any(line.startswith("unreachable: ") for line in out.splitlines())
         assert "healthy" not in out.lower()
         assert sent == []
 
-        rc = self._run(monkeypatch, tmp_path, 200, raw, calls=sent)
+        rc = run_main(monkeypatch, tmp_path, 200, raw, calls=sent)
         out = capsys.readouterr().out
         assert rc == monitor.EXIT_SPOKE
         assert "healthy" not in out.lower()
@@ -676,25 +698,9 @@ def test_each_threshold_flag_is_reachable_from_the_command_line(
     the value travelled.
     """
     sent = []
-    monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: (200, raw))
-    monkeypatch.setattr(
-        monitor, "notify", lambda command, message: sent.append(message) or True
-    )
-
     assert classify(200, raw, threshold_s=DEFAULT_STALL_THRESHOLD_S).state == HEALTHY
 
-    rc = monitor.main(
-        [
-            "--url",
-            "http://x/health/scheduling",
-            "--state-file",
-            str(tmp_path / "s.json"),
-            "--notify-command",
-            "/bin/true",
-            flag,
-            str(value),
-        ]
-    )
+    rc = run_main(monkeypatch, tmp_path, 200, raw, calls=sent, extra=(flag, str(value)))
 
     assert rc == monitor.EXIT_SPOKE, "the flag did not reach classify"
     assert sent and said in sent[0] and f"(threshold {value}s)" in sent[0]

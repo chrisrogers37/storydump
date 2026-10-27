@@ -21,8 +21,9 @@ API, the worker or the outbox cannot silence it.
 The script classifies each reading with
 `storydump_cli/health_classify/scheduling.py`, the same classifier
 `storydump health` uses, and keeps only the polling: fetch, decide and announce,
-the state file and the notify command. It needs no install: it runs on the system
-Python from a checkout.
+the state file and the notify command. The delivery axis and the commit split
+below are the script's own: `storydump health` judges neither. It needs no
+install: it runs on the system Python from a checkout.
 
 ## Two axes
 

@@ -1,8 +1,8 @@
 """The commit a deployment runs, as the API and the worker both name it.
 
-One reading of one variable, so `/health/scheduling` can set the API's commit
-beside the worker's and a difference between them is a real difference in
-what each service runs.
+Both services derive their short commit here, from the same variable, so when
+`/health/scheduling` sets the API's commit beside the worker's, a difference
+between them is a real difference in what each service runs.
 """
 
 from __future__ import annotations

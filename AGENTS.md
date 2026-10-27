@@ -353,9 +353,11 @@ client, never a database connection. Install it with
    operating details, `GET /api/v1/ops/health`, which answers only the user ids
    in the API's `OPS_USER_IDS` — `storydump whoami` prints yours; without
    them the webhook is `not_checked`, not well, and `data.details` says why;
-   exit 4 then, the report and each verdict still printed. Two bounds against
-   the pollers: one reading has no watch clock, and one unreachable reading
-   is reported where the pollers wait for two) · `storydump deploys
+   exit 4 then, the report and each verdict still printed. Three bounds against
+   the pollers: one reading has no watch clock, one unreachable reading is
+   reported where the pollers wait for two, and neither `/health/delivery` nor
+   the API/worker commit split is judged here, though the scheduling monitor
+   pages on both) · `storydump deploys
    [--watch --commit <sha> --timeout <s>]` (the latest deployments on Railway
    through your own `railway` login, with the linked project checked first;
    exit 5 with the fix when Railway cannot be read; `--watch` ends 0 on both

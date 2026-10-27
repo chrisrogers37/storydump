@@ -73,6 +73,7 @@ from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.api.routes.public import WaitlistSlots, full_notices
 from src.api.routes.public import router as public_router
+from src.config import release
 from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
     CrossSiteRefused,
@@ -886,7 +887,6 @@ def create_app(
         openapi_url="/openapi.json" if docs else None,
     )
     # The deployed commit, for `/health` (Railway sets it on a Git deploy).
-    from src.config import release
     from src.services.target import mix_conversion
 
     app.state.mix_conversion_evidence = mix_conversion.release_evidence(

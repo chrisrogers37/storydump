@@ -725,7 +725,7 @@ class TestSchedulingHealthIsASecondSurface:
         assert set(scheduling[sm._WORKER]) == {
             *sm._WORKER_COUNTS,
             *sm._WORKER_AGES,
-            *sm._WORKER_TEXT,
+            sm._WORKER_COMMIT,
         }
         posting = client.get("/health/posting").json()
         assert set(posting) == set(pm._COUNTS + pm._AGES)

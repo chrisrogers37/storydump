@@ -205,6 +205,7 @@ async def scheduling_health_check(request: Request):
     engine = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="target database not configured")
+    api_commit = request.app.state.commit
 
     async def read():
         # A DIRECT CONNECTION, not a unit of work: `UnitOfWork.__init__`
@@ -242,11 +243,7 @@ async def scheduling_health_check(request: Request):
             # plus the API's own commit beside the worker's, which the
             # scheduling monitor compares for a version split. The queue's
             # backpressure is in the operating details (`queue_pressure`).
-            return {
-                **lag,
-                "worker": worker,
-                "api_commit": request.app.state.commit,
-            }
+            return {**lag, "worker": worker, "api_commit": api_commit}
 
     return await request.app.state.health_cache.answer("scheduling", read)
 

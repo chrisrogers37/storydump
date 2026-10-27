@@ -124,26 +124,24 @@ class TestTheWorkerAxisIsNotAllowedToReadAsHealthyWhenItCannotTell:
     each blind condition gets a state of its own here.
     """
 
-    @pytest.mark.parametrize("active", [0, 1, 5])
+    @pytest.mark.parametrize(
+        "stalled,active,lag",
+        [(0, 0, 0), (0, 1, 0), (0, 5, 0), (2, 5, 9999)],
+        ids=["none-active", "one-active", "five-active", "a-stall"],
+    )
     def test_a_reading_without_the_worker_block_is_unreachable_never_healthy(
-        self, active
+        self, stalled, active, lag
     ):
         """The route always serves the block, so a reading without it is a broken
         instrument. With a destination active, the cursor axis alone would
         answer `HEALTHY` and the worker axis would be gone without a word;
-        with none, `WORKER_UNKNOWN` would page nobody."""
-        v = classify(200, body(active=active, lag=0, worker=None), threshold_s=T)
-        assert v.state == UNREACHABLE
-        assert v.detail == "the endpoint does not serve a worker block"
-
-    def test_a_reading_without_the_worker_block_is_unreachable_even_with_a_stall(
-        self,
-    ):
-        """The instrument comes first, whatever the cursor shows. Read as
-        `STALLED`, it would page one poll sooner and drop the worker axis
-        without a word."""
+        with none, `WORKER_UNKNOWN` would page nobody. With a stall the
+        instrument still comes first: read as `STALLED`, it would page one poll
+        sooner and drop the worker axis without a word."""
         v = classify(
-            200, body(stalled=2, active=5, lag=9999, worker=None), threshold_s=T
+            200,
+            body(stalled=stalled, active=active, lag=lag, worker=None),
+            threshold_s=T,
         )
         assert v.state == UNREACHABLE
         assert v.detail == "the endpoint does not serve a worker block"
