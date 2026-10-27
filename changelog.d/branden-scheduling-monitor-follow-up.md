@@ -1,0 +1,9 @@
+### Added
+
+- **The scheduling monitor watches delivery as an axis of its own.** Each poll also reads `/health/delivery`, the surface beside `--url` (or `--delivery-url`), and judges it with its own state, so cards failing and posts not landing never mask each other. Any send in the last hour that failed or is ambiguous pages with its count, the hour's sends and the failing classes with their provider codes; the page repeats every 6 hours while it lasts and ends in RECOVERED. A deferral is never a failure, and a reading that cannot be read is skipped and changes nothing.
+- **The scheduling monitor pages when the API and the worker run different commits for longer than a deploy.** It reads both commits from the scheduling reading. A split that lasts 30 minutes pages with both commits, repeats daily and says VERSION SPLIT RESOLVED when they match again; a split that ends sooner is never said, and a reading without both commits changes nothing.
+
+### Fixed
+
+- **A paused workspace no longer pages STALLED.** The scheduling lag counted every active account, but the clock advances only the accounts of an active, unpaused workspace, so pausing a workspace read its due cursors as stalled and paged on the first reading and every 6 hours after. The lag now counts the clock's own population; a migration replaces the door in place, with the same signature, owner and grants.
+- **Losing the last destination is said, and a fault that ends in blindness is closed honestly.** The monitor keeps the most active destinations any reading has shown, which an unreadable reading never lowers. Once the estate had one and has none, its notice says NO ACTIVE DESTINATIONS with that count and repeats daily, not weekly. A notice after a reported worker outage or unreachable endpoint opens with RECOVERED from that state; after a stall it says the stall is no longer observable, never that it recovered.
