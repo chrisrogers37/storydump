@@ -341,11 +341,8 @@ def _plain(refusal) -> Optional[str]:
         if not last:
             return sentence
         # With no try spent, what the slide last recorded was no try's refusal.
-        return (
-            f"{sentence}; the last was refused: {last}"
-            if whole(tries)
-            else f"{sentence}; {last}"
-        )
+        said = "the last was refused: " if whole(tries) else ""
+        return f"{sentence}; {said}{last}"
     if kind in ("cdn_refused", "cdn_error"):
         statuses = "/".join(str(s) for s in refusal.get("statuses") or []) or "?"
         verb = "refused the link twice" if kind == "cdn_refused" else "failed"

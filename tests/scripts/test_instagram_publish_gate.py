@@ -913,16 +913,19 @@ async def test_park_records_the_refusal_evidence_on_the_story_and_in_the_audit(
     assert details == [{"reason": "past_posts_content_unavailable", "refusal": REFUSAL}]
 
 
-async def test_park_without_refusal_evidence_writes_no_refusal_key(
+async def test_park_without_refusal_evidence_records_why_it_was_not_admitted(
     past_posts_engine, origin
 ):
     """A preparation that raises a pending carrying no evidence parks the story
-    with its reason alone: neither the story's `last_error -> 'error'` nor the
-    audit detail has a `refusal` key."""
+    on a `not_admitted` refusal, its reason and the item's state, in the
+    story's `last_error -> 'error'` and the audit detail alike."""
     row, details = await parked_after(
         past_posts_engine,
         origin,
         source_policy.MediaAdmissionPending("asset_unavailable"),
+    )
+    not_admitted = refusal_evidence.evidence(
+        "not_admitted", reason="asset_unavailable", item_state="available"
     )
     assert row["state"] == "review_required"
     assert row["last_error"] == {
@@ -931,10 +934,13 @@ async def test_park_without_refusal_evidence_writes_no_refusal_key(
             "type": "PastPostsEffectRefused",
             "reason": "past_posts_content_unavailable",
             "message": "past_posts_content_unavailable",
+            "refusal": not_admitted,
         },
     }
     assert row["has_evidence"] is False
-    assert details == [{"reason": "past_posts_content_unavailable"}]
+    assert details == [
+        {"reason": "past_posts_content_unavailable", "refusal": not_admitted}
+    ]
 
 
 async def test_a_latched_slide_parks_the_publish_job_at_once_with_its_refusal(

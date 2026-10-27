@@ -314,10 +314,10 @@ def _not_admitted(reason, subject) -> dict:
 async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> bool:
     """Park a waiting past-posts story for review, in the caller's
     transaction, on the reason its preparation was not admitted. The refusal's
-    *evidence*, when there is one, rides with the reason: `last_error ->
-    'error' -> 'refusal'`, the audit detail's `refusal` and the notice
-    (`refusal_evidence`). A slide judged gone has no asset row left to hold
-    it. False, and nothing logged, when the story had already moved on."""
+    *evidence* rides with the reason: `last_error -> 'error' -> 'refusal'`,
+    the audit detail's `refusal` and the notice (`refusal_evidence`). A slide
+    judged gone has no asset row left to hold it. False, and nothing logged,
+    when the story had already moved on."""
     from src.services.target import publish_pipeline
 
     reason = (
@@ -325,7 +325,6 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> b
         if admission_reason == "selected_asset_changed"
         else "past_posts_content_unavailable"
     )
-    refusal = {"refusal": evidence} if evidence else {}
     await conn.execute(
         text("UPDATE post_intents SET last_error=CAST(:error AS jsonb) WHERE id=:id"),
         dict(
@@ -337,7 +336,7 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> b
                         "type": "PastPostsEffectRefused",
                         "reason": reason,
                         "message": reason,
-                        **refusal,
+                        "refusal": evidence,
                     },
                 }
             ),
@@ -351,7 +350,7 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> b
         intent=iid,
         from_state=state,
         to_state=state,
-        detail={"reason": reason, **refusal},
+        detail={"reason": reason, "refusal": evidence},
     )
     tz = await conn.scalar(text("SELECT tz FROM workspaces WHERE id=:ws"), dict(ws=ws))
     parked = await publish_pipeline.park_for_review(
@@ -368,7 +367,7 @@ async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> b
             iid,
             state,
             reason,
-            (evidence or {}).get("kind", "no refusal recorded"),
+            evidence.get("kind"),
         )
     return parked
 
