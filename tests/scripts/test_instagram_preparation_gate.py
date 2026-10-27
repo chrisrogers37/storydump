@@ -522,10 +522,14 @@ async def test_a_story_asked_to_cancel_holds_no_slide(past_posts_engine, origin)
     assert await listed(past_posts_engine, origin, src) == (1, False)
 
 
-async def test_a_first_slide_source_keeps_the_held_slide_too(past_posts_engine, origin):
-    """A source that takes only each post's first slide keeps a held slide as
-    well: no sync read retires a slide a live story holds, so a complete read
-    that lacks the story's slide keeps it after the read's own."""
+async def test_a_first_slide_source_holds_no_slide_and_its_story_is_told(
+    past_posts_engine, origin
+):
+    """A source that takes only each post's first slide holds none: a slide
+    kept after the read's own would no longer be first, so its story could
+    never fetch it. A complete read that lacks the story's slide holds it out
+    like any other, the story's start refuses it as unavailable before any
+    fetch, and the next complete read that lacks it retires it."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
     async with obs.uow(past_posts_engine, origin) as conn:
         await source_policy.put_policy(
@@ -542,13 +546,26 @@ async def test_a_first_slide_source_keeps_the_held_slide_too(past_posts_engine, 
             ),
             capability=foundation.capability(),
         )
-    await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    first = await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    assert (first.kept, first.unlisted, first.retired) == ((), ("123",), ())
     assert await slide(past_posts_engine, origin, src, "123") == {
-        "state": "available",
+        "state": "missing",
         "position": 2,
         "tombstones": 0,
     }
-    assert await listed(past_posts_engine, origin, src) == (1, False)
+    prepared, calls = service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "unavailable" and calls == []
+    second = await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    assert (second.kept, second.unlisted, second.retired) == ((), (), ("123",))
+    assert await slide(past_posts_engine, origin, src, "123") == {
+        "state": "removed",
+        "position": None,
+        "tombstones": 1,
+    }
 
 
 async def test_a_kept_slide_its_story_finds_again_is_fetched(past_posts_engine, origin):

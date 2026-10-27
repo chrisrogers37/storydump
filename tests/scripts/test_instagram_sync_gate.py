@@ -2,12 +2,15 @@
 
 import importlib.util
 import json
+import logging
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.services.target import jobs
+from src.services.target.instagram_catalog import PastPostsAsset
 from src.services.target.media_adapters import MediaPage, MediaTurnCounters
 from tests.scripts import test_source_read_admission_gate as admission
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -188,6 +191,66 @@ async def test_fault_rolls_back_whole_landing(
             worker, job, ports=await ports(m, Adapter(page(obs.bundle())), c)
         )
         assert result.committed_observations == 1
+    finally:
+        await worker.dispose()
+
+
+def told(caplog, module):
+    """The sync's lines about the posts a turn changed, in the order written."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == module.__name__
+        and record.getMessage().startswith("instagram sync: post")
+    ]
+
+
+def carousel(*ids, parent="900"):
+    """A complete read of carousel `parent` that lists the slides `ids`."""
+    return replace(
+        obs.bundle(parent),
+        assets=tuple(
+            PastPostsAsset(mid, "image", position=i) for i, mid in enumerate(ids, 1)
+        ),
+        slide_count=len(ids),
+    )
+
+
+async def before_commit(at):
+    if at == "before_commit":
+        raise RuntimeError("injected landing fault")
+
+
+async def test_a_slide_the_landing_holds_out_is_told_once_its_turn_commits(
+    world_db, past_posts_engine, origin, caplog
+):
+    """The slide line is written after the turn commits, so a turn rolled back
+    at its last step tells nothing. The committed one names the post, the
+    number of slides its read listed and what the landing did with the one
+    the read lacks."""
+    m = service()
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
+    await obs.observe(past_posts_engine, origin, src, carousel("100", "101", "102"))
+    lacking = page(carousel("100", "101"))
+    try:
+        with caplog.at_level(logging.WARNING, logger=m.__name__):
+            with pytest.raises(RuntimeError, match="injected landing fault"):
+                await m.run_sync(
+                    worker,
+                    job,
+                    ports=await ports(m, Adapter(lacking), c),
+                    fault=before_commit,
+                )
+            assert told(caplog, m) == []
+            result = await m.run_sync(
+                worker, job, ports=await ports(m, Adapter(lacking), c)
+            )
+        assert result.committed_observations == 1
+        assert told(caplog, m) == [
+            "instagram sync: post 900, a complete read of 2 slide(s): kept [] for"
+            " the stories that hold them, held ['102'] out of the draw, retired []"
+        ]
     finally:
         await worker.dispose()
 
@@ -1184,6 +1247,46 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
                     dict(sid=src["source_id"]),
                 )
             ).scalar_one()
+    finally:
+        await client.aclose()
+        await worker.dispose()
+
+
+async def test_a_post_a_refused_read_retires_is_told_once_its_turn_commits(
+    world_db, past_posts_engine, origin, caplog
+):
+    """The post line is written after the turn commits, so a turn rolled back
+    at its last step tells nothing. The committed one says what retired the
+    post, a read of it that Instagram refused for good, and how many slide
+    items that removed."""
+    import httpx
+
+    m = service()
+    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
+    await obs.observe(
+        past_posts_engine, origin, src, obs.bundle("111", attribution="not_detected")
+    )
+    await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=["111"])
+
+    async def response(request):
+        if request.url.path.endswith("/media"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(
+            400, json={"error": {"code": 100, "message": "private parent failure"}}
+        )
+
+    injected, client, requests = await quality_ports(m, c, response)
+    try:
+        with caplog.at_level(logging.WARNING, logger=m.__name__):
+            with pytest.raises(RuntimeError, match="injected landing fault"):
+                await m.run_sync(worker, job, ports=injected, fault=before_commit)
+            assert told(caplog, m) == []
+            result = await m.run_sync(worker, job, ports=injected)
+        assert result.outcome == "committed"
+        assert told(caplog, m) == [
+            "instagram sync: post 111 retired: Instagram refused a read of it for"
+            " good; 1 slide item(s) removed"
+        ]
     finally:
         await client.aclose()
         await worker.dispose()
