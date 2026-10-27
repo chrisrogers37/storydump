@@ -3183,7 +3183,9 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
         assert b'name="photo"; filename="f.jpg"' in edit.body
         assert b"JPEGBYTES" in edit.body
         keyboard = json.loads(multipart_field(edit, "reply_markup"))
-        tokens = [b["callback_data"] for r in keyboard["inline_keyboard"] for b in r]
+        tokens = [
+            b.get("callback_data") for r in keyboard["inline_keyboard"] for b in r
+        ]
         assert f"v1:cfg:{intent}" in tokens and f"v1:posted:{intent}" in tokens
         (block,) = fetched
         assert block["workspace_id"] == outbox_db["ws"], "fetched once, as its tenant"
