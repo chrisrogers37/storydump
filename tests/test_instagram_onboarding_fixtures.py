@@ -710,9 +710,12 @@ def test_carousel_heavy_manifest_matches_independent_fixture_facts(n):
             carousels += 1
             returned = post.children[:20]
             slides += len(returned)
-            truncations += len(post.children) > 20
+            # A read past the one page, or one that lists no slides, which
+            # proves nothing, leaves the carousel's list incomplete.
+            truncations += len(post.children) > 20 or not returned
             if not returned:
-                totals["unavailable"] += 1
+                # Read as not yet read, the post is a candidate still pending.
+                totals["validation_pending"] += 1
         else:
             returned = (post.parent,)
         items += len(returned)
