@@ -70,36 +70,60 @@ def body(stalled=0, active=0, lag=None, worker=ALIVE_WORKER):
     return json.dumps(data)
 
 
+#: A worker that has never finished a system job: no baseline and no backlog.
+NO_BASELINE_WORKER = {
+    **ALIVE_WORKER,
+    "succeeded_ever": 0,
+    "last_success_age_seconds": None,
+}
+
+
+@pytest.fixture(
+    params=[(NO_SIGNAL, ALIVE_WORKER), (WORKER_UNKNOWN, NO_BASELINE_WORKER)],
+    ids=["no-signal", "worker-unknown"],
+)
+def notice(request):
+    """An empty estate's reading, with the worker provably alive or with no
+    baseline at all: the two states that are said but never page."""
+    state, worker = request.param
+    verdict = classify(200, body(active=0, worker=worker), threshold_s=T)
+    assert verdict.state == state
+    return verdict
+
+
 class TestNothingToSeeIsNotTheSameAsNothingWrong:
     """*Nothing is late* and *nothing EXISTS to be late* have opposite remedies
-    and must never render the same. The second is `NO_SIGNAL`: it is said, it
-    never pages, it repeats rarely, and the end of it is announced."""
+    and must never render the same. The second is `NO_SIGNAL`, or
+    `WORKER_UNKNOWN` when the worker has no baseline either. Blind is not
+    broken: each is said, never pages, repeats weekly rather than on the fault
+    cadence, and the end of it is announced."""
 
-    def test_no_signal_never_pages(self):
-        _, msg = step(classify(200, body(active=0), threshold_s=T), {}, now=1000.0)
+    def test_it_is_said_and_never_pages(self, notice):
+        _, msg = step(notice, {}, now=1000.0)
         assert msg is not None, "silence would let a reader believe they are covered"
         assert "FLEET ALERT" not in msg, "an empty estate is expected, not a fault"
         assert "all-clear" in msg.lower() or "cannot detect" in msg.lower()
 
-    def test_it_says_so_once_then_stops(self):
-        v = classify(200, body(active=0), threshold_s=T)
-        state, first = step(v, {}, now=1000.0)
+    def test_it_says_so_once_then_stops(self, notice):
+        # Checked past the 6-h fault cadence: a notice repeats weekly.
+        state, first = step(notice, {}, now=1000.0)
         assert first is not None
-        _, second = step(v, state, now=1000.0 + 3600)
+        _, second = step(notice, state, now=1000.0 + monitor.REALERT_AFTER_S + 1)
         assert second is None
 
-    def test_but_it_does_not_stay_quiet_forever(self):
+    def test_but_it_does_not_stay_quiet_forever(self, notice):
         # "We have no monitoring coverage" must not fade from memory because it
         # was said once a month ago.
-        v = classify(200, body(active=0), threshold_s=T)
-        state, _ = step(v, {}, now=1000.0)
-        _, later = step(v, state, now=1000.0 + monitor.RENOTICE_NO_SIGNAL_AFTER_S + 1)
+        state, _ = step(notice, {}, now=1000.0)
+        _, later = step(
+            notice, state, now=1000.0 + monitor.RENOTICE_NO_SIGNAL_AFTER_S + 1
+        )
         assert later is not None
 
-    def test_the_day_it_gains_sight_it_says_so(self):
+    def test_the_day_it_gains_sight_it_says_so(self, notice):
         # Otherwise the transition out of blindness is invisible, and nobody
         # knows when the monitor started being worth anything.
-        state, _ = step(classify(200, body(active=0), threshold_s=T), {}, now=1.0)
+        state, _ = step(notice, {}, now=1.0)
         _, msg = step(
             classify(200, body(active=2, lag=5), threshold_s=T), state, now=2.0
         )
@@ -505,19 +529,29 @@ class TestMainEndToEnd:
         )
         assert NO_SIGNAL in capsys.readouterr().out
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(body(stalled=0, active=1, lag=0, worker=None), id="no-lag"),
+            pytest.param(
+                body(stalled=2, active=5, lag=5000, worker=None), id="a-stall"
+            ),
+        ],
+    )
     def test_a_missing_worker_block_is_unreachable_and_pages_on_the_second_poll(
-        self, monkeypatch, tmp_path, capsys
+        self, monkeypatch, tmp_path, capsys, raw
     ):
         """A reading with no worker block is a broken instrument, and `main`
         must treat it as one.
 
         With a destination active and no lag, the cursor axis alone would answer
-        `healthy` and the worker axis would be gone without a word. So the first
-        poll prints `unreachable` and stays quiet (one reading is not enough),
-        the second pages, and neither prints `healthy`.
+        `healthy` and the worker axis would be gone without a word. With a lag
+        past the threshold it would answer `stalled`, and the instrument still
+        comes first. So the first poll prints `unreachable` and stays quiet
+        (one reading is not enough), the second pages, and neither prints
+        `healthy`.
         """
         alert = "FLEET ALERT: storydump scheduling check UNREACHABLE"
-        raw = body(stalled=0, active=1, lag=0, worker=None)
         sent = []
 
         rc = self._run(monkeypatch, tmp_path, 200, raw, calls=sent)
@@ -538,9 +572,9 @@ class TestMainEndToEnd:
 # ── the worker-liveness axis ─────────────────────────────────────────────────
 #
 # `NO_SIGNAL` is the honest answer for the CURSOR axis on an empty estate, and
-# it is also the answer a DEAD WORKER produces there. These tests pin how the
-# poller treats the worker states: an outage pages at once, and blindness is
-# said but never pages.
+# it is also the answer a DEAD WORKER produces there. This pins that an outage
+# pages at once; blindness (`WORKER_UNKNOWN`) is said but never pages, and is
+# pinned with `NO_SIGNAL` in `TestNothingToSeeIsNotTheSameAsNothingWrong`.
 
 
 def test_worker_down_pages_on_the_very_first_reading():
@@ -559,22 +593,11 @@ def test_worker_down_pages_on_the_very_first_reading():
     assert "FLEET ALERT" in msg
 
 
-def test_worker_unknown_is_a_notice_and_never_pages():
-    """Blind is not broken. It must be SAID — repeatedly, so it cannot fade —
-    but it is not an outage and must not wake anyone."""
-    verdict = Verdict(WORKER_UNKNOWN, "no baseline")
-
-    _, msg = monitor.decide(verdict, {}, now=1000.0)
-
-    assert msg is not None, "total blindness said nothing at all"
-    assert "FLEET ALERT" not in msg
-
-
 # ── the threshold flags ──────────────────────────────────────────────────────
 #
 # The classifier decides what a reading means; the poller only hands it the
 # thresholds. These tests pin that the hand-off is real: the defaults are the
-# classifier's own, and a flag reaches `classify`.
+# classifier's own, and each flag reaches `classify`.
 
 
 def test_the_threshold_flags_default_to_the_classifiers_constants():
@@ -597,29 +620,68 @@ def test_the_threshold_flags_default_to_the_classifiers_constants():
     assert args.worker_overdue_threshold == DEFAULT_WORKER_OVERDUE_S
 
 
-def test_the_worker_thresholds_are_reachable_from_the_command_line(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    "flag,value,raw,said",
+    [
+        pytest.param(
+            "--stall-threshold",
+            DEFAULT_STALL_THRESHOLD_S // 4,
+            body(1, 5, DEFAULT_STALL_THRESHOLD_S // 2),
+            "SCHEDULING IS STALLED",
+            id="stall",
+        ),
+        pytest.param(
+            "--worker-stale-threshold",
+            DEFAULT_WORKER_STALE_S // 4,
+            body(
+                0,
+                5,
+                0,
+                worker={
+                    **ALIVE_WORKER,
+                    "last_success_age_seconds": DEFAULT_WORKER_STALE_S // 2,
+                },
+            ),
+            "no system job has finished",
+            id="worker-stale",
+        ),
+        pytest.param(
+            "--worker-overdue-threshold",
+            DEFAULT_WORKER_OVERDUE_S // 4,
+            body(
+                0,
+                5,
+                0,
+                worker={
+                    **ALIVE_WORKER,
+                    "overdue_ready": 2,
+                    "max_overdue_seconds": DEFAULT_WORKER_OVERDUE_S // 2,
+                },
+            ),
+            "due system job(s) unclaimed",
+            id="worker-overdue",
+        ),
+    ],
+)
+def test_each_threshold_flag_is_reachable_from_the_command_line(
+    monkeypatch, tmp_path, flag, value, raw, said
 ):
-    """Adding the flags and forgetting to thread them into `classify` is the
+    """Adding a flag and forgetting to thread it into `classify` is the
     ordinary way this breaks: the defaults keep every test green while the
     operator's setting silently does nothing.
 
-    So this drives `main` with an age that is healthy under the DEFAULT and an
-    outage only under the flag. It can only pass if the value travelled.
+    So each case drives `main` with a reading that is healthy under the
+    DEFAULTS and a fault only under its flag. The numbers are derived from the
+    defaults, so both halves hold whatever they become. It can only pass if
+    the value travelled.
     """
     sent = []
-    # Derived from the default, so both halves hold whatever it becomes.
-    age = DEFAULT_WORKER_STALE_S // 2
-    raw = body(
-        active=0,
-        worker={**ALIVE_WORKER, "last_success_age_seconds": age},
-    )
     monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: (200, raw))
     monkeypatch.setattr(
         monitor, "notify", lambda command, message: sent.append(message) or True
     )
 
-    assert classify(200, raw, threshold_s=T).state == NO_SIGNAL
+    assert classify(200, raw, threshold_s=DEFAULT_STALL_THRESHOLD_S).state == HEALTHY
 
     rc = monitor.main(
         [
@@ -629,13 +691,13 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
             str(tmp_path / "s.json"),
             "--notify-command",
             "/bin/true",
-            "--worker-stale-threshold",
-            str(age // 2),
+            flag,
+            str(value),
         ]
     )
 
     assert rc == monitor.EXIT_SPOKE, "the flag did not reach classify"
-    assert sent and "WORKER IS NOT ADVANCING" in sent[0]
+    assert sent and said in sent[0] and f"(threshold {value}s)" in sent[0]
 
 
 # ── pins: these pass on main by design ──────────────────────────────────────
@@ -680,30 +742,3 @@ def test_every_fault_repeats_while_it_lasts_and_announces_recovery(fault, readin
     assert later is not None
     _, recovered = step(classify(200, body(0, 5, 3), threshold_s=T), state, now=t + 60)
     assert recovered is not None and "RECOVERED" in recovered
-
-
-def test_the_stall_threshold_is_reachable_from_the_command_line(monkeypatch, tmp_path):
-    """A lag that is healthy under the default and a stall only under the flag:
-    it can only page if the value travelled into `classify`."""
-    sent = []
-    lag = DEFAULT_STALL_THRESHOLD_S // 2
-    raw = body(1, 5, lag)
-    monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: (200, raw))
-    monkeypatch.setattr(
-        monitor, "notify", lambda command, message: sent.append(message) or True
-    )
-    assert classify(200, raw, threshold_s=DEFAULT_STALL_THRESHOLD_S).state == HEALTHY
-    rc = monitor.main(
-        [
-            "--url",
-            "http://x/health/scheduling",
-            "--state-file",
-            str(tmp_path / "s.json"),
-            "--notify-command",
-            "/bin/true",
-            "--stall-threshold",
-            str(lag - 1),
-        ]
-    )
-    assert rc == monitor.EXIT_SPOKE, "the flag did not reach classify"
-    assert sent and "SCHEDULING IS STALLED" in sent[0]

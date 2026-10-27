@@ -136,6 +136,18 @@ class TestTheWorkerAxisIsNotAllowedToReadAsHealthyWhenItCannotTell:
         assert v.state == UNREACHABLE
         assert v.detail == "the endpoint does not serve a worker block"
 
+    def test_a_reading_without_the_worker_block_is_unreachable_even_with_a_stall(
+        self,
+    ):
+        """The instrument comes first, whatever the cursor shows. Read as
+        `STALLED`, it would page one poll sooner and drop the worker axis
+        without a word."""
+        v = classify(
+            200, body(stalled=2, active=5, lag=9999, worker=None), threshold_s=T
+        )
+        assert v.state == UNREACHABLE
+        assert v.detail == "the endpoint does not serve a worker block"
+
     def test_a_database_where_nothing_has_ever_run_is_unknown(self):
         """No baseline and no backlog. Genuinely unknowable — and the reading
         is identical to a healthy idle estate, which is why it needs its own
