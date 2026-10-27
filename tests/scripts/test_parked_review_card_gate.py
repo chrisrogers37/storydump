@@ -88,12 +88,13 @@ async def test_a_parked_storys_review_card_and_notice_say_why_it_was_refused(
     assert "unavailable or changed" not in str(notice)
 
 
-async def test_a_park_with_no_refusal_evidence_says_its_admission_reason(
+async def test_a_park_no_refusal_backs_says_why_on_its_card_and_its_notice(
     past_posts_engine, origin, sync_conn
 ):
-    """A preparation that is not admitted for a reason it carries no evidence
-    for (the chosen post was removed) parks the story, and the notice says that
-    reason, never that no reason was recorded."""
+    """A preparation not admitted for a reason it carries no refusal for
+    records that reason (`not_admitted`) as the story's refusal, so the card
+    and the notice say the same, and only what the record supports: the item
+    is untouched, so never that the post is no longer available."""
     _bind(sync_conn, origin["ws"])
     src, item, intent = await preparation.selected(past_posts_engine, origin)
     selected, _ = preparation.service(past_posts_engine, origin)
@@ -112,10 +113,23 @@ async def test_a_park_with_no_refusal_evidence_says_its_admission_reason(
     await c.selected_prepare(
         engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
     )
-    (notice,) = [
-        r[3] for r in _outbox_rows(sync_conn, intent) if r[1] == "notification"
-    ]
-    assert "Refused: the chosen post is no longer available." in str(notice)
+    with sync_conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_error -> 'error' -> 'refusal' FROM post_intents WHERE id = %s",
+            (intent,),
+        )
+        (refusal,) = cur.fetchone()
+    sync_conn.commit()
+    assert refusal == refusal_evidence.evidence(
+        "not_admitted", reason="asset_unavailable", item_state="available"
+    )
+    sentence = "the chosen post could not be fetched, and no detail was recorded"
+    rows = _outbox_rows(sync_conn, intent)
+    (card,) = [r[3] for r in rows if r[1] == "approval_prompt"]
+    assert card["outcome_text"].endswith(f"\nRefused: {sentence}.")
+    (notice,) = [r[3] for r in rows if r[1] == "notification"]
+    assert f"Refused: {sentence}." in str(notice)
+    assert "no longer available" not in str(notice)
 
 
 @pytest.mark.parametrize(
