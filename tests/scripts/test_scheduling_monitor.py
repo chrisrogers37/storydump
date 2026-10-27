@@ -206,6 +206,79 @@ class TestAFaultThatEndsInBlindnessIsSaidHonestly:
         assert "RECOVERED" not in msg
 
 
+#: `/health/delivery`'s body: the last hour's sends, and those that failed or
+#: are ambiguous, by class and code.
+DELIVERY_OK = {
+    "window_seconds": 3600,
+    "sent_in_window": 40,
+    "failed_or_ambiguous": 0,
+    "by_class": {},
+}
+DELIVERY_FAILING = {
+    "window_seconds": 3600,
+    "sent_in_window": 40,
+    "failed_or_ambiguous": 3,
+    "by_class": {
+        "ambiguous": {"rows": 2, "alerting": 2, "codes": {"none": 2}},
+        "refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}},
+    },
+}
+
+
+def dstep(reading, prior, now):
+    """`decide_delivery`, then record the announcement ONLY if a message went
+    out: the same split as `step`, on the delivery axis's own state."""
+    state, msg = monitor.decide_delivery(reading, prior, now)
+    if msg is not None:
+        state = monitor.announce_delivery(state, now)
+    return state, msg
+
+
+class TestDeliveryIsItsOwnAxis:
+    """Cards failing and posts not landing are independent causes, so delivery
+    is read from its own surface and judged with its own state: one axis never
+    masks the other."""
+
+    def test_failing_sends_page_with_their_counts(self):
+        _, msg = dstep(DELIVERY_FAILING, {}, now=1.0)
+        assert msg is not None and "FLEET ALERT" in msg and "DELIVERY" in msg
+        assert "3 of the last hour's sends" in msg and "40 sent" in msg
+        assert "ambiguous" in msg and "400" in msg
+
+    def test_a_quiet_hour_says_nothing(self):
+        _, msg = dstep(DELIVERY_OK, {}, now=1.0)
+        assert msg is None
+
+    def test_it_repeats_while_failing_and_announces_recovery(self):
+        state, _ = dstep(DELIVERY_FAILING, {}, now=1.0)
+        _, soon = dstep(DELIVERY_FAILING, state, now=1.0 + monitor.REALERT_AFTER_S - 1)
+        assert soon is None
+        _, later = dstep(DELIVERY_FAILING, state, now=1.0 + monitor.REALERT_AFTER_S + 1)
+        assert later is not None
+        _, recovered = dstep(DELIVERY_OK, state, now=2.0)
+        assert recovered is not None and recovered.startswith("RECOVERED")
+
+    def test_an_unreadable_reading_changes_nothing_and_says_nothing(self):
+        # The scheduling axis already says when the API cannot be reached.
+        state, _ = dstep(DELIVERY_FAILING, {}, now=1.0)
+        after, msg = dstep(None, state, now=2.0)
+        assert msg is None and after == state
+
+    def test_only_a_whole_reading_is_read(self):
+        good = json.dumps(DELIVERY_FAILING)
+        assert monitor.read_delivery(200, good) == DELIVERY_FAILING
+        assert monitor.read_delivery(503, good) is None
+        assert monitor.read_delivery(200, "not json") is None
+        assert monitor.read_delivery(200, json.dumps({"sent_in_window": 1})) is None
+
+    def test_the_delivery_surface_sits_beside_the_scheduling_one(self):
+        assert (
+            monitor.delivery_url("https://api.example/health/scheduling")
+            == "https://api.example/health/delivery"
+        )
+        assert monitor.delivery_url("https://api.example/elsewhere") is None
+
+
 class TestTheStateFile:
     def test_a_corrupt_file_reads_as_no_history(self, tmp_path):
         p = tmp_path / "s.json"
