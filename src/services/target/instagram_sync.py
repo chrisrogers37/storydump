@@ -688,8 +688,9 @@ class _ParentCapture:
 
 
 async def _capture_helper_terminal(conn, capture, candidate):
-    """One terminal parent answer retires all known slide items, atomically.
-    The number of items it removed, or None when the index moved meanwhile."""
+    """A read of the post Instagram refused for good retires all its known
+    slide items, atomically. The number of items it removed, or None when the
+    index moved meanwhile."""
     params = dict(
         ws=capture.workspace_id,
         sid=capture.source_id,
@@ -872,16 +873,15 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
     # Told once the turn has committed, so no line names a change it rolled back.
     for parent, removed in retired_posts:
         logger.warning(
-            "instagram sync: post %s retired on a terminal answer to its parent"
-            " read; %d slide item(s) removed",
+            "instagram sync: post %s retired: Instagram refused a read of it for"
+            " good; %d slide item(s) removed",
             parent,
             removed,
         )
     for observation, landed in told:
         logger.warning(
             "instagram sync: post %s, a complete read of %d slide(s): kept %s for"
-            " the stories that hold them, unlisted %s out of the draw, retired %s"
-            " that the read before lacked too",
+            " the stories that hold them, held %s out of the draw, retired %s",
             observation.parent_media_id,
             len(observation.assets),
             list(landed.kept),

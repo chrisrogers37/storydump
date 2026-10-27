@@ -25,8 +25,10 @@ from src.services.target.instagram_sources import PastPostsRefused, require_acti
 #: The exclusion reason of a slide one complete read of its carousel lacked:
 #: it is held out of the draw (its item `missing`), the next complete read that
 #: lacks it too retires it, and a read that lists it again brings it back.
-#: `fn_planned_misses` takes `missing` as final; that is safe because no live
-#: story's slide is ever held out (`_held_slides`).
+#: `fn_planned_misses` takes `missing` as final. A live story's slide is held
+#: out only on a source that takes each post's first slide, where its story
+#: could never fetch it (`_held_slides`), so a due planned story there ends on
+#: that one read, as it did when one read retired its slide.
 _UNLISTED = "unlisted"
 
 _ID = re.compile(r"[0-9]{1,64}\Z")
@@ -419,16 +421,18 @@ def _item_state(asset, conflict):
     return "missing" if asset.exclusion_reason == _UNLISTED else "unsupported"
 
 
-async def _held_slides(executor, ws, missing):
+async def _held_slides(executor, ws, sid, missing):
     """The slides a complete read lacks (`missing`, id to item) whose item a
     live story holds.
 
     A slide is its own entity: one read that lacks it is no proof it left. So
     while a story that is neither terminal nor asked to cancel holds the
     slide, the index keeps it for that story's own fetch to judge
-    (`instagram_past_posts_adapter`'s two-read proof), whatever the read: a
-    full carousel's and a first-slide source's included. No sync reply
-    retires a slide a live story holds.
+    (`instagram_past_posts_adapter`'s two-read proof), a full carousel's
+    included. None is kept on a source that takes only each post's first
+    slide: a kept slide follows the read's own, so it is no longer first and
+    its story could never fetch it. There the read holds it out like any
+    other.
     """
     if not missing:
         return frozenset()
@@ -436,8 +440,11 @@ async def _held_slides(executor, ws, missing):
         executor,
         "SELECT DISTINCT media_item_id FROM post_intents WHERE workspace_id=:ws "
         "AND media_item_id=ANY(CAST(:items AS uuid[])) AND NOT cancel_requested "
-        f"AND {intent_ledger.NOT_TERMINAL}",
+        f"AND {intent_ledger.NOT_TERMINAL} AND EXISTS (SELECT 1 FROM "
+        "instagram_source_policies p WHERE p.workspace_id=:ws "
+        "AND p.source_id=:sid AND p.carousel_slides='all')",
         ws=ws,
+        sid=sid,
         items=sorted(set(missing.values())),
     )
     holding = {str(row["media_item_id"]) for row in rows}
@@ -542,7 +549,7 @@ async def _land(executor, ws, sid, gid, o, keys):
         if o.slides_complete
         else {}
     )
-    held = await _held_slides(executor, ws, missing)
+    held = await _held_slides(executor, ws, sid, missing)
     unlisted, retiring = _lacking(o, previous, missing, held)
     assets = _bundle_assets(o, previous, held, unlisted)
     # A list that keeps a slide the read lacked is no longer one complete read;
