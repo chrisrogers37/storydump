@@ -312,6 +312,22 @@ def deps_of(engine, prepared):
     )
 
 
+async def reap(deps):
+    """One reaper run of a worker that parks late past-posts stories: the
+    source's activation and *deps*' pipeline park given, as the work loop
+    gives them."""
+    config = deps.config
+    await scheduler.execute_reap_expired(
+        deps.engine,
+        limit=50,
+        approval_ttl_seconds=config.approval_ttl_seconds,
+        approved_ttl_seconds=config.approved_ttl_seconds,
+        capability=foundation.capability(),
+        park_late=deps.past_posts.park_late,
+        past_posts_late_seconds=config.planned_late_seconds,
+    )
+
+
 async def test_a_caller_that_parks_leaves_a_late_past_posts_story_waiting(
     world_db, sync_conn, past_posts_engine, origin
 ):
@@ -574,15 +590,7 @@ async def test_the_reaper_parks_a_late_story_saying_why_and_tells_it_once(
     assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
     binding = await bind(worker, origin)
 
-    await scheduler.execute_reap_expired(
-        worker,
-        limit=50,
-        approval_ttl_seconds=config.approval_ttl_seconds,
-        approved_ttl_seconds=config.approved_ttl_seconds,
-        capability=foundation.capability(),
-        park_late=deps.past_posts.park_late,
-        past_posts_late_seconds=config.planned_late_seconds,
-    )
+    await reap(deps)
 
     story = parked(sync_conn, intent)
     assert story["state"] == "review_required"
@@ -624,27 +632,17 @@ async def test_a_story_the_reaper_meets_before_any_try_waits_then_parks_told_onc
     assert slip(sync_conn, intent, "2 seconds") == PAST_POSTS_STORY
     assert prep_jobs(sync_conn, intent) == []
     prepared, calls = preparation.service(worker, origin)
+    deps = deps_of(worker, prepared)
     binding = await bind(worker, origin)
 
-    async def reap():
-        await scheduler.execute_reap_expired(
-            worker,
-            limit=50,
-            approval_ttl_seconds=config.approval_ttl_seconds,
-            approved_ttl_seconds=config.approved_ttl_seconds,
-            capability=foundation.capability(),
-            park_late=deps_of(worker, prepared).past_posts.park_late,
-            past_posts_late_seconds=config.planned_late_seconds,
-        )
-
-    await reap()
+    await reap(deps)
 
     assert state_of(sync_conn, intent) == "scheduled"
     assert is_due(world_db, intent), "its first preparation is still owed"
     assert await notices(worker, origin, intent, binding) == []
 
     assert slip(sync_conn, intent, "61 minutes") == PAST_POSTS_STORY
-    await reap()
+    await reap(deps)
 
     story = parked(sync_conn, intent)
     assert story["state"] == "review_required"
