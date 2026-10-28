@@ -6,8 +6,9 @@ parsing prose (``vocabulary.exit_code_for``); ``Unreachable`` — a connect
 error, a timeout, a 5xx, or an answer that is not the API's JSON — is the
 one failure that is not an answer. The ``transport`` argument exists for
 tests (``httpx.MockTransport``); nothing else about the client changes
-under test. A client is opened per request: a CLI makes one or two calls,
-and a client closed deterministically is one that never warns at exit.
+under test. A client is opened per request: a verb makes a handful of calls
+at most, and a client closed deterministically is one that never warns at
+exit.
 """
 
 from __future__ import annotations
@@ -224,10 +225,8 @@ class Client:
         ):
             try:
                 surfaces[name] = self._request("GET", path, root=True)
-            except (Unreachable, ApiError) as exc:
-                error = f"HTTP {exc.status}: {exc.detail}" if exc.status else exc.detail
-                reason = getattr(exc, "reason", None)
-                surfaces[name] = {"error": f"{error} ({reason})" if reason else error}
+            except ApiError as exc:  # `Unreachable` is one
+                surfaces[name] = {"error": f"HTTP {exc}" if exc.status else exc.detail}
         return surfaces
 
     def list_my_tokens(self) -> dict[str, Any]:

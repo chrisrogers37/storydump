@@ -59,8 +59,10 @@ _MIGRATION_FILE = re.compile(r"^(\d{3})_.*\.sql$")
 
 #: The three dependency surfaces are judged by the classifiers in
 #: `storydump_cli/health_classify/` (stdlib-only, so the CLI stays a pure
-#: client): a surface is not well exactly when its verdict is one of these. A quiet estate with nothing to watch is not an
-#: outage, so `no-signal` and `never-posted` inside its grace are well.
+#: client): scheduling and posting are not well exactly when their verdict is
+#: one of these, and delivery whenever it is not delivering. A quiet estate
+#: with nothing to watch is not an outage, so `no-signal` and `never-posted`
+#: inside its grace are well.
 SCHEDULING_ALERTS = frozenset(
     {
         scheduling.STALLED,
@@ -75,18 +77,20 @@ POSTING_ALERTS = frozenset(
         posting.NEVER_POSTED_OVERDUE,
     }
 )
-#: The scheduling monitor pages on both: a failed or ambiguous send in the
-#: last hour, and a surface it cannot read.
-DELIVERY_ALERTS = frozenset({delivery.FAILING, delivery.UNREACHABLE})
 
 
 # --- health -------------------------------------------------------------------
 
 
+def _judged(well: bool, verdict: Any) -> tuple[bool, dict[str, str]]:
+    return well, {"state": verdict.state, "detail": verdict.detail}
+
+
 def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     """``(well, {"state", "detail"})`` for one surface: `/health` by its
     `status`; scheduling, posting and delivery by their classifiers'
-    verdicts."""
+    verdicts. Delivery is well only while delivering: every other state is
+    one the scheduling monitor pages on."""
     if not isinstance(payload, dict):
         return False, {"state": "unreachable", "detail": "no answer"}
     if "error" in payload:
@@ -100,10 +104,7 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
         verdict = scheduling.classify(
             200, body, threshold_s=scheduling.DEFAULT_STALL_THRESHOLD_S
         )
-        return verdict.state not in SCHEDULING_ALERTS, {
-            "state": verdict.state,
-            "detail": verdict.detail,
-        }
+        return _judged(verdict.state not in SCHEDULING_ALERTS, verdict)
     if name == "posting":
         verdict = posting.classify(
             200,
@@ -112,16 +113,10 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
             grace_s=posting.DEFAULT_GRACE_S,
             watched_s=0.0,
         )
-        return verdict.state not in POSTING_ALERTS, {
-            "state": verdict.state,
-            "detail": verdict.detail,
-        }
+        return _judged(verdict.state not in POSTING_ALERTS, verdict)
     if name == "delivery":
         verdict = delivery.classify(200, body)
-        return verdict.state not in DELIVERY_ALERTS, {
-            "state": verdict.state,
-            "detail": verdict.detail,
-        }
+        return _judged(verdict.state == delivery.DELIVERING, verdict)
     # A surface fetched with no rule to judge it is never a clean bill of health.
     return False, {"state": "unjudged", "detail": f"no rule judges {name}"}
 
