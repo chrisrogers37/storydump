@@ -135,7 +135,7 @@ def test_the_health_classifiers_import_the_standard_library_only():
     classifiers = (
         Path(__file__).resolve().parents[2] / "storydump_cli" / "health_classify"
     )
-    for name in ("posting.py", "scheduling.py"):
+    for name in ("delivery.py", "posting.py", "scheduling.py"):
         tree = ast.parse((classifiers / name).read_text())
         for node in ast.walk(tree):
             names = []

@@ -984,6 +984,21 @@ class TestDeliveryHealthIsAFOURTHSurface:
         assert resp.status_code == 200, resp.text
         return resp, doors
 
+    def test_the_real_body_is_what_the_shared_classifier_reads(self, engine, client):
+        """The real route over the real `delivery_health`, read by the classifier
+        `storydump health` and the scheduling monitor share: the body carries
+        exactly its keys, and a failed send in it reads as failing."""
+        from storydump_cli.health_classify import delivery as dm
+
+        resp, _ = self._get(
+            engine, client, [("refused", 400, 1, 1), ("rate_limited", 429, 9, 0)]
+        )
+        assert set(resp.json()) == {dm._WINDOW, *dm._COUNTS, dm._BY_CLASS}
+        verdict = dm.classify(resp.status_code, resp.text)
+        assert verdict.state == dm.FAILING, verdict
+        assert "refused: 400×1" in verdict.detail
+        assert "rate_limited" not in verdict.detail
+
     def test_the_body_is_aggregates_only(self, engine, client):
         """The route is unauthenticated: counts and codes, and nothing that
         names a workspace, a chat or a message."""

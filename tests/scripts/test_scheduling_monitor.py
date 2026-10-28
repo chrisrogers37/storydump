@@ -70,13 +70,34 @@ def body(stalled=0, active=0, lag=None, worker=ALIVE_WORKER):
     return json.dumps(data)
 
 
+#: `/health/delivery`'s body: the last hour's sends, and those that failed or
+#: are ambiguous, by class and code.
+QUIET_HOUR = {
+    "window_seconds": 3600,
+    "sent_in_window": 40,
+    "failed_or_ambiguous": 0,
+    "by_class": {},
+}
+FAILING_HOUR = {
+    "window_seconds": 3600,
+    "sent_in_window": 40,
+    "failed_or_ambiguous": 3,
+    "by_class": {
+        "ambiguous": {"rows": 2, "alerting": 2, "codes": {"none": 2}},
+        "refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}},
+        # A deferral: back to pending, so nothing in the class alerts.
+        "rate_limited": {"rows": 4, "alerting": 0, "codes": {"429": 4}},
+    },
+}
+
+
 def run_main(
     monkeypatch,
     tmp_path,
     status,
     raw,
     *,
-    delivery=(404, ""),
+    delivery=(200, json.dumps(QUIET_HOUR)),
     delivery_url="http://x/health/delivery",
     notify_ok=True,
     calls=None,
@@ -84,8 +105,9 @@ def run_main(
 ):
     """`main` with the network and the notifier stubbed at the seam, keyed by
     URL: `(status, raw)` at --url and `delivery` at `delivery_url`, by default
-    the surface beside it and a reading the delivery axis skips. Any other URL
-    answers 404. The state file is `tmp_path / "s.json"`."""
+    the surface beside it and a quiet, readable hour, so a test of the
+    scheduling axis stays about it. Any other URL answers 404. The state file
+    is `tmp_path / "s.json"`."""
     pages = {"http://x/health/scheduling": (status, raw), delivery_url: delivery}
     monkeypatch.setattr(
         monitor, "fetch", lambda url, timeout_s: pages.get(url, (404, ""))
@@ -287,27 +309,6 @@ class TestAFaultThatEndsInBlindnessIsSaidHonestly:
         assert "RECOVERED" not in msg
 
 
-#: `/health/delivery`'s body: the last hour's sends, and those that failed or
-#: are ambiguous, by class and code.
-QUIET_HOUR = {
-    "window_seconds": 3600,
-    "sent_in_window": 40,
-    "failed_or_ambiguous": 0,
-    "by_class": {},
-}
-FAILING_HOUR = {
-    "window_seconds": 3600,
-    "sent_in_window": 40,
-    "failed_or_ambiguous": 3,
-    "by_class": {
-        "ambiguous": {"rows": 2, "alerting": 2, "codes": {"none": 2}},
-        "refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}},
-        # A deferral: back to pending, so nothing in the class alerts.
-        "rate_limited": {"rows": 4, "alerting": 0, "codes": {"429": 4}},
-    },
-}
-
-
 def dstep(reading, prior, now):
     """`step` on the delivery axis's own state."""
     return step(reading, prior, now, decide=monitor.decide_delivery)
@@ -405,6 +406,117 @@ class TestDeliveryIsItsOwnAxis:
         )
         assert code == monitor.EXIT_SPOKE
         assert len(sent) == 1 and "DELIVERY IS FAILING" in sent[0]
+
+
+#: A delivery surface that answered, but not with a reading: the route's
+#: answer to a statement past its cap.
+BUSY = (503, json.dumps({"detail": "busy — try again", "reason": "statement_timeout"}))
+#: No API at all: neither surface can be reached.
+DOWN = (0, "connection refused")
+
+
+class TestAnUnreadableDeliverySurfaceIsSaid:
+    """A delivery surface that cannot be read while the API answers is a broken
+    instrument: said on the second reading, repeated while it lasts, closed
+    when it reads again. When the API itself cannot be reached, the scheduling
+    axis pages that, once."""
+
+    def test_it_pages_on_the_second_poll_and_names_the_reason(
+        self, monkeypatch, tmp_path
+    ):
+        sent = []
+        healthy = body(0, 5, 3)
+        first = run_main(monkeypatch, tmp_path, 200, healthy, delivery=BUSY, calls=sent)
+        assert first == monitor.EXIT_QUIET and sent == []
+        second = run_main(
+            monkeypatch, tmp_path, 200, healthy, delivery=BUSY, calls=sent
+        )
+        assert second == monitor.EXIT_SPOKE and len(sent) == 1
+        assert "delivery check UNREACHABLE" in sent[0]
+        assert "HTTP 503 (statement_timeout)" in sent[0]
+
+    def test_it_repeats_on_the_fault_cadence(self, monkeypatch, tmp_path):
+        sent = []
+        for _ in range(3):
+            run_main(
+                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
+            )
+        assert len(sent) == 1, "a poll inside the fault cadence said it again"
+        path = str(tmp_path / "s.json")
+        state = monitor.load_state(path)
+        state["delivery"]["spoke_at"] -= monitor.REALERT_AFTER_S
+        monitor.save_state(path, state)
+        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
+        assert len(sent) == 2 and "delivery check UNREACHABLE" in sent[1]
+
+    def test_it_says_recovered_when_the_surface_reads_again(
+        self, monkeypatch, tmp_path
+    ):
+        sent = []
+        for _ in range(2):
+            run_main(
+                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
+            )
+        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), calls=sent)
+        assert len(sent) == 2
+        assert sent[1].startswith("RECOVERED") and "reads again" in sent[1]
+
+    def test_a_failing_hour_after_it_pages_failing(self, monkeypatch, tmp_path):
+        sent = []
+        for _ in range(2):
+            run_main(
+                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
+            )
+        failing = (200, json.dumps(FAILING_HOUR))
+        run_main(
+            monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=failing, calls=sent
+        )
+        assert len(sent) == 2 and "DELIVERY IS FAILING" in sent[1]
+
+    def test_an_api_that_cannot_be_reached_pages_once(self, monkeypatch, tmp_path):
+        """Both surfaces down is one cause, and the scheduling axis pages it.
+        Readings held meanwhile do not count, so once the API answers,
+        delivery needs two readings of its own before it pages."""
+        sent = []
+        for _ in range(2):
+            run_main(monkeypatch, tmp_path, *DOWN, delivery=DOWN, calls=sent)
+        assert len(sent) == 1 and "scheduling check UNREACHABLE" in sent[0]
+        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
+        assert len(sent) == 2 and sent[1].startswith("RECOVERED: storydump scheduling")
+        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
+        assert len(sent) == 3 and "delivery check UNREACHABLE" in sent[2]
+
+    def test_a_malformed_scheduling_answer_does_not_hold_delivery(
+        self, monkeypatch, tmp_path
+    ):
+        """A 200 the scheduling classifier cannot read means the API answered,
+        so delivery's own reading stands."""
+        sent = []
+        no_worker = body(0, 5, 3, worker=None)
+        for _ in range(2):
+            run_main(monkeypatch, tmp_path, 200, no_worker, delivery=BUSY, calls=sent)
+        assert any("delivery check UNREACHABLE" in m for m in sent), sent
+
+    def test_each_poll_prints_one_line_with_both_axes(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """One verdict line per poll, as the operating guide counts them."""
+        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3))
+        (line,) = capsys.readouterr().out.strip().splitlines()
+        assert line.startswith("healthy: ")
+        assert " · delivery delivering: " in line
+
+    def test_a_url_with_no_delivery_surface_is_refused(self, monkeypatch, tmp_path):
+        """Watching no delivery surface must never be something a reader has to
+        notice: the run fails, and the supervisor logs a failed unit."""
+        monkeypatch.setattr(
+            monitor, "fetch", lambda url, timeout_s: (200, body(0, 5, 3))
+        )
+        argv = ["--url", "http://x/elsewhere", "--state-file", str(tmp_path / "s.json")]
+        with pytest.raises(SystemExit) as refused:
+            monitor.main(argv)
+        assert refused.value.code == 2
+        assert monitor.main([*argv, "--status"]) == monitor.EXIT_QUIET
 
 
 def with_commits(api="abc1234", worker="abc1234"):
