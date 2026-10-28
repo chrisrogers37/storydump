@@ -2,6 +2,9 @@
 
 The scheduling monitor judges delivery with this verdict; how it repeats and
 recovers is pinned in `tests/scripts/test_scheduling_monitor.py`.
+`storydump health` judges it too: not well on a reading the monitor pages on,
+and on one unreadable reading at once, where the monitor waits for a second
+in a row.
 """
 
 from __future__ import annotations

@@ -60,7 +60,7 @@ _MIGRATION_FILE = re.compile(r"^(\d{3})_.*\.sql$")
 #: The three dependency surfaces are judged by the classifiers in
 #: `storydump_cli/health_classify/` (stdlib-only, so the CLI stays a pure
 #: client): scheduling and posting are not well exactly when their verdict is
-#: one of these, and delivery whenever it is not delivering. A quiet estate
+#: one of these, and delivery whenever it is neither delivering nor quiet. A quiet estate
 #: with nothing to watch is not an outage, so `no-signal` and `never-posted`
 #: inside its grace are well.
 SCHEDULING_ALERTS = frozenset(
@@ -82,6 +82,11 @@ POSTING_ALERTS = frozenset(
 # --- health -------------------------------------------------------------------
 
 
+#: Nothing failed: sends got through, or nothing was sent. Every other state,
+#: and any state the classifier gains, is not well.
+DELIVERY_WELL = frozenset({delivery.DELIVERING, delivery.QUIET})
+
+
 def _judged(well: bool, verdict: Any) -> tuple[bool, dict[str, str]]:
     return well, {"state": verdict.state, "detail": verdict.detail}
 
@@ -89,7 +94,7 @@ def _judged(well: bool, verdict: Any) -> tuple[bool, dict[str, str]]:
 def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     """``(well, {"state", "detail"})`` for one surface: `/health` by its
     `status`; scheduling, posting and delivery by their classifiers'
-    verdicts. Delivery is well only while delivering: every other state is
+    verdicts. Delivery is well while delivering or quiet: every other state is
     one the scheduling monitor pages on."""
     if not isinstance(payload, dict):
         return False, {"state": "unreachable", "detail": "no answer"}
@@ -116,7 +121,7 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
         return _judged(verdict.state not in POSTING_ALERTS, verdict)
     if name == "delivery":
         verdict = delivery.classify(200, body)
-        return _judged(verdict.state == delivery.DELIVERING, verdict)
+        return _judged(verdict.state in DELIVERY_WELL, verdict)
     # A surface fetched with no rule to judge it is never a clean bill of health.
     return False, {"state": "unjudged", "detail": f"no rule judges {name}"}
 

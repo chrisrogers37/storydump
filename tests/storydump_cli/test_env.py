@@ -70,7 +70,7 @@ HEALTH = {
     },
     "backpressure": {"lanes": {"interactive": {"ready": 0}, "bulk": {"ready": 2}}},
 }
-#: The real shapes (`src/api/app.py`'s three routes): the two dependency
+#: The real shapes (`src/api/app.py`'s routes): the three dependency
 #: surfaces carry aggregates, never a `status` — `health` hands them to the
 #: classifiers' own `classify`, whose strictness these fixtures satisfy.
 SCHEDULING = {
@@ -336,6 +336,17 @@ def test_health_reads_an_unreadable_delivery_surface_as_not_well(tmp_path, answe
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     verdict = one_envelope(result)["data"]["verdicts"]["delivery"]
     assert verdict["state"] == "unreachable", verdict
+
+
+def test_health_reads_an_hour_with_nothing_sent_as_quiet_and_well(tmp_path):
+    """Nothing sent and nothing failed is no fault, and the verdict says the
+    hour was quiet rather than that it delivered."""
+    quiet = {**DELIVERY, "sent_in_window": 0}
+    api = health_api({("GET", "/health/delivery"): (200, quiet)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_OK, result.output
+    verdict = one_envelope(result)["data"]["verdicts"]["delivery"]
+    assert verdict["state"] == "quiet", verdict
 
 
 def test_health_reads_a_due_job_inside_the_grace_as_well(tmp_path):
