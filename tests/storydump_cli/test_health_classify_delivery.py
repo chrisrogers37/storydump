@@ -94,28 +94,27 @@ class TestAnUnreadableReadingIsNeverAHealthyOne:
     @pytest.mark.parametrize(
         "raw",
         [
-            "not json",
-            json.dumps([1, 2]),
-            json.dumps({"window_seconds": 3600, "failed_or_ambiguous": 0}),
-            reading(sent_in_window=None),
-            reading(sent_in_window=True),
-            reading(failed_or_ambiguous=-1),
-            reading(failed_or_ambiguous="3"),
-            reading(by_class=[]),
-            json.dumps(
-                {"window_seconds": 3600, "sent_in_window": 1, "failed_or_ambiguous": 0}
+            pytest.param("not json", id="not-json"),
+            pytest.param(json.dumps([1, 2]), id="not-an-object"),
+            pytest.param(
+                json.dumps({"window_seconds": 3600, "failed_or_ambiguous": 0}),
+                id="no-sent-count",
             ),
-        ],
-        ids=[
-            "not-json",
-            "not-an-object",
-            "no-sent-count",
-            "null-count",
-            "bool-count",
-            "negative-count",
-            "string-count",
-            "by-class-not-an-object",
-            "no-by-class",
+            pytest.param(reading(sent_in_window=None), id="null-count"),
+            pytest.param(reading(sent_in_window=True), id="bool-count"),
+            pytest.param(reading(failed_or_ambiguous=-1), id="negative-count"),
+            pytest.param(reading(failed_or_ambiguous="3"), id="string-count"),
+            pytest.param(reading(by_class=[]), id="by-class-not-an-object"),
+            pytest.param(
+                json.dumps(
+                    {
+                        "window_seconds": 3600,
+                        "sent_in_window": 1,
+                        "failed_or_ambiguous": 0,
+                    }
+                ),
+                id="no-by-class",
+            ),
         ],
     )
     def test_every_malformed_reading_is_unreachable(self, delivery, raw):

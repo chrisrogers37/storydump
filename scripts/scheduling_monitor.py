@@ -94,6 +94,26 @@ def announce(state: dict, now: float) -> dict:
     return {**state, "announced": state["state"], "spoke_at": now}
 
 
+#: `UNREACHABLE` speaks on this many readings in a row: one failed request is a
+#: dropped packet, two is a fact.
+UNREACHABLE_AFTER_READINGS = 2
+
+
+def _run(prior: dict, state: str) -> int:
+    """Readings in a row of `state`, this one included."""
+    return prior.get("consecutive", 0) + 1 if prior.get("state") == state else 1
+
+
+def _carried(prior: dict, now: float) -> dict:
+    """What every axis keeps from poll to poll: when it last read, and what a
+    human was last told, and when."""
+    return {
+        "observed_at": now,
+        "announced": prior.get("announced"),
+        "spoke_at": prior.get("spoke_at", 0.0),
+    }
+
+
 def _repeat_due(prior: dict, told: str, now: float, interval: float) -> bool:
     """Whether `told` is due to be said: never told it, or told it long enough
     ago that silence would read as fixed."""
@@ -114,7 +134,7 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
     because the day this monitor first gains sight is worth saying out loud.
     """
     announced = prior.get("announced")
-    run = prior.get("consecutive", 0) + 1 if prior.get("state") == verdict.state else 1
+    run = _run(prior, verdict.state)
     # The most destinations any reading has shown. A reading with no counts (an
     # unreachable one) never lowers it, or a network blip would turn a lost
     # destination back into the notice for an estate that never had one.
@@ -126,9 +146,7 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
         "state": verdict.state,
         "detail": verdict.detail,
         "consecutive": run,
-        "observed_at": now,
-        "announced": announced,
-        "spoke_at": prior.get("spoke_at", 0.0),
+        **_carried(prior, now),
         "payload": verdict.payload,
         "max_active_seen": seen,
     }
@@ -149,8 +167,7 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
         return _repeat_due(prior, verdict.state, now, interval)
 
     if verdict.state == UNREACHABLE:
-        # One failed request is a dropped packet. Two is a fact.
-        if run < 2 or not repeat_due(REALERT_AFTER_S):
+        if run < UNREACHABLE_AFTER_READINGS or not repeat_due(REALERT_AFTER_S):
             return state, None
         return state, (
             f"FLEET ALERT: storydump scheduling check UNREACHABLE "
@@ -263,22 +280,18 @@ def decide_delivery(
     run counts toward nothing.
     """
     announced = prior.get("announced")
-    if verdict.state == delivery.UNREACHABLE and held:
-        run = 0
-    elif prior.get("state") == verdict.state:
-        run = prior.get("consecutive", 0) + 1
-    else:
-        run = 1
+    held = held and verdict.state == delivery.UNREACHABLE
+    run = 0 if held else _run(prior, verdict.state)
     state = {
         "state": verdict.state,
         "detail": verdict.detail,
         "consecutive": run,
-        "observed_at": now,
-        "announced": announced,
-        "spoke_at": prior.get("spoke_at", 0.0),
+        **_carried(prior, now),
     }
     if verdict.state == delivery.UNREACHABLE:
-        if run < 2 or not _repeat_due(prior, verdict.state, now, REALERT_AFTER_S):
+        if run < UNREACHABLE_AFTER_READINGS or not _repeat_due(
+            prior, verdict.state, now, REALERT_AFTER_S
+        ):
             return state, None
         return state, (
             f"FLEET ALERT: storydump delivery check UNREACHABLE ({verdict.detail}) "
@@ -317,11 +330,7 @@ def decide_split(payload: dict, prior: dict, now: float) -> tuple[dict, str | No
         return dict(prior), None
     api, worker = pair
     announced = prior.get("announced")
-    state = {
-        "observed_at": now,
-        "announced": announced,
-        "spoke_at": prior.get("spoke_at", 0.0),
-    }
+    state = _carried(prior, now)
     if api == worker:
         state["state"] = SAME
         if announced == SPLIT:

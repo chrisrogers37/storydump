@@ -321,21 +321,13 @@ class TestDeliveryIsItsOwnAxis:
     is read from its own surface and judged with its own state: one axis never
     masks the other."""
 
-    def test_failing_sends_page_with_their_counts(self):
+    def test_failing_sends_page_with_the_classifiers_detail(self):
+        """What a failing reading says is the classifier's, pinned in
+        `tests/storydump_cli/test_health_classify_delivery.py`; the page
+        carries it whole."""
         _, msg = dstep(FAILING_HOUR, {}, now=1.0)
-        assert msg is not None and "FLEET ALERT" in msg and "DELIVERY" in msg
-        assert "3 of the last hour's sends" in msg and "40 sent" in msg
-        assert "ambiguous" in msg and "400" in msg
-        assert "rate_limited" not in msg and "429" not in msg, "a deferral paged"
-
-    def test_a_single_failed_send_pages(self):
-        one = {
-            **QUIET_HOUR,
-            "failed_or_ambiguous": 1,
-            "by_class": {"refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}}},
-        }
-        _, msg = dstep(one, {}, now=1.0)
-        assert msg is not None and "1 of the last hour's sends" in msg
+        detail = delivery.classify(200, json.dumps(FAILING_HOUR)).detail
+        assert msg == f"FLEET ALERT: storydump DELIVERY IS FAILING — {detail}."
 
     def test_a_quiet_hour_says_nothing(self):
         _, msg = dstep(QUIET_HOUR, {}, now=1.0)
@@ -398,6 +390,15 @@ BUSY = (503, json.dumps({"detail": "busy — try again", "reason": "statement_ti
 DOWN = (0, "connection refused")
 
 
+def polls(monkeypatch, tmp_path, *deliveries, scheduling=(200, body(0, 5, 3))):
+    """One `main` poll per delivery reading, against the same state file, and
+    every message sent across them."""
+    sent = []
+    for answer in deliveries:
+        run_main(monkeypatch, tmp_path, *scheduling, delivery=answer, calls=sent)
+    return sent
+
+
 class TestAnUnreadableDeliverySurfaceIsSaid:
     """A delivery surface that cannot be read while the API answers is a broken
     instrument: said on the second reading, repeated while it lasts, closed
@@ -407,77 +408,53 @@ class TestAnUnreadableDeliverySurfaceIsSaid:
     def test_it_pages_on_the_second_poll_and_names_the_reason(
         self, monkeypatch, tmp_path
     ):
-        sent = []
-        healthy = body(0, 5, 3)
-        first = run_main(monkeypatch, tmp_path, 200, healthy, delivery=BUSY, calls=sent)
-        assert first == monitor.EXIT_QUIET and sent == []
-        second = run_main(
-            monkeypatch, tmp_path, 200, healthy, delivery=BUSY, calls=sent
-        )
-        assert second == monitor.EXIT_SPOKE and len(sent) == 1
-        assert "delivery check UNREACHABLE" in sent[0]
-        assert "HTTP 503 (statement_timeout)" in sent[0]
+        assert polls(monkeypatch, tmp_path, BUSY) == []
+        (page,) = polls(monkeypatch, tmp_path, BUSY)
+        assert "delivery check UNREACHABLE" in page
+        assert "HTTP 503 (statement_timeout)" in page
 
     def test_it_repeats_on_the_fault_cadence(self, monkeypatch, tmp_path):
-        sent = []
-        for _ in range(3):
-            run_main(
-                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
-            )
+        sent = polls(monkeypatch, tmp_path, BUSY, BUSY, BUSY)
         assert len(sent) == 1, "a poll inside the fault cadence said it again"
         path = str(tmp_path / "s.json")
         state = monitor.load_state(path)
         state["delivery"]["spoke_at"] -= monitor.REALERT_AFTER_S
         monitor.save_state(path, state)
-        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
-        assert len(sent) == 2 and "delivery check UNREACHABLE" in sent[1]
+        (again,) = polls(monkeypatch, tmp_path, BUSY)
+        assert "delivery check UNREACHABLE" in again
 
-    def test_it_says_recovered_when_the_surface_reads_again(
-        self, monkeypatch, tmp_path
-    ):
-        sent = []
-        for _ in range(2):
-            run_main(
-                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
-            )
-        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), calls=sent)
-        assert len(sent) == 2
-        assert sent[1].startswith("RECOVERED") and "reads again" in sent[1]
-
-    def test_a_failing_hour_after_it_pages_failing(self, monkeypatch, tmp_path):
-        sent = []
-        for _ in range(2):
-            run_main(
-                monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent
-            )
-        failing = (200, json.dumps(FAILING_HOUR))
-        run_main(
-            monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=failing, calls=sent
-        )
-        assert len(sent) == 2 and "DELIVERY IS FAILING" in sent[1]
+    @pytest.mark.parametrize(
+        "after,said",
+        [
+            pytest.param(
+                QUIET_HOUR, "the storydump delivery check reads again", id="reads"
+            ),
+            pytest.param(FAILING_HOUR, "DELIVERY IS FAILING", id="failing"),
+        ],
+    )
+    def test_what_follows_it_closes_it(self, monkeypatch, tmp_path, after, said):
+        """RECOVERED when the surface reads again; a failing hour pages failing."""
+        sent = polls(monkeypatch, tmp_path, BUSY, BUSY, (200, json.dumps(after)))
+        assert len(sent) == 2 and said in sent[1]
 
     def test_an_api_that_cannot_be_reached_pages_once(self, monkeypatch, tmp_path):
         """Both surfaces down is one cause, and the scheduling axis pages it.
         Readings held meanwhile do not count, so once the API answers,
         delivery needs two readings of its own before it pages."""
-        sent = []
-        for _ in range(2):
-            run_main(monkeypatch, tmp_path, *DOWN, delivery=DOWN, calls=sent)
-        assert len(sent) == 1 and "scheduling check UNREACHABLE" in sent[0]
-        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
-        assert len(sent) == 2 and sent[1].startswith("RECOVERED: storydump scheduling")
-        run_main(monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=BUSY, calls=sent)
-        assert len(sent) == 3 and "delivery check UNREACHABLE" in sent[2]
+        (down,) = polls(monkeypatch, tmp_path, DOWN, DOWN, scheduling=DOWN)
+        assert "scheduling check UNREACHABLE" in down
+        (back,) = polls(monkeypatch, tmp_path, BUSY)
+        assert back.startswith("RECOVERED: storydump scheduling")
+        (page,) = polls(monkeypatch, tmp_path, BUSY)
+        assert "delivery check UNREACHABLE" in page
 
     def test_a_malformed_scheduling_answer_does_not_hold_delivery(
         self, monkeypatch, tmp_path
     ):
         """A 200 the scheduling classifier cannot read means the API answered,
         so delivery's own reading stands."""
-        sent = []
-        no_worker = body(0, 5, 3, worker=None)
-        for _ in range(2):
-            run_main(monkeypatch, tmp_path, 200, no_worker, delivery=BUSY, calls=sent)
+        no_worker = (200, body(0, 5, 3, worker=None))
+        sent = polls(monkeypatch, tmp_path, BUSY, BUSY, scheduling=no_worker)
         assert any("delivery check UNREACHABLE" in m for m in sent), sent
 
     def test_each_poll_prints_one_line_with_both_axes(

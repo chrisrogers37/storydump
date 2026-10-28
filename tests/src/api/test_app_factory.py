@@ -993,7 +993,7 @@ class TestDeliveryHealthIsAFOURTHSurface:
         resp, _ = self._get(
             engine, client, [("refused", 400, 1, 1), ("rate_limited", 429, 9, 0)]
         )
-        assert set(resp.json()) == {dm._WINDOW, *dm._COUNTS, dm._BY_CLASS}
+        assert set(resp.json()) == {"window_seconds", *dm._COUNTS, dm._BY_CLASS}
         verdict = dm.classify(resp.status_code, resp.text)
         assert verdict.state == dm.FAILING, verdict
         assert "refused: 400×1" in verdict.detail

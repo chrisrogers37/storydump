@@ -14,10 +14,9 @@ DELIVERING = "delivering"
 FAILING = "failing"
 UNREACHABLE = "unreachable"
 
-#: What `classify` reads, and so, with the window, all `/health/delivery`
-#: publishes (a test holds the route to these): the hour's sends, the failed
-#: or ambiguous among them, and the failures by class.
-_WINDOW = "window_seconds"
+#: What `classify` reads, and so, with its `window_seconds`, all
+#: `/health/delivery` publishes (a test holds the route to these): the hour's
+#: sends, the failed or ambiguous among them, and the failures by class.
 _COUNTS = ("sent_in_window", "failed_or_ambiguous")
 _BY_CLASS = "by_class"
 
