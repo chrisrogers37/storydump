@@ -77,18 +77,19 @@ def run_main(
     raw,
     *,
     delivery=(404, ""),
+    delivery_url="http://x/health/delivery",
     notify_ok=True,
     calls=None,
     extra=(),
 ):
     """`main` with the network and the notifier stubbed at the seam, keyed by
-    URL: `(status, raw)` at --url and `delivery` beside it, by default a
-    reading the delivery axis skips. The state file is `tmp_path / "s.json"`."""
-    pages = {
-        "http://x/health/scheduling": (status, raw),
-        "http://x/health/delivery": delivery,
-    }
-    monkeypatch.setattr(monitor, "fetch", lambda url, timeout_s: pages[url])
+    URL: `(status, raw)` at --url and `delivery` at `delivery_url`, by default
+    the surface beside it and a reading the delivery axis skips. Any other URL
+    answers 404. The state file is `tmp_path / "s.json"`."""
+    pages = {"http://x/health/scheduling": (status, raw), delivery_url: delivery}
+    monkeypatch.setattr(
+        monitor, "fetch", lambda url, timeout_s: pages.get(url, (404, ""))
+    )
     monkeypatch.setattr(
         monitor,
         "notify",
@@ -232,12 +233,13 @@ class TestLosingTheLastDestinationSpeaks:
         state, msg = step(notice, state, now=2.0)
         assert msg is not None and "NO ACTIVE DESTINATIONS" in msg
         assert "had 1" in msg
-        after = monitor.RENOTICE_LOST_DESTINATIONS_AFTER_S
-        _, soon = step(notice, state, now=2.0 + after - 1)
+        # A day, as a number: quiet through the 6-h fault cadence and the rest
+        # of the day, said again after it.
+        day = 24 * 3600
+        _, soon = step(notice, state, now=2.0 + day - 1)
         assert soon is None
-        _, later = step(notice, state, now=2.0 + after + 1)
+        _, later = step(notice, state, now=2.0 + day + 1)
         assert later is not None and "NO ACTIVE DESTINATIONS" in later
-        assert after < monitor.RENOTICE_NO_SIGNAL_AFTER_S
 
     def test_a_reading_with_no_payload_does_not_forget_the_estate(self, notice):
         # An unreachable reading carries no counts; what the estate had must
@@ -255,11 +257,26 @@ class TestAFaultThatEndsInBlindnessIsSaidHonestly:
     nothing, closes that fault in words: the human must not be left holding an
     alert that no longer describes anything."""
 
-    def test_a_dead_worker_that_goes_blind_says_it_recovered(self):
-        down = Verdict(WORKER_DOWN, "no system job has finished for 90000s")
-        state, _ = step(down, {}, now=1.0)
-        _, msg = step(Verdict(WORKER_UNKNOWN, "no baseline"), state, now=2.0)
-        assert msg is not None and msg.startswith(f"RECOVERED from {WORKER_DOWN}")
+    @pytest.mark.parametrize(
+        "fault,readings",
+        [
+            pytest.param(
+                lambda: Verdict(WORKER_DOWN, "no system job has finished for 90000s"),
+                1,
+                id="worker-down",
+            ),
+            pytest.param(
+                lambda: classify(0, "boom", threshold_s=T), 2, id="unreachable"
+            ),
+        ],
+    )
+    def test_an_outage_that_goes_blind_says_it_recovered(self, fault, readings):
+        v, state = fault(), {}
+        for i in range(readings):
+            state, _ = step(v, state, now=1.0 + i)
+        assert state["announced"] == v.state
+        _, msg = step(Verdict(WORKER_UNKNOWN, "no baseline"), state, now=10.0)
+        assert msg is not None and msg.startswith(f"RECOVERED from {v.state}")
 
     def test_a_stall_that_goes_blind_is_not_called_recovered(self):
         # Pausing the only workspace stops the stall's evidence, not the stall.
@@ -285,6 +302,8 @@ FAILING_HOUR = {
     "by_class": {
         "ambiguous": {"rows": 2, "alerting": 2, "codes": {"none": 2}},
         "refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}},
+        # A deferral: back to pending, so nothing in the class alerts.
+        "rate_limited": {"rows": 4, "alerting": 0, "codes": {"429": 4}},
     },
 }
 
@@ -304,6 +323,16 @@ class TestDeliveryIsItsOwnAxis:
         assert msg is not None and "FLEET ALERT" in msg and "DELIVERY" in msg
         assert "3 of the last hour's sends" in msg and "40 sent" in msg
         assert "ambiguous" in msg and "400" in msg
+        assert "rate_limited" not in msg and "429" not in msg, "a deferral paged"
+
+    def test_a_single_failed_send_pages(self):
+        one = {
+            **QUIET_HOUR,
+            "failed_or_ambiguous": 1,
+            "by_class": {"refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}}},
+        }
+        _, msg = dstep(one, {}, now=1.0)
+        assert msg is not None and "1 of the last hour's sends" in msg
 
     def test_a_quiet_hour_says_nothing(self):
         _, msg = dstep(QUIET_HOUR, {}, now=1.0)
@@ -327,9 +356,15 @@ class TestDeliveryIsItsOwnAxis:
     def test_only_a_whole_reading_is_read(self):
         good = json.dumps(FAILING_HOUR)
         assert monitor.read_delivery(200, good) == FAILING_HOUR
-        assert monitor.read_delivery(503, good) is None
+        for status in (503, 404):
+            assert monitor.read_delivery(status, good) is None
         assert monitor.read_delivery(200, "not json") is None
         assert monitor.read_delivery(200, json.dumps({"sent_in_window": 1})) is None
+        no_classes = {k: v for k, v in FAILING_HOUR.items() if k != "by_class"}
+        assert monitor.read_delivery(200, json.dumps(no_classes)) is None
+        for count in (True, -1):
+            bad = {**FAILING_HOUR, "failed_or_ambiguous": count}
+            assert monitor.read_delivery(200, json.dumps(bad)) is None
 
     def test_the_delivery_surface_sits_beside_the_scheduling_one(self):
         assert (
@@ -353,6 +388,23 @@ class TestDeliveryIsItsOwnAxis:
         st = monitor.load_state(str(tmp_path / "s.json"))
         assert st["delivery"]["announced"] == monitor.DELIVERY_FAILING
         assert st.get("announced") is None
+
+    def test_delivery_url_names_the_surface_read(self, monkeypatch, tmp_path):
+        """`--delivery-url` replaces the surface beside --url, which then
+        answers nothing."""
+        sent = []
+        code = run_main(
+            monkeypatch,
+            tmp_path,
+            200,
+            body(0, 5, 3),
+            delivery=(200, json.dumps(FAILING_HOUR)),
+            delivery_url="http://y/delivery",
+            calls=sent,
+            extra=("--delivery-url", "http://y/delivery"),
+        )
+        assert code == monitor.EXIT_SPOKE
+        assert len(sent) == 1 and "DELIVERY IS FAILING" in sent[0]
 
 
 def with_commits(api="abc1234", worker="abc1234"):
@@ -390,7 +442,21 @@ class TestAVersionSplitPagesOnceItOutlastsADeploy:
         assert msg is None
         _, msg = sstep(split, state, now=1.0 + monitor.SPLIT_AFTER_S)
         assert msg is not None and "VERSION SPLIT" in msg
-        assert "abc1234" in msg and "def5678" in msg
+        assert "the API runs abc1234, the worker def5678" in msg
+
+    def test_it_waits_half_an_hour_and_repeats_after_a_day(self):
+        """The two values the operating guide states, as numbers: quiet at 29
+        minutes, a page at 30, quiet for the next 23 hours, a page after 24."""
+        split = with_commits(worker="def5678")
+        state, _ = sstep(split, {}, now=0.0)
+        _, early = sstep(split, state, now=29 * 60)
+        assert early is None
+        state, first = sstep(split, state, now=30 * 60)
+        assert first is not None
+        _, soon = sstep(split, state, now=30 * 60 + 23 * 3600)
+        assert soon is None
+        _, later = sstep(split, state, now=30 * 60 + 24 * 3600)
+        assert later is not None
 
     def test_it_repeats_daily_and_says_when_it_is_resolved(self):
         split, t = with_commits(worker="def5678"), monitor.SPLIT_AFTER_S

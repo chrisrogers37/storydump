@@ -672,6 +672,33 @@ class TestSchedulingHealthIsASecondSurface:
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
 
+    def test_it_publishes_the_apis_own_commit(self, monkeypatch):
+        """The API's half of the version split is the deployed commit, as
+        `/health` names it. Published as None, every poll would read as "no
+        commit" and the split axis would be off with nothing failing."""
+
+        async def fake_lag(executor):
+            return {"stalled": 0, "accounts_active": 1, "max_lag_seconds": 3}
+
+        async def fake_worker(executor):
+            return {
+                "succeeded_ever": 1,
+                "last_success_age_seconds": 30,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+                "commit": "def5678",
+            }
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        app = create_app(
+            engine=FakeEngine(),
+            env={"RAILWAY_GIT_COMMIT_SHA": "abc1234aaaabbbbccccdddd"},
+        )
+        reading = TestClient(app).get("/health/scheduling").json()
+        assert reading["api_commit"] == "abc1234"
+        assert reading["worker"]["commit"] == "def5678"
+
     def test_the_public_payloads_are_exactly_what_the_classifiers_read(
         self, client, monkeypatch
     ):

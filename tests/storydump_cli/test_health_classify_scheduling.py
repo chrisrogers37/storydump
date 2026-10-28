@@ -12,6 +12,7 @@ from storydump_cli.health_classify.scheduling import (
     WORKER_DOWN,
     WORKER_UNKNOWN,
     classify,
+    commits,
 )
 
 
@@ -221,6 +222,24 @@ class TestTheTwoWorkerSignalsCoverEachOthersBlindSpot:
             threshold_s=T,
         )
         assert v.state == WORKER_DOWN
+
+
+class TestTheTwoCommits:
+    """`commits` reads the API's and the worker's commits from one reading:
+    hex of seven characters or more, compared on the first seven."""
+
+    @staticmethod
+    def reading(api, worker):
+        return {"api_commit": api, "worker": {**ALIVE_WORKER, "commit": worker}}
+
+    def test_a_full_commit_and_its_short_form_are_one_commit(self):
+        full = "abc1234" + "0" * 33
+        assert commits(self.reading(full, "abc1234")) == ("abc1234", "abc1234")
+
+    def test_anything_but_a_hex_commit_is_no_commit(self):
+        for bad in ("not-hex!", "abc12", None, 7):
+            assert commits(self.reading(bad, "abc1234")) is None
+            assert commits(self.reading("abc1234", bad)) is None
 
 
 def test_a_live_worker_does_not_mask_a_stalled_cursor():

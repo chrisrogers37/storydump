@@ -236,9 +236,10 @@ class TestTheBacklogIsComputedFromRealTimestamps:
         self, conn, world_db
     ):
         """`commit` is the stamp the worker puts last on its claimer name,
-        read from the freshest succeeded system job. A row claimed by an
-        unstamped worker, or before the stamp, reads None, never a guess.
-        Future-dated, so a sibling's row can never be the fresher one."""
+        read from the freshest succeeded system job. A fresher row that has
+        not succeeded is not read. A row claimed by an unstamped worker, or
+        before the stamp, reads None, never a guess. Future-dated, so a
+        sibling's row can never be the fresher one."""
         for minutes, name in (
             (1, "host-7-bulk-0@aaaaaaa"),
             (2, "host-7-bulk-0@abc1234"),
@@ -252,6 +253,18 @@ class TestTheBacklogIsComputedFromRealTimestamps:
                 updated_at=f"+ interval '{minutes} minutes'",
                 locked_by=name,
             )
+        assert (await _freshness(world_db))["commit"] == "abc1234"
+        # The clock mints each recurring kind's next run unclaimed, so the
+        # newest row is often one with no claimer at all. Due tomorrow, so it
+        # never counts as an overdue backlog for a later test.
+        _seed_system_job(
+            conn,
+            kind="reap_expired",
+            state="ready",
+            run_at="+ interval '1 day'",
+            created_at="+ interval '150 seconds'",
+            updated_at="+ interval '150 seconds'",
+        )
         assert (await _freshness(world_db))["commit"] == "abc1234"
         _seed_system_job(
             conn,
