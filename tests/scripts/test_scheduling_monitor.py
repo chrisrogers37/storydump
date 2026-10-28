@@ -18,6 +18,7 @@ import json
 import pytest
 
 from scripts import scheduling_monitor as monitor
+from storydump_cli.health_classify import delivery
 from storydump_cli.health_classify.scheduling import (
     DEFAULT_STALL_THRESHOLD_S,
     DEFAULT_WORKER_OVERDUE_S,
@@ -310,8 +311,9 @@ class TestAFaultThatEndsInBlindnessIsSaidHonestly:
 
 
 def dstep(reading, prior, now):
-    """`step` on the delivery axis's own state."""
-    return step(reading, prior, now, decide=monitor.decide_delivery)
+    """`step` on the delivery axis's own state, over a reading the API served."""
+    verdict = delivery.classify(200, json.dumps(reading))
+    return step(verdict, prior, now, decide=monitor.decide_delivery)
 
 
 class TestDeliveryIsItsOwnAxis:
@@ -348,25 +350,6 @@ class TestDeliveryIsItsOwnAxis:
         _, recovered = dstep(QUIET_HOUR, state, now=2.0)
         assert recovered is not None and recovered.startswith("RECOVERED")
 
-    def test_an_unreadable_reading_changes_nothing_and_says_nothing(self):
-        # The scheduling axis already says when the API cannot be reached.
-        state, _ = dstep(FAILING_HOUR, {}, now=1.0)
-        after, msg = dstep(None, state, now=2.0)
-        assert msg is None and after == state
-
-    def test_only_a_whole_reading_is_read(self):
-        good = json.dumps(FAILING_HOUR)
-        assert monitor.read_delivery(200, good) == FAILING_HOUR
-        for status in (503, 404):
-            assert monitor.read_delivery(status, good) is None
-        assert monitor.read_delivery(200, "not json") is None
-        assert monitor.read_delivery(200, json.dumps({"sent_in_window": 1})) is None
-        no_classes = {k: v for k, v in FAILING_HOUR.items() if k != "by_class"}
-        assert monitor.read_delivery(200, json.dumps(no_classes)) is None
-        for count in (True, -1):
-            bad = {**FAILING_HOUR, "failed_or_ambiguous": count}
-            assert monitor.read_delivery(200, json.dumps(bad)) is None
-
     def test_the_delivery_surface_sits_beside_the_scheduling_one(self):
         assert (
             monitor.delivery_url("https://api.example/health/scheduling")
@@ -380,14 +363,14 @@ class TestDeliveryIsItsOwnAxis:
         """`main` fetches the delivery surface beside --url and sends its page
         as its own message, recorded on the delivery axis alone."""
         sent = []
-        delivery = (200, json.dumps(FAILING_HOUR))
+        failing = (200, json.dumps(FAILING_HOUR))
         code = run_main(
-            monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=delivery, calls=sent
+            monkeypatch, tmp_path, 200, body(0, 5, 3), delivery=failing, calls=sent
         )
         assert code == monitor.EXIT_SPOKE
         assert len(sent) == 1 and "DELIVERY IS FAILING" in sent[0]
         st = monitor.load_state(str(tmp_path / "s.json"))
-        assert st["delivery"]["announced"] == monitor.DELIVERY_FAILING
+        assert st["delivery"]["announced"] == delivery.FAILING
         assert st.get("announced") is None
 
     def test_delivery_url_names_the_surface_read(self, monkeypatch, tmp_path):

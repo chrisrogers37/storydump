@@ -1,0 +1,3 @@
+### Added
+
+- **The scheduling monitor pages when `/health/delivery` cannot be read.** Delivery is judged by one classifier, `storydump_cli/health_classify/delivery.py`. A reading that is not a whole one is unreachable, and pages on the second poll in a row while the API answers; a non-200 names the body's reason, such as `HTTP 503 (statement_timeout)`. The page repeats every 6 hours, and RECOVERED follows once the surface reads again. When `/health/scheduling` cannot be fetched either, the scheduling axis pages the outage alone. Each poll prints one line with both axes, and a `--url` with no delivery surface beside it, and no `--delivery-url`, is refused at start.

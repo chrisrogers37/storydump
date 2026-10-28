@@ -93,18 +93,27 @@ so one `unreachable` reading that never paged ends in silence.
 ## Delivery, its own axis
 
 Each poll also reads `/health/delivery`: the one beside `--url`, or
-`--delivery-url`. Cards can fail while posts land, so delivery keeps its own
-surface and is judged with its own state. One axis never masks the other.
+`--delivery-url`. A `--url` that does not end in `/health/scheduling`, with no
+`--delivery-url`, is refused at start (exit 2), so a delivery surface nothing
+watches is a failed unit, never a quiet one. Cards can fail while posts land,
+so delivery keeps its own surface and is judged with its own state, by
+`storydump_cli/health_classify/delivery.py`. One axis never masks the other.
 
-- **Pages:** any send in the last hour that failed or is ambiguous, the
-  endpoint's `failed_or_ambiguous`, pages with its count, the hour's sends and
-  the alerting classes with their provider codes. A deferral (a 429) is never a
-  failure.
-- **Repeats:** every 6 hours while it lasts, and `RECOVERED` once an hour passes
-  with none.
-- **Skips:** a reading that is not a whole one (a non-200, not a JSON object,
-  missing counts) is skipped for that poll and changes nothing. The scheduling
-  axis already says when the API cannot be reached.
+- **Pages, failing:** any send in the last hour that failed or is ambiguous,
+  the endpoint's `failed_or_ambiguous`, pages with its count, the hour's sends
+  and the alerting classes with their provider codes. A deferral (a 429) is
+  never a failure.
+- **Pages, unreadable:** a reading that is not a whole one (a non-200, not a
+  JSON object, a missing or mistyped count) is `unreachable`, and pages on the
+  second in a row, as an unreachable scheduling endpoint does. A non-200 names
+  the body's `reason` when it gives one, such as `HTTP 503 (statement_timeout)`.
+- **One cause, one page:** when `/health/scheduling` could not be fetched in
+  the same poll (no answer, or a 5xx), the API is down and the scheduling axis
+  pages it. An unreadable delivery reading in that poll counts toward nothing,
+  so once the API answers, delivery still needs two readings of its own.
+- **Repeats:** every 6 hours while it lasts. `RECOVERED` once an hour passes
+  with no failure, or once the surface reads again after an unreadable page; a
+  failing hour after that page pages failing instead.
 
 ## A version split
 
@@ -136,6 +145,7 @@ the route always serves the block, so its absence means a broken instrument.
 | Flag | Meaning |
 |---|---|
 | `--url`, `--state-file` | the endpoint to poll, and where state is kept between polls (both required) |
+| `--delivery-url` | the `/health/delivery` endpoint; by default the one beside `--url`, and required when `--url` does not end in `/health/scheduling` |
 | `--notify-command` | an executable given one argument, the message; exit 0 within 60 seconds means a human was told |
 | `--stall-threshold`, `--worker-stale-threshold`, `--worker-overdue-threshold` | the three thresholds, in seconds |
 | `--timeout` | seconds to wait for the endpoint (default 20) |
@@ -147,8 +157,8 @@ failed unit: a monitor cannot page about its own paging failure, but it can
 refuse to record that it spoke, so the next poll tries again, and the supervisor
 sees a failed unit.
 
-Every poll prints one `<state>: <detail>` line, even when silent. A message is
-printed only after it was delivered.
+Every poll prints one `<state>: <detail> · delivery <state>: <detail>` line,
+even when silent. A message is printed only after it was delivered.
 
 ## The state file
 
@@ -164,7 +174,8 @@ and what a human last heard:
   reading with no counts, such as an `unreachable` one, never lowers it. Losing
   the file makes the monitor speak LESS about a lost destination: the estate then
   reads as one that never had any, until a reading shows one again.
-- `delivery`: the delivery axis's own `state`, `observed_at`, `announced` and
+- `delivery`: the delivery axis's own `state` (`delivering`, `failing` or
+  `unreachable`), `detail`, `consecutive`, `observed_at`, `announced` and
   `spoke_at`, kept apart from the scheduling axis's.
 - `split`: the version split's `state` (`split` or `same`), `since`, the two
   commits, `announced` and `spoke_at`.

@@ -12,13 +12,14 @@ What one reading means is `storydump_cli.health_classify.scheduling`, the same
 classifier `storydump health` uses: the cursor axis (due cursors the clock has
 not advanced), the worker axis (system jobs the worker has not finished), and
 the commits the API and the worker run. `/health/delivery` is read beside it as
-an axis of its own, by `read_delivery` here. This file adds what a poller needs
-on top: the requests, the history that decides when to speak, the state file,
-and the command that reaches a human. `storydump health` judges neither delivery
-nor a commit split: they are this poller's alone.
+an axis of its own, judged by `storydump_cli.health_classify.delivery`. This
+file adds what a poller needs on top: the requests, the history that decides
+when to speak, the state file, and the command that reaches a human.
+`storydump health` judges neither delivery nor a commit split: they are this
+poller's alone.
 
 It runs on the system Python from a checkout, with nothing installed: it imports
-only the standard library and that classifier, which does the same. The
+only the standard library and those classifiers, which do the same. The
 operating guide is `documentation/operations/scheduling-monitor.md`.
 """
 
@@ -38,6 +39,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storydump_cli.health_classify import delivery
 from storydump_cli.health_classify.scheduling import (
     DEFAULT_STALL_THRESHOLD_S,
     DEFAULT_WORKER_OVERDUE_S,
@@ -231,7 +233,6 @@ def decide(verdict: Verdict, prior: dict, now: float) -> tuple[dict, str | None]
 #: Delivery's own surface, beside the scheduling one. It is read and judged as
 #: its own axis: cards can fail while posts land, so neither may mask the other.
 SCHEDULING_PATH, DELIVERY_PATH = "/health/scheduling", "/health/delivery"
-DELIVERY_FAILING, DELIVERY_OK = "failing", "ok"
 
 
 def delivery_url(url: str) -> str | None:
@@ -242,68 +243,57 @@ def delivery_url(url: str) -> str | None:
     return url[: -len(SCHEDULING_PATH)] + DELIVERY_PATH
 
 
-def read_delivery(status: int, body: str) -> dict | None:
-    """A whole `/health/delivery` reading, else None: a non-200, a body that is
-    not a JSON object, or one missing its counts. None skips the axis for the
-    run; the scheduling axis already says when the API cannot be reached."""
-    if status != 200:
-        return None
-    try:
-        data = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(data, dict) or not isinstance(data.get("by_class"), dict):
-        return None
-    for key in ("sent_in_window", "failed_or_ambiguous"):
-        value = data.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-    return data
-
-
-def _failures(by_class: dict) -> str:
-    """The alerting failures by class and provider code, as one clause. A
-    deferral (a 429) is context, never a failure, so a class with nothing
-    alerting is left out."""
-    parts = []
-    for name in sorted(by_class):
-        entry = by_class[name] if isinstance(by_class[name], dict) else {}
-        if not _count(entry.get("alerting")):
-            continue
-        codes = entry.get("codes") if isinstance(entry.get("codes"), dict) else {}
-        said = ", ".join(f"{code}×{n}" for code, n in sorted(codes.items()))
-        parts.append(f"{name}: {said}" if said else str(name))
-    return "; ".join(parts) or "no class recorded"
+def api_unreachable(status: int) -> bool:
+    """A `/health/scheduling` fetch that says the API is down, not that one
+    reading was malformed: no answer at all, or a server error."""
+    return status == 0 or status >= 500
 
 
 def decide_delivery(
-    reading: dict | None, prior: dict, now: float
+    verdict: delivery.Verdict, prior: dict, now: float, *, held: bool = False
 ) -> tuple[dict, str | None]:
-    """A delivery reading + the axis's own history → (its state, a message or
-    None). Pure, like `decide`; only `announce` records that a human was
-    told. Any failed or ambiguous send in the last hour pages, the number
-    `/health/delivery` publishes for its poller, and repeats while it lasts."""
-    if reading is None:
-        return dict(prior), None
-    failing = reading["failed_or_ambiguous"] >= 1
+    """A delivery verdict + the axis's own history → (its state, a message or
+    None). Pure, like `decide`; only `announce` records that a human was told.
+
+    Failing pages at once and repeats while it lasts. A surface that cannot be
+    read pages on the second reading, as an unreachable endpoint does, and
+    says RECOVERED when it reads again. `held` is a run in which
+    `/health/scheduling` could not be fetched either: the API is down, the
+    scheduling axis pages that, and an unreadable delivery reading in such a
+    run counts toward nothing.
+    """
+    announced = prior.get("announced")
+    if verdict.state == delivery.UNREACHABLE and held:
+        run = 0
+    elif prior.get("state") == verdict.state:
+        run = prior.get("consecutive", 0) + 1
+    else:
+        run = 1
     state = {
-        **prior,
-        "state": DELIVERY_FAILING if failing else DELIVERY_OK,
+        "state": verdict.state,
+        "detail": verdict.detail,
+        "consecutive": run,
         "observed_at": now,
+        "announced": announced,
+        "spoke_at": prior.get("spoke_at", 0.0),
     }
-    if failing:
-        if not _repeat_due(prior, DELIVERY_FAILING, now, REALERT_AFTER_S):
+    if verdict.state == delivery.UNREACHABLE:
+        if run < 2 or not _repeat_due(prior, verdict.state, now, REALERT_AFTER_S):
             return state, None
         return state, (
-            f"FLEET ALERT: storydump DELIVERY IS FAILING — "
-            f"{reading['failed_or_ambiguous']} of the last hour's sends failed or "
-            f"are ambiguous ({reading['sent_in_window']} sent; "
-            f"{_failures(reading['by_class'])})."
+            f"FLEET ALERT: storydump delivery check UNREACHABLE ({verdict.detail}) "
+            f"on {run} consecutive polls. Failed sends cannot be seen, which is "
+            f"not the same as delivery being fine."
         )
-    if prior.get("announced") == DELIVERY_FAILING:
+    if verdict.state == delivery.FAILING:
+        if not _repeat_due(prior, verdict.state, now, REALERT_AFTER_S):
+            return state, None
+        return state, f"FLEET ALERT: storydump DELIVERY IS FAILING — {verdict.detail}."
+    if announced == delivery.FAILING:
+        return state, f"RECOVERED: storydump delivery — {verdict.detail}."
+    if announced == delivery.UNREACHABLE:
         return state, (
-            f"RECOVERED: storydump delivery — no send failed or is ambiguous in "
-            f"the last hour ({reading['sent_in_window']} sent)."
+            f"RECOVERED: the storydump delivery check reads again — {verdict.detail}."
         )
     return state, None
 
@@ -447,11 +437,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.status:
         print(json.dumps(load_state(args.state_file), indent=2, sort_keys=True))
         return EXIT_QUIET
+
+    # A delivery surface nothing watches must not be a quiet one: refused, so
+    # the supervisor logs a failed unit.
+    url = args.delivery_url or delivery_url(args.url)
+    if url is None:
+        parser.error(
+            f"--url does not end in {SCHEDULING_PATH}, so the delivery surface "
+            f"beside it is unknown: pass --delivery-url"
+        )
 
     status, body = fetch(args.url, args.timeout)
     verdict = classify(
@@ -466,15 +466,14 @@ def main(argv: list[str] | None = None) -> int:
     state, message = decide(verdict, prior, now)
 
     # Delivery: its own surface, judged with its own state under "delivery".
-    delivery_message = None
-    url = args.delivery_url or delivery_url(args.url)
-    if url:
-        prior_delivery = prior.get("delivery")
-        state["delivery"], delivery_message = decide_delivery(
-            read_delivery(*fetch(url, args.timeout)),
-            prior_delivery if isinstance(prior_delivery, dict) else {},
-            now,
-        )
+    prior_delivery = prior.get("delivery")
+    delivery_verdict = delivery.classify(*fetch(url, args.timeout))
+    state["delivery"], delivery_message = decide_delivery(
+        delivery_verdict,
+        prior_delivery if isinstance(prior_delivery, dict) else {},
+        now,
+        held=api_unreachable(status),
+    )
 
     # The API's commit beside the worker's, from the same reading, under "split".
     prior_split = prior.get("split")
@@ -483,8 +482,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Always visible, even when silent — `NO_SIGNAL` must never be something a
-    # reader has to go looking for.
-    print(f"{verdict.state}: {verdict.detail}")
+    # reader has to go looking for. One line per poll, both axes on it.
+    print(
+        f"{verdict.state}: {verdict.detail} · "
+        f"delivery {delivery_verdict.state}: {delivery_verdict.detail}"
+    )
 
     spoke = failed = False
     # Scheduling's history is the top level of the state; each other axis
