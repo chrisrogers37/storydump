@@ -1,8 +1,10 @@
 # Storydump
 
-Storydump turns a Google Drive folder into a daily Instagram Stories queue. On
-the schedule you set, it picks an item from your connected folders and asks your
-team to approve it, as a card in your Telegram group and a row in the web Queue.
+Storydump gives your past Instagram posts another life as Stories. Connect a
+professional Instagram account to reuse its own feed posts, and optionally add
+media from Google Drive folders. Choose your posting schedule and source mix,
+then review upcoming Stories with your team on Telegram or the web.
+
 An approved Story is published through the Instagram API where a workspace has
 API publishing on; otherwise a teammate posts it by hand and taps *Posted
 myself*.
@@ -18,10 +20,12 @@ to use Storydump.
 
 ## Features
 
+- **Instagram past posts**: reuse eligible media from a connected professional account's own feed posts as Stories. This is a source for your posting queue, not an Instagram backup or a way to import other accounts' posts. The [past-posts guide](documentation/operations/instagram-past-posts-review.md) covers account access, setup and limits.
+- **Google Drive as another source**: optionally connect Drive and choose folders for media you want to share, whether or not it has appeared on Instagram before.
+- **Your posting mix**: turn sources on or off and choose how often each source appears in an account's rotation, combining Instagram past posts and Drive folders (`src/services/target/category_mix.py`).
 - **Scheduling per workspace**: posts per day, a posting-hours window and a timezone (`workspaces.posts_per_day`, `posting_hours_start`/`_end`, `tz`); an account may override them. The worker's clock mints one slot per account as it falls due.
-- **Media from Google Drive**: a workspace connects Drive once and picks folders under that grant; everything inside a connected folder syncs, and the posting mix weights how often each connected folder posts (`src/services/target/category_mix.py`).
 - **Approval on Telegram and on the web**: a slot that finds eligible media becomes a story awaiting approval — a card in each bound Telegram chat (Post now · Posted myself · Skip · Reject · Open Instagram) and a row in the web Queue. A slot that finds none tells the bound chats, at most once a day per account (`src/services/target/scheduler.py`).
-- **Manual or API publishing, per workspace**: with `api_publishing_enabled` off a person posts and taps *Posted myself*; with it on, *Post now* runs the publish pipeline (Drive → Cloudinary → the Instagram Graph API). Dry run and pause are workspace settings too.
+- **Manual or API publishing, per workspace**: with `api_publishing_enabled` off a person posts and taps *Posted myself*; with it on, *Post now* runs the publish pipeline (selected source → Cloudinary → the Instagram Graph API). Dry run and pause are workspace settings too.
 - **Locks**: a posted item is locked for that account for the repost TTL (30 days by default), a skipped one for the skip TTL (45 days by default), a rejected one permanently (`post_locks`).
 - **Audit trail**: every state change of a story writes an `audit_events` row by trigger, naming who acted and through which channel; `storydump story <intent_id>` reads the timeline.
 - **Tenancy**: workspaces with members and roles (owner, admin, member). Tenant tables carry row-level-security policies keyed on the workspace (`07_row_security.sql`); whether the deployed login is subject to them is what `storydump posture` reports.
@@ -29,8 +33,8 @@ to use Storydump.
 
 ## How it works
 
-1. A person signs in with Google on the web, creates a workspace, connects an Instagram account (Instagram Login) and Google Drive, and binds a Telegram group.
-2. The worker syncs the connected folders into `media_items`.
+1. A person signs in with Google on the web, creates a workspace and connects a professional Instagram account through Instagram Login. They can use Instagram past posts as a source, optionally connect Google Drive folders, and bind a Telegram group for review cards.
+2. The worker indexes the account's past feed posts and syncs any connected Drive folders into `media_items`. The posting mix controls which sources are on and their shares of the account's rotation.
 3. The elected clock ticks in the database (`fn_clock_tick`): for each account whose next slot is due it mints a `plan_slot` job and advances the slot cursor. The job picks a media item and inserts a `post_intents` row in `scheduled`.
 4. The prompt sweep moves the story to `awaiting_approval` and writes one approval card per bound chat into `channel_outbox`; the outbox sender delivers them.
 5. A member acts — on the card, in the web Queue, or with a `storydump` write verb. All three hand the same command to the command port (`src/services/target/commands.py`).
@@ -176,10 +180,16 @@ unset; `landing/.env.local.example`).
 
 ### 5. Connect media and set the schedule on the web
 
-Media comes from a connected Google Drive folder (Settings › Integrations) and
-the schedule from the Posting Schedule card under Settings › General. From then
-on the worker mints a slot for each account as it falls due and asks for
-approval in the bound Telegram chats and the web Queue.
+Connect a professional Instagram account and choose whether to use its past
+posts as a source. In Settings, use the Posting mix card to switch Instagram
+past posts on or off and set its share of the rotation. To include other media,
+connect Google Drive under Settings › Integrations and add folders to the mix.
+
+Set the schedule on the Posting Schedule card under Settings › General. The
+worker then selects eligible media from the sources you have turned on as each
+slot falls due, and asks for approval in the bound Telegram chats and the web
+Queue. The [past-posts guide](documentation/operations/instagram-past-posts-review.md)
+explains the account requirements and source controls.
 
 ## The `storydump` CLI
 
