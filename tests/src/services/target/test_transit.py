@@ -1473,8 +1473,9 @@ class TestTheStoryFrame:
         )
         steps = re.search(r"/s--[^/]+--/(.+?)/(?:v\d+/)?ws/", url).group(1)
         assert steps == (
-            "du_60/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/"
-            "ac_aac,af_48000,br_13000000,fps_23-60,vc_h264:high:4.2"
+            "du_59.95/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/"
+            "ac_aac,af_48000,br_av:video_(value_12000000);audio_(value_128000),"
+            "fps_23-60,vc_h264:high:4.2"
         ), "every step, in order, and no named transformation"
         assert url.endswith(".mp4") and "/video/authenticated/" in url
 

@@ -1,0 +1,4 @@
+### Fixed
+
+- **A story video's audio is encoded at Instagram's 128 kbit/s, and its video at a rate that keeps the file under 100 MB (#54).** The derivation Instagram fetches set one bit rate, 13 Mbit/s, which Cloudinary applies to the audio as well. So the audio was encoded above Instagram's audio rate, and a worst-case 60 s video could pass 100 MB, which storydump's own check then refuses before Instagram is asked. The audio and the video now have their own rates. The audio gets 128 kbit/s, and the video 12 Mbit/s, which at the longest story leaves room under 100 MB for the audio and for the encoder's rate buffer.
+- **A video longer than a story is trimmed to end before 60 s (#54).** The trim kept every frame that starts before 60 s, so the last one could end past it (60.03 s at 29.97 fps). It now trims at 59.95 s. At every frame rate a story allows, the derivation then ends before 60 s, and the card's "Trimmed to 60 s" line holds for what Instagram gets.
