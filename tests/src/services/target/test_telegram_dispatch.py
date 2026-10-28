@@ -714,6 +714,22 @@ class TestTheConfigureMenu:
         assert menu["log"]["executed"] == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["cfg", "back", "aa1", "aa0"])
+    async def test_a_removed_items_card_in_review_heals_to_give_up(self, menu, action):
+        """The item cannot post again, so a touch heals its story's card to the
+        story's own keyboard: Give up alone, the one resolution left, and no
+        command runs."""
+        menu["menu_row"].update(state="review_required", item_state="removed")
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap(action))
+        assert r.answer_text == "This item can't post again."
+        assert r.edit_markup == {
+            "inline_keyboard": [
+                [{"text": "🚫 Give up", "callback_data": f"v1:giveup:{INTENT}"}]
+            ]
+        }
+        assert menu["log"]["executed"] == []
+
+    @pytest.mark.asyncio
     async def test_at_the_cap_a_menu_tap_is_told(self, menu):
         menu["exhausted"] = True
         r = await telegram_dispatch.TelegramDispatcher()(None, tap("cfg"))

@@ -615,6 +615,9 @@ class TestACardIsRenderedAgainAtClaimTime:
             (_facts("awaiting_approval", cancel=True), ["cfg"]),
             (_facts("rejected"), None),
             (_facts("posted", item_state="removed"), None),
+            # A removed item's story in review: the item cannot post again, so
+            # the edit leaves with Give up alone.
+            (_facts("review_required", item_state="removed"), ["giveup"]),
         ],
     )
     async def test_every_states_edit_leaves_with_its_storys_keyboard(
@@ -623,7 +626,8 @@ class TestACardIsRenderedAgainAtClaimTime:
         """#1477, through the real keyboard read: an edit claimed for an
         approved, posted or skipped story carries Configure alone, a parked
         one the three resolutions and Configure, a cancelling one Configure
-        alone; a rejected story's or a removed item's carries none."""
+        alone; a rejected story's or a removed item's carries none, except a
+        removed item's story in review, which carries Give up alone."""
         claims["claimed"] = [
             _claimed(
                 "prompt_supersede",

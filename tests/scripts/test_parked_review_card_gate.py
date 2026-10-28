@@ -118,6 +118,57 @@ async def test_a_park_with_no_refusal_evidence_says_its_admission_reason(
     assert "Refused: the chosen post is no longer available." in str(notice)
 
 
+async def test_a_story_whose_item_was_removed_parks_with_give_up_alone(
+    past_posts_engine, origin, sync_conn
+):
+    """A story whose item is removed still parks for review with its review
+    card in every bound chat, and the keyboard its card carries is Give up
+    alone: the item cannot post again, and giving the story up ends the
+    review."""
+    from src.services.target import prompts
+
+    chats = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
+    src, item, intent = await preparation.selected(past_posts_engine, origin)
+    selected, _ = preparation.service(past_posts_engine, origin)
+    await selected.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    # A removed item fails suitability, so the story binds its selected asset
+    # while the item is available; the item is removed, and its preparation
+    # then reports the chosen post gone.
+    async with observations.uow(past_posts_engine, origin) as conn:
+        await conn.execute(
+            text("UPDATE media_items SET state = 'removed' WHERE id = :id"),
+            dict(id=item.media_item_id),
+        )
+
+    async def refuse(**kwargs):
+        raise source_policy.MediaAdmissionPending("asset_unavailable")
+
+    c = instagram_publish.PastPostsPipeline(
+        capability=foundation.capability(),
+        fetch_selected=selected.fetch_selected,
+        prepare_selected=refuse,
+    )
+    await c.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    cards = [r for r in _outbox_rows(sync_conn, intent) if r[1] == "approval_prompt"]
+    assert sorted(r[0] for r in cards) == sorted(chats), "one card per bound chat"
+    for _, _, state, payload in cards:
+        assert state == "pending"
+        assert payload["outcome_text"].startswith("👀 Needs review")
+    async with observations.uow(past_posts_engine, origin) as conn:
+        keyboard = await prompts.card_keyboard_for(
+            conn, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert keyboard == {
+        "inline_keyboard": [
+            [{"text": "🚫 Give up", "callback_data": f"v1:giveup:{intent}"}]
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     "state,ref,second",
     [("sent", "'41'", False), ("superseded", "NULL", True), ("failed", "NULL", True)],
