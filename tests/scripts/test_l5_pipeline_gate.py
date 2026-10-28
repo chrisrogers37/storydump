@@ -4166,18 +4166,24 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         )
         return intent, outcome
 
-    def test_the_answers_about_something_else_are_a_dead_token_and_throttling(self):
+    def test_the_answers_that_say_nothing_about_the_file_are_pinned(self):
         """Pinned here, so dropping a code from the set fails its cases below
         instead of taking them with it."""
-        assert NOT_ABOUT_THE_FILE == {190, 4, 17, 32, 613, 80002}
+        named = {0, 9, 190, 3, 102, 10, 341, 368, 4, 17, 32, 613, 80002}
+        assert NOT_ABOUT_THE_FILE == named | set(range(200, 300))
 
     @pytest.mark.parametrize("edge", ["create", "publish"])
-    @pytest.mark.parametrize("code", [190, 4, 17, 32, 613, 80002])
+    @pytest.mark.parametrize(
+        "code", [0, 9, 190, 3, 102, 10, 200, 299, 341, 368, 4, 17, 32, 613, 80002]
+    )
     def test_a_refusal_that_says_nothing_about_the_file_is_not_a_drift(
         self, pipe_db, edge, code
     ):
-        """A dead token or throttling that ends the story, at the create call
-        or at the publish call, records and tells nothing."""
+        """An answer that is not the file's that ends the story, at the create
+        call or at the publish call, records and tells nothing: no call made
+        (0), the posting cap (9), a dead token (190), a session or capability
+        answer (3, 102), a permission answer (10, and 200 and 299 for the
+        range), a limit (341, 368) or throttling."""
         from src.services.target.meta_adapter import MetaRetryableError
 
         meta = self._refusing(
@@ -4188,6 +4194,25 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         assert outcome == POISONED
         kinds = {o["op_kind"] for o in _ops(pipe_db, intent)}
         assert ("publish" in kinds) == (edge == "publish"), "refused at the edge"
+        assert self._drifts(pipe_db, intent) == []
+        assert told.told == []
+
+    def test_the_posting_cap_at_the_container_call_is_not_a_drift(self, pipe_db):
+        """The cap reaches the pipeline as `MetaCapDeferral` (code 9). The
+        publish call defers on it; at the container call it ends the story on
+        its last attempt like any other answer, and records and tells
+        nothing."""
+        from src.services.target.meta_adapter import CAP_ERROR_CODE, MetaCapDeferral
+
+        meta = self._refusing(
+            "create",
+            lambda: MetaCapDeferral(
+                code=CAP_ERROR_CODE, subcode=2207042, message="posting cap reached"
+            ),
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
         assert self._drifts(pipe_db, intent) == []
         assert told.told == []
 
