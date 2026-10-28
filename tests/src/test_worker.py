@@ -1180,8 +1180,10 @@ class TestKTasksPerLane:
             config=WorkerConfig(),
             env={COMMIT_VAR: "abc1234def5678abc1234def5678abc1234def56"},
         )
+        # Each loop's own lane, so the test holds for whatever lanes compose
+        # builds.
         assert app.loops and all(
-            re.fullmatch(r".+-(interactive|bulk)-\d+@abc1234", wl._worker_name)
+            re.fullmatch(rf".+-{re.escape(wl.lane)}-\d+@abc1234", wl._worker_name)
             for wl in app.loops
         )
         plain = self._compose(WorkerConfig())
