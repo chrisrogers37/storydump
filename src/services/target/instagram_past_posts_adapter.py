@@ -20,6 +20,7 @@ probe reads a time, never a post, so it changes no coverage claim.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -54,6 +55,8 @@ from src.services.target.media_adapters import (
 
 if TYPE_CHECKING:
     from src.services.target.instagram_catalog import PastPostsObservation
+
+logger = logging.getLogger(__name__)
 
 PROVIDER = "instagram_past_posts"
 LISTING_CEILING = 10_000
@@ -1043,6 +1046,15 @@ class InstagramPastPostsAdapter:
         parts, complete = (
             ((), False) if deferred_carousel else await self._children(parent, turn)
         )
+        if complete and not parts:
+            # A carousel always has slides, so a children read that lists none
+            # proves nothing about them: the post lands as one not yet read, and
+            # the index keeps what it holds.
+            logger.warning(
+                "instagram sync: post %s listed no slides; read as unknown",
+                parent.get("id"),
+            )
+            deferred_carousel, complete = True, False
         assets = []
         for position, part in enumerate(parts, 1):
             kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))

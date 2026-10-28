@@ -370,7 +370,15 @@ link, generation and revision, and its validation evidence.
 **Coverage rules for a walk:**
 - A children response with more pages keeps its returned slides, records incomplete
   coverage, and makes no second request.
-- Only a complete response can retire a missing slide.
+- Only a complete response that lists slides can retire a missing slide, and only on
+  the second such response that lacks it. The first one keeps the slide out of the
+  draw (its item `missing`, its asset `unlisted`), and a later response that lists it
+  brings it back. A response that lists no slides proves nothing. A slide excluded as
+  unsupported, never drawn, retires on the first.
+- No response retires a slide a live story holds: the story's own fetch judges it.
+  The exception is a source that takes only each post's first slide. A kept slide
+  would no longer be first, so its story could never fetch it, and the response
+  holds it out like any other.
 - A listing capped or windowed this way never proves a post was deleted
   (`checkpoint_whole` is false).
 

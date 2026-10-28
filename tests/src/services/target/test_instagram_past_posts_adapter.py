@@ -1,6 +1,7 @@
 """Past-posts contract proofs: only MockTransport; no Instagram credentials."""
 
 import json
+import logging
 from datetime import datetime, timezone
 
 import httpx
@@ -396,7 +397,8 @@ def test_observation_validation_rejects_duplicate_slide_identity_and_position():
 @pytest.mark.parametrize(
     "children,paging,expected_complete",
     [
-        ([], None, True),
+        # A read that lists no slides proves nothing: it lands incomplete.
+        ([], None, False),
         (
             [{"id": "11", "media_type": "IMAGE", "media_url": URL}],
             {"next": "opaque"},
@@ -405,8 +407,9 @@ def test_observation_validation_rejects_duplicate_slide_identity_and_position():
     ],
 )
 async def test_empty_and_truncated_children_keep_one_request(
-    children, paging, expected_complete
+    children, paging, expected_complete, caplog
 ):
+    caplog.set_level(logging.WARNING, logger=past_posts.__name__)
     requests = []
 
     def handler(req):
@@ -426,6 +429,12 @@ async def test_empty_and_truncated_children_keep_one_request(
     assert observation.slides_complete is expected_complete
     assert len(page.candidates) == len(children)
     assert len(requests) == 2
+    # Only the read that lists none is told, at read time.
+    assert [
+        r.getMessage() for r in caplog.records if r.name == past_posts.__name__
+    ] == (
+        [] if children else ["instagram sync: post 1 listed no slides; read as unknown"]
+    )
 
 
 async def test_oversized_graph_reply_is_typed_and_retryable(monkeypatch):

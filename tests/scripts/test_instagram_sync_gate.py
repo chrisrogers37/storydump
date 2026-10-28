@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import logging
 
 import pytest
 from sqlalchemy import text
@@ -12,6 +13,7 @@ from src.services.target.media_adapters import MediaPage, MediaTurnCounters
 from tests.scripts import test_source_read_admission_gate as admission
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
+from tests.scripts import test_instagram_slides_gate as slides
 from tests.scripts.conftest import as_user, async_url
 
 pytestmark = [pytest.mark.integration]
@@ -160,6 +162,16 @@ async def test_atomic_bundle_checkpoint_progress_and_continuation(
         await worker.dispose()
 
 
+def fault_at(stage):
+    """A landing fault that raises at `stage`."""
+
+    async def fault(at):
+        if at == stage:
+            raise RuntimeError("injected landing fault")
+
+    return fault
+
+
 @pytest.mark.parametrize(
     "stage", ["observation", "progress", "checkpoint", "continuation", "before_commit"]
 )
@@ -171,23 +183,59 @@ async def test_fault_rolls_back_whole_landing(
     worker, job, c = await leased(world_db, past_posts_engine, origin, src)
     try:
         before = await state(past_posts_engine, origin, src)
-
-        async def fault(at):
-            if at == stage:
-                raise RuntimeError("injected landing fault")
-
         with pytest.raises(RuntimeError, match="injected landing fault"):
             await m.run_sync(
                 worker,
                 job,
                 ports=await ports(m, Adapter(page(obs.bundle())), c),
-                fault=fault,
+                fault=fault_at(stage),
             )
         assert await state(past_posts_engine, origin, src) == before
         result = await m.run_sync(
             worker, job, ports=await ports(m, Adapter(page(obs.bundle())), c)
         )
         assert result.committed_observations == 1
+    finally:
+        await worker.dispose()
+
+
+def told(caplog, module):
+    """What the sync logged about the posts a turn changed, in order."""
+    return [r.getMessage() for r in caplog.records if r.name == module.__name__]
+
+
+async def test_a_slide_the_landing_holds_out_is_told_once_its_turn_commits(
+    world_db, past_posts_engine, origin, caplog
+):
+    """The slide line is written after the turn commits, so a turn rolled back
+    at its last step tells nothing. The committed one names the post, the
+    number of slides its read listed and what the landing did with the one
+    the read lacks."""
+    m = service()
+    src = await admission.ready(past_posts_engine, origin)
+    worker, job, c = await leased(world_db, past_posts_engine, origin, src)
+    await obs.observe(
+        past_posts_engine, origin, src, slides.carousel(ids=(100, 101, 102))
+    )
+    lacking = page(slides.carousel(ids=(100, 101)))
+    try:
+        with caplog.at_level(logging.WARNING, logger=m.__name__):
+            with pytest.raises(RuntimeError, match="injected landing fault"):
+                await m.run_sync(
+                    worker,
+                    job,
+                    ports=await ports(m, Adapter(lacking), c),
+                    fault=fault_at("before_commit"),
+                )
+            assert told(caplog, m) == []
+            result = await m.run_sync(
+                worker, job, ports=await ports(m, Adapter(lacking), c)
+            )
+        assert result.committed_observations == 1
+        assert told(caplog, m) == [
+            "instagram sync: post 900, a complete read of 2 slide(s): kept [] for"
+            " the stories that hold them, held ['102'] out of the draw, retired []"
+        ]
     finally:
         await worker.dispose()
 
@@ -1088,15 +1136,14 @@ async def quality_checkpoint(
     return cp
 
 
-async def test_real_permanent_helper_failure_retires_without_partial_observation(
-    world_db, past_posts_engine, origin
-):
+async def refused_parent(world_db, engine, origin):
+    """A helper turn queued for post 111, whose read Instagram refuses for good."""
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(world_db, past_posts_engine, origin)
+    src, worker, job, c = await quality_source(world_db, engine, origin)
     await obs.observe(
-        past_posts_engine, origin, src, obs.bundle("111", attribution="not_detected")
+        engine, origin, src, obs.bundle("111", attribution="not_detected")
     )
     await quality_checkpoint(m, worker, origin, src, c, lane="helper", helpers=["111"])
 
@@ -1108,6 +1155,15 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
         )
 
     injected, client, requests = await quality_ports(m, c, response)
+    return m, src, worker, job, c, injected, client, requests
+
+
+async def test_real_permanent_helper_failure_retires_without_partial_observation(
+    world_db, past_posts_engine, origin
+):
+    m, src, worker, job, c, injected, client, requests = await refused_parent(
+        world_db, past_posts_engine, origin
+    )
     try:
         first = await m.run_sync(worker, job, ports=injected)
         cp, rows, queued = await state(past_posts_engine, origin, src)
@@ -1184,6 +1240,34 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
                     dict(sid=src["source_id"]),
                 )
             ).scalar_one()
+    finally:
+        await client.aclose()
+        await worker.dispose()
+
+
+async def test_a_post_a_refused_read_retires_is_told_once_its_turn_commits(
+    world_db, past_posts_engine, origin, caplog
+):
+    """The post line is written after the turn commits, so a turn rolled back
+    at its last step tells nothing. The committed one says what retired the
+    post, a read of it that Instagram refused for good, and how many slide
+    items that removed."""
+    m, _src, worker, job, _c, injected, client, _requests = await refused_parent(
+        world_db, past_posts_engine, origin
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger=m.__name__):
+            with pytest.raises(RuntimeError, match="injected landing fault"):
+                await m.run_sync(
+                    worker, job, ports=injected, fault=fault_at("before_commit")
+                )
+            assert told(caplog, m) == []
+            result = await m.run_sync(worker, job, ports=injected)
+        assert result.outcome == "committed"
+        assert told(caplog, m) == [
+            "instagram sync: post 111 retired: Instagram refused a read of it for"
+            " good; 1 slide item(s) removed"
+        ]
     finally:
         await client.aclose()
         await worker.dispose()

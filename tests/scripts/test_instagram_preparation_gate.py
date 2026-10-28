@@ -421,7 +421,7 @@ async def test_a_complete_read_keeps_the_slide_a_live_story_holds(
     """A complete read that lacks the slide a live story holds does not retire
     it. The slide stays after the read's own, the list is marked incomplete and
     its count stays what the read listed, so the story's own fetch judges it.
-    A slide no story holds is retired as before."""
+    A slide no story holds is only held out of the draw, its item missing."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
     await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
     assert await slide(past_posts_engine, origin, src, "123") == {
@@ -430,16 +430,83 @@ async def test_a_complete_read_keeps_the_slide_a_live_story_holds(
         "tombstones": 0,
     }
     assert await slide(past_posts_engine, origin, src, "456") == {
-        "state": "removed",
-        "position": None,
-        "tombstones": 1,
+        "state": "missing",
+        "position": 3,
+        "tombstones": 0,
     }
     assert await listed(past_posts_engine, origin, src) == (1, False)
 
 
+async def test_a_second_complete_read_that_lacks_an_unlisted_slide_retires_it(
+    past_posts_engine, origin
+):
+    """Two complete reads that lack a slide no story holds retire it: the
+    first holds it out of the draw, the second writes its tombstone and
+    removes it. Each landing says what it did with the slides it lacked, and
+    the slide a story holds stays through both."""
+    src, item, intent = await selected(past_posts_engine, origin, carousel=True)
+    first = await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    assert (first.kept, first.unlisted, first.retired) == (("123",), ("456",), ())
+    second = await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    assert (second.kept, second.unlisted, second.retired) == (("123",), (), ("456",))
+    assert await slide(past_posts_engine, origin, src, "456") == {
+        "state": "removed",
+        "position": None,
+        "tombstones": 1,
+    }
+    assert await slide(past_posts_engine, origin, src, "123") == {
+        "state": "available",
+        "position": 2,
+        "tombstones": 0,
+    }
+
+
+async def test_a_read_that_lists_an_unlisted_slide_again_brings_it_back(
+    past_posts_engine, origin
+):
+    """A slide one complete read held out comes back when the next read lists
+    it: its item is available again and nothing is retired."""
+    src, item, intent = await selected(past_posts_engine, origin, carousel=True)
+    await obs.observe(past_posts_engine, origin, src, lacking_123("789"))
+    back = await obs.observe(past_posts_engine, origin, src, lacking_123("789", "456"))
+    assert back.retired == ()
+    assert await slide(past_posts_engine, origin, src, "456") == {
+        "state": "available",
+        "position": 2,
+        "tombstones": 0,
+    }
+
+
+async def test_a_read_that_lists_no_slides_keeps_every_slide(past_posts_engine, origin):
+    """A read that lists none of a carousel's slides proves nothing about any
+    of them, so it lands as one not yet read (the adapter's shape for it):
+    every slide stays where it was, held or not, and the post stays
+    available."""
+    src, item, intent = await selected(past_posts_engine, origin, carousel=True)
+    unread = replace(
+        lacking_123(),
+        slides_complete=False,
+        exclusion_reason="incomplete_observation",
+    )
+    landed = await obs.observe(past_posts_engine, origin, src, unread)
+    assert (landed.kept, landed.unlisted, landed.retired) == ((), (), ())
+    assert await slide(past_posts_engine, origin, src, "123") == {
+        "state": "available",
+        "position": 1,
+        "tombstones": 0,
+    }
+    assert await slide(past_posts_engine, origin, src, "456") == {
+        "state": "available",
+        "position": 2,
+        "tombstones": 0,
+    }
+    assert await listed(past_posts_engine, origin, src) == (0, False)
+
+
 async def test_a_story_asked_to_cancel_holds_no_slide(past_posts_engine, origin):
     """Only a live story holds a slide: once its story is asked to cancel, a
-    complete read that lacks the slide retires it as before."""
+    complete read that lacks the slide holds it out of the draw, as it does
+    any slide no story holds."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
     async with obs.uow(past_posts_engine, origin) as conn:
         await conn.execute(
@@ -448,19 +515,21 @@ async def test_a_story_asked_to_cancel_holds_no_slide(past_posts_engine, origin)
         )
     await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
     assert await slide(past_posts_engine, origin, src, "123") == {
-        "state": "removed",
-        "position": None,
-        "tombstones": 1,
+        "state": "missing",
+        "position": 2,
+        "tombstones": 0,
     }
-    assert await listed(past_posts_engine, origin, src) == (1, True)
+    assert await listed(past_posts_engine, origin, src) == (1, False)
 
 
-async def test_a_first_slide_source_retires_the_held_slide_as_before(
+async def test_a_first_slide_source_holds_no_slide_and_its_story_is_told(
     past_posts_engine, origin
 ):
-    """A source that takes only each post's first slide holds nothing: a kept
-    slide would follow the read's own and no longer be first, so a complete
-    read that lacks the story's slide retires it as before."""
+    """A source that takes only each post's first slide holds none: a slide
+    kept after the read's own would no longer be first, so its story could
+    never fetch it. A complete read that lacks the story's slide holds it out
+    like any other, the story's start refuses it as unavailable before any
+    fetch, and the next complete read that lacks it retires it."""
     src, item, intent = await selected(past_posts_engine, origin, carousel=True)
     async with obs.uow(past_posts_engine, origin) as conn:
         await source_policy.put_policy(
@@ -477,13 +546,26 @@ async def test_a_first_slide_source_retires_the_held_slide_as_before(
             ),
             capability=foundation.capability(),
         )
-    await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    first = await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    assert (first.kept, first.unlisted, first.retired) == ((), ("123",), ())
+    assert await slide(past_posts_engine, origin, src, "123") == {
+        "state": "missing",
+        "position": 2,
+        "tombstones": 0,
+    }
+    prepared, calls = service(past_posts_engine, origin)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.fetch_selected(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "unavailable" and calls == []
+    second = await obs.observe(past_posts_engine, origin, src, lacking_123("456"))
+    assert (second.kept, second.unlisted, second.retired) == ((), (), ("123",))
     assert await slide(past_posts_engine, origin, src, "123") == {
         "state": "removed",
         "position": None,
         "tombstones": 1,
     }
-    assert await listed(past_posts_engine, origin, src) == (1, True)
 
 
 async def test_a_kept_slide_its_story_finds_again_is_fetched(past_posts_engine, origin):
@@ -531,11 +613,9 @@ async def test_a_kept_slide_its_story_proves_gone_is_retired_with_the_evidence(
     assert await listed(past_posts_engine, origin, src) == (1, False)
 
 
-async def test_a_held_slide_that_cannot_fit_beside_a_full_read_is_retired(
-    past_posts_engine, origin
-):
-    """A complete read that lists a full carousel leaves no room for another
-    slide: the held slide it lacks is retired as before, and the observation
+async def test_a_held_slide_past_a_full_read_is_kept(past_posts_engine, origin):
+    """A complete read that lists a full carousel keeps the held slide it lacks
+    after its own, for the story's fetch to judge, and the observation
     lands."""
     limit = CAROUSEL_SLIDE_LIMIT
     src, slides = await selection.carousel(past_posts_engine, origin, count=limit)
@@ -554,11 +634,11 @@ async def test_a_held_slide_that_cannot_fit_beside_a_full_read_is_retired(
     others = [str(1000 + position) for position in range(2, limit + 1)]
     await obs.observe(past_posts_engine, origin, src, lacking_123(*others, "2001"))
     assert await slide(past_posts_engine, origin, src, "1001") == {
-        "state": "removed",
-        "position": None,
-        "tombstones": 1,
+        "state": "available",
+        "position": limit + 1,
+        "tombstones": 0,
     }
-    assert await listed(past_posts_engine, origin, src) == (limit, True)
+    assert await listed(past_posts_engine, origin, src) == (limit, False)
 
 
 @pytest.mark.parametrize("when", ["before_dispatch", "after_graph", "before_cas"])
