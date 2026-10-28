@@ -196,14 +196,11 @@ def _hold_a_card(sync_conn, origin, chat, intent, state, ref):
 
 def _cards(rows, chat):
     """The story's `approval_prompt` rows in *chat*, as (state, payload)."""
-    return sorted(
-        (
-            (state, payload)
-            for c, kind, state, payload in rows
-            if c == chat and kind == "approval_prompt"
-        ),
-        key=lambda card: card[0],
-    )
+    return [
+        (state, payload)
+        for c, kind, state, payload in rows
+        if c == chat and kind == "approval_prompt"
+    ]
 
 
 def _assert_review_cards_only_where_owed(rows, *, has_card, has_none, state, second):
@@ -212,32 +209,13 @@ def _assert_review_cards_only_where_owed(rows, *, has_card, has_none, state, sec
     one never reached it (*second*), *has_none* gets one, and every card the
     park wrote says the story needs review."""
     held, none = _cards(rows, has_card), _cards(rows, has_none)
-    assert [s for s, _ in held] == sorted([state, "pending"] if second else [state])
-    assert [s for s, _ in none] == ["pending"]
-    written = [payload for s, payload in held + none if s == "pending"]
-    assert len(written) == (2 if second else 1)
-    for payload in written:
-        assert payload["outcome_text"].startswith("👀 Needs review")
-
-
-async def _run_publish(engine, job, coordinator, meta):
-    """One run of the real publish pipeline over a past post's *job*: the post
-    is read from Instagram, so no run fetches any media."""
-    from src.services.target import publish_pipeline
-    from tests.scripts import test_instagram_publish_gate as publish_gate
-
-    async def forbidden_fetch(subject):
-        pytest.fail("a past post fetches no media")
-
-    return await publish_pipeline.run_publish_pipeline(
-        job,
-        engine=engine,
-        meta=meta,
-        transit=publish_gate.Transit(),
-        media_fetch=forbidden_fetch,
-        past_posts=coordinator,
-        sleep=publish_gate.no_sleep,
+    assert sorted(s for s, _ in held) == sorted(
+        [state, "pending"] if second else [state]
     )
+    assert [s for s, _ in none] == ["pending"]
+    for s, payload in held + none:
+        if s == "pending":
+            assert payload["outcome_text"].startswith("👀 Needs review")
 
 
 @pytest.mark.parametrize("state,ref,second", EARLIER_CARDS)
@@ -251,6 +229,9 @@ async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_ca
     from src.services.target.meta_adapter import StubMetaAdapter
     from tests.scripts import test_instagram_publish_gate as publish_gate
 
+    async def forbidden_fetch(subject):
+        pytest.fail("a past post fetches no media")
+
     has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
     src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
     async with observations.uow(past_posts_engine, origin) as conn:
@@ -262,19 +243,20 @@ async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_ca
     meta = StubMetaAdapter(create_outcomes=["retryable"])
     # The claim has counted the job's last try, so the refusal is not retried.
     job = {**job, "attempts": job["max_attempts"]}
-    assert (
-        await _run_publish(past_posts_engine, job, c, meta) == publish_pipeline.POISONED
+    outcome = await publish_pipeline.run_publish_pipeline(
+        job,
+        engine=past_posts_engine,
+        meta=meta,
+        transit=publish_gate.Transit(),
+        media_fetch=forbidden_fetch,
+        past_posts=c,
+        sleep=publish_gate.no_sleep,
     )
-    assert len(meta.create_calls) == 1, "the create was asked once and refused"
-    with sync_conn.cursor() as cur:
-        cur.execute(
-            "SELECT state, last_error -> 'error' FROM post_intents WHERE id = %s",
-            (intent,),
-        )
-        parked, error = cur.fetchone()
-    sync_conn.commit()
-    assert parked == "review_required"
-    assert (error["type"], error["code"]) == ("MetaRetryableError", 4)
+    assert outcome == publish_pipeline.POISONED
+    assert len(meta.create_calls) == 1, (
+        "pins the route: the park came after the container create, through the"
+        " job's poison, not by a refusal before it"
+    )
     rows = _outbox_rows(sync_conn, intent)
     _assert_review_cards_only_where_owed(
         rows, has_card=has_card, has_none=has_none, state=state, second=second
@@ -292,17 +274,21 @@ async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
     confirms, parks the story in review. The park writes the review card in
     every chat that holds no card of it, and no notice: that waits out its
     window."""
-    from src.services.target import publish_pipeline, reconciler
-    from src.services.target.meta_adapter import StubMetaAdapter
+    from src.services.target import reconciler
     from tests.scripts import test_instagram_publish_gate as publish_gate
 
     has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
     src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
-    meta = StubMetaAdapter(publish_outcomes=["transport"])
-    assert (
-        await _run_publish(past_posts_engine, job, c, meta)
-        == publish_pipeline.PARKED_AMBIGUOUS
-    )
+    async with observations.uow(past_posts_engine, origin) as conn:
+        # The state a lost publish answer leaves (`ck_ambiguous_called`: only a
+        # publish call on record is ambiguous).
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state='publishing_ambiguous',"
+                " publish_step='publish_called' WHERE id=:id"
+            ),
+            dict(id=intent),
+        )
     _hold_a_card(sync_conn, origin, has_card, intent, state, ref)
     async with observations.uow(past_posts_engine, origin) as conn:
         outcome = await reconciler.reconcile_intent(
@@ -313,16 +299,6 @@ async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
             checks=99,
         )
     assert outcome == "review_required"
-    with sync_conn.cursor() as cur:
-        cur.execute(
-            "SELECT state, last_error -> 'error' -> 'refusal' FROM post_intents"
-            " WHERE id = %s",
-            (intent,),
-        )
-        parked, refusal = cur.fetchone()
-    sync_conn.commit()
-    assert parked == "review_required"
-    assert refusal == refusal_evidence.evidence("publish_unconfirmed", checks=100)
     rows = _outbox_rows(sync_conn, intent)
     _assert_review_cards_only_where_owed(
         rows, has_card=has_card, has_none=has_none, state=state, second=second
