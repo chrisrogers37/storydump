@@ -544,8 +544,12 @@ async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -
     under it why: a publish whose answer was lost, unconfirmed after *checks*
     checks, recorded beside the trail as `last_error -> 'error'`. A chat that
     holds no card of it gets its review card (`prompts.prompt_review`), as
-    every park's does. The notice keeps the notify window (`notify_parked`).
-    A park that matched no row raises, as `_terminalize`'s flip does."""
+    every park's does, written in a savepoint of its own: a card that cannot
+    be written is logged and the park stands, so the story leaves the ladder
+    instead of rolling back to `publishing_ambiguous`, where it would hold its
+    account's next publish and be asked about again every beat. The notice
+    keeps the notify window (`notify_parked`). A park that matched no row
+    raises, as `_terminalize`'s flip does."""
     from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
 
     from src.services.target import outbox, prompts, refusal_evidence  # noqa: PLC0415 — cycle
@@ -588,6 +592,15 @@ async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -
         intent_id=str(intent_id),
         outcome_text=line,
     )
-    await prompts.prompt_review(
-        conn, workspace_id=str(workspace_id), intent_id=str(intent_id)
-    )
+    try:
+        async with conn.begin_nested():
+            await prompts.prompt_review(
+                conn, workspace_id=str(workspace_id), intent_id=str(intent_id)
+            )
+    except Exception:  # noqa: BLE001 — the park stands without the card
+        logger.warning(
+            "reconciler: parked intent %s for review; its review card was NOT"
+            " written for the chats that hold no card of it",
+            intent_id,
+            exc_info=True,
+        )

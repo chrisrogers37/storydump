@@ -76,11 +76,26 @@ class TestTheSupersedePayload:
 
 
 class _Session:
-    """Records statements; the restate UPDATE returns the rows given."""
+    """Records statements and savepoints; the restate UPDATE returns the rows
+    given."""
 
     def __init__(self, rows):
         self.rows = rows
         self.sql = []
+        self.savepoints = []
+
+    @asynccontextmanager
+    async def begin_nested(self):
+        """A savepoint: released on a clean exit; on a raise it is rolled back
+        and the error let through."""
+        self.savepoints.append("savepoint")
+        try:
+            yield
+        except BaseException:
+            self.savepoints.append("rolled back")
+            raise
+        else:
+            self.savepoints.append("released")
 
     async def execute(self, statement, params=None):
         self.sql.append((str(statement), params))
@@ -342,6 +357,51 @@ class TestThePromptForAParkedStory:
             ("restate", str(workspace), str(story)),
             ("cards", str(workspace), str(story)),
         ]
+
+    async def test_the_reconcilers_park_stands_when_its_card_cannot_be_written(
+        self, monkeypatch, caplog
+    ):
+        """A card that cannot be written is rolled back in a savepoint of its
+        own and logged, and the park stands: the restate is kept, no notice is
+        written, and nothing is raised."""
+        import logging
+        from uuid import UUID
+
+        from src.services.target import prompts, reconciler
+
+        workspace, story = UUID(int=1), UUID(int=2)
+        seen = []
+
+        async def restate_everywhere(session, *, workspace_id, intent_id, outcome_text):
+            seen.append(("restate", workspace_id, intent_id))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            raise RuntimeError("card render failed")
+
+        async def fanout_notification(session, **kw):
+            seen.append(("notice", kw))
+
+        monkeypatch.setattr(outbox, "restate_everywhere", restate_everywhere)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+
+        conn = _Session([("UTC",)])
+        with caplog.at_level(logging.WARNING, logger=reconciler.__name__):
+            await reconciler._park_review_required(
+                conn, intent_id=story, workspace_id=workspace, checks=4
+            )
+        assert seen == [("restate", str(workspace), str(story))], "no card, no notice"
+        assert conn.savepoints == ["savepoint", "rolled back"]
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == reconciler.__name__ and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert str(story) in warnings[0].getMessage()
+        assert "NOT written" in warnings[0].getMessage()
+        assert warnings[0].exc_info is not None, "the cause rides the log line"
 
 
 class TestTheReviewRestateSaysWhy:

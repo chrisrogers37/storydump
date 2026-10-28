@@ -306,6 +306,55 @@ async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
     assert [r for r in rows if r[1] == "notification"] == [], "the notice waits"
 
 
+async def test_the_reconcilers_park_stands_when_its_card_step_fails_in_the_database(
+    past_posts_engine, origin, sync_conn, monkeypatch
+):
+    """A database error in the card step aborts only its own savepoint, so the
+    park commits: the story leaves the ladder and the restate of the card a chat
+    holds is kept, with no review card and no notice written."""
+    from src.services.target import prompts, reconciler
+    from tests.scripts import test_instagram_publish_gate as publish_gate
+
+    async def failing_card(session, *, workspace_id, intent_id):
+        await session.execute(text("SELECT 1 / 0"))
+
+    has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
+    src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        # The state a lost publish answer leaves (`ck_ambiguous_called`: only a
+        # publish call on record is ambiguous).
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state='publishing_ambiguous',"
+                " publish_step='publish_called' WHERE id=:id"
+            ),
+            dict(id=intent),
+        )
+    _hold_a_card(sync_conn, origin, has_card, intent, "sent", "41")
+    monkeypatch.setattr(prompts, "prompt_review", failing_card)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        outcome = await reconciler.reconcile_intent(
+            conn,
+            intent_id=intent,
+            workspace_id=str(origin["ws"]),
+            status_code="IN_PROGRESS",
+            checks=99,
+        )
+    assert outcome == "review_required"
+    with sync_conn.cursor() as cur:
+        cur.execute("SELECT state FROM post_intents WHERE id = %s", (intent,))
+        (parked,) = cur.fetchone()
+    sync_conn.commit()
+    assert parked == "review_required", "the park committed"
+    rows = _outbox_rows(sync_conn, intent)
+    assert sorted((kind, s) for chat, kind, s, _ in rows if chat == has_card) == [
+        ("approval_prompt", "sent"),
+        ("prompt_supersede", "pending"),
+    ], "the restate of the card it holds stood"
+    assert not [r for r in rows if r[0] == has_none and r[1] == "approval_prompt"]
+    assert [r for r in rows if r[1] == "notification"] == [], "the notice waits"
+
+
 async def test_a_changed_slide_parked_by_the_senders_last_try_says_why(
     past_posts_engine, origin, sync_conn
 ):
