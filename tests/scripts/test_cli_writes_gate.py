@@ -371,7 +371,7 @@ def test_pause_and_resume_the_workspace(world, people, tmp_path):
     _run(main())
 
 
-def test_health_through_the_real_cli_reports_the_three_surfaces(
+def test_health_through_the_real_cli_reports_the_four_surfaces(
     world, people, tmp_path, monkeypatch
 ):
     """The token's person is in `OPS_USER_IDS`, so `api` is the details."""
@@ -392,10 +392,20 @@ def test_health_through_the_real_cli_reports_the_three_surfaces(
                 "api",
                 "scheduling",
                 "posting",
+                "delivery",
                 "details",
                 "verdicts",
             }
-            assert set(data["verdicts"]) == {"api", "scheduling", "posting", "webhook"}
+            assert set(data["verdicts"]) == {
+                "api",
+                "scheduling",
+                "posting",
+                "delivery",
+                "webhook",
+            }
+            # The real route and the real classifier: a replayed database has
+            # sent nothing, so no send can have failed.
+            assert data["verdicts"]["delivery"]["state"] == "delivering"
             # no worker heartbeat on a replayed database: the verdict is the
             # exit code, the report is still the answer
             assert code == (EXIT_OK if data["ok"] else EXIT_API_UNREACHABLE)
