@@ -111,6 +111,9 @@ so delivery keeps its own surface and is judged with its own state, by
   the same poll (no answer, or a 5xx), the API is down and the scheduling axis
   pages it. An unreadable delivery reading in that poll counts toward nothing,
   so once the API answers, delivery still needs two readings of its own.
+- **Quiet:** an hour with nothing sent and nothing failed reads `quiet`, not
+  `delivering`: it is not an hour that delivered, and not a fault, so it never
+  pages.
 - **Repeats:** every 6 hours while it lasts. `RECOVERED` once an hour passes
   with no failure, or once the surface reads again after an unreadable page; a
   failing hour after that page pages failing instead.
@@ -174,8 +177,8 @@ and what a human last heard:
   reading with no counts, such as an `unreachable` one, never lowers it. Losing
   the file makes the monitor speak LESS about a lost destination: the estate then
   reads as one that never had any, until a reading shows one again.
-- `delivery`: the delivery axis's own `state` (`delivering`, `failing` or
-  `unreachable`), `detail`, `consecutive`, `observed_at`, `announced` and
+- `delivery`: the delivery axis's own `state` (`delivering`, `quiet`, `failing`
+  or `unreachable`), `detail`, `consecutive`, `observed_at`, `announced` and
   `spoke_at`, kept apart from the scheduling axis's.
 - `split`: the version split's `state` (`split` or `same`), `since`, the two
   commits, `announced` and `spoke_at`.

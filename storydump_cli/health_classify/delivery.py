@@ -1,9 +1,9 @@
 """Classification of one `/health/delivery` reading into a verdict.
 
 Pure functions over the endpoint's JSON: the last hour's sends got through,
-some of them failed or are ambiguous, or the reading cannot be read.
-`classify` is the entry point, and the scheduling monitor judges delivery
-with it.
+nothing was sent and nothing failed, some sends failed or are ambiguous, or
+the reading cannot be read. `classify` is the entry point, and the scheduling
+monitor judges delivery with it.
 """
 
 from __future__ import annotations
@@ -11,6 +11,10 @@ from __future__ import annotations
 import json
 
 DELIVERING = "delivering"
+#: No send and no failure in the hour. Not an hour that delivered: the endpoint
+#: leaves its poller to read the sent count against a quiet one, and this
+#: state is that reading. Not a fault either, so it never pages.
+QUIET = "quiet"
 FAILING = "failing"
 UNREACHABLE = "unreachable"
 
@@ -104,6 +108,10 @@ def classify(status: int, body: str) -> Verdict:
             f"{failed} of the last hour's sends failed or are ambiguous "
             f"({sent} sent; {_failures(data[_BY_CLASS])})",
             data,
+        )
+    if not sent:
+        return Verdict(
+            QUIET, "nothing was sent in the last hour, and nothing failed", data
         )
     return Verdict(
         DELIVERING,

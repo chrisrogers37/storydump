@@ -79,6 +79,13 @@ QUIET_HOUR = {
     "failed_or_ambiguous": 0,
     "by_class": {},
 }
+#: An hour with nothing sent and nothing failed.
+NO_SENDS = {
+    "window_seconds": 3600,
+    "sent_in_window": 0,
+    "failed_or_ambiguous": 0,
+    "by_class": {},
+}
 FAILING_HOUR = {
     "window_seconds": 3600,
     "sent_in_window": 40,
@@ -333,6 +340,17 @@ class TestDeliveryIsItsOwnAxis:
         _, msg = dstep(QUIET_HOUR, {}, now=1.0)
         assert msg is None
 
+    def test_an_hour_with_no_sends_is_quiet_and_says_nothing(self):
+        state, msg = dstep(NO_SENDS, {}, now=1.0)
+        assert msg is None
+        assert state["state"] == delivery.QUIET
+
+    def test_a_quiet_hour_closes_a_failing_page(self):
+        state, _ = dstep(FAILING_HOUR, {}, now=1.0)
+        _, msg = dstep(NO_SENDS, state, now=2.0)
+        assert msg is not None and msg.startswith("RECOVERED")
+        assert "nothing was sent in the last hour" in msg
+
     def test_it_repeats_while_failing_and_announces_recovery(self):
         state, _ = dstep(FAILING_HOUR, {}, now=1.0)
         _, soon = dstep(FAILING_HOUR, state, now=1.0 + monitor.REALERT_AFTER_S - 1)
@@ -429,6 +447,7 @@ class TestAnUnreadableDeliverySurfaceIsSaid:
             pytest.param(
                 QUIET_HOUR, "the storydump delivery check reads again", id="reads"
             ),
+            pytest.param(NO_SENDS, "nothing was sent in the last hour", id="quiet"),
             pytest.param(FAILING_HOUR, "DELIVERY IS FAILING", id="failing"),
         ],
     )
@@ -455,6 +474,22 @@ class TestAnUnreadableDeliverySurfaceIsSaid:
         so delivery's own reading stands."""
         no_worker = (200, body(0, 5, 3, worker=None))
         sent = polls(monkeypatch, tmp_path, BUSY, BUSY, scheduling=no_worker)
+        assert any("delivery check UNREACHABLE" in m for m in sent), sent
+
+    def test_a_scheduling_503_is_the_api_down_and_holds_delivery(
+        self, monkeypatch, tmp_path
+    ):
+        """A 5xx from the scheduling route is the API down, so delivery is held."""
+        sent = polls(monkeypatch, tmp_path, BUSY, BUSY, scheduling=BUSY)
+        assert len(sent) == 1, sent
+        assert "scheduling check UNREACHABLE" in sent[0]
+
+    def test_a_scheduling_404_is_the_api_answering_and_does_not_hold_delivery(
+        self, monkeypatch, tmp_path
+    ):
+        """Any answer short of a 5xx is the API answering, so delivery is not held."""
+        not_found = (404, json.dumps({"detail": "not found"}))
+        sent = polls(monkeypatch, tmp_path, BUSY, BUSY, scheduling=not_found)
         assert any("delivery check UNREACHABLE" in m for m in sent), sent
 
     def test_each_poll_prints_one_line_with_both_axes(

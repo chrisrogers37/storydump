@@ -1,8 +1,7 @@
 """What one `/health/delivery` reading means.
 
-`storydump health` and the scheduling monitor judge delivery with this one
-verdict, so the CLI is not well exactly when the monitor would page. How the
-monitor repeats and recovers is pinned in `tests/scripts/test_scheduling_monitor.py`.
+The scheduling monitor judges delivery with this verdict; how it repeats and
+recovers is pinned in `tests/scripts/test_scheduling_monitor.py`.
 """
 
 from __future__ import annotations
@@ -42,6 +41,19 @@ class TestWhatAReadingSays:
         v = delivery.classify(200, reading())
         assert v.state == delivery.DELIVERING
         assert v.detail == "no send failed or is ambiguous in the last hour (40 sent)"
+
+    def test_an_hour_with_nothing_sent_is_quiet_not_delivering(self, delivery):
+        """No send and no failure is not an hour that delivered: the sent count
+        is read against it."""
+        v = delivery.classify(200, reading(sent_in_window=0))
+        assert v.state == delivery.QUIET
+        assert v.detail == "nothing was sent in the last hour, and nothing failed"
+
+    def test_a_failure_in_an_hour_with_no_send_is_failing(self, delivery):
+        v = delivery.classify(
+            200, reading(sent_in_window=0, failed_or_ambiguous=1, by_class=REFUSED)
+        )
+        assert v.state == delivery.FAILING
 
     def test_one_failed_send_is_failing(self, delivery):
         v = delivery.classify(200, reading(failed_or_ambiguous=1, by_class=REFUSED))
