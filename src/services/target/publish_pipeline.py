@@ -1003,30 +1003,20 @@ async def _retry_or_poison(
                 raise ValueError(
                     f"intent {ctx.intent_id} left 'publishing' during poison"
                 )
-            # Said at once, not six hours later: the card gains the review
-            # line and the workspace hears; the reconciler's own notice reads
-            # the latch and stays silent.
-            told = await _say_outcome(
+            # Said at once, not six hours later: the courtesy every park is
+            # owed (`tell_review`), so a chat that holds no card of the story
+            # gets its review card. The reconciler's own notice reads the
+            # latch and stays silent; the latch is stamped only when an
+            # audience heard, so a workspace with no push binding at poison
+            # time keeps its six-hour backstop (`reconciler.py`).
+            await tell_review(
                 session,
-                ctx,
-                state="review_required",
-                at=now,
+                workspace_id=ctx.workspace_id,
+                intent_id=ctx.intent_id,
+                tz=ctx.tz,
                 notice=notice or _poison_notice(ctx, now),
+                at=now,
             )
-            if told:
-                # The latch is the reconciler's own rule (`reconciler.py`): it is
-                # stamped only when an audience heard, so a workspace with no
-                # push binding at poison time keeps its six-hour backstop.
-                await session.execute(
-                    text(
-                        "UPDATE post_intents SET "
-                        + intent_ledger.EVIDENCE_MERGE.format(
-                            seed="{}", key="customer_notified", value="true"
-                        )
-                        + " WHERE id = :intent"
-                    ),
-                    {"intent": ctx.intent_id},
-                )
             await finalize_job(
                 session, ctx.job["id"], ctx.job["lease_token"], "review_required"
             )
@@ -2270,19 +2260,20 @@ async def tell_review(
     intent_id: str,
     tz: str,
     notice: str,
+    at: Optional[datetime] = None,
 ) -> None:
     """The courtesy a story parked for review is owed: its card restated with
     the review keyboard, its review card in every chat that holds no card of
     it (`prompts.prompt_review`; a story parked before it was served has none
     anywhere), one notice per push binding, and the `customer_notified` latch
-    when anyone heard — in the caller's transaction."""
-    at = datetime.now(timezone.utc)
+    when anyone heard — in the caller's transaction. *at* is when it was
+    parked, for its card's line: now, when not given."""
     told = await _restate_and_notify(
         session,
         workspace_id=workspace_id,
         intent_id=intent_id,
         state="review_required",
-        at=at,
+        at=at or datetime.now(timezone.utc),
         tz=tz,
         notice=notice,
     )

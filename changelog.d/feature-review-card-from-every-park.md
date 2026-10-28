@@ -1,0 +1,3 @@
+### Fixed
+
+- **A chat that holds no card of a story gets its review card when the publish job or the reconciler parks the story (#40, #48).** Two parks only restated the cards the chats already held: the publish job's, when its tries are spent or its failure cannot be retried, and the reconciler's, when a lost publish answer is never confirmed. A chat bound after the card went out, or whose card failed or was retired before it was sent, got no card. It now gets the review card, as it does from every other park. The reconciler still sends its notice after the notify window.
