@@ -93,6 +93,8 @@ class _Session:
             def first(self_inner):
                 return rows[0] if rows else None
 
+            fetchone = first
+
         return _R()
 
 
@@ -160,9 +162,10 @@ class TestTheChatsWithoutACard:
 
 
 class TestThePromptForAParkedStory:
-    """`prompts.prompt_review`, the park's courtesy (`tell_review`): the
-    review card goes to every chat that holds no card of the story, and is
-    rendered only when one does."""
+    """`prompts.prompt_review`, the park's courtesy: the review card goes to
+    every chat that holds no card of the story, and is rendered only when one
+    does. Every route into review gives it: the parks and the publish job's
+    poison through `tell_review`, the reconciler's park on its own."""
 
     @pytest.fixture
     def doors(self, monkeypatch):
@@ -225,6 +228,124 @@ class TestThePromptForAParkedStory:
             _Session([]), workspace_id="ws", intent_id="i", tz="UTC", notice="n"
         )
         assert order == [("courtesy", "review_required"), ("cards", "i")]
+
+    async def test_the_publish_jobs_poison_gives_the_parked_story_the_same_courtesy(
+        self, monkeypatch
+    ):
+        """A job whose tries are spent parks its story through `tell_review`,
+        at the run's own time: the restate and notice, then the review card for
+        the chats that hold none, then the latch, all before the job is
+        finalized."""
+        from src.services.target import prompts, publish_pipeline
+
+        now = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        job = {
+            "id": "job-1",
+            "lease_token": "tok",
+            "workspace_id": "ws",
+            "payload": {},
+            "attempts": 5,
+            "max_attempts": 5,
+        }
+        story = {
+            "id": "i1",
+            "eff_tz": "Europe/Paris",
+            "attempts_by_step": {"v": 1, "float_since": "2026-09-12T12:28:00+00:00"},
+        }
+        ctx = publish_pipeline._Ctx(job, story, [])
+        seen = []
+
+        class Session(_Session):
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                if "customer_notified" in sql:
+                    seen.append(("latch",))
+                elif "state = 'review_required'" in sql:
+                    seen.append(("flip",))
+                else:
+                    seen.append(("write",))
+                return await super().execute(statement, params)
+
+        @asynccontextmanager
+        async def leased_tx(uow, job):
+            yield Session([("i1",)])
+
+        async def restate_and_notify(session, **kw):
+            seen.append(("courtesy", kw["state"], kw["at"], kw["tz"], kw["notice"]))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def finalize_job(session, job_id, token, state):
+            seen.append(("finalize", state))
+
+        monkeypatch.setattr(publish_pipeline, "_leased_tx", leased_tx)
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", restate_and_notify)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(publish_pipeline, "finalize_job", finalize_job)
+
+        outcome = await publish_pipeline._retry_or_poison(
+            object(),
+            ctx,
+            [60],
+            lambda: now,
+            error={"v": 1, "error": {"type": "MetaRetryableError", "code": 4}},
+        )
+        assert outcome == publish_pipeline.POISONED
+        notice = publish_pipeline._poison_notice(ctx, now)
+        assert "after 34 minutes of trying" in notice, (
+            "the notice reads the run's clock"
+        )
+        assert seen == [
+            ("write",),
+            ("flip",),
+            ("courtesy", "review_required", now, "Europe/Paris", notice),
+            ("cards", "ws", "i1"),
+            ("latch",),
+            ("finalize", "review_required"),
+        ]
+
+    async def test_the_reconcilers_park_gives_its_cards_after_the_restate_and_no_notice(
+        self, monkeypatch
+    ):
+        """The reconciler's park restates every card of the story by ref, then
+        gives the review card to the chats that hold none, with ids as text.
+        It writes no notice: that comes after the notify window."""
+        from uuid import UUID
+
+        from src.services.target import prompts, reconciler
+
+        workspace, story = UUID(int=1), UUID(int=2)
+        seen = []
+
+        async def restate_everywhere(session, *, workspace_id, intent_id, outcome_text):
+            seen.append(("restate", workspace_id, intent_id))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def fanout_notification(session, **kw):
+            seen.append(("notice", kw))
+
+        monkeypatch.setattr(outbox, "restate_everywhere", restate_everywhere)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+
+        conn = _Session([("UTC",)])
+        await reconciler._park_review_required(
+            conn, intent_id=story, workspace_id=workspace, checks=4
+        )
+        assert len(conn.sql) == 1, "the park's flip is the only write of its own"
+        flip, params = conn.sql[0]
+        assert "state = 'review_required'" in flip and params["intent"] == str(story)
+        assert seen == [
+            ("restate", str(workspace), str(story)),
+            ("cards", str(workspace), str(story)),
+        ]
 
 
 class TestTheReviewRestateSaysWhy:
