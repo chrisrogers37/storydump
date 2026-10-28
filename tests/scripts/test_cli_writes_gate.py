@@ -404,8 +404,9 @@ def test_health_through_the_real_cli_reports_the_four_surfaces(
                 "webhook",
             }
             # The real route and the real classifier: a replayed database has
-            # sent nothing, so no send can have failed.
-            assert data["verdicts"]["delivery"]["state"] == "delivering"
+            # sent nothing and nothing failed, so the hour is quiet, not one
+            # that delivered.
+            assert data["verdicts"]["delivery"]["state"] == "quiet"
             # no worker heartbeat on a replayed database: the verdict is the
             # exit code, the report is still the answer
             assert code == (EXIT_OK if data["ok"] else EXIT_API_UNREACHABLE)
