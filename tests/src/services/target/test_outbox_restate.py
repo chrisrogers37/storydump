@@ -243,7 +243,6 @@ class TestThePromptForAParkedStory:
             "id": "job-1",
             "lease_token": "tok",
             "workspace_id": "ws",
-            "payload": {},
             "attempts": 5,
             "max_attempts": 5,
         }
@@ -262,8 +261,6 @@ class TestThePromptForAParkedStory:
                     seen.append(("latch",))
                 elif "state = 'review_required'" in sql:
                     seen.append(("flip",))
-                else:
-                    seen.append(("write",))
                 return await super().execute(statement, params)
 
         @asynccontextmanager
@@ -299,7 +296,6 @@ class TestThePromptForAParkedStory:
             "the notice reads the run's clock"
         )
         assert seen == [
-            ("write",),
             ("flip",),
             ("courtesy", "review_required", now, "Europe/Paris", notice),
             ("cards", "ws", "i1"),

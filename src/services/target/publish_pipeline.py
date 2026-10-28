@@ -2129,8 +2129,14 @@ async def _fail_terminal(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during fail")
-        await _say_outcome(
-            session, ctx, state="failed", at=at, notice=_failure_notice(exc)
+        await _restate_and_notify(
+            session,
+            workspace_id=ctx.workspace_id,
+            intent_id=ctx.intent_id,
+            state="failed",
+            at=at,
+            tz=ctx.tz,
+            notice=_failure_notice(exc),
         )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "failed")
     await _destroy_transit_best_effort(ctx, transit)
@@ -2148,30 +2154,6 @@ def _failure_notice(exc: BaseException) -> str:
     return "A story didn't post. Open the Queue on the web to see which."
 
 
-async def _say_outcome(
-    session,
-    ctx: _Ctx,
-    *,
-    state: str,
-    at,
-    notice: str,
-) -> int:
-    """Restate every card of the intent with the outcome line (the posted
-    line's own path — the tap already superseded the card, so only a restate
-    by ref can reach it) and write ONE notification per push binding, in the
-    caller's transaction. Returns how many bindings could hear it — zero
-    means nobody was told, and the caller must not pretend otherwise."""
-    return await _restate_and_notify(
-        session,
-        workspace_id=ctx.workspace_id,
-        intent_id=ctx.intent_id,
-        state=state,
-        at=at,
-        tz=ctx.tz,
-        notice=notice,
-    )
-
-
 async def _restate_and_notify(
     session,
     *,
@@ -2182,7 +2164,13 @@ async def _restate_and_notify(
     tz: str,
     notice: str,
 ) -> int:
-    """The card's keyboard is the sender's to render, from the story as it is
+    """Restate every card of the intent with the outcome line (the tap
+    already superseded the card, so only a restate by ref can reach it) and
+    write ONE notification per push binding, in the caller's transaction.
+    Returns how many bindings could hear it — zero means nobody was told,
+    and the caller must not pretend otherwise (`tell_review`'s latch).
+
+    The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
     buttons because it is `review_required`. Its line says why the story was
     refused when its refusal says anything, as the card rendered again does
@@ -2273,7 +2261,7 @@ async def tell_review(
         workspace_id=workspace_id,
         intent_id=intent_id,
         state="review_required",
-        at=at or datetime.now(timezone.utc),
+        at=at or utcnow(),
         tz=tz,
         notice=notice,
     )
