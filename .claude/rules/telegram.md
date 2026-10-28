@@ -142,7 +142,9 @@ takes a keyboard, so no caller picks one, and a rejected card loses its
 buttons because it is rejected. ⚙️ **Configure** is on every card for the
 card's whole life, except a rejected story's or a removed item's:
 - a waiting card shows the decision buttons, with Configure beside 📱 Open Instagram;
-- a `review_required` card shows the three resolutions, then Configure;
+- a `review_required` card shows the three resolutions, then Configure, and
+  one whose item is removed shows 🚫 Give up alone: the item cannot post
+  again, and giving the story up resolves it;
 - any other card shows Configure alone.
 
 Configure opens a menu one level down (`menu_keyboard`): 🔁 Auto-approve this
@@ -153,9 +155,10 @@ item (on/off, the member command `set_item_auto_approve`), ⚙️ Approval setti
 - **The edit:** the menu edits the tapped message itself, once, after the
   commit, through the route's one edit seam (`TapResult.edit_markup` →
   `editMessageReplyMarkup`). It never goes through the outbox.
-- **Healing:** a menu tap on a card whose story carries no keyboard (a
-  rejected story's, a removed item's) heals it on touch. Back and the heal read
-  the story as the sender does (`card_facts`, `keyboard_of`).
+- **Healing:** a menu tap on a card that cannot post again (a rejected
+  story's, a removed item's) heals it on touch to its story's own keyboard:
+  none, or Give up alone for a removed item's story in review. Back and the
+  heal read the story as the sender does (`card_facts`, `keyboard_of`).
 - **The toggle:** it never decides the card it was tapped on; the flag
   acts the next time the item is served. Its answer names what still holds
   the flag back as the serve step decides it (`auto_approval.decide`, read

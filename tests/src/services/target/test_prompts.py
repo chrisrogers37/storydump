@@ -382,7 +382,8 @@ REFUSED = refusal_evidence.plain(REFUSAL)
 class TestTheCardKeyboard:
     """`card_keyboard`: the one spelling of an approval card's
     keyboard for its story as it is now. Configure is on every card but a
-    rejected story's or a removed item's, which carry none."""
+    rejected story's or a removed item's, which carry none — except a removed
+    item's story in review, which carries Give up alone."""
 
     @staticmethod
     def _datas(kb):
@@ -431,6 +432,25 @@ class TestTheCardKeyboard:
         ]
         assert rows[1][0]["text"] == "🚫 Give up"
 
+    @pytest.mark.parametrize("api_publishing_enabled", [True, False])
+    def test_a_removed_items_card_in_review_carries_give_up_alone(
+        self, api_publishing_enabled
+    ):
+        """A removed item cannot post again, so its story in review offers the
+        one resolution that ends it: no retry, no Configure, whichever way the
+        workspace posts."""
+        kb = prompts.card_keyboard(
+            INTENT,
+            state="review_required",
+            api_publishing_enabled=api_publishing_enabled,
+            item_state="removed",
+        )
+        assert kb == {
+            "inline_keyboard": [
+                [{"text": "🚫 Give up", "callback_data": f"v1:giveup:{INTENT}"}]
+            ]
+        }
+
     @pytest.mark.parametrize(
         "state",
         [
@@ -468,6 +488,10 @@ class TestTheCardKeyboard:
             ("rejected", "available"),
             ("awaiting_approval", "removed"),
             ("posted", "removed"),
+            # A story given up ends `cancelled`, and its card keeps no keyboard
+            # while its item stays removed.
+            ("cancelled", "removed"),
+            ("rejected", "removed"),
         ],
     )
     def test_a_rejected_story_or_a_removed_item_carries_none(self, state, item_state):
