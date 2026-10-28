@@ -866,6 +866,25 @@ def _render_health(console: Console, data: Any) -> None:
         _verdict("posting"),
         _facts(posting, *[k for k in posting if k != "status"]),
     )
+    sends = health.get("delivery") if isinstance(health.get("delivery"), dict) else {}
+    judged = (
+        verdicts.get("delivery") if isinstance(verdicts.get("delivery"), dict) else {}
+    )
+    table.add_row(
+        "delivery",
+        _verdict("delivery"),
+        " · ".join(
+            part
+            for part in (
+                _facts(
+                    sends, "window_seconds", "sent_in_window", "failed_or_ambiguous"
+                ),
+                # The classes and codes that failed, as the classifier names them.
+                _text(judged.get("detail"), ""),
+            )
+            if part
+        ),
+    )
     console.print(table)
     read = health.get("details") if isinstance(health.get("details"), dict) else {}
     if read.get("read") is False:

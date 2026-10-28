@@ -1081,7 +1081,7 @@ def create_app(
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)
-    # Railway's probe and the two dependency-touching axes (`routes/health.py`).
+    # Railway's probe and the dependency-touching surfaces (`routes/health.py`).
     # Included LAST, so these routes sit last in the route table.
     app.include_router(health_router)
 

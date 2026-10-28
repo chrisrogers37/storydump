@@ -346,7 +346,7 @@ client, never a database connection. Install it with
    admitted" (exit 0), and `--resend` sends the email again, its new link
    replacing the last. It emails a real person and nothing undoes it, so it
    is on the never-run list above.
-6. The environment: `storydump health` (the API's three health surfaces,
+6. The environment: `storydump health` (the API's four health surfaces,
    judged by the fleet monitors' verdicts, which
    `storydump_cli/health_classify/` carries: not well when a monitor would
    page; plus the bot's webhook from the API's
@@ -355,9 +355,9 @@ client, never a database connection. Install it with
    them the webhook is `not_checked`, not well, and `data.details` says why;
    exit 4 then, the report and each verdict still printed. Three bounds against
    the pollers: one reading has no watch clock, one unreachable reading is
-   reported where the pollers wait for two, and neither `/health/delivery` nor
-   the API/worker commit split is judged here, though the scheduling monitor
-   pages on both) · `storydump deploys
+   reported where the pollers wait for two, and the API/worker commit split
+   is not judged here, though the scheduling monitor pages on it)
+   · `storydump deploys
    [--watch --commit <sha> --timeout <s>]` (the latest deployments on Railway
    through your own `railway` login, with the linked project checked first;
    exit 5 with the fix when Railway cannot be read; `--watch` ends 0 on both

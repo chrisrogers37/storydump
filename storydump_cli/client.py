@@ -212,22 +212,22 @@ class Client:
         return self._request("GET", "/ops/health")
 
     def health(self) -> dict[str, Any]:
-        """The API's three public surfaces. `/health` must answer; the two
-        dependency-touching axes may not (a 503 with no engine), and then the
-        report carries that surface's error rather than losing the rest."""
+        """The API's four public surfaces. `/health` must answer; the three
+        dependency-touching ones may not (a 503 with no engine, or busy), and
+        then the report carries that surface's error, with the API's reason,
+        rather than losing the rest."""
         surfaces: dict[str, Any] = {"api": self.health_api()}
         for name, path in (
             ("scheduling", "/health/scheduling"),
             ("posting", "/health/posting"),
+            ("delivery", "/health/delivery"),
         ):
             try:
                 surfaces[name] = self._request("GET", path, root=True)
             except (Unreachable, ApiError) as exc:
-                surfaces[name] = {
-                    "error": f"HTTP {exc.status}: {exc.detail}"
-                    if exc.status
-                    else exc.detail
-                }
+                error = f"HTTP {exc.status}: {exc.detail}" if exc.status else exc.detail
+                reason = getattr(exc, "reason", None)
+                surfaces[name] = {"error": f"{error} ({reason})" if reason else error}
         return surfaces
 
     def list_my_tokens(self) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 """The environment verbs: ``health``, ``deploys`` and ``doctor``.
 
-``health`` reads the API's three health surfaces and exits 0 only when every
+``health`` reads the API's four health surfaces and exits 0 only when every
 one reports well (4 otherwise — "API unreachable or failed" — with
 the report still printed). ``deploys`` shells out to the ``railway`` binary
 through one seam: it checks the login and the linked project before reading

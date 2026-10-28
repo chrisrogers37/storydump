@@ -928,7 +928,7 @@ class TestPostingHealthIsATHIRDSurface:
         assert verdict.state == NEVER_POSTED_OVERDUE
 
     def test_the_railway_probe_still_opens_no_connection(self):
-        """Three health surfaces, and one reason for the split: liveness must
+        """Four health surfaces, and one reason for the split: liveness must
         not open a connection or a database blip takes the service down for a
         fault no restart repairs."""
         app = create_app(env={})

@@ -4,7 +4,7 @@ Each prints a REPORT and returns a VERDICT: the report is the envelope's
 ``data`` (so an agent reads the facts whatever the verdict), and the exit
 code says whether the facts are good — 0, or the code of what is wrong (4
 for the API or its deployment, 5 for Railway, 3 for the token, 64 for the
-local configuration). ``health`` reads the API's three health surfaces;
+local configuration). ``health`` reads the API's four health surfaces;
 ``deploys`` reads Railway through the one seam that checks the login and
 the linked project first; ``webhook`` registers
 and checks the bot's webhook; ``doctor`` runs every check a fresh
@@ -20,7 +20,7 @@ from typing import Any, Mapping, Optional
 
 import click
 
-from storydump_cli.health_classify import posting, scheduling
+from storydump_cli.health_classify import delivery, posting, scheduling
 from src.services.target.vocabulary import (
     EXIT_API_UNREACHABLE,
     EXIT_NOT_AUTHORIZED,
@@ -57,7 +57,7 @@ WELL_WORDS = frozenset({"ok", "healthy"})
 DEPLOYS_EVERY = 15.0
 _MIGRATION_FILE = re.compile(r"^(\d{3})_.*\.sql$")
 
-#: The two dependency surfaces are judged by the classifiers in
+#: The three dependency surfaces are judged by the classifiers in
 #: `storydump_cli/health_classify/` (stdlib-only, so the CLI stays a pure
 #: client): a surface is not well exactly when its verdict is one of these. A quiet estate with nothing to watch is not an
 #: outage, so `no-signal` and `never-posted` inside its grace are well.
@@ -75,6 +75,9 @@ POSTING_ALERTS = frozenset(
         posting.NEVER_POSTED_OVERDUE,
     }
 )
+#: The scheduling monitor pages on both: a failed or ambiguous send in the
+#: last hour, and a surface it cannot read.
+DELIVERY_ALERTS = frozenset({delivery.FAILING, delivery.UNREACHABLE})
 
 
 # --- health -------------------------------------------------------------------
@@ -82,7 +85,8 @@ POSTING_ALERTS = frozenset(
 
 def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     """``(well, {"state", "detail"})`` for one surface: `/health` by its
-    `status`; scheduling and posting by their classifiers' verdicts."""
+    `status`; scheduling, posting and delivery by their classifiers'
+    verdicts."""
     if not isinstance(payload, dict):
         return False, {"state": "unreachable", "detail": "no answer"}
     if "error" in payload:
@@ -112,7 +116,14 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
             "state": verdict.state,
             "detail": verdict.detail,
         }
-    return True, {"state": "reported", "detail": ""}
+    if name == "delivery":
+        verdict = delivery.classify(200, body)
+        return verdict.state not in DELIVERY_ALERTS, {
+            "state": verdict.state,
+            "detail": verdict.detail,
+        }
+    # A surface fetched with no rule to judge it is never a clean bill of health.
+    return False, {"state": "unjudged", "detail": f"no rule judges {name}"}
 
 
 def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
@@ -212,11 +223,12 @@ def _refused(exc: ApiError, verb: str) -> dict[str, Any]:
 @global_options
 @click.pass_context
 def health(ctx: click.Context) -> int:
-    """The API's three health surfaces — liveness, scheduling, posting — as the
-    API reports them, judged by the CLI's classifiers
+    """The API's four health surfaces — liveness, scheduling, posting,
+    delivery — as the API reports them, judged by the CLI's classifiers
     (`storydump_cli/health_classify/`): not well on any of these — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
-    overdue past its grace, or a surface unreachable — and the bot's webhook
+    overdue past its grace, a send in the last hour that failed or is
+    ambiguous, or a surface unreachable — and the bot's webhook
     from the API's operating details: unregistered, or a backlog behind a
     delivery error. The details answer only a token whose person is in the
     API's `OPS_USER_IDS`; without them the webhook is `not_checked`, which is

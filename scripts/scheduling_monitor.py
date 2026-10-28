@@ -15,8 +15,8 @@ the commits the API and the worker run. `/health/delivery` is read beside it as
 an axis of its own, judged by `storydump_cli.health_classify.delivery`. This
 file adds what a poller needs on top: the requests, the history that decides
 when to speak, the state file, and the command that reaches a human.
-`storydump health` judges neither delivery nor a commit split: they are this
-poller's alone.
+`storydump health` judges delivery with the same classifier; a commit split is
+this poller's alone.
 
 It runs on the system Python from a checkout, with nothing installed: it imports
 only the standard library and those classifiers, which do the same. The

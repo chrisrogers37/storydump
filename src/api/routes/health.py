@@ -2,9 +2,9 @@
 posting axis and the delivery axis.
 
 Like every other route in the API, they live in a module here and are
-included as a router. `storydump health` renders the scheduling and posting
-axes and `details` (the `OPS_USER_IDS`-only `/api/v1/ops/health`), so a field
-renamed here is a renderer broken elsewhere.
+included as a router. `storydump health` renders the scheduling, posting and
+delivery axes and `details` (the `OPS_USER_IDS`-only `/api/v1/ops/health`), so
+a field renamed here is a renderer broken elsewhere.
 
 `details` reads `app.state.*` — the engine, the sampled database role, the pool
 watch, the tap counters and the two webhook reports — rather than the factory's
