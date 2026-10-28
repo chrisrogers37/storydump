@@ -20,7 +20,7 @@ to use Storydump.
 
 ## Features
 
-- **Instagram past posts**: reuse eligible media from a connected professional account's own feed posts as Stories. This is a source for your posting queue, not an Instagram backup or a way to import other accounts' posts. The [past-posts guide](documentation/operations/instagram-past-posts-review.md) covers account access, setup and limits.
+- **Instagram past posts**: reuse eligible media from a connected professional account's own feed posts as Stories. The [past-posts guide](documentation/operations/instagram-past-posts-review.md) covers account access, setup and limits.
 - **Google Drive as another source**: optionally connect Drive and choose folders for media you want to share, whether or not it has appeared on Instagram before.
 - **Your posting mix**: turn sources on or off and choose how often each source appears in an account's rotation, combining Instagram past posts and Drive folders (`src/services/target/category_mix.py`).
 - **Scheduling per workspace**: posts per day, a posting-hours window and a timezone (`workspaces.posts_per_day`, `posting_hours_start`/`_end`, `tz`); an account may override them. The worker's clock mints one slot per account as it falls due.
