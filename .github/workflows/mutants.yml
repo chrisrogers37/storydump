@@ -1,0 +1,39 @@
+# Scratch: the scheduling monitor's mutant run. This branch is never merged.
+name: Monitor mutants
+
+on:
+  push:
+    branches: ['scratch/monitor-mutants-3']
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit's test files are read from history.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e '.[cli]'
+
+      - name: Run the mutants
+        timeout-minutes: 10
+        env:
+          PYTHONHASHSEED: "0"
+          # Nothing listens here, so the database tests skip.
+          DB_PORT: "65432"
+        run: python .github/scratch/mutants.py
