@@ -1389,7 +1389,7 @@ class TestTheStoryFrame:
 
         chain = story_transformation(f"ws/{WS}/clip1", media_kind="video")
         assert chain == [
-            {"duration": 60},
+            {"duration": 59.95},
             {"crop": "limit", "width": 1080, "height": 1920},
             {
                 "crop": "pad",
@@ -1402,7 +1402,7 @@ class TestTheStoryFrame:
                 "audio_codec": "aac",
                 "audio_frequency": 48000,
                 "fps": "23-60",
-                "bit_rate": 13_000_000,
+                "bit_rate": "av:video_(value_12000000);audio_(value_128000)",
             },
         ]
 
