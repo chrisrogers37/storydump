@@ -111,15 +111,18 @@ async def settled_line(
         from src.services.target import identity  # noqa: PLC0415 — cycle
 
         by = await identity.display_name_for(session, user_id=settled["by_user_id"])
-    # A story in review says why, in the words of its refusal's evidence.
+    state = state or settled["state"]
+    # A story in review says why, in the words of its refusal's evidence. A
+    # row keeps its reason past review (a retry's, after "It posted"), so no
+    # other line reads it.
     return outcome_line(
-        state or settled["state"],
+        state,
         by=by,
         at=settled.get("at") or at,
         tz=tz,
         published_via=settled.get("published_via"),
         rule=settled.get("approval_rule"),
-        refusal=settled.get("refusal"),
+        refusal=settled.get("refusal") if state == "review_required" else None,
     )
 
 

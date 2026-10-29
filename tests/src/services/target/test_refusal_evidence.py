@@ -450,7 +450,10 @@ def test_scrub_text_leaves_nothing_of_a_link_written_up_against_a_parameter(
     """A parameter's value with a signed link glued to it, no space between:
     neither the token nor any part of the link's signature survives."""
     scrubbed = refusal_evidence.scrub_text(f"bad request {parameter}{link} end")
-    assert "signature-value" not in scrubbed and "FAKE-TOKEN-1" not in scrubbed
+    # Lower-cased: a link's host pass that ran first would keep the token as
+    # part of the host it names, in lower case.
+    assert "signature-value" not in scrubbed.lower()
+    assert "fake-token-1" not in scrubbed.lower()
     assert scrubbed.startswith("bad request ") and scrubbed.endswith(" end")
 
 
