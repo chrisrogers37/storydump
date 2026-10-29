@@ -206,7 +206,7 @@ class TestThePromptForAParkedStory:
 
     async def test_each_chat_without_a_card_gets_the_review_card(self, doors):
         prompts, seen = doors
-        n = await prompts.prompt_review(None, workspace_id="ws", intent_id="i")
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
         assert n == 2 and seen["rendered"] == 1, "rendered once"
         assert [
             (w["binding_id"], w["kind"], w["payload"]) for w in seen["written"]
@@ -219,7 +219,8 @@ class TestThePromptForAParkedStory:
     async def test_no_chat_without_a_card_renders_and_writes_nothing(self, doors):
         prompts, seen = doors
         seen["chats"] = []
-        assert await prompts.prompt_review(None, workspace_id="ws", intent_id="i") == 0
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
+        assert n == 0
         assert seen["rendered"] == 0 and seen["written"] == []
 
     async def test_the_park_gives_its_cards_after_the_restate_and_notice(
@@ -358,50 +359,29 @@ class TestThePromptForAParkedStory:
             ("cards", str(workspace), str(story)),
         ]
 
-    async def test_the_reconcilers_park_stands_when_its_card_cannot_be_written(
+    async def test_a_review_card_that_cannot_be_written_leaves_the_park_standing(
         self, monkeypatch, caplog
     ):
-        """A card that cannot be written is rolled back in a savepoint of its
-        own and logged, and the park stands: the restate is kept, no notice is
-        written, and nothing is raised."""
+        """`prompt_review` writes in a savepoint of its own, for every park: a
+        card that cannot be written is rolled back there and logged with its
+        cause, and nothing is raised, so the caller's park stands."""
         import logging
-        from uuid import UUID
 
-        from src.services.target import prompts, reconciler
+        from src.services.target import prompts
 
-        workspace, story = UUID(int=1), UUID(int=2)
-        seen = []
+        async def chats_without_card(session, *, workspace_id, intent_id):
+            raise RuntimeError("card read failed")
 
-        async def restate_everywhere(session, *, workspace_id, intent_id, outcome_text):
-            seen.append(("restate", workspace_id, intent_id))
-            return 1
-
-        async def prompt_review(session, *, workspace_id, intent_id):
-            raise RuntimeError("card render failed")
-
-        async def fanout_notification(session, **kw):
-            seen.append(("notice", kw))
-
-        monkeypatch.setattr(outbox, "restate_everywhere", restate_everywhere)
-        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
-        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
-
-        conn = _Session([("UTC",)])
-        with caplog.at_level(logging.WARNING, logger=reconciler.__name__):
-            await reconciler._park_review_required(
-                conn, intent_id=story, workspace_id=workspace, checks=4
+        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
+        session = _Session([])
+        with caplog.at_level(logging.ERROR, logger=prompts.__name__):
+            written = await prompts.prompt_review(
+                session, workspace_id="ws", intent_id="i1"
             )
-        assert seen == [("restate", str(workspace), str(story))], "no card, no notice"
-        assert conn.savepoints == ["savepoint", "rolled back"]
-        warnings = [
-            r
-            for r in caplog.records
-            if r.name == reconciler.__name__ and r.levelno == logging.WARNING
-        ]
-        assert len(warnings) == 1
-        assert str(story) in warnings[0].getMessage()
-        assert "NOT written" in warnings[0].getMessage()
-        assert warnings[0].exc_info is not None, "the cause rides the log line"
+        assert written == 0
+        assert session.savepoints == ["savepoint", "rolled back"]
+        [record] = [r for r in caplog.records if r.name == prompts.__name__]
+        assert "i1" in record.getMessage() and record.exc_info is not None
 
 
 class TestTheReviewRestateSaysWhy:

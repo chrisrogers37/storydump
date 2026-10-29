@@ -171,25 +171,16 @@ async def test_a_chat_gets_a_second_card_only_if_the_first_never_reached_it(
     ]
 
 
-#: How a chat's earlier card of a story stands: its state, the message ref it
-#: carries, and whether the chat is still owed a card. A chat holds the card
-#: once a row of it carries a ref.
-EARLIER_CARDS = [
-    ("sent", "41", False),
-    ("superseded", None, True),
-    ("failed", None, True),
-]
-
-
-def _hold_a_card(sync_conn, origin, chat, intent, state, ref):
-    """A card of the story already in *chat*: an `approval_prompt` row in
-    *state*, carrying message ref *ref*."""
+def _hold_a_card(sync_conn, origin, chat, intent):
+    """A card of the story already in *chat*: an `approval_prompt` row sent,
+    carrying its message ref. Which earlier cards count as held is the
+    predicate's, pinned above."""
     with sync_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
             " payload, state, attempts, external_message_ref)"
-            " VALUES (%s, %s, 'approval_prompt', %s, %s, %s, 1, %s)",
-            (origin["ws"], chat, intent, '{"v": 2, "text": "card"}', state, ref),
+            " VALUES (%s, %s, 'approval_prompt', %s, %s, 'sent', 1, '41')",
+            (origin["ws"], chat, intent, '{"v": 2, "text": "card"}'),
         )
     sync_conn.commit()
 
@@ -203,24 +194,18 @@ def _cards(rows, chat):
     ]
 
 
-def _assert_review_cards_only_where_owed(rows, *, has_card, has_none, state, second):
+def _assert_review_cards_only_where_owed(rows, *, has_card, has_none):
     """The park wrote the review card in the chats that hold no card of the
-    story and nowhere else: *has_card* keeps its earlier card alone unless that
-    one never reached it (*second*), *has_none* gets one, and every card the
-    park wrote says the story needs review."""
-    held, none = _cards(rows, has_card), _cards(rows, has_none)
-    assert sorted(s for s, _ in held) == sorted(
-        [state, "pending"] if second else [state]
-    )
-    assert [s for s, _ in none] == ["pending"]
-    for s, payload in held + none:
-        if s == "pending":
-            assert payload["outcome_text"].startswith("👀 Needs review")
+    story and nowhere else: *has_card* keeps its sent card alone, *has_none*
+    gets one, and it says the story needs review."""
+    assert [s for s, _ in _cards(rows, has_card)] == ["sent"]
+    [(state, payload)] = _cards(rows, has_none)
+    assert state == "pending"
+    assert payload["outcome_text"].startswith("👀 Needs review")
 
 
-@pytest.mark.parametrize("state,ref,second", EARLIER_CARDS)
 async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_card(
-    past_posts_engine, origin, sync_conn, state, ref, second
+    past_posts_engine, origin, sync_conn
 ):
     """A publish job whose last try meets a retryable refusal at the container
     create poisons the story into review. The park's courtesy writes the review
@@ -239,7 +224,7 @@ async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_ca
             text("UPDATE post_intents SET state='approved' WHERE id=:id"),
             dict(id=intent),
         )
-    _hold_a_card(sync_conn, origin, has_card, intent, state, ref)
+    _hold_a_card(sync_conn, origin, has_card, intent)
     meta = StubMetaAdapter(create_outcomes=["retryable"])
     # The claim has counted the job's last try, so the refusal is not retried.
     job = {**job, "attempts": job["max_attempts"]}
@@ -258,17 +243,14 @@ async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_ca
         " job's poison, not by a refusal before it"
     )
     rows = _outbox_rows(sync_conn, intent)
-    _assert_review_cards_only_where_owed(
-        rows, has_card=has_card, has_none=has_none, state=state, second=second
-    )
+    _assert_review_cards_only_where_owed(rows, has_card=has_card, has_none=has_none)
     for chat in (has_card, has_none):
         notices = [r for r in rows if r[0] == chat and r[1] == "notification"]
         assert len(notices) == 1, "the poison tells every chat once"
 
 
-@pytest.mark.parametrize("state,ref,second", EARLIER_CARDS)
 async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
-    past_posts_engine, origin, sync_conn, state, ref, second
+    past_posts_engine, origin, sync_conn
 ):
     """A publish whose answer was lost, and that the reconcile ladder never
     confirms, parks the story in review. The park writes the review card in
@@ -289,7 +271,7 @@ async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
             ),
             dict(id=intent),
         )
-    _hold_a_card(sync_conn, origin, has_card, intent, state, ref)
+    _hold_a_card(sync_conn, origin, has_card, intent)
     async with observations.uow(past_posts_engine, origin) as conn:
         outcome = await reconciler.reconcile_intent(
             conn,
@@ -300,9 +282,7 @@ async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
         )
     assert outcome == "review_required"
     rows = _outbox_rows(sync_conn, intent)
-    _assert_review_cards_only_where_owed(
-        rows, has_card=has_card, has_none=has_none, state=state, second=second
-    )
+    _assert_review_cards_only_where_owed(rows, has_card=has_card, has_none=has_none)
     assert [r for r in rows if r[1] == "notification"] == [], "the notice waits"
 
 
@@ -312,10 +292,10 @@ async def test_the_reconcilers_park_stands_when_its_card_step_fails_in_the_datab
     """A database error in the card step aborts only its own savepoint, so the
     park commits: the story leaves the ladder and the restate of the card a chat
     holds is kept, with no review card and no notice written."""
-    from src.services.target import prompts, reconciler
+    from src.services.target import outbox, reconciler
     from tests.scripts import test_instagram_publish_gate as publish_gate
 
-    async def failing_card(session, *, workspace_id, intent_id):
+    async def failing_read(session, *, workspace_id, intent_id):
         await session.execute(text("SELECT 1 / 0"))
 
     has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
@@ -330,8 +310,8 @@ async def test_the_reconcilers_park_stands_when_its_card_step_fails_in_the_datab
             ),
             dict(id=intent),
         )
-    _hold_a_card(sync_conn, origin, has_card, intent, "sent", "41")
-    monkeypatch.setattr(prompts, "prompt_review", failing_card)
+    _hold_a_card(sync_conn, origin, has_card, intent)
+    monkeypatch.setattr(outbox, "chats_without_card", failing_read)
     async with observations.uow(past_posts_engine, origin) as conn:
         outcome = await reconciler.reconcile_intent(
             conn,

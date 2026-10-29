@@ -592,15 +592,6 @@ async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -
         intent_id=str(intent_id),
         outcome_text=line,
     )
-    try:
-        async with conn.begin_nested():
-            await prompts.prompt_review(
-                conn, workspace_id=str(workspace_id), intent_id=str(intent_id)
-            )
-    except Exception:  # noqa: BLE001 — the park stands without the card
-        logger.warning(
-            "reconciler: parked intent %s for review; its review card was NOT"
-            " written for the chats that hold no card of it",
-            intent_id,
-            exc_info=True,
-        )
+    await prompts.prompt_review(
+        conn, workspace_id=str(workspace_id), intent_id=str(intent_id)
+    )
