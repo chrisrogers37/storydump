@@ -89,7 +89,7 @@ def world(monkeypatch):
     monkeypatch.setattr(publish_pipeline, "assert_lease", nothing)
     monkeypatch.setattr(publish_pipeline.publish_cap, "refund_cap", nothing)
     monkeypatch.setattr(publish_pipeline.provider_ops, "resolve_permit", nothing)
-    monkeypatch.setattr(publish_pipeline, "_say_outcome", nothing)
+    monkeypatch.setattr(publish_pipeline, "_restate_and_notify", nothing)
     return log
 
 
