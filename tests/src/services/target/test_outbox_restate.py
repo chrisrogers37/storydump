@@ -24,11 +24,14 @@ from src.services.target.outbox import OutboxPaced
 PARKED = "00000000-0000-4000-8000-0000000000aa"
 
 
-def _facts(state="awaiting_approval", *, item_state="available", cancel=False):
+def _facts(
+    state="awaiting_approval", *, item_state="available", cancel=False, step="none"
+):
     """A card's story as `prompts.card_facts` reads it."""
     return {
         "state": state,
         "cancel_requested": cancel,
+        "publish_step": step,
         "media_item_id": "m-1",
         "item_state": item_state,
         "auto_approve": False,
@@ -772,6 +775,14 @@ class TestACardIsRenderedAgainAtClaimTime:
             (_facts("awaiting_approval", cancel=True), ["cfg"]),
             (_facts("rejected"), None),
             (_facts("posted", item_state="removed"), None),
+            # A removed item's story in review: the item cannot post again, so
+            # the edit leaves with Give up, and It posted above it once a
+            # publish call was made.
+            (_facts("review_required", item_state="removed"), ["giveup"]),
+            (
+                _facts("review_required", item_state="removed", step="publish_called"),
+                ["itposted", "giveup"],
+            ),
         ],
     )
     async def test_every_states_edit_leaves_with_its_storys_keyboard(
@@ -780,7 +791,9 @@ class TestACardIsRenderedAgainAtClaimTime:
         """#1477, through the real keyboard read: an edit claimed for an
         approved, posted or skipped story carries Configure alone, a parked
         one the three resolutions and Configure, a cancelling one Configure
-        alone; a rejected story's or a removed item's carries none."""
+        alone; a rejected story's or a removed item's carries none, except a
+        removed item's story in review, which carries Give up, under It posted
+        once a publish call was made."""
         claims["claimed"] = [
             _claimed(
                 "prompt_supersede",

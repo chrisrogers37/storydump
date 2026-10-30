@@ -253,22 +253,33 @@ def card_keyboard(
     api_publishing_enabled: bool,
     item_state: Optional[str] = None,
     cancelling: bool = False,
+    publish_step: Optional[str] = None,
 ) -> Optional[dict]:
     """The keyboard of an approval card for its story as it is now — the one
     spelling: the sender renders every card's keyboard with it
     when it sends or edits the card (`card_keyboard_for`), and Configure's
     Back and its heal read it the same way (`keyboard_of`), so no caller picks
     one. ⚙️ Configure is on every card but a rejected story's or a removed
-    item's, which carry none:
+    item's. A rejected story's card carries no keyboard, and nor does a
+    removed item's, except while its story waits in review:
 
     - a waiting story: the decision buttons (🚀 Post now only where the
       workspace posts through the API), and Configure beside 📱 Open Instagram
       — unless its cancel is pending (*cancelling*): it is on its way to
       `cancelled`, so its card shows what a cancelled one does, Configure
       alone, and the cancel's edit never brings the decision buttons back;
-    - `review_required`: the member's three resolutions, then Configure;
+    - `review_required`: the member's three resolutions, then Configure; with
+      its item removed, 🚫 Give up, since the item cannot post again and has
+      no Auto-approve to set, and giving the story up resolves it — under ✅ It
+      posted once a publish call was made (*publish_step* is `publish_called`)
+      and no cancel is pending, as the web's Queue offers it: the story may
+      have posted before its item was removed;
     - any other state: Configure alone, for the card's whole life.
     """
+    if state == "review_required" and item_state == "removed":
+        posted = publish_step == "publish_called" and not cancelling
+        actions = ("itposted", "giveup") if posted else ("giveup",)
+        return {"inline_keyboard": [[_button(a, intent_id)] for a in actions]}
     if state == "rejected" or item_state == "removed":
         return None
     configure = _button("cfg", intent_id)
@@ -468,6 +479,7 @@ def keyboard_of(intent_id: str, facts: Mapping) -> Optional[dict]:
         api_publishing_enabled=bool(facts["api_publishing_enabled"]),
         item_state=facts["item_state"],
         cancelling=bool(facts["cancel_requested"]),
+        publish_step=facts["publish_step"],
     )
 
 
