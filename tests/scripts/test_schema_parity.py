@@ -29,7 +29,7 @@ def healthy_snapshot():
     catalog["relations"] = {
         f"public.table_{n}": {"kind": "r", "rls_enabled": True} for n in range(44)
     }
-    for dimension, count in (("functions", 85), ("policies", 115), ("triggers", 53)):
+    for dimension, count in (("functions", 87), ("policies", 115), ("triggers", 53)):
         catalog[dimension] = {f"public.object_{n}": {} for n in range(count)}
     return {"format_version": parity.FORMAT_VERSION, "catalog": catalog, "reported": {}}
 

@@ -36,7 +36,8 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
   `meta_deletion_cleanup` (without a transit store it runs, and counts an
   upload still owed as unresolved); no mix conversion evidence parks
   `convert_source_mix`; a past-posts source that is not armed (no
-  capability, or no past-posts client) parks `reconcile_past_posts_accounts`;
+  capability, or no past-posts client) parks `reconcile_past_posts_accounts`
+  and `prepare_past_post`;
   `reencrypt_credentials` has no executor at all
   (`work_loop.UNBUILT_KINDS`), and `retention_sweep` runs one
   retention class only, `rate_counters` (7 d,
@@ -45,7 +46,7 @@ use the ledger verbs — `storydump jobs`, `storydump floating`,
   `park_seconds` (900 s) — never finalized dead (`_run_parked`, `work_loop.py:1265`).
 - `run` (`:809`) binds the health endpoint before the first database connection,
   then starts the clock, the lease heartbeat, K claim loops per lane
-  (interactive 3, bulk 2; `TARGET_WORKER_*_CONCURRENCY`), the sender sweeper
+  (interactive 2, bulk 2, media 1; `TARGET_WORKER_*_CONCURRENCY`), the sender sweeper
   (3 s), the prompt sweeper (5 s) and a status line every 60 s. `supervise`
   (`:743`) ends the worker loudly when any of them dies.
 - A task that dies is `supervise`'s; an event loop that stops turning is the
@@ -173,11 +174,13 @@ be written. Only the empty library's notice, where nothing was minted, parks a
   wait) moves the deadline with `run_at`, so the job keeps its slack; a
   retryable failure keeps its deadline. A new job kind must be classified
   against that list.
-- Per-workspace lane caps (interactive 5, bulk 3) are the claim's, and they
-  bind only across several replicas: `fn_claim_job` counts the deployment's
-  leases, and one process runs fewer tasks per lane (3 interactive, 2 bulk)
-  than the caps. So on a single worker one workspace can hold a whole lane
-  (`work_loop.py:85-96`).
+- Per-workspace lane caps (interactive 5, bulk 3, media 1) are the claim's.
+  Interactive and bulk bind only across several replicas: `fn_claim_job` counts
+  the deployment's leases, and one process runs fewer tasks per lane
+  (2 interactive, 2 bulk) than those caps. So on a single worker one workspace
+  can hold a whole lane. Media's cap is below any K its lane is raised to (the
+  default is 1), so it binds on one process too, and one workspace never holds
+  more than one file task (`work_loop.py:92-103`).
 - An executor that waits on a provider is marked `own_transactions`
   (`work_loop.py:242`): it runs with no job session open and finalizes in a
   short transaction afterwards. So is `retention_sweep`, whose batches each

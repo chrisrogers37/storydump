@@ -1163,7 +1163,9 @@ async def test_unrecognized_targeted_field_refusal_does_not_become_unknown():
         metadata_only=True,
     )
     result = await targeted(a)
-    assert result.failed == ("1",) and result.deferred == ()
+    # Nor does it prove the post gone: the parent is read again later.
+    assert result.failed == () and result.deferred == ("1",)
+    assert result.diagnostics == ("parent_read_unproven",)
     assert result.observations == () and result.outcome == "parent_enrichment_pending"
 
 
@@ -1221,10 +1223,8 @@ async def test_targeted_partial_or_unowned_parent_does_not_create_a_complete_bun
     assert result.observations == () and result.candidates == []
     assert result.outcome == "parent_enrichment_pending" and result.checkpoint == {}
     assert result.counters.observed_parents == 0
-    # An unowned parent is refused for good; the others wait for a retry.
-    assert (result.failed, result.deferred) == (
-        (("1",), ()) if fault == "owner" else ((), ("1",))
-    )
+    # No fault proves the post gone, so none retires it: each waits for a retry.
+    assert (result.failed, result.deferred) == ((), ("1",))
 
 
 @pytest.mark.parametrize("bad_id", [None, "bad-id", True])
@@ -1694,9 +1694,11 @@ async def test_local_typed_exit_keeps_original_exception_and_actual_counters(
 
     a._children = refused
     if operation == "enrichment" and error_type is MediaTerminalError:
-        # A terminal read of one parent is that parent's failure, not the turn's.
+        # A terminal read of one parent is that parent's, not the turn's; one
+        # that does not prove the post gone defers it.
         result = await targeted(a)
-        assert result.failed == ("1",) and result.observations == ()
+        assert result.deferred == ("1",) and result.failed == ()
+        assert result.observations == ()
         assert result.counters == media_adapters.MediaTurnCounters(
             graph_attempts=1, listed_parents=1
         )
@@ -1998,10 +2000,19 @@ async def test_a_probe_answer_that_breaks_its_contract_is_refused_not_trusted(an
 
 
 def batch_graph(
-    calls, *, owner=ACCOUNT, carousels=(), terminal=(), throttled=(), dead=(), me=None
+    calls,
+    *,
+    owner=ACCOUNT,
+    carousels=(),
+    terminal=(),
+    unproven=(),
+    throttled=(),
+    dead=(),
+    me=None,
 ):
     """A Graph of queued parents: each parent read answers its caption, a
-    carousel its child page, `/me` the *me* answer, and a named id its fault."""
+    carousel its child page, `/me` the *me* answer, and a named id its fault:
+    *terminal* Graph's "does not exist", *unproven* a refusal that is not."""
 
     def handler(req):
         path = req.url.path
@@ -2015,10 +2026,11 @@ def batch_graph(
             return httpx.Response(
                 401, json={"error": {"code": 190, "message": "private-grant"}}
             )
-        if mid in terminal:
-            return httpx.Response(
-                400, json={"error": {"code": 100, "message": "private-parent"}}
-            )
+        if mid in terminal or mid in unproven:
+            error = {"code": 100, "message": "private-parent"}
+            if mid in terminal:
+                error["error_subcode"] = 33
+            return httpx.Response(400, json={"error": error})
         if mid in throttled:
             return httpx.Response(
                 429, json={"error": {"code": 4, "message": "private-throttle"}}
@@ -2081,6 +2093,19 @@ async def test_a_parent_the_provider_refuses_for_good_does_not_end_the_batch():
     assert result.failed == ("2",) and result.deferred == ()
     assert calls == ["/v26.0/1", "/v26.0/2", "/v26.0/3"]
     assert result.counters.graph_attempts == 3 and result.counters.observed_parents == 2
+    assert "private-parent" not in repr(result)
+
+
+async def test_a_parent_answer_that_does_not_prove_the_post_gone_defers_it():
+    """A refusal that is not Graph's "does not exist" retires none of the
+    post's slides: the parent waits for a later read, and the batch goes on."""
+    calls = []
+    a, _ = make(batch_graph(calls, unproven=["2"]), metadata_only=True)
+    result = await batch(a, ["1", "2", "3"])
+    assert [o.parent_media_id for o in result.observations] == ["1", "3"]
+    assert result.deferred == ("2",) and result.failed == ()
+    assert result.diagnostics == ("parent_read_unproven",)
+    assert calls == ["/v26.0/1", "/v26.0/2", "/v26.0/3"]
     assert "private-parent" not in repr(result)
 
 
@@ -2156,7 +2181,9 @@ async def test_an_owner_that_is_neither_the_account_nor_the_recorded_id_is_refus
         graph_limit=20,
     )
     result = await batch(a, ["1", "2"])
-    assert result.observations == () and result.failed == ("1", "2")
+    # An owner it cannot prove does not prove the post gone: both wait.
+    assert result.observations == () and result.deferred == ("1", "2")
+    assert result.failed == ()
     # The recorded id is the proof: a mismatch is not retried through `/me`.
     assert "/v26.0/me" not in calls and len(calls) == 2
 
@@ -2195,8 +2222,8 @@ async def test_a_me_answer_that_does_not_prove_ownership_is_asked_once_and_refus
     calls = []
     a, _ = make(batch_graph(calls, owner=APP_ID, me=me), metadata_only=True)
     result = await batch(a, ["1", "2", "3"])
-    assert result.observations == () and result.failed == ("1", "2", "3")
-    assert calls.count("/v26.0/me") == 1
+    assert result.observations == () and result.deferred == ("1", "2", "3")
+    assert result.failed == () and calls.count("/v26.0/me") == 1
     assert "private-profile" not in repr(result)
 
 

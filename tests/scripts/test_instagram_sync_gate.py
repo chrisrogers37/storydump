@@ -1088,6 +1088,14 @@ async def quality_checkpoint(
     return cp
 
 
+#: Graph's answer for a post that does not exist (code 100, subcode 33), and a
+#: refusal that does not prove it.
+GONE = {
+    "error": {"code": 100, "error_subcode": 33, "message": "private parent failure"}
+}
+UNPROVEN = {"error": {"code": 100, "message": "private parent failure"}}
+
+
 async def test_real_permanent_helper_failure_retires_without_partial_observation(
     world_db, past_posts_engine, origin
 ):
@@ -1103,9 +1111,7 @@ async def test_real_permanent_helper_failure_retires_without_partial_observation
     async def response(request):
         if request.url.path.endswith("/media"):
             return httpx.Response(200, json={"data": []})
-        return httpx.Response(
-            400, json={"error": {"code": 100, "message": "private parent failure"}}
-        )
+        return httpx.Response(400, json=GONE)
 
     injected, client, requests = await quality_ports(m, c, response)
     try:
@@ -1361,9 +1367,20 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
         await worker.dispose()
 
 
+@pytest.mark.parametrize(
+    "answer,deferred,availability,reason",
+    [
+        (GONE, [], "unavailable", "asset_unavailable"),
+        (UNPROVEN, ["222"], "available", None),
+    ],
+    ids=["gone", "unproven"],
+)
 async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
-    world_db, past_posts_engine, origin
+    world_db, past_posts_engine, origin, answer, deferred, availability, reason
 ):
+    """Graph's "does not exist" retires the parent's slides; any other refusal
+    leaves them as they were and the parent waits for the next restart. Either
+    way the rest of the batch lands."""
     import httpx
 
     m = service()
@@ -1375,9 +1392,7 @@ async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
 
     async def response(request):
         if request.url.path.endswith("/222"):
-            return httpx.Response(
-                400, json={"error": {"code": 100, "message": "private parent failure"}}
-            )
+            return httpx.Response(400, json=answer)
         return httpx.Response(200, json=parent_json(request))
 
     injected, client, requests = await quality_ports(m, c, response)
@@ -1386,14 +1401,14 @@ async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
         cp, _, _ = await state(past_posts_engine, origin, src)
         assert first.graph_attempts == len(requests) == 3
         assert first.committed_observations == 2
-        assert cp["pending_helpers"] == [] and cp["deferred_helpers"] == []
+        assert cp["pending_helpers"] == [] and cp["deferred_helpers"] == deferred
         rows = await batch_state(past_posts_engine, origin, src)
         assert (
             rows["111"]["attribution"] == rows["333"]["attribution"] == "not_detected"
         )
         assert rows["222"]["attribution"] == "unknown"
-        assert rows["222"]["availability"] == "unavailable"
-        assert rows["222"]["exclusion_reason"] == "asset_unavailable"
+        assert rows["222"]["availability"] == availability
+        assert rows["222"]["exclusion_reason"] == reason
         assert rows["222"]["validation_capture"] is None
         assert rows["111"]["validation_capture"] is None
     finally:

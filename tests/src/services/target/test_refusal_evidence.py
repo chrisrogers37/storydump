@@ -19,7 +19,12 @@ import traceback
 
 import pytest
 
-from src.services.target import instagram_publish, media_validation, refusal_evidence
+from src.services.target import (
+    instagram_preparation,
+    instagram_publish,
+    media_validation,
+    refusal_evidence,
+)
 from tests.src.services.target.conftest import SIGNED, SIGNED_PARTS
 
 SECRET = "EAAB-fake-secret-value"
@@ -120,6 +125,94 @@ def test_of_hands_back_an_empty_dict_rather_than_none():
     """An empty dict is still evidence: `of` checks the type, not the truth."""
     error = refusal_evidence.attach(RuntimeError("plain"), {})
     assert refusal_evidence.of(error) == {}
+
+
+# --- latched -------------------------------------------------------------------
+
+#: A slide's capture once a refused fetch parked it.
+PARKED = {
+    "state": "validation_pending",
+    "reason": "asset_unavailable",
+    "attempt": 8,
+    "refusal": refusal_evidence.evidence("cdn_refused", statuses=[404, 404]),
+}
+
+
+#: A slide's capture once a local check judged its file unsupported: the
+#: capture's reason is the check that decided it.
+JUDGED = {
+    "state": "unsupported",
+    "reason": "duration",
+    "refusal": refusal_evidence.evidence(
+        "local_validation",
+        state="unsupported",
+        check="duration",
+        measured={"seconds": 2.5},
+    ),
+}
+
+
+@pytest.mark.unit
+def test_a_parked_slide_keeps_the_refusal_that_parked_it():
+    assert refusal_evidence.latched(PARKED) == PARKED["refusal"]
+
+
+@pytest.mark.unit
+def test_a_slide_judged_unsupported_keeps_the_check_that_judged_it():
+    """A local check's verdict latches the slide too, so a later park says the
+    check, not only that the media is one stories do not take."""
+    assert refusal_evidence.latched(JUDGED) == JUDGED["refusal"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reason,capture",
+    [("asset_unavailable", PARKED), ("unsupported", JUDGED)],
+    ids=["fetch-refused", "judged-unsupported"],
+)
+def test_a_story_meeting_a_latched_slide_carries_the_refusal_that_latched_it(
+    reason, capture
+):
+    """The pending for a story whose verdict meets a parked slide carries the
+    refusal that parked the slide, a refused fetch's or a local check's, so its
+    park says why."""
+    pending = instagram_preparation._unsuitable(
+        {"reason": reason}, {"current_capture": capture}
+    )
+    assert pending.reason == reason
+    assert refusal_evidence.of(pending) == capture["refusal"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "capture",
+    [
+        {**JUDGED, "state": "validation_pending"},
+        {**JUDGED, "refusal": PARKED["refusal"]},
+    ],
+    ids=["not-unsupported", "not-a-local-check"],
+)
+def test_only_a_local_checks_unsupported_verdict_is_its_latch(capture):
+    """A pending check latches nothing, and an unsupported capture keeps only a
+    local check's refusal as the one that judged it."""
+    assert refusal_evidence.latched(capture) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "capture",
+    [
+        {**PARKED, "reason": "download_pending"},
+        {**PARKED, "refusal": "text"},
+        {key: value for key, value in PARKED.items() if key != "refusal"},
+        None,
+        "asset_unavailable",
+    ],
+    ids=["a-try-still-waiting", "not-evidence", "no-refusal", "no-capture", "text"],
+)
+def test_anything_but_a_parked_slide_has_no_latched_refusal(capture):
+    """Only a capture the refusal parked says why the slide is parked."""
+    assert refusal_evidence.latched(capture) is None
 
 
 # --- graph_path ----------------------------------------------------------------
@@ -748,6 +841,71 @@ FETCH_SENTENCES = [
         id="over-byte-cap",
     ),
     pytest.param(
+        fetch_refusal("download_budget_spent", seconds=240.0, host=HOST),
+        "Instagram's file did not download within the 240 s limit",
+        id="download-budget-spent",
+    ),
+    pytest.param(
+        fetch_refusal("download_budget_spent", seconds=None, host=HOST),
+        "Instagram's file did not download within its time limit",
+        id="download-budget-spent-without-its-seconds",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed",
+            late_seconds=3600,
+            tries=7,
+            last_refusal=fetch_refusal(
+                "cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY
+            ),
+        ),
+        "its file could not be fetched within 60 minutes of its slot (7 tries);"
+        " the last was refused: Instagram's file server refused the link twice"
+        " (HTTP 403/404)",
+        id="window-closed",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed", late_seconds=3600, tries=0, last_refusal=None
+        ),
+        "its file could not be fetched within 60 minutes of its slot (0 tries)",
+        id="window-closed-before-a-try",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed", late_seconds=3600, tries=1, last_refusal=None
+        ),
+        "its file could not be fetched within 60 minutes of its slot (1 try)",
+        id="window-closed-after-one-try",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed",
+            late_seconds=3600,
+            tries=0,
+            last_refusal=refusal_evidence.evidence(
+                "not_admitted", reason="asset_unavailable", item_state="removed"
+            ),
+        ),
+        "its file could not be fetched within 60 minutes of its slot (0 tries);"
+        " the chosen slide or post is no longer in the index of your past posts",
+        id="window-closed-on-a-retired-slide-before-a-try",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "window_closed",
+            late_seconds=3600,
+            tries=2,
+            last_refusal=refusal_evidence.evidence(
+                "not_admitted", reason="asset_unavailable", item_state="removed"
+            ),
+        ),
+        "its file could not be fetched within 60 minutes of its slot (2 tries);"
+        " the last was refused: the chosen slide or post is no longer in the"
+        " index of your past posts",
+        id="window-closed-on-a-retired-slide-after-tries",
+    ),
+    pytest.param(
         fetch_refusal("cdn_refused", statuses=[403, 404], host=HOST, expiry=EXPIRY),
         "Instagram's file server refused the link twice (HTTP 403/404)",
         id="cdn-refused",
@@ -1046,6 +1204,47 @@ HELD_SENTENCES = [
     ),
 ]
 
+#: Why a preparation was not admitted, for a park no refusal backs: only what
+#: the reason and the item's state support, so a retired item never reads as a
+#: post gone from Instagram.
+NOT_ADMITTED_SENTENCES = [
+    pytest.param(
+        refusal_evidence.evidence(
+            "not_admitted", reason="asset_unavailable", item_state="removed"
+        ),
+        "the chosen slide or post is no longer in the index of your past posts",
+        id="not-admitted-retired",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "not_admitted", reason="asset_unavailable", item_state="available"
+        ),
+        "the chosen post could not be fetched, and no detail was recorded",
+        id="not-admitted-unavailable",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "not_admitted", reason="unsupported", item_state="available"
+        ),
+        "this media was judged one stories do not take",
+        id="not-admitted-unsupported",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "not_admitted", reason="selected_asset_changed", item_state="available"
+        ),
+        "the chosen post's content changed",
+        id="not-admitted-changed",
+    ),
+    pytest.param(
+        refusal_evidence.evidence(
+            "not_admitted", reason="made_up_reason", item_state="available"
+        ),
+        "the chosen post was not prepared (made_up_reason), and no detail was recorded",
+        id="not-admitted-unknown-reason",
+    ),
+]
+
 #: Why a story went into review by a route that refused nothing.
 REVIEW_SENTENCES = [
     pytest.param(
@@ -1065,6 +1264,14 @@ REVIEW_SENTENCES = [
         id="budget-spent",
     ),
     pytest.param(
+        refusal_evidence.evidence(
+            "budget_spent", tries=8, trying_to="fetch this story's file from Instagram"
+        ),
+        "we hit a fault on our side 8 times trying to fetch this story's file"
+        " from Instagram",
+        id="budget-spent-fetching",
+    ),
+    pytest.param(
         refusal_evidence.evidence("publish_unconfirmed", checks=12),
         "Instagram's answer to the post was lost, and it could not be confirmed"
         " as posted (12 checks)",
@@ -1081,14 +1288,19 @@ REVIEW_SENTENCES = [
 KINDS = sorted(
     {
         case.values[0]["kind"]
-        for case in FETCH_SENTENCES + PUBLISH_SENTENCES + REVIEW_SENTENCES
+        for case in FETCH_SENTENCES
+        + PUBLISH_SENTENCES
+        + NOT_ADMITTED_SENTENCES
+        + REVIEW_SENTENCES
     }
     | {"local_validation"}
 )
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("refusal,sentence", FETCH_SENTENCES + PUBLISH_SENTENCES)
+@pytest.mark.parametrize(
+    "refusal,sentence", FETCH_SENTENCES + PUBLISH_SENTENCES + NOT_ADMITTED_SENTENCES
+)
 def test_plain_says_why_each_kind_was_refused(refusal, sentence):
     """One sentence per refusal, from its facts alone: the record's host, expiry,
     path, trace id and counters are not in it, and a dead container is said by
@@ -1443,36 +1655,28 @@ def test_the_park_notice_says_what_a_record_holds(evidence, sentence):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "admission_reason,sentence",
-    [
-        ("asset_unavailable", "the chosen post is no longer available"),
-        ("selected_asset_changed", "the chosen post's content changed"),
-        ("unsupported", "the chosen post's media is not one stories take"),
-    ],
-)
-def test_the_park_notice_says_its_admission_reason_when_it_holds_no_evidence(
-    admission_reason, sentence
-):
-    """A park with no refusal evidence still knows why its preparation was not
-    admitted, and says that rather than that no reason was recorded."""
-    assert instagram_publish._park_notice(None, admission_reason) == (
+@pytest.mark.parametrize("evidence,sentence", NOT_ADMITTED_SENTENCES)
+def test_the_park_notice_says_why_a_preparation_was_not_admitted(evidence, sentence):
+    """A park no refusal backs records why its preparation was not admitted,
+    and its notice says that record's sentence, the one its card says, and
+    never that the post is no longer available."""
+    notice = instagram_publish._park_notice(evidence)
+    assert notice == (
         "This story from your Instagram past posts could not be prepared."
         f" Refused: {sentence}. Open the Queue to review it."
     )
+    assert "no longer available" not in notice
 
 
 @pytest.mark.unit
-def test_the_park_notice_says_its_evidence_before_its_admission_reason():
-    """Evidence with something to say wins: the admission reason is said only
-    when the evidence says nothing."""
-    evidence = validation_refusal("malformed_container", **CONTAINER)
-    notice = instagram_publish._park_notice(evidence, "unsupported")
-    assert "Refused: this video file is damaged." in notice
-
-
-@pytest.mark.unit
-def test_the_park_notice_guesses_no_admission_reason_it_has_no_words_for():
-    """An admission reason the notice has no words for is not guessed at."""
-    notice = instagram_publish._park_notice(None, "made_up_reason")
-    assert "Refused: no reason was recorded." in notice
+def test_the_not_admitted_record_holds_the_reason_and_the_items_state():
+    """The record a park no refusal backs keeps the admission reason and the
+    item's state the park read under the story's lock, and nothing else."""
+    assert instagram_publish._not_admitted(
+        "asset_unavailable", {"media_item_state": "removed"}
+    ) == {
+        "v": refusal_evidence.VERSION,
+        "kind": "not_admitted",
+        "reason": "asset_unavailable",
+        "item_state": "removed",
+    }

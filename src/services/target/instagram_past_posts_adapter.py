@@ -85,6 +85,9 @@ _EXPIRED_LINK = frozenset({401, 403, 404, 410})
 PREVIEW_GRAPH_REQUESTS = 2
 PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 PREVIEW_BUDGET_S = 8.0
+#: A download's wall budget when the caller names none (`WorkerConfig`'s
+#: `past_posts_download_seconds` names one per kind).
+DEFAULT_DOWNLOAD_SECONDS = 120.0
 _PREVIEW_FIELDS = _FETCH_FIELDS + ",thumbnail_url"
 _PREVIEW_CHILD_FIELDS = "id,media_type,media_url,thumbnail_url"
 
@@ -679,7 +682,8 @@ class InstagramPastPostsAdapter:
 
         Before a request the turn cannot afford, the batch yields: the parent it
         was reading, and every later one, stay queued, and what completed is
-        returned. A parent the provider refused for good is `failed` and the
+        returned. A parent Graph says does not exist is `failed`, and one refused
+        without that proof is `deferred`, its slides untouched; either way the
         batch goes on, so one bad parent cannot starve the rest. A parent whose
         read is retryable is `deferred`, and the batch ends there, so a provider
         that is throttling or failing is not asked again this turn. A first
@@ -706,8 +710,14 @@ class InstagramPastPostsAdapter:
                     deferred.append(mid)
                     diagnostics.append("parent_read_retry_pending")
                     break
-                except MediaTerminalError:
-                    failed.append(mid)
+                except MediaTerminalError as exc:
+                    if refusal_evidence.proves_gone(refusal_evidence.of(exc)):
+                        failed.append(mid)
+                    else:
+                        # One answer that does not prove the post gone retires
+                        # none of its slides: the parent is read again later.
+                        deferred.append(mid)
+                        diagnostics.append("parent_read_unproven")
                     continue
                 observations.append(observation)
                 candidates.extend(
@@ -1200,6 +1210,7 @@ class InstagramPastPostsAdapter:
         workspace_id: str,
         max_bytes: int,
         selected_asset_id: Optional[str] = None,
+        download_budget_s: Optional[float] = None,
         expected_slide_count: Optional[int] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
@@ -1209,6 +1220,8 @@ class InstagramPastPostsAdapter:
         captured selected_asset_id. Freshly changed carousel bytes cannot
         inherit the previous child's evidence. No consumer is wired here. A
         preview is :meth:`fetch_preview`, never this full fetch.
+        download_budget_s is the download's wall budget, DEFAULT_DOWNLOAD_SECONDS
+        when None; a download it cuts off names it in the refusal's evidence.
         expected_slide_count is the slide count the index recorded for the
         post, None for a single post or when none was recorded: a selected
         slide the reads lack is judged gone only against it (`_current_slide`).
@@ -1242,7 +1255,8 @@ class InstagramPastPostsAdapter:
                             has_link=isinstance(url, str) and bool(url),
                         ),
                     )
-                policy = self._download_policy(url, max_bytes)
+                policy = self._download_policy(url, max_bytes, download_budget_s)
+                link = refusal_evidence.link_evidence(url)
                 try:
                     # Never forward the Instagram token to the CDN.
                     self._require_plain_client()
@@ -1260,14 +1274,18 @@ class InstagramPastPostsAdapter:
                             "over_byte_cap",
                             cap=exc.cap,
                             received=exc.received,
-                            host=refusal_evidence.link_evidence(url)["host"],
+                            host=link["host"],
                         ),
                     ) from None
                 except egress.EgressBudgetExhausted:
-                    raise MediaRetryableError(
-                        "Instagram download budget exhausted"
+                    raise refusal_evidence.attach(
+                        MediaRetryableError("Instagram download budget exhausted"),
+                        refusal_evidence.evidence(
+                            "download_budget_spent",
+                            seconds=policy.total_budget_s,
+                            host=link["host"],
+                        ),
                     ) from None
-                link = refusal_evidence.link_evidence(url)
                 if response.status_code in _EXPIRED_LINK:
                     link_statuses.append(response.status_code)
                     if attempt == 0:
@@ -1459,7 +1477,9 @@ class InstagramPastPostsAdapter:
             },
         )
 
-    def _download_policy(self, url: str, max_bytes: int) -> egress.EgressPolicy:
+    def _download_policy(
+        self, url: str, max_bytes: int, budget_s: Optional[float] = None
+    ) -> egress.EgressPolicy:
         try:
             parsed = urlsplit(url)
             host = parsed.hostname or ""
@@ -1487,5 +1507,5 @@ class InstagramPastPostsAdapter:
             allowed_hosts=frozenset({host}),
             max_response_bytes=max_bytes,
             timeout_class="upload",
-            total_budget_s=120,
+            total_budget_s=DEFAULT_DOWNLOAD_SECONDS if budget_s is None else budget_s,
         )

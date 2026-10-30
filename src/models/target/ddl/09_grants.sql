@@ -300,6 +300,14 @@ REVOKE ALL ON FUNCTION fn_reaper_stale_approved(interval, integer) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_reaper_stale_approved(interval, integer) TO svc_worker;
 
+REVOKE ALL ON FUNCTION fn_reaper_parks_late(uuid, uuid) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_parks_late(uuid, uuid) TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_reaper_late_past_posts(interval, integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_late_past_posts(interval, integer) TO svc_worker;
+
 REVOKE ALL ON FUNCTION fn_health_posting_freshness() FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_health_posting_freshness() TO svc_ingress;
@@ -444,9 +452,9 @@ REVOKE ALL ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) FROM PUB
 
 GRANT EXECUTE ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) TO svc_worker;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) TO svc_worker;
 
 REVOKE ALL ON FUNCTION trg_past_posts_validation_capture_reset() FROM PUBLIC;
 

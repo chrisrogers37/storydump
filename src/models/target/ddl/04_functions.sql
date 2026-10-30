@@ -480,6 +480,45 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
    LIMIT GREATEST(p_lim, 0)
 $$;
 
+-- Whether a reaper that parks late past-posts stories (fn_reaper_sweep's
+-- p_past_posts_park_late) owns this cadence story's end: its file is a past
+-- post's, and its workspace is active and unpaused. The cadence leg leaves such
+-- a story and fn_reaper_late_past_posts lists it, both by this one rule, so no
+-- story is left to neither.
+CREATE FUNCTION fn_reaper_parks_late(p_ws uuid, p_item uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM media_items m
+                   JOIN media_sources s ON s.workspace_id = m.workspace_id AND s.id = m.source_id
+                   JOIN workspaces w ON w.id = m.workspace_id
+                  WHERE m.workspace_id = p_ws AND m.id = p_item
+                    AND s.provider = 'instagram_past_posts'
+                    AND w.state = 'active' AND NOT w.is_paused)
+$$;
+
+-- The past-posts cadence stories a reaper that parks them (fn_reaper_sweep's
+-- p_past_posts_park_late) parks now: its own (fn_reaper_parks_late), still
+-- waiting for their slot p_late after it, and with no prepare_past_post job
+-- running, so no download is in flight. Each comes with the tries its latest
+-- prepare job spent; a job puts back unspent the tries that asked nothing.
+CREATE FUNCTION fn_reaper_late_past_posts(p_late interval, p_lim int)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid, o_tries int)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT i.id, i.workspace_id,
+         COALESCE((SELECT j.attempts FROM jobs j
+                    WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                      AND j.serialization_key = 'prep:' || i.id
+                    ORDER BY j.created_at DESC, j.id DESC LIMIT 1), 0)
+    FROM post_intents i
+   WHERE i.state IN ('scheduled', 'prompt_pending') AND i.origin = 'cadence'
+     AND NOT i.cancel_requested AND i.schedule_slot_at < now() - p_late
+     AND fn_reaper_parks_late(i.workspace_id, i.media_item_id)
+     AND NOT EXISTS (SELECT 1 FROM jobs j
+                      WHERE j.workspace_id = i.workspace_id AND j.kind = 'prepare_past_post'
+                        AND j.serialization_key = 'prep:' || i.id AND j.state = 'leased')
+   ORDER BY i.schedule_slot_at, i.id
+   LIMIT GREATEST(p_lim, 0)
+$$;
+
 -- Landings and their freshness, estate-wide, for /health/posting: confirmed
 -- posts (never a dry_run row), the age of the freshest,
 -- every intent ever and the age of the oldest. A SECURITY DEFINER read owned
@@ -1686,7 +1725,15 @@ BEGIN
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
 
-CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean)
+-- The cadence leg expires a cadence story still waiting p_late, the caller's
+-- late window, after its slot; with no window, the default, it expires it at
+-- its slot. A story is minted once its slot has come, so the window is what
+-- keeps the leg off a story the prompt sweep has not reached yet. A caller
+-- that passes p_past_posts_park_late parks the stories fn_reaper_parks_late
+-- names itself once their late window closes (fn_reaper_late_past_posts), so
+-- the leg leaves them to it. Without it, the default, such a story expires as
+-- a Drive story does.
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval,p_past_posts_enabled boolean,p_past_posts_park_late boolean DEFAULT false,p_late interval DEFAULT NULL)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE locked_workspaces uuid[]:='{}'; lock_ws uuid; expired_job record; refusal text; n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
@@ -1698,8 +1745,10 @@ BEGIN
      'plan_slot','refresh_credential','reauth_prompt','deliver_outbox','sync_media_source','first_ingest_chunk','convert_source_mix') ORDER BY id LIMIT GREATEST(p_lim,0))
    UNION (SELECT workspace_id FROM post_intents WHERE cancel_requested AND cap_consumed_on IS NULL
     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved') ORDER BY id LIMIT GREATEST(p_lim,0))
-   UNION (SELECT workspace_id FROM post_intents WHERE state IN ('scheduled','prompt_pending')
-    AND schedule_slot_at<now() AND origin='cadence' ORDER BY id LIMIT GREATEST(p_lim,0))
+   UNION (SELECT i.workspace_id FROM post_intents i WHERE i.state IN ('scheduled','prompt_pending')
+    AND i.schedule_slot_at<now()-COALESCE(p_late,interval '0') AND i.origin='cadence'
+    AND NOT (p_past_posts_park_late AND fn_reaper_parks_late(i.workspace_id,i.media_item_id))
+    ORDER BY i.id LIMIT GREATEST(p_lim,0))
    UNION (SELECT i.workspace_id FROM post_intents i JOIN workspaces w ON w.id=i.workspace_id
     WHERE i.state='awaiting_approval' AND i.entered_state_at<now()-COALESCE(w.approval_ttl_minutes*interval '1 minute',p_approval_ttl)
     ORDER BY i.id LIMIT GREATEST(p_lim,0))
@@ -1731,10 +1780,12 @@ BEGIN
      AND state IN ('scheduled','prompt_pending','awaiting_approval','approved');
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents SET state = 'expired'
-   WHERE id IN (SELECT id FROM post_intents
-                 WHERE workspace_id=ANY(locked_workspaces) AND state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
-                   AND origin = 'cadence'
-                 ORDER BY id LIMIT rem);
+   WHERE id IN (SELECT i.id FROM post_intents i
+                 WHERE i.workspace_id=ANY(locked_workspaces) AND i.state IN ('scheduled','prompt_pending') AND i.schedule_slot_at < now() - COALESCE(p_late, interval '0')
+                   AND i.origin = 'cadence'
+                   AND NOT (p_past_posts_park_late
+                            AND fn_reaper_parks_late(i.workspace_id, i.media_item_id))
+                 ORDER BY i.id LIMIT rem);
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents i SET state = 'expired'
    WHERE i.id IN (
@@ -1962,6 +2013,10 @@ SELECT c.source_id,c.media_item_id,c.provider,
 FROM context c
 $$;
 
+-- The past-posts stories whose file is due for preparation and not yet
+-- supported. A story with a prepare_past_post job ready or running is left
+-- out: the job owns it until it ends, so the prompt sweep mints one job per
+-- story and a story waiting out its next try costs the sweep nothing.
 CREATE FUNCTION fn_selected_preparation_due(p_limit integer)
 RETURNS TABLE(intent_id uuid,workspace_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER
@@ -1971,6 +2026,8 @@ SET search_path=pg_catalog,public,pg_temp AS $$
  JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
  WHERE s.provider='instagram_past_posts'
  AND w.state='active' AND NOT w.is_paused AND NOT i.cancel_requested
+ AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.workspace_id=i.workspace_id AND j.kind='prepare_past_post'
+ AND j.serialization_key='prep:'||i.id AND j.state IN ('ready','leased'))
  AND NOT EXISTS (
  SELECT 1 FROM instagram_intent_provenance p
  JOIN instagram_media_assets a ON a.workspace_id=p.workspace_id

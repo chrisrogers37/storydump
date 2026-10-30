@@ -5,7 +5,7 @@ database: it re-checks the capture it serves, reads that capture's credential
 under the source prefix and decrypts it outside the transaction. It runs as the
 API's login and as the worker's (the preview and the sync), so each case here
 runs as both. The reaper takes the activation as a parameter, and its
-four-argument door is judged here against an expired past-posts sync. The
+activated door is judged here against an expired past-posts sync. The
 default-off half drives the composed, INACTIVE worker's publish executor over a
 real past-posts intent: with no coordinator the intent is refused by name, and
 nothing reaches a provider.

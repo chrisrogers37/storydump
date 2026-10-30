@@ -44,6 +44,7 @@ from src.services.target import (
 from src.services.target import (
     past_posts_activation,
     past_posts_deletion,
+    past_posts_preparation_job,
     past_posts_reconciliation,
     bindings,
     content_runway,
@@ -55,6 +56,7 @@ from src.services.target import (
     reconciler,
     scheduler,
     unit_of_work,
+    vocabulary,
 )
 from src.services.target.instagram_sources import is_activated
 from src.utils.datetime_utils import utcnow
@@ -82,18 +84,25 @@ class WorkerConfig:
     # lane in ONE process, on pooled checkouts — K bounds tasks, not
     # connections. Start values under the ceiling `assert_concurrency_fits`
     # enforces; raising them past it needs the measurement the gate records.
+    # Against the pinned pool (`POOL_SIZE_SEAM`, 10), with
+    # `RESERVED_CONNECTIONS` (3) held besides the tasks, each weighed by
+    # `TASK_CONNECTIONS`, these fit exactly: 2×1 + 2×2 + 1×1 + 3 = 10.
+    # The media lane's loops prepare past-posts files.
     lane_concurrency: Mapping[str, int] = field(
-        default_factory=lambda: {"interactive": 3, "bulk": 2}
+        default_factory=lambda: {"interactive": 2, "bulk": 2, "media": 1}
     )
     # Per-workspace, per-lane: interactive 5, bulk 3 (one
-    # publish + one sync + one misc). They bind
+    # publish + one sync + one misc), media 1. Interactive and bulk bind
     # only across several replicas: `fn_claim_job` counts the deployment's
     # leases, and under the pinned pool (`POOL_SIZE_SEAM`) one process never
     # runs more tasks per lane than these — `assert_concurrency_fits` checks
     # the pool, not the caps — so on a single worker one workspace can hold
-    # a whole lane.
+    # a whole lane. Media is the exception: its cap is 1, below any K its lane
+    # is raised to, so it binds on one process too and one workspace never
+    # holds more than one file task.
     ws_lane_cap_interactive: int = 5
     ws_lane_cap_bulk: int = 3
+    ws_lane_cap_media: int = 1
     claim_idle_seconds: float = 1.0  # sleep when a lane has nothing runnable
     park_seconds: float = 900.0  # executor-less kinds retry this often
     # < lease_seconds: the poller's hold per claim, short so a
@@ -106,9 +115,11 @@ class WorkerConfig:
     prompt_sweep_limit: int = 50  # sweep batch (`prompts.sweep_due_prompts`)
     # The late window: a planned story is still served up to
     # an hour after its time — the worker down, or a pause that ended inside
-    # the hour; past it, it is missed and its bound chats are told. Passed to
-    # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
-    # no migration.
+    # the hour; past it, it is missed and its bound chats are told. A cadence
+    # story has the same hour before the reaper expires it, or parks it when its
+    # file is a past post's. Passed to each door that judges lateness
+    # (`fn_prompts_due`, `fn_planned_misses`, `fn_reaper_sweep`,
+    # `fn_reaper_late_past_posts`), so a new value needs no migration.
     planned_late_seconds: int = 3600
     # A past post whose fetch is refused without proof (`past_posts_retry`) is
     # tried again after a wait that doubles from the base to the cap, up to the
@@ -117,6 +128,10 @@ class WorkerConfig:
     past_posts_retry_attempts: int = 8
     past_posts_retry_base_seconds: float = 30.0
     past_posts_retry_cap_seconds: float = 900.0
+    # The wall budget of one past-post download, per kind: a video is larger.
+    past_posts_download_seconds: Mapping[str, float] = field(
+        default_factory=lambda: {"image": 120.0, "video": 240.0}
+    )
     status_interval_seconds: float = 60.0  # cadence of the status line
     # The event-loop watchdog (`loop_watchdog`): the loop stamps a beat every
     # `loop_beat_seconds`, and one silent for `loop_stall_seconds` ends the
@@ -183,11 +198,11 @@ class WorkerConfig:
         return max(1, int(self.lane_concurrency.get(lane, 1)))
 
     def ws_lane_cap_for(self, lane: str) -> int:
-        return (
-            self.ws_lane_cap_interactive
-            if lane == "interactive"
-            else self.ws_lane_cap_bulk
-        )
+        if lane == "interactive":
+            return self.ws_lane_cap_interactive
+        if lane == "media":
+            return self.ws_lane_cap_media
+        return self.ws_lane_cap_bulk
 
     clock_interval_seconds: float = 15.0
     clock_max_inserts: int = 500
@@ -214,36 +229,41 @@ RESERVED_CONNECTIONS = 3
 #: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
 #: open sessions of their own UNDER the loop's job transaction, so a bulk task
 #: holds two at its peak. The ceiling weighs them so, rather than pretending.
-TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
+#: A media task runs an `own_transactions` executor that opens one short unit
+#: of work at a time, so it holds one connection at its peak.
+#:
+#: The lanes here are the lanes the worker serves: `src.worker.compose` starts
+#: `concurrency_for(lane)` loops for each, so what the ceiling counts is what runs.
+TASK_CONNECTIONS = {"interactive": 1, "bulk": 2, "media": 1}
 
 
 def task_connections(config: WorkerConfig) -> int:
     return sum(
-        config.concurrency_for(lane) * TASK_CONNECTIONS[lane]
-        for lane in ("interactive", "bulk")
+        config.concurrency_for(lane) * held for lane, held in TASK_CONNECTIONS.items()
     )
 
 
 def assert_concurrency_fits(config: WorkerConfig, *, pool_size: int) -> str:
     """The ceiling: every task DB-active at once (weighed by what a
     task holds at its peak, `TASK_CONNECTIONS`) plus the reserved steady
-    holders must fit the pool — `K_interactive × 1 + K_bulk × 2 + 3 ≤ pool`.
+    holders must fit the pool —
+    `K_interactive × 1 + K_bulk × 2 + K_media × 1 + 3 ≤ pool`.
     Returns the startup line; raises `ValueError` naming the numbers when
     the configuration would oversubscribe the pool (a worker that starts
     and then times out on every checkout is the failure this refuses at
     boot). A momentary overlap of the transient readers past the pool is a
     bounded wait, counted, never a failure."""
-    k_i = config.concurrency_for("interactive")
-    k_b = config.concurrency_for("bulk")
+    ks = {lane: config.concurrency_for(lane) for lane in TASK_CONNECTIONS}
     held = task_connections(config)
+    lanes = " ".join(f"{lane}×{k}" for lane, k in ks.items())
     line = (
-        f"lanes: interactive×{k_i} bulk×{k_b} pool={pool_size}"
+        f"lanes: {lanes} pool={pool_size}"
         f" (tasks hold up to {held} + {RESERVED_CONNECTIONS} reserved)"
     )
     if held + RESERVED_CONNECTIONS > pool_size:
+        weighed = " + ".join(f"{ks[lane]}×{n}" for lane, n in TASK_CONNECTIONS.items())
         raise ValueError(
-            f"{line}: {k_i}×{TASK_CONNECTIONS['interactive']} +"
-            f" {k_b}×{TASK_CONNECTIONS['bulk']} + {RESERVED_CONNECTIONS} reserved"
+            f"{line}: {weighed} + {RESERVED_CONNECTIONS} reserved"
             f" exceeds the pool of {pool_size} — lower TARGET_WORKER_*_CONCURRENCY"
             " or raise the pool (measure the load first)"
         )
@@ -299,8 +319,6 @@ class WorkerDeps:
     ops_notice: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
-    #: Selected-only preparation, outside SQL; strict fresh DB evidence remains authoritative.
-    selected_prepare: Any = None
     past_posts_capability: Any = None
 
 
@@ -310,9 +328,11 @@ _UNBUILT_REASON = (
 )
 
 #: Kinds the tier has never carried an executor for. The registry parks them
-#: unconditionally; the schema-derived completeness test keeps this honest.
+#: unconditionally; the schema-derived completeness test keeps this honest, and
+#: a kind leaves the tuple when `build_registry` registers its executor.
 #: (The three past-posts lifecycle kinds all have executors; the
-#: existing-account reconciliation parks only while the past-posts source is not armed.)
+#: existing-account reconciliation and the file lane's preparation park only
+#: while the past-posts source is not armed.)
 UNBUILT_KINDS = ("reencrypt_credentials",)
 
 
@@ -406,6 +426,8 @@ def build_registry(deps: WorkerDeps) -> dict:
             approval_ttl_seconds=cfg.approval_ttl_seconds,
             approved_ttl_seconds=cfg.approved_ttl_seconds,
             capability=deps.past_posts_capability,
+            park_late=deps.past_posts.park_late if deps.past_posts else None,
+            late_seconds=cfg.planned_late_seconds,
         )
 
     @own_transactions
@@ -787,6 +809,13 @@ def build_registry(deps: WorkerDeps) -> dict:
         outcome = await past_posts_deletion.execute(deps, job)
         logger.info("meta_deletion_cleanup %s -> %s", job["id"], outcome)
 
+    # Own transactions: it fetches the story's file between its short
+    # transactions, never inside one, and finalizes or puts back its own job
+    # (`past_posts_preparation_job`).
+    @own_transactions
+    async def prepare_past_post(session, job):
+        return await past_posts_preparation_job.execute(deps, job)
+
     # Own transactions: it asks the provider who a token is for between its
     # short transactions, never inside one. A turn that left accounts over put
     # its job back itself (`past_posts_reconciliation.CONTINUED`).
@@ -807,6 +836,11 @@ def build_registry(deps: WorkerDeps) -> dict:
         meta_deletion_cleanup
         if deps.past_posts_keys is not None
         else Parked("deletion cleanup needs PAST_POSTS_HMAC_KEYS")
+    )
+    registry["prepare_past_post"] = (
+        prepare_past_post
+        if deps.past_posts is not None
+        else Parked("instagram past posts off (no armed past-posts source)")
     )
     if reconciling:
         registry["reconcile_past_posts_accounts"] = reconcile_past_posts_accounts
@@ -1110,18 +1144,25 @@ _DEFAULT_NOTICE = (
 async def _settle_exhausted(session, job, *, capability=None) -> Optional[dict]:
     """The state a spent job leaves behind, written in the finalize's own
     transaction and ahead of the notice's savepoint, so that a failed notice
-    cannot roll it back: a sync's source re-armed for tomorrow, a publish
-    job's story flipped to review. Returns the parked story's `tell_review`
-    arguments for the notice, or None. Nothing here may raise on a malformed
-    payload: outside the savepoint a raise aborts the finalize, and the spent
-    job would be claimed again on every lease lapse, so each branch refuses a
-    malformed id with a log line instead."""
+    cannot roll it back: a sync's source re-armed for tomorrow, the story a
+    publish or prepare job carried flipped to review. Returns the parked
+    story's `tell_review` arguments for the notice, or None. Nothing here may
+    raise on a malformed payload: outside the savepoint a raise aborts the
+    finalize, and the spent job would be claimed again on every lease lapse,
+    so each branch refuses a malformed id with a log line instead."""
     kind = str(job.get("kind"))
     if kind in _SYNC_KINDS:
         await _rearm_source(session, job, capability=capability)
         return None
     if kind == "publish_pipeline":
         return await publish_pipeline.flip_exhausted(session, job)
+    if kind == past_posts_preparation_job.KIND:
+        return await publish_pipeline.flip_exhausted(
+            session,
+            job,
+            from_states=vocabulary.WAITING_STATES,
+            trying_to="fetch this story's file from Instagram",
+        )
     return None
 
 
@@ -1134,11 +1175,11 @@ async def _notify_exhausted(session, job, parked: Optional[dict]) -> None:
     workspace_id = job.get("workspace_id")
     if workspace_id is None or kind in _REMINTED_KINDS:
         return
-    if kind == "publish_pipeline":
-        # The story a dead publish job carried is parked for the
+    if kind in ("publish_pipeline", past_posts_preparation_job.KIND):
+        # The story a dead publish or prepare job carried is parked for the
         # workspace's review — the card with its buttons and one honest
-        # line — never left reading Approved behind a generic notice. The
-        # flip is `_settle_exhausted`'s; this is its courtesy.
+        # line — never left waiting behind a generic notice. The flip is
+        # `_settle_exhausted`'s; this is its courtesy.
         if parked:
             await publish_pipeline.tell_review(session, **parked)
         return

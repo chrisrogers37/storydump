@@ -21,7 +21,7 @@ if __package__ in (None, ""):
 
 from scripts.sql_lexer import COMMENTS, DOLLAR, segments
 
-ALLOWED = frozenset({"000", "001", "002", "003", "004", "005"})
+ALLOWED = frozenset({"000", "001", "002", "003", "004", "005", "006"})
 SOURCE_SUFFIXES = frozenset({".py", ".sql", ".ts", ".tsx", ".js", ".jsx"})
 DOCUMENT_SUFFIXES = frozenset({".md", ".rst"})
 # Higher numbers can also be counts, HTTP statuses, limits or example IDs.

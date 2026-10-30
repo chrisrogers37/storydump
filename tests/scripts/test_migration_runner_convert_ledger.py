@@ -146,7 +146,7 @@ def test_conversion_preserves_every_old_field_and_adopts_the_current_base(
         == identity
     )
     assert [migration.version for migration in report.adopted] == [0]
-    assert [migration.version for migration in report.pending] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in report.pending] == [1, 2, 3, 4, 5, 6]
     assert [(row["version"], row["status"]) for row in ledger_rows(retired_ledger)] == [
         (0, "adopted")
     ]

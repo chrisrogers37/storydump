@@ -25,6 +25,7 @@ import pytest
 from src.api import app as app_module
 from src.services.target import past_posts_activation as aa
 from src.services.target import past_posts_composition as composition
+from src.services.target.past_posts_retry import ONCE
 from src.services.target import (
     jobs,
     scheduler,
@@ -74,6 +75,7 @@ def built(client, **extra):
         engine=object(),
         env=armed(**extra),
         client=client,
+        retry=ONCE,
     )
 
 
@@ -108,7 +110,7 @@ def test_nothing_is_built_without_the_key_ring_and_the_line_names_why(
     caplog, env, reason
 ):
     with caplog.at_level(logging.INFO, logger=composition.logger.name):
-        worker = composition.build_worker(engine=object(), env=env)
+        worker = composition.build_worker(engine=object(), env=env, retry=ONCE)
         api = composition.build_api(engine=object(), env=env)
     assert (worker, api) == (None, None)
     assert [m for m in caplog.messages if m.startswith("instagram past posts")] == [
@@ -122,7 +124,9 @@ def test_the_ring_arms_on_any_release_with_nothing_else_set(caplog, client, rele
     if release is not None:
         env[composition.RELEASE_VAR] = release
     with caplog.at_level(logging.INFO, logger=composition.logger.name):
-        worker = composition.build_worker(engine=object(), env=env, client=client)
+        worker = composition.build_worker(
+            engine=object(), env=env, client=client, retry=ONCE
+        )
     run = aa.release_evidence(release).run_id
     assert worker is not None and worker.evidence == aa.release_evidence(release)
     assert f"instagram past posts: on (run={run})" in caplog.messages
@@ -134,12 +138,11 @@ def test_an_inactive_worker_wires_no_past_posts_seam_but_still_loads_the_receipt
     assert (
         deps.past_posts,
         deps.past_posts_sync,
-        deps.selected_prepare,
         deps.past_posts_capability,
         deps.past_posts_evidence,
         deps.past_posts_client,
         deps.past_posts_keys,
-    ) == (None,) * 7
+    ) == (None,) * 6
     assert all(loop._past_posts_capability is None for loop in bare.loops)
     assert isinstance(bare.registry["reconcile_past_posts_accounts"], Parked)
     # `compose` reads the key ring itself: a deletion receipt is redacted with
@@ -229,6 +232,7 @@ def test_an_armed_process_with_a_bad_graph_version_refuses_to_compose(client):
         composition.build_worker(
             engine=object(),
             env={"META_GRAPH_VERSION": "latest"},
+            retry=ONCE,
         )
         is None
     )
@@ -250,17 +254,27 @@ async def test_the_access_provider_refuses_a_call_for_another_source_before_any_
 # --- armed: the worker's wiring ---------------------------------------------------
 
 
-def test_the_preparation_tries_again_under_the_retry_it_is_handed(client):
-    """The worker hands `WorkerConfig`'s retry to `build_worker`, which hands it
-    to the preparation; handed none, the preparation tries once."""
-    from src.services.target.past_posts_retry import ONCE, Retry
+def test_the_preparation_tries_again_under_the_numbers_it_is_handed(client):
+    """The worker hands `WorkerConfig`'s retry and download budgets to
+    `build_worker`, which hands them to the preparation; handed no budgets, the
+    preparation keeps the adapter's own. The retry has no default: a builder
+    that forgets it is refused."""
+    from src.services.target.past_posts_retry import Retry
 
     retry = Retry(attempts=5, base_seconds=10, cap_seconds=60)
+    budgets = {"image": 12.0, "video": 34.0}
     past_posts = composition.build_worker(
-        engine=object(), env=armed(), client=client, retry=retry
+        engine=object(),
+        env=armed(),
+        client=client,
+        retry=retry,
+        download_seconds=budgets,
     )
     assert past_posts.preparation.ports.retry is retry
-    assert built(client).preparation.ports.retry is ONCE
+    assert past_posts.preparation.ports.download_seconds == budgets
+    assert not built(client).preparation.ports.download_seconds
+    with pytest.raises(TypeError):
+        composition.build_worker(engine=object(), env=armed(), client=client)
 
 
 def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):
@@ -268,11 +282,10 @@ def test_an_armed_worker_wires_every_seam_to_the_one_graph(client):
     app = composed(past_posts, env=armed())
     deps = app.deps
 
+    # The coordinator, whose `selected_prepare` WRAPPER owns the bound-content
+    # review route: the prepare job never reaches the bare `SelectedPreparation`
+    # method the coordinator was built over.
     assert deps.past_posts is past_posts.coordinator
-    # The WRAPPER, which owns the bound-content review route: never the bare
-    # `SelectedPreparation` method the coordinator was built over.
-    assert deps.selected_prepare == past_posts.coordinator.selected_prepare
-    assert deps.selected_prepare != past_posts.preparation.selected_prepare
     assert deps.past_posts_sync is past_posts.sync_ports
     assert deps.past_posts_capability is past_posts.capability
     assert deps.past_posts_evidence is past_posts.evidence
@@ -343,6 +356,8 @@ async def test_the_claim_the_reaper_and_the_clock_receive_the_capability(
 
     assert claimed["capability"] is past_posts.capability
     assert reaped["capability"] is past_posts.capability
+    assert reaped["park_late"] == past_posts.coordinator.park_late
+    assert reaped["late_seconds"] == app.config.planned_late_seconds
     assert ticked["capability"] is past_posts.capability
 
 
@@ -436,6 +451,14 @@ async def test_a_spent_job_is_settled_under_the_loops_capability(monkeypatch):
 
 # --- the reaper's door ------------------------------------------------------------
 
+#: The sweep as the reaper calls it: the activation, whether it parks, and the
+#: late window its cadence leg waits.
+REAPER_SWEEP = (
+    "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
+    " make_interval(secs => :b), CAST(:activated AS boolean),"
+    " CAST(:parks AS boolean), make_interval(secs => :late))"
+)
+
 
 class _Door:
     """A session that records each statement and answers every read empty."""
@@ -451,10 +474,73 @@ class _Door:
         return None
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_the_reaper_runs_the_four_argument_door_only_when_activated(
-    monkeypatch, enabled
+@pytest.mark.parametrize(
+    ("enabled", "parker"), [(True, True), (True, False), (False, True)]
+)
+async def test_the_reaper_parks_late_past_posts_only_when_activated_with_a_park(
+    monkeypatch, enabled, parker
 ):
+    """Activated and handed the pipeline's park, the door hears that the caller
+    parks a late past-posts story itself, and the reaper lists the stories whose
+    window closed, from the budget the door left. Activated without a park, the
+    door hears it does not; not activated, it hears the source is inactive.
+    Neither lists a late story. Every call hands the door the late window."""
+    log = []
+
+    @asynccontextmanager
+    async def system():
+        yield _Door(log)
+
+    async def settled(session, *, limit):
+        return None
+
+    async def park_late(**kwargs):
+        raise AssertionError("nothing is listed, so nothing is parked")
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+    monkeypatch.setattr(scheduler.prompts, "sweep_settled_cards", settled)
+
+    await scheduler.execute_reap_expired(
+        object(),
+        limit=5,
+        approval_ttl_seconds=60,
+        approved_ttl_seconds=120,
+        capability=PastPostsCapability(enabled=True) if enabled else None,
+        park_late=park_late if parker else None,
+        late_seconds=3600,
+    )
+
+    sql, params = log[0]
+    assert sql == REAPER_SWEEP
+    assert params == {
+        "lim": 5,
+        "a": 60,
+        "b": 120,
+        "activated": enabled,
+        "parks": enabled and parker,
+        "late": 3600,
+    }
+    late = [(q, p) for q, p in log if "fn_reaper_late_past_posts" in q]
+    if enabled and parker:
+        assert late == [
+            (
+                "SELECT o_intent_id, o_workspace_id, o_tries FROM "
+                "fn_reaper_late_past_posts(make_interval(secs => :late), :lim)",
+                {"late": 3600, "lim": 5},
+            )
+        ]
+    else:
+        assert late == []
+
+
+async def test_with_no_window_the_door_expires_a_cadence_story_at_its_slot(
+    monkeypatch,
+):
+    """A caller that gives no late window hands the door a window of none, so
+    its cadence leg expires a cadence story at its slot, as an older worker's
+    call does; nothing parks."""
     log = []
 
     @asynccontextmanager
@@ -470,22 +556,96 @@ async def test_the_reaper_runs_the_four_argument_door_only_when_activated(
     monkeypatch.setattr(scheduler.prompts, "sweep_settled_cards", settled)
 
     await scheduler.execute_reap_expired(
+        object(), limit=5, approval_ttl_seconds=60, approved_ttl_seconds=120
+    )
+
+    sql, params = log[0]
+    assert sql == REAPER_SWEEP
+    assert (params["activated"], params["parks"], params["late"]) == (False, False, 0)
+
+
+async def test_a_park_without_its_late_window_is_refused_before_the_door_runs(
+    monkeypatch,
+):
+    """A park needs the window: with none, the late door would list every
+    past-posts story whose slot has come, so the reaper refuses to run."""
+    log = []
+
+    @asynccontextmanager
+    async def system():
+        yield _Door(log)
+
+    async def park_late(**kwargs):
+        raise AssertionError("refused before anything is listed")
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+
+    with pytest.raises(TypeError, match="late_seconds"):
+        await scheduler.execute_reap_expired(
+            object(),
+            limit=5,
+            approval_ttl_seconds=60,
+            approved_ttl_seconds=120,
+            capability=PastPostsCapability(enabled=True),
+            park_late=park_late,
+        )
+
+    assert log == []
+
+
+async def test_the_reaper_parks_each_late_story_it_lists_through_the_park(
+    monkeypatch,
+):
+    """Each late story the door lists is handed to the park, as the reaper,
+    with its tries and the window, in the door's order, and a park that fails
+    leaves the others to run; the reaper counts the parks that took."""
+    rows = [("i-2", "ws-b", 3), ("i-1", "ws-a", 0), ("i-3", "ws-c", 1)]
+    parked = []
+
+    class _Late(_Door):
+        async def execute(self, statement, params=None):
+            self.log.append((str(statement), dict(params or {})))
+            listed = rows if "fn_reaper_late_past_posts" in str(statement) else []
+            return SimpleNamespace(scalar=lambda: 0, all=lambda: listed)
+
+    @asynccontextmanager
+    async def system():
+        yield _Late([])
+
+    async def settled(session, *, limit):
+        return None
+
+    async def park_late(
+        *, engine, workspace_id, intent_id, tries, late_seconds, actor_kind
+    ):
+        parked.append((workspace_id, intent_id, tries, late_seconds, actor_kind))
+        if intent_id == "i-2":
+            raise RuntimeError("one story rolls back alone")
+        return intent_id == "i-1"
+
+    monkeypatch.setattr(
+        unit_of_work, "poller_session_factory", lambda engine, tenant: system
+    )
+    monkeypatch.setattr(scheduler.prompts, "sweep_settled_cards", settled)
+
+    touched = await scheduler.execute_reap_expired(
         object(),
         limit=5,
         approval_ttl_seconds=60,
         approved_ttl_seconds=120,
-        capability=PastPostsCapability(enabled=True) if enabled else None,
+        capability=PastPostsCapability(enabled=True),
+        park_late=park_late,
+        late_seconds=3600,
     )
 
-    sql, params = log[0]
-    assert "fn_reaper_sweep" in sql
-    assert ("CAST(:activated AS boolean)" in sql) is enabled
-    assert params == {
-        "lim": 5,
-        "a": 60,
-        "b": 120,
-        **({"activated": True} if enabled else {}),
-    }
+    assert parked == [
+        ("ws-b", "i-2", 3, 3600, "reaper"),
+        ("ws-a", "i-1", 0, 3600, "reaper"),
+        ("ws-c", "i-3", 1, 3600, "reaper"),
+    ]
+    assert touched == 1
 
 
 # --- the API ----------------------------------------------------------------------

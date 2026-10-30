@@ -9,7 +9,9 @@ anyone reading the provider again. It is attached to the raised error as its
 'refusal'` and the park's audit detail. An error's message stays constant; the
 evidence never reaches a log line or a traceback. A dead container's evidence,
 a `container_dead` refusal, is written by the publish pipeline straight into
-the story's `last_error -> 'error' -> 'refusal'`.
+the story's `last_error -> 'error' -> 'refusal'`. A past post parked on a
+reason no refusal backs records that reason as a `not_admitted` refusal, with
+the item's state, so its card and its notice say the same.
 
 A route into review that refuses nothing records its own reason in the same
 place (`review_error`, one of `REVIEW_KINDS`), so a story's review card says
@@ -112,6 +114,25 @@ def of(exc: BaseException) -> Optional[dict]:
     """The evidence `exc` carries, or None."""
     value = getattr(exc, "evidence", None)
     return value if isinstance(value, dict) else None
+
+
+def latched(capture) -> Optional[dict]:
+    """The refusal that parked a slide, from its stored capture: kept where a
+    refused fetch parked it (`asset_unavailable`), or where a local check
+    judged its file one stories do not take (`unsupported`), so whichever
+    caller later meets the parked slide says why. None for a capture of
+    anything else."""
+    if not isinstance(capture, dict):
+        return None
+    refusal = capture.get("refusal")
+    if not isinstance(refusal, dict):
+        return None
+    if capture.get("reason") == "asset_unavailable" or (
+        capture.get("state") == "unsupported"
+        and refusal.get("kind") == "local_validation"
+    ):
+        return refusal
+    return None
 
 
 def graph_path(url: str) -> str:
@@ -306,10 +327,15 @@ _CHECKS = {
     ),
 }
 
+#: What a publish job is trying to do: a spent budget's `trying_to` when its
+#: record names none.
+PUBLISH_TRYING_TO = "post this story"
+
 #: Why a story went into review by a route that refused nothing, given what
 #: the route counted: its container never reported ready, Instagram's answer
 #: to preparing its media was lost, its job's budget is spent, its publish was
-#: never confirmed, or it waited approved until the reaper parked it.
+#: never confirmed, or it waited approved until the reaper parked it. A spent
+#: budget says what its job was trying to do (`trying_to`).
 _REVIEW = {
     "container_pending": lambda r: (
         "Instagram did not report this story's media as ready on the last of"
@@ -321,7 +347,7 @@ _REVIEW = {
     ),
     "budget_spent": lambda r: (
         f"we hit a fault on our side {_counted(r.get('tries'), 'time', 'times')}"
-        " trying to post this story"
+        f" trying to {short(r.get('trying_to')) or PUBLISH_TRYING_TO}"
     ),
     "publish_unconfirmed": lambda r: (
         "Instagram's answer to the post was lost, and it could not be confirmed"
@@ -397,6 +423,28 @@ def _plain(refusal) -> Optional[str]:
             f"this file is over the {_count(refusal.get('cap'))}-byte limit"
             f" (stopped after {_count(refusal.get('received'))} bytes)"
         )
+    if kind == "download_budget_spent":
+        seconds = refusal.get("seconds")
+        limit = (
+            f"the {_seconds(seconds)} s limit"
+            if seconds is not None
+            else "its time limit"
+        )
+        return f"Instagram's file did not download within {limit}"
+    if kind == "window_closed":
+        late = whole(refusal.get("late_seconds"))
+        within = f"within {late // 60:,} minutes of its slot" if late else "in time"
+        tries = refusal.get("tries")
+        sentence = (
+            f"its file could not be fetched {within}"
+            f" ({_count(tries)} {'try' if whole(tries) == 1 else 'tries'})"
+        )
+        last = plain(refusal.get("last_refusal"))
+        if not last:
+            return sentence
+        # With no try spent, what the slide last recorded was no try's refusal.
+        said = "the last was refused: " if whole(tries) else ""
+        return f"{sentence}; {said}{last}"
     if kind in ("cdn_refused", "cdn_error"):
         statuses = "/".join(str(s) for s in refusal.get("statuses") or []) or "?"
         verb = "refused the link twice" if kind == "cdn_refused" else "failed"
@@ -446,6 +494,25 @@ def _plain(refusal) -> Optional[str]:
         )
         return f"this file failed the {check} check" + (
             f" ({values})" if values else ""
+        )
+    if kind == "not_admitted":
+        # Only what the reason and the item's state support: `removed` does not
+        # say why the item was retired, and the post may still be on Instagram.
+        reason = refusal.get("reason")
+        if reason == "asset_unavailable":
+            if refusal.get("item_state") == "removed":
+                return (
+                    "the chosen slide or post is no longer in the index of"
+                    " your past posts"
+                )
+            return "the chosen post could not be fetched, and no detail was recorded"
+        if reason == "unsupported":
+            return "this media was judged one stories do not take"
+        if reason == "selected_asset_changed":
+            return "the chosen post's content changed"
+        return (
+            f"the chosen post was not prepared ({short(reason) or 'unknown'}),"
+            " and no detail was recorded"
         )
     # A record with nothing specific still says what it holds: its error's
     # class for a refusal raised without evidence, else its kind.

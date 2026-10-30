@@ -370,7 +370,8 @@ link, generation and revision, and its validation evidence.
 **Coverage rules for a walk:**
 - A children response with more pages keeps its returned slides, records incomplete
   coverage, and makes no second request.
-- Only a complete response can retire a missing slide.
+- At sync, only a complete response can retire a missing slide. A selected slide
+  has its own, stricter rule (below).
 - A listing capped or windowed this way never proves a post was deleted
   (`checkpoint_whole` is false).
 
@@ -379,13 +380,22 @@ link, generation and revision, and its validation evidence.
 - **A selected item.** Its bytes are read twice: to prepare its approval card, and
   again for publishing transit. Each read first makes a fresh Graph lookup, and retries
   once if the CDN link proves expired.
+  - The card's read runs in the story's own `prepare_past_post` job, on the worker's
+    `media` lane, never in the prompt sweep. A refusal that proves nothing is tried
+    again after a wait that doubles from 30 s to 15 min. The story parks for review
+    with its evidence on a proven refusal, on its eighth try, or when a download could
+    no longer finish within an hour of its slot.
   - The CDN request never carries the Instagram token. It goes only to
     `*.cdninstagram.com` or `*.fbcdn.net`, over HTTPS.
   - The real validator judges the bytes before a card or any publishing effect.
-  - A carousel selection reads the parent and its children once, then finds the
-    captured slide by id. A slide missing from a complete response goes to review as
-    unavailable. A truncated response is retryable, and never substitutes another
-    slide.
+  - A carousel selection follows the children's pages, with the same fields and
+    limit, until the captured slide is listed or the list ends, up to 20 slides, and
+    finds the slide by id. A slide missing from a complete read is read again: the
+    parent and its children, a second time. It is retired only when both reads are
+    complete, list the same slides, hold at least one slide and fewer than the
+    indexed count, and the parent still answers. Anything else, a truncated response
+    included, is a change, tried again on the job's waits, and it never substitutes
+    another slide.
 - **A preview** is its own bound: at most two Graph lookups and one CDN download of at
   most 2 MiB, none of them retried. A video's preview is its Graph `thumbnail_url`
   image, never the video file.
