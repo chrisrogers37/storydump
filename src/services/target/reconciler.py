@@ -542,9 +542,14 @@ async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -
     workspace resolves its own `review_required` intent, so every card of it
     is restated with the review line and the three resolution buttons, and
     under it why: a publish whose answer was lost, unconfirmed after *checks*
-    checks, recorded beside the trail as `last_error -> 'error'`. The
-    notice keeps the notify window (`notify_parked`). A park that matched no
-    row raises, as `_terminalize`'s flip does."""
+    checks, recorded beside the trail as `last_error -> 'error'`. A chat that
+    holds no card of it gets its review card (`prompts.prompt_review`), as
+    every park's does, written in a savepoint of its own: a card that cannot
+    be written is logged and the park stands, so the story leaves the ladder
+    instead of rolling back to `publishing_ambiguous`, where it would hold its
+    account's next publish and be asked about again every beat. The notice
+    keeps the notify window (`notify_parked`). A park that matched no row
+    raises, as `_terminalize`'s flip does."""
     from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
 
     from src.services.target import outbox, prompts, refusal_evidence  # noqa: PLC0415 — cycle
@@ -586,4 +591,7 @@ async def _park_review_required(conn, *, intent_id, workspace_id, checks: int) -
         workspace_id=str(workspace_id),
         intent_id=str(intent_id),
         outcome_text=line,
+    )
+    await prompts.prompt_review(
+        conn, workspace_id=str(workspace_id), intent_id=str(intent_id)
     )

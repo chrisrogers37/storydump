@@ -1197,7 +1197,10 @@ class TestTheSettledLineSaysWhyAStoryWasRefused:
     async def test_a_story_that_is_not_in_review_keeps_its_line(
         self, state, rule, line
     ):
-        assert await self._line(self._settlement(state, rule=rule)) == line
+        """Even with a reason still on its row: a retry's, or one kept after
+        "It posted"."""
+        settled = self._settlement(state, rule=rule, refusal=REFUSAL)
+        assert await self._line(settled) == line
 
 
 class TestWaitingLine:
