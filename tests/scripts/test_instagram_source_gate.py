@@ -51,6 +51,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import json
 import sys
 import time
 import uuid
@@ -825,17 +826,22 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             }
         ]
 
-        # The card is the rendered approval: the picture and the account, then
-        # the edit that gives that message its taps.
+        # The card is the rendered approval: its text with no taps, then the
+        # edit that puts the picture and the account on that same message and
+        # gives it its taps.
         await g.deliver()
-        (photo,) = g.telegram.sent("sendPhoto")
-        assert fakes.jpeg() in photo.body
-        assert fakes.multipart_field(photo, "caption").startswith(
-            "\U0001f4f8 @example_handle_a"
-        )
-        assert fakes.multipart_field(photo, "reply_markup") is None
-        (armed,) = g.telegram.sent("editMessageReplyMarkup")
-        markup = armed.json["reply_markup"]
+        (card,) = [
+            c
+            for c in g.telegram.sent("sendMessage")
+            if c.json.get("text", "").startswith("\U0001f4f8")
+        ]
+        assert "reply_markup" not in card.json
+        (edit,) = g.telegram.sent("editMessageMedia")
+        assert fakes.jpeg() in edit.body
+        media = json.loads(fakes.multipart_field(edit, "media"))
+        assert media["type"] == "photo"
+        assert media["caption"].startswith("\U0001f4f8 @example_handle_a")
+        markup = json.loads(fakes.multipart_field(edit, "reply_markup"))
         assert [
             b["callback_data"]
             for row in markup["inline_keyboard"]
@@ -847,7 +853,7 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             f"v1:{verb}:{story['id']}"
             for verb in ("post", "posted", "skip", "reject", "cfg")
         ]
-        (notice,) = g.telegram.sent("sendMessage")
+        (notice,) = [c for c in g.telegram.sent("sendMessage") if c is not card]
         assert "@example_handle_a has no content left" in notice.json["text"]
         assert len(g.ig.cdn) == 2 and len(g.validated) == 2
 
@@ -1566,8 +1572,8 @@ async def test_two_accounts_and_two_workspaces_never_see_each_others_past_posts(
         await g.sweep_prompts()
         await g.deliver()
         assert {
-            fakes.multipart_field(c, "caption").splitlines()[0]
-            for c in g.telegram.sent("sendPhoto")
+            json.loads(fakes.multipart_field(c, "media"))["caption"].splitlines()[0]
+            for c in g.telegram.sent("editMessageMedia")
         } == {"\U0001f4f8 @example_handle_a", "\U0001f4f8 @example_handle_b"}
         details = {
             (s.account, s.path)
@@ -1907,10 +1913,10 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             "SELECT asset_media_id,position FROM instagram_media_assets WHERE media_item_id=%s",
             first["item"],
         )
-        (photo,) = g.telegram.sent("sendPhoto")
+        (edit,) = g.telegram.sent("editMessageMedia")
         assert (
             f"Instagram post, slide {asset['position']} of 10"
-            in fakes.multipart_field(photo, "caption")
+            in json.loads(fakes.multipart_field(edit, "media"))["caption"]
         )
         assert g.rows(
             "SELECT selected_asset_identity FROM instagram_intent_provenance WHERE intent_id=%s",

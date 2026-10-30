@@ -98,6 +98,7 @@ rule that holds until someone forgets.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 import time
 from dataclasses import dataclass, field, replace
@@ -112,6 +113,8 @@ from src.services.target.unit_of_work import (
     in_transaction,
 )
 
+logger = logging.getLogger(__name__)
+
 #: Named timeout classes. A call names its class; it does not pass seconds.
 #: It is "a timeout class" rather than "a timeout" for that reason — the
 #: value is an operational number, and naming it keeps the adapter honest about
@@ -120,6 +123,12 @@ TIMEOUT_CLASSES = {
     "fast": 5.0,
     "standard": 15.0,
     "upload": 60.0,
+    # A chat card's photo or video (`telegram_transport.edit_media`): Telegram
+    # answers only once it has taken in the file, and the edit is never sent
+    # twice inside the call, so a wait cut short is a lost answer: the outbox
+    # gives the card's media up and the card stays text with its line and
+    # keyboard — never a second card, and never a second upload.
+    "card_upload": 120.0,
 }
 
 #: The closed set of provider hosts. Additions are deliberate and reviewable.
@@ -424,6 +433,7 @@ async def request(
             raise TransactionDisciplineError(
                 "request admission left a transaction open"
             )
+        sent_at = time.monotonic()
         try:
             # STREAMED, not buffered. `client.request()` reads the whole body
             # before returning (httpx 0.28.1 `Client.send`: `if not stream:
@@ -489,11 +499,24 @@ async def request(
                 )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_exc = exc
-            if not policy.retry_after_send and not isinstance(exc, _NEVER_SENT):
-                raise EgressAnswerLost(
-                    f"the request may have reached the provider and its answer"
-                    f" was lost; not attempted again (#857): {exc!r}"
-                ) from None
+            if not policy.retry_after_send:
+                # A call that creates something is the one a lost answer can
+                # copy, so each failed attempt says how long it waited and how
+                # it failed. Only the host: a provider's path can carry a secret.
+                never_sent = isinstance(exc, _NEVER_SENT)
+                logger.warning(
+                    "egress: %s %s failed after %.1fs: %s (%s)",
+                    method,
+                    target.host,
+                    time.monotonic() - sent_at,
+                    type(exc).__name__,
+                    "never sent" if never_sent else "may have landed",
+                )
+                if not never_sent:
+                    raise EgressAnswerLost(
+                        f"the request may have reached the provider and its answer"
+                        f" was lost; not attempted again (#857): {exc!r}"
+                    ) from None
             continue
         finally:
             if admission is not None:

@@ -102,6 +102,9 @@ class _Session:
         rows = self.rows
 
         class _R:
+            # A write that changed its row, as `_leave_sending`'s CAS reads.
+            rowcount = 1
+
             def fetchall(self_inner):
                 return rows
 
@@ -158,6 +161,17 @@ class TestRestateEverywhere:
 
 
 CARD = {"v": 2, "text": "📸 card", "outcome_text": "👀 Needs review"}
+
+#: The `media` block of a card whose story has a picture
+#: (`prompt_rendering.render_card`).
+MEDIA = {
+    "workspace_id": "ws",
+    "source_id": "src",
+    "ref": "file-1",
+    "kind": "image",
+    "mime": "image/jpeg",
+    "file_name": "f.jpg",
+}
 
 
 class TestTheChatsWithoutACard:
@@ -572,6 +586,8 @@ class TestACardIsRenderedAgainAtClaimTime:
             "facts": {},
             "keyed": [],
             "paced": False,
+            "cards": {},
+            "asked": [],
         }
 
         async def recover_stranded(session, *, binding_id):
@@ -596,9 +612,14 @@ class TestACardIsRenderedAgainAtClaimTime:
             seen["keyed"].append(intent_id)
             return seen["facts"].get(intent_id)
 
+        async def _card_of(session, row, *, ref):
+            seen["asked"].append(ref)
+            return seen["cards"].get(ref)
+
         # The real `card_keyboard_for` and `keyboard_of` run over the story's
         # facts: what the sender sends is `card_keyboard`'s, per state.
         monkeypatch.setattr(prompts, "card_facts", card_facts)
+        monkeypatch.setattr(outbox, "_card_of", _card_of, raising=False)
         monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
         monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
         monkeypatch.setattr(outbox, "claim_next", claim_next)
@@ -807,6 +828,230 @@ class TestACardIsRenderedAgainAtClaimTime:
         row = await self._claim()
         assert row["payload"] == {"v": 1, "supersedes_ref": "77"}
         assert claims["keyed"] == [] and claims["left"] == []
+
+    async def test_a_cards_edit_carries_the_cards_media_while_it_is_unconfirmed(
+        self, claims
+    ):
+        """The card's record is the one truth about its media, as the story's
+        facts are about its keyboard: an edit of a card whose record holds a
+        `media` block and does not say `media` is given that block in memory
+        (the transport sends it as the media edit), with the card's `sent_as`.
+        Nothing of it is written to the edit row."""
+        claims["claimed"] = [
+            _claimed("prompt_supersede", "i", {"v": 1, "supersedes_ref": "77"}),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {
+            "77": {"text": "t", "caption": "c", "media": MEDIA, "sent_as": "text"}
+        }
+        row = await self._claim()
+        assert row["payload"]["media"] == MEDIA
+        assert row["payload"]["sent_as"] == "text"
+        assert claims["asked"] == ["77"]
+        assert claims["left"] == [], "an edit's record is not written back"
+
+    async def test_once_the_media_is_confirmed_the_edit_carries_none(self, claims):
+        """The card's record says `media` once an edit put the picture on the
+        message: the edits after it are caption edits, as the card says."""
+        claims["claimed"] = [
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {
+                    "v": 1,
+                    "supersedes_ref": "77",
+                    "outcome_text": "x",
+                    "sent_as": "text",
+                },
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {"77": {"text": "t", "media": MEDIA, "sent_as": "media"}}
+        row = await self._claim()
+        assert "media" not in row["payload"]
+        assert row["payload"]["sent_as"] == "media"
+
+    async def test_a_card_whose_media_was_dropped_gives_its_edit_none(self, claims):
+        """A card whose upload was given up (refused, unfetchable, or its
+        answer lost) is text in its record, with no block: whatever its edit
+        row carried gives way to the record, so no edit uploads again."""
+        claims["claimed"] = [
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {"v": 1, "supersedes_ref": "77", "sent_as": "media", "media": MEDIA},
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {"77": {"text": "t", "sent_as": "text"}}
+        row = await self._claim()
+        assert "media" not in row["payload"]
+        assert row["payload"]["sent_as"] == "text"
+
+    async def test_a_settled_cards_media_edit_carries_the_line_the_card_shows(
+        self, claims
+    ):
+        """The media edit rewrites the whole message, so it carries the line
+        the card shows: the edit's own when it has one, else the card's."""
+        claims["claimed"] = [
+            _claimed("prompt_supersede", "i", {"v": 1, "supersedes_ref": "77"}),
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {"v": 1, "supersedes_ref": "77", "outcome_text": "✅ Posted"},
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {
+            "77": {
+                "text": "t",
+                "media": MEDIA,
+                "sent_as": "text",
+                "outcome_text": "✅ Approved",
+            }
+        }
+        without = await self._claim()
+        assert without["payload"]["outcome_text"] == "✅ Approved"
+        own = await self._claim()
+        assert own["payload"]["outcome_text"] == "✅ Posted"
+
+    async def test_a_card_never_asks_for_its_own_record(self, claims):
+        """Only an edit of a card reads the card's record: the card itself has
+        none before it is sent, and an invitation's edit, which names no story,
+        is left as it was."""
+        claims["claimed"] = [
+            _claimed("approval_prompt", "live", {"v": 2, "text": "old"}),
+            _claimed("prompt_supersede", "live", {"v": 1, "supersedes_ref": "77"}),
+            _claimed("prompt_supersede", None, {"v": 1, "supersedes_ref": "78"}),
+        ]
+        claims["rendered"] = {"live": {"v": 2, "text": "new"}}
+        claims["facts"] = {"live": _facts()}
+        await self._claim()
+        assert claims["asked"] == []
+        await self._claim()
+        assert claims["asked"] == ["77"], "the edit of a card asks for it"
+        await self._claim()
+        assert claims["asked"] == ["77"], "an intent-less edit asks for nothing"
+
+
+class TestAConfirmedEditRecordsHowTheCardStands:
+    """`settle` of an edit of a card: the card's own record says how its
+    message now stands (`_record_cards_media`), in the write after the edit's
+    own. A confirmed edit says it by its receipt; an edit that carried the
+    card's media and lost its answer, or was refused, gives the upload up."""
+
+    EDIT = {
+        "id": "ob-9",
+        "kind": "prompt_supersede",
+        "intent_id": "i",
+        "workspace_id": "ws",
+        "binding_id": "b",
+        "attempts": 1,
+        "payload": {"v": 1, "supersedes_ref": "77", "sent_as": "text"},
+    }
+    CARRYING = {**EDIT, "payload": {**EDIT["payload"], "media": MEDIA}}
+    NOTIFICATION = {
+        "id": "ob-8",
+        "kind": "notification",
+        "intent_id": None,
+        "workspace_id": "ws",
+        "binding_id": "b",
+        "attempts": 1,
+        "payload": {"v": 1, "text": "n"},
+    }
+
+    @staticmethod
+    def _receipt(sent_as):
+        from src.channels.telegram_transport import SendReceipt
+
+        return SendReceipt("77", sent_as=sent_as)
+
+    @staticmethod
+    def _lost():
+        from src.channels.telegram_transport import TelegramSendError
+
+        return TelegramSendError("editMessageMedia: transport failure")
+
+    @staticmethod
+    def _refused():
+        from src.channels.telegram_transport import TelegramRefused
+
+        return TelegramRefused(
+            "editMessageText: 400 Bad Request: message to edit not found", code=400
+        )
+
+    @staticmethod
+    def _auth_dead():
+        from src.channels.telegram_transport import TelegramAuthDead
+
+        return TelegramAuthDead("editMessageMedia: 401 Unauthorized", code=401)
+
+    @staticmethod
+    def _recorded(session):
+        """The card's write, the session's last statement, whitespace folded."""
+        sql, params = session.sql[-1]
+        return " ".join(sql.split()), params
+
+    @pytest.mark.parametrize("how", ["media", "text"])
+    async def test_a_confirmed_edit_records_how_the_message_stands(self, how):
+        s = _Session([])
+        await outbox.settle(s, self.EDIT, receipt=self._receipt(how))
+        assert len(s.sql) == 2, "the edit's own write, then the card's"
+        sql, params = self._recorded(s)
+        assert sql.startswith("UPDATE channel_outbox SET payload = CASE")
+        assert "payload || jsonb_build_object('sent_as', 'media')" in sql
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert sql.endswith("kind = 'approval_prompt' AND external_message_ref = :ref")
+        assert params == {"how": how, "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_only_an_edit_that_says_how_the_message_stands_records_it(self):
+        said = _Session([])
+        await outbox.settle(said, self.EDIT, receipt=self._receipt("media"))
+        assert len(said.sql) == 2, "positive control: this one records"
+        for row, how in ((self.EDIT, "edit"), (self.NOTIFICATION, "text")):
+            s = _Session([])
+            await outbox.settle(s, row, receipt=self._receipt(how))
+            assert len(s.sql) == 1, (row["kind"], how)
+
+    async def test_a_lost_answer_on_the_media_edit_gives_the_upload_up(self):
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._lost())
+        assert result["state"] == "ambiguous"
+        assert len(s.sql) == 2, "the ambiguous CAS, then the card's record"
+        assert s.sql[0][1]["s"] == "ambiguous"
+        sql, params = self._recorded(s)
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert params == {"how": "text", "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_only_an_edit_that_carried_the_media_gives_it_up_on_a_lost_answer(
+        self,
+    ):
+        carrying = _Session([])
+        await outbox.settle(carrying, self.CARRYING, error=self._lost())
+        assert len(carrying.sql) == 2, "positive control: this one records"
+        for row in (self.EDIT, self.NOTIFICATION):
+            s = _Session([])
+            await outbox.settle(s, row, error=self._lost())
+            assert len(s.sql) == 1, row["kind"]
+
+    async def test_a_refused_media_edit_gives_the_upload_up(self):
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._refused())
+        assert result["state"] == "failed"
+        assert len(s.sql) == 2, "the failed CAS, then the card's record"
+        assert s.sql[0][1]["s"] == "failed"
+        sql, params = self._recorded(s)
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert params == {"how": "text", "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_a_dead_credential_keeps_the_media_the_card_is_owed(self):
+        refused = _Session([])
+        await outbox.settle(refused, self.CARRYING, error=self._refused())
+        assert len(refused.sql) == 2, "positive control: a refusal records"
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._auth_dead())
+        assert result["state"] == "failed"
+        assert len(s.sql) == 1, "the failed CAS alone: the card keeps its block"
 
 
 @pytest.fixture(autouse=True)

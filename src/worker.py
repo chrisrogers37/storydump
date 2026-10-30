@@ -1043,8 +1043,8 @@ def _card_media_fetch(
 
     Drive cards use the source/reference contract. Past-posts cards additionally
     name the server-selected intent and use its bound preparation port; an
-    absent port is a no-send refusal. Current provider configuration is read
-    here, for every queued card.
+    absent port refuses the bytes (`MediaAdmissionNotSent`), and the card stays
+    text. Current provider configuration is read here, for every queued card.
     """
     from src.channels.telegram_transport import MediaTransient, MediaUnavailable
 
@@ -1141,7 +1141,7 @@ def _card_media_fetch(
             return await read(media)
         except MediaAdmissionNotSent:
             raise
-        except Exception:  # noqa: BLE001 — past-posts cards never degrade to actionable text
+        except Exception:  # noqa: BLE001 — a past-posts card shows the selected slide or none
             if media.get("intent_id") is not None:
                 raise MediaAdmissionNotSent(
                     "validation_pending", preparation_failed=True

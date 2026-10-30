@@ -72,18 +72,27 @@ unresolved send becomes `ambiguous` and the per-kind policy decides.
 * **`notification` / `ack`** — retry once after backoff, then `failed`. A
   duplicate notification is the accepted cost, **bounded at one**.
 * **`approval_prompt` / `invitation`** — resend, at most `MAX_PROMPT_RESENDS`
-  times. **An approval card leaves with no keyboard**: its keyboard reaches
-  the chat only as an edit of a message whose id the ledger holds, queued as
-  the send is settled (:func:`_edit_sent_card`). So a copy a lost answer left
-  in the chat carries no buttons, and a resend can never make a second live
-  card; what a lost answer can leave is one inert copy, which no tap reaches
-  (Telegram has no idempotent send and no read-back to find it).
+  times. **An approval card leaves as its text with no keyboard**: its
+  keyboard, and for a card with a `media` block its photo or video, reach the
+  chat only as an edit of a message whose id the ledger holds, queued as the
+  send is settled (:func:`_edit_sent_card`). So a copy a lost answer left in
+  the chat is a text message with no buttons, and a resend can never make a
+  second live card; what the lost answers can leave is up to
+  `MAX_PROMPT_RESENDS + 1` such copies, which no tap reaches (Telegram has no
+  idempotent send and no read-back to find them). A card whose every send
+  loses its answer ends `failed` and logs a WARNING; when its chat holds no
+  other card of the story, the chat is told once that the story waits in the
+  Queue (`CARD_UNCONFIRMED_NOTICE`).
 * **`prompt_supersede`** — resend until Telegram confirms it: an edit is
   idempotent ("message is not modified" is success), so it is never failed
   for a lost answer, only for a definitive refusal, and an older edit of the
-  same message is retired once a newer one exists. Each lost answer waits
-  longer before the resend (`AMBIGUOUS_RESOLVE_AFTER_SECONDS` × attempts, the
-  same schedule `fn_sender_sweep` mints the sender on).
+  same message is retired once a newer one exists. A media card's edit is what
+  puts its photo or video on the message (`editMessageMedia`, to the same
+  message id), ONCE: when that upload loses its answer the card's record drops
+  its media, and the resent edit brings the line and the keyboard alone; a
+  flood wait holds the chat and the same upload goes again after it. Each lost
+  answer waits longer before the resend (`AMBIGUOUS_RESOLVE_AFTER_SECONDS` ×
+  attempts, the same schedule `fn_sender_sweep` mints the sender on).
 * **Edits always go supersede-then-send** — never edit-in-place on an ambiguous
   ref. On any intent state change, **supersede-all**: `prompt_supersede` rows
   target every known `external_message_ref`. A tapped message the ledger does
@@ -121,7 +130,8 @@ logger = logging.getLogger(__name__)
 
 #: Kinds whose ambiguity resolves by resend rather than retry-once, at most
 #: `MAX_PROMPT_RESENDS` times. A card's resend leaves no second live card (a
-#: card leaves without its keyboard); a duplicate notification is bounded at
+#: card leaves as its text, without its keyboard; its media and keyboard
+#: arrive by the edit that follows); a duplicate notification is bounded at
 #: one. A card EDIT (`prompt_supersede`) has its own rule in
 #: `resolve_ambiguous`: it is idempotent — "not modified" is success — and,
 #: since the route edits a card only for a menu tap, it is the only path that
@@ -171,7 +181,8 @@ class MediaAdmissionNotSent(ChannelSendError):
 
 
 class ChannelPaced(ChannelSendError):
-    """The provider answered 429: not a lost response (the message did not
+    """The provider's flood wait (a 429, or Telegram's 400 that names the
+    wait): not a lost response (the message did not
     go) and not a fault of the row: the row returns to
     `pending`, and the budget the provider named is written as a DURABLE hold
     on the pacing rows so every replica's poller defers until it passes —
@@ -239,6 +250,15 @@ class ChannelRefused(ChannelSendError):
 #: binding's sender on the same schedule. The policy's "retry once after
 #: backoff" — this is the backoff.
 AMBIGUOUS_RESOLVE_AFTER_SECONDS = 30
+
+#: What a chat hears when every send of a story's card lost its answer and
+#: no card of the story in that chat is known to the ledger: the row ends
+#: `failed` (`resolve_ambiguous`), and the story is not lost, it waits on
+#: the web. Said once per such card.
+CARD_UNCONFIRMED_NOTICE = (
+    "A story's card could not be confirmed in this chat after several tries."
+    " The story waits for a decision: open the Queue on the web."
+)
 
 #: How many of a binding's aged `ambiguous` rows one pass resolves. Bounded
 #: like every sweep; the next pass takes the rest.
@@ -541,6 +561,18 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     Returns the state it moved to. Reads the kind from the row rather than
     taking it as an argument: the policy is a property of the row, and a caller
     that could pass the wrong kind is a second authority on which rule applies.
+
+    Every row that fails here — a card or an invitation past
+    `MAX_PROMPT_RESENDS`, a notification past its one retry, an edit past
+    `EDIT_RESEND_HORIZON_SECONDS` — logs one WARNING naming the row, its kind,
+    its story, the binding, the sends and the last failure's class and code
+    (never the provider's text); a paced claim later in the same transaction
+    rolls the give-up back, and the tick that gives the row up again logs it
+    again. An `approval_prompt` that fails while its chat holds no other card
+    of the story, and none is on its way (`chats_without_card`), has left the
+    chat nothing it can decide from, so one `notification` also tells the chat
+    once that the story's card could not be confirmed and the story waits in
+    the Queue (`CARD_UNCONFIRMED_NOTICE`), in this transaction.
     """
     row = (
         await session.execute(
@@ -556,7 +588,9 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
                 "                  AND n.kind = 'prompt_supersede'"
                 "                  AND n.payload->>'supersedes_ref' = o.payload->>'supersedes_ref'"
                 "                  AND n.created_at > o.created_at) AS newer_edit,"
-                "       o.created_at > now() - make_interval(secs => :horizon) AS fresh"
+                "       o.created_at > now() - make_interval(secs => :horizon) AS fresh,"
+                "       o.workspace_id, o.binding_id, o.intent_id,"
+                "       o.last_failure_class, o.last_error_code"
                 "  FROM channel_outbox o"
                 " WHERE o.id = :i AND o.state = 'ambiguous'"
             ),
@@ -567,17 +601,29 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
         raise OutboxFenced(
             f"outbox {outbox_id}: not 'ambiguous' — already resolved elsewhere"
         )
-    kind, attempts, newer_edit = row[0], row[1], bool(row[2])
+    (
+        kind,
+        attempts,
+        newer_edit,
+        fresh,
+        workspace_id,
+        binding_id,
+        intent_id,
+        failure_class,
+        code,
+    ) = row
 
     if kind == "prompt_supersede":
         # Idempotent, so resent until Telegram confirms it, each wait longer
-        # than the last (`resolve_aged_ambiguous`). Retired, never resent,
+        # than the last (`resolve_aged_ambiguous`); an edit that carried the
+        # card's media gave it up when its answer was lost (`settle`), so the
+        # resend brings the line and the keyboard alone. Retired, never resent,
         # once the message has a newer line queued or landed (a resend carries
         # ITS line); failed past `EDIT_RESEND_HORIZON_SECONDS`.
         if newer_edit:
             to_state = "superseded"
         else:
-            to_state = "pending" if row[3] else "failed"
+            to_state = "pending" if fresh else "failed"
     elif kind in RESEND_KINDS:
         # Resend — an approval card leaves without its keyboard, so its
         # resend leaves no second live card; an invitation leaves with its
@@ -597,6 +643,43 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     )
     if result.rowcount == 0:
         raise OutboxFenced(f"outbox {outbox_id}: resolved by someone else first")
+    if to_state == "failed":
+        tell = (
+            kind == "approval_prompt"
+            and intent_id is not None
+            and str(binding_id)
+            in await chats_without_card(
+                session, workspace_id=str(workspace_id), intent_id=str(intent_id)
+            )
+        )
+        # Every give-up is said: the row, its kind, its story, its binding,
+        # the sends, and the last failure's class and code — never the
+        # provider's text. A paced claim later in this transaction rolls the
+        # give-up back with it, and the tick that gives the row up again says
+        # so again: the line names its row.
+        logger.warning(
+            "outbox row %s (%s) of story %s on binding %s gave up after %s sends"
+            " (last failure %s%s)%s",
+            outbox_id,
+            kind,
+            intent_id if intent_id is not None else "-",
+            binding_id,
+            attempts,
+            failure_class or "ambiguous",
+            f", code {code}" if code is not None else "",
+            "; no card of the story reached this chat — it is told once, and"
+            " the story waits in the Queue"
+            if tell
+            else "",
+        )
+        if tell:
+            await fanout_notification(
+                session,
+                workspace_id=workspace_id,
+                bindings=[str(binding_id)],
+                text=CARD_UNCONFIRMED_NOTICE,
+                intent_id=intent_id,
+            )
     return to_state
 
 
@@ -604,7 +687,9 @@ def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> d
     """What the sender needs to edit the card it names: the ref, the outcome
     line, the original header (a media card's caption or a text card's text —
     the edit keeps it and appends the outcome), and how the card went out. No
-    keyboard: the sender gives the edit its story's when it claims it."""
+    keyboard and no media: the sender gives the edit its story's keyboard, and
+    the card's media while it is not yet on the message, when it claims it
+    (`_with_the_storys_keyboard`)."""
     payload = _json(payload)
     body: dict = {"v": 1, "supersedes_ref": str(ref)}
     if outcome_text:
@@ -1168,6 +1253,43 @@ async def _claim_current(
     return None
 
 
+#: The card an edit names: the `approval_prompt` row of the edit's story on
+#: its binding that holds the edit's message ref (`_card_key` binds it).
+_CARD_OF_EDIT = (
+    " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
+    "   AND kind = 'approval_prompt' AND external_message_ref = :ref"
+)
+
+
+def _card_key(row: dict, ref) -> dict:
+    """`_CARD_OF_EDIT`'s parameters for the edit *row* and its message *ref*."""
+    return {
+        "ws": str(row.get("workspace_id")),
+        "b": str(row.get("binding_id")),
+        "i": str(row.get("intent_id")),
+        "ref": str(ref),
+    }
+
+
+async def _card_of(session, row: dict, *, ref: str) -> Optional[dict]:
+    """The record of the card an edit names: the payload of the
+    `approval_prompt` row of the edit's story on its binding that holds *ref*
+    (the newest, where a twin was adopted) — its `media` block, if any, how it
+    went out (`sent_as`) and the line it shows (`outcome_text`). None when no
+    card holds the ref."""
+    found = (
+        await session.execute(
+            text(
+                "SELECT payload FROM channel_outbox"
+                + _CARD_OF_EDIT
+                + " ORDER BY created_at DESC LIMIT 1"
+            ),
+            _card_key(row, ref),
+        )
+    ).first()
+    return None if found is None else _json(found[0])
+
+
 async def _with_the_storys_keyboard(session, row: dict) -> dict:
     """*row* as it leaves. An approval card leaves with NO keyboard: a
     keyboard reaches a chat only as an edit of a message whose id the ledger
@@ -1178,9 +1300,20 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
     story as it is now (`prompts.card_keyboard_for`): no caller picks one,
     so a rejected card loses its buttons because it is rejected. An edit's
     record is not rewritten, since only the transport reads its keyboard, and
-    a resent edit is claimed and given one again. Called after the pacing,
-    which a keyboard never changes, so a paced attempt reads and writes none
-    of this."""
+    a resent edit is claimed and given one again. An edit of a card whose
+    media is not yet on the message (the card's record has a `media` block and
+    `sent_as` is not `media`) is also given that block, and the card's line
+    when it carries none of its own: the transport sends it as the media
+    edit, and `settle` records on the card how the message then stands
+    (`_record_cards_media`). Nothing of this is written to the edit row. An
+    edit is given the block only while the card's record still holds one. The
+    upload is made once: `settle` removes the block when the edit that carried
+    it is confirmed as text (refused, or nothing fetched), fails refused, or
+    loses its answer,
+    so the edits after it bring the line and the keyboard alone; a paced edit
+    keeps it and uploads again after the hold. Called after the pacing, which
+    a keyboard never changes, so a paced attempt reads and writes none of
+    this."""
     from src.services.target import prompts  # noqa: PLC0415 — cycle
 
     if not _takes_the_storys_keyboard(row):
@@ -1199,6 +1332,21 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
         payload.pop("reply_markup", None)
     else:
         payload["reply_markup"] = keyboard
+    ref = payload.get("supersedes_ref")
+    card = None if ref is None else await _card_of(session, row, ref=str(ref))
+    if card is not None:
+        payload.pop("media", None)
+        if card.get("media") and card.get("sent_as") != "media":
+            # The card's photo or video is not yet on its message: this edit
+            # brings it, with the line the card shows — its own, or the one
+            # the card was sent with — since the media edit rewrites the
+            # whole message.
+            payload["media"] = card["media"]
+            payload["sent_as"] = "text"
+            if not payload.get("outcome_text") and card.get("outcome_text"):
+                payload["outcome_text"] = card["outcome_text"]
+        elif card.get("sent_as"):
+            payload["sent_as"] = card["sent_as"]
     return {**row, "payload": payload}
 
 
@@ -1441,7 +1589,10 @@ async def settle(
     clock and budgets — writes the provider's `retry_after` as a durable hold
     on the pacing rows: the chat's row for the whole
     `retry_after` when the 429 is chat-scoped (with a short brake on the
-    global row), the global row for up to a minute otherwise."""
+    global row), the global row for up to a minute otherwise. A confirmed edit
+    of a card records on the card how its message now stands
+    (`_record_cards_media`); so does an edit that carried the card's media and
+    lost its answer or was refused, which gives the upload up."""
     if isinstance(error, MediaAdmissionNotSent) and receipt is None:
         await _leave_sending(session, row["id"], "pending", restore_attempt=True)
         # Pacing admission committed before the byte read. Keep that charge:
@@ -1527,12 +1678,38 @@ async def settle(
         # never land, or no message will until the credential is replaced.
         # Nothing to resend; the row fails, and the binding stays.
         await _leave_sending(session, row["id"], "failed", failure=failure)
+        if isinstance(error, ChannelRefused) and _carried_media(row):
+            # The upload is made once per card: a media edit refused outright
+            # (its fallback too, or the message is gone) leaves no later edit
+            # to upload again. A dead credential took nothing, so its card
+            # keeps the media it is owed.
+            await _record_cards_media(session, row, sent_as="text")
         return {**row, "state": "failed", "external_message_ref": None}
     if error is not None:
-        # A lost response is the ambiguous case.
+        # A lost response is the ambiguous case: said once per lost answer,
+        # so a card or edit resent after one is visible in the log — the
+        # class and the code, never the provider's text.
+        carried = _carried_media(row)
         await mark_ambiguous(session, outbox_id=row["id"], failure=failure)
+        logger.warning(
+            "outbox row %s (%s): the answer to attempt %s was lost; ambiguous (%s%s)%s",
+            row["id"],
+            row.get("kind"),
+            row.get("attempts"),
+            failure[0],
+            f", code {failure[1]}" if failure[1] is not None else "",
+            "; the card's media is given up — the card stays text, and the"
+            " resent edit brings its line and keyboard alone"
+            if carried
+            else "",
+        )
+        if carried:
+            # The upload is made once per card: whatever this one left on
+            # the message, no later edit uploads again (`_record_cards_media`).
+            await _record_cards_media(session, row, sent_as="text")
         return {**row, "state": "ambiguous", "external_message_ref": None}
 
+    sent_as = getattr(receipt, "sent_as", None)
     if row.get("kind") == "approval_prompt" and _json(row.get("payload")).get(
         "outcome_text"
     ):
@@ -1546,16 +1723,54 @@ async def settle(
             row["id"],
             "superseded",
             external_message_ref=str(receipt),
-            sent_as=getattr(receipt, "sent_as", None),
+            sent_as=sent_as,
         )
     else:
         await mark_sent(
             session,
             outbox_id=row["id"],
             external_message_ref=str(receipt),
-            sent_as=getattr(receipt, "sent_as", None),
+            sent_as=sent_as,
         )
+        if row.get("kind") == "prompt_supersede" and row.get("intent_id"):
+            await _record_cards_media(session, row, sent_as=sent_as)
     return {**row, "state": "sent", "external_message_ref": str(receipt)}
+
+
+def _carried_media(row: dict) -> bool:
+    """Whether a claimed edit carried its card's photo or video, given to it at
+    claim (`_with_the_storys_keyboard`): the one upload the card is owed."""
+    return row.get("kind") == "prompt_supersede" and bool(
+        _json(row.get("payload")).get("media")
+    )
+
+
+async def _record_cards_media(session, row: dict, *, sent_as: Optional[str]) -> None:
+    """After an edit of a card lands, the card's own record says how its
+    message stands: `media` once the edit put the card's photo or video on it
+    (later edits are caption edits, and none brings the media again), or
+    `text` with no `media` block when the media was refused (whether or not
+    the edit's fallback then landed), could not be fetched, or the edit that
+    carried the upload lost its answer (the upload is
+    made once: whatever it left on the message, the card stays text in the
+    record and no later edit uploads again). An edit that finds the message is
+    not the type the record says (the transport's receipt then says `media` or
+    `text`) corrects the record the same way. A plain edit of the line or the
+    keyboard (`edit`) records nothing."""
+    if sent_as not in ("media", "text"):
+        return
+    ref = _json(row.get("payload")).get("supersedes_ref")
+    if ref is None:
+        return
+    await session.execute(
+        text(
+            "UPDATE channel_outbox SET payload = CASE WHEN CAST(:how AS text) = 'media'"
+            "   THEN payload || jsonb_build_object('sent_as', 'media')"
+            "   ELSE (payload - 'media') || jsonb_build_object('sent_as', 'text') END"
+            + _CARD_OF_EDIT
+        ),
+        {"how": sent_as, **_card_key(row, ref)},
+    )
 
 
 def _json(payload: Any) -> dict:
@@ -1568,11 +1783,13 @@ def _json(payload: Any) -> dict:
 
 async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
     """After a card's send: queue the edit that gives the message its
-    keyboard — the card left with none (`_with_the_storys_keyboard`) — and,
-    when the intent has moved past `awaiting_approval` since the claim (a tap,
-    the web queue, the reaper), the line it now carries. The keyboard is the
-    story's as the sender claims the edit, so a card whose story was decided
-    meanwhile never shows decision buttons. *force* is the fenced case: the
+    keyboard — and, for a card with a `media` block, its photo or video, given
+    to the edit at claim — the card left with neither
+    (`_with_the_storys_keyboard`) — and, when the intent has moved past
+    `awaiting_approval` since the claim (a tap, the web queue, the reaper),
+    the line it now carries. The keyboard is the story's as the sender claims
+    the edit, so a card whose story was decided meanwhile never shows decision
+    buttons. *force* is the fenced case: the
     row left `sending` under us. Only a row that was SUPERSEDED (a tap or a
     cancellation retired the card in flight) is owed the edit, with the line
     that supersede carried, and the row takes the ref, so a later line

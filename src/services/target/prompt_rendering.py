@@ -395,9 +395,10 @@ def render_card(
     *intent* carries ``intent_id``, ``file_name``, ``media_kind``,
     ``schedule_slot_at`` (ISO string or datetime) and ``tz``; with
     ``source_id`` + ``provider_file_ref`` (and ``workspace_id``, ``mime_type``,
-    ``handle``) the card carries the MEDIA: the transport fetches the bytes and
-    sends the photo or video with ``caption`` — the account and the slot — and
-    ``text`` is the card when it
+    ``handle``) the card carries the MEDIA: the card is sent as ``text``, and
+    the edit that brings its keyboard fetches the bytes and puts the photo or
+    video on that message with ``caption`` — the account and the slot;
+    ``text`` stays the card when it
     cannot. The slot renders in the WORKSPACE's timezone — a solo user reads
     his own clock, never UTC. A planned story's card (``origin``,
     ``scheduled_by``) also says who scheduled it, and whether it is late
@@ -430,9 +431,10 @@ def render_card(
     if keyboard is not None:
         payload["reply_markup"] = keyboard
     if intent.get("provider_file_ref") and intent.get("source_id"):
-        # The card IS the photo: the
-        # transport fetches these bytes under the workspace grant and sends
-        # them with `caption`; `text` stays as the card when it cannot.
+        # The card becomes the photo: it is sent as `text`, and the edit that
+        # brings its keyboard fetches these bytes under the workspace grant and
+        # puts them on that message with `caption`; `text` stays the card when
+        # it cannot.
         handle = intent.get("handle")
         # Bounded: Telegram captions stop at 1024 characters, and a Drive
         # file name has no bound of its own.

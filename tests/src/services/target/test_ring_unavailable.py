@@ -373,9 +373,10 @@ class TestTheDriveReadIsNotADeadGrant:
             )
 
     async def test_a_cards_media_fetch_is_loud_not_a_blip(self, monkeypatch):
-        """`_card_media_fetch` resends a blip (`MediaTransient`) quietly, as
-        ambiguous. A fault that is neither the file's nor the network's stays
-        loud and counted, as a dead grant does — so it must pass unwrapped."""
+        """A blip (`MediaTransient`) from `_card_media_fetch` costs the card its
+        picture quietly, at WARNING. A fault that is neither the file's nor the
+        network's stays loud and counted, as a dead grant does — so it must
+        pass unwrapped."""
         from src.worker import _card_media_fetch
 
         async def fetch_bytes(config, file_ref, **kwargs):

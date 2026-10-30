@@ -183,10 +183,11 @@ the buttons carry as `v1:<verb>:<intent id>`.
    CDN request) and the real validator judges them. The story is `awaiting_approval`,
    the item's index row reads `validation_state = supported`, and the story's
    provenance records `capture_epoch = 1`.
-6. **Card.** `sendPhoto` carries the picture, a caption whose first line is the camera
-   emoji and `@example_handle_a`, and the buttons `post`, `posted`, `skip`, `reject`,
-   plus the notice that the account has no content left. Two CDN requests so far
-   (prepare, send).
+6. **Card.** `sendMessage` carries the card's text with no buttons; the edit that
+   follows (`editMessageMedia`) puts the picture on that same message with a caption
+   whose first line is the camera emoji and `@example_handle_a`, and the buttons
+   `post`, `posted`, `skip`, `reject`, plus the notice that the account has no content
+   left. Two CDN requests so far (prepare, the card's picture).
 7. **Approve.** The command port answers 202 `enqueued` (state `approved`, job
    `publish_pipeline`). No container and no upload exist yet.
 8. **Fake publish.** The story is `posted`, `publish_step = effect_confirmed`,

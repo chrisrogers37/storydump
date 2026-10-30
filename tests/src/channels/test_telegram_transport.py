@@ -238,8 +238,9 @@ class TestSendText:
 class TestACardSentSettled:
     """#1477: a card sent settled keeps the card's own text in its payload
     and carries its line in `outcome_text`, the outbox's record of the line a
-    card carries. The send puts the line under the text or the caption, as an
-    edit does, so a later edit's header is the card without that line."""
+    card carries. The send puts the line under the text, and the edit that
+    brings a media card its picture puts it under the caption, as an edit
+    does, so a later edit's header is the card without that line."""
 
     async def test_a_text_card_goes_out_with_its_line_under_it(self):
         sent = []
@@ -259,21 +260,37 @@ class TestACardSentSettled:
             {"chat_id": "7", "text": "📸 f.jpg (image)\n✅ Approved by YOLO"}
         ]
 
-    async def test_a_media_card_goes_out_with_its_line_under_the_caption(self):
-        seen = {}
-
-        def handler(request):
-            seen["body"] = _multipart(request)
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+    async def test_a_media_cards_create_puts_its_line_under_its_text(self):
+        calls = []
+        t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=_fetch_ok)
         row = dict(
             MEDIA_ROW,
             payload={**MEDIA_ROW["payload"], "outcome_text": "✅ Posted by YOLO"},
         )
-        assert await t.for_chat("7")(row) == "77"
-        caption = "📸 @example.brand\nSlot: 2026-08-21 14:30 America/New_York\n✅ Posted by YOLO"
-        assert caption.encode() in seen["body"]
+        assert await t.for_chat("7")(row) == "555"
+        ((method, body),) = calls
+        assert method == "sendMessage"
+        assert json.loads(body)["text"] == (
+            "📸 sunset.jpg (image)\nSlot: 2026-08-21 14:30 America/New_York\n"
+            "✅ Posted by YOLO"
+        )
+
+    async def test_the_media_edit_puts_the_line_under_the_caption(self):
+        """A card settled before its picture lands: the edit that brings the
+        picture writes the line under the card's header, as the caption."""
+        calls = []
+        t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=_fetch_ok)
+        row = dict(
+            EDIT_ROW,
+            payload={**EDIT_ROW["payload"], "outcome_text": "✅ Posted by YOLO"},
+        )
+        assert await t.for_chat("7")(row) == "555"
+        ((method, body),) = calls
+        assert method == "editMessageMedia"
+        assert json.loads(_multipart_field(body, "media"))["caption"] == (
+            "📸 @example.brand\nSlot: 2026-08-21 14:30 America/New_York\n"
+            "✅ Posted by YOLO"
+        )
 
 
 class TestTheEditSeam:
@@ -428,97 +445,269 @@ async def _fetch_fails(media):
     raise RuntimeError("drive said no")
 
 
-def _multipart(request):
-    body = request.read()
-    assert request.headers["content-type"].startswith("multipart/form-data"), (
-        "a media card is a multipart upload"
-    )
-    return body
+def _multipart_field(body, name):
+    """A text field of a multipart upload's body, decoded."""
+    marker = f'name="{name}"\r\n\r\n'.encode()
+    assert marker in body, f"the upload carries no {name!r} field"
+    return body.split(marker, 1)[1].split(b"\r\n--", 1)[0].decode()
+
+
+def _bot(calls, refusals=None):
+    """A Bot API that records `(method, body)` into *calls* and answers every
+    call ok with message 555, except the methods *refusals* maps to a
+    `(status, description)` refusal."""
+    refusals = refusals or {}
+
+    def handler(request):
+        name = str(request.url).rsplit("/", 1)[-1]
+        calls.append((name, request.read()))
+        if name in refusals:
+            status, description = refusals[name]
+            return httpx.Response(
+                status,
+                json={"ok": False, "error_code": status, "description": description},
+            )
+        return _ok({"message_id": 555})
+
+    return handler
+
+
+def _methods(calls):
+    """The Bot API methods *calls* (from `_bot`) names, in order."""
+    return [method for method, _ in calls]
+
+
+def _levels(caplog):
+    """The levels of what the transport logged, in order."""
+    return [r.levelname for r in caplog.records if r.name == transport_logger.name]
+
+
+# The edit that brings a media card its photo or video, as the sender claims
+# it: the card's `media` block, `sent_as` saying the media is not yet on the
+# message, and the story's keyboard.
+EDIT_ROW = {
+    "id": "ob-3",
+    "kind": "prompt_supersede",
+    "payload": {
+        "v": 1,
+        "supersedes_ref": "555",
+        "header": MEDIA_ROW["payload"]["caption"],
+        "sent_as": "text",
+        "media": MEDIA_ROW["payload"]["media"],
+        "reply_markup": {
+            "inline_keyboard": [[{"text": "Configure", "callback_data": "v1:cfg:x"}]]
+        },
+    },
+    "attempts": 1,
+    "intent_id": "i-1",
+    "workspace_id": "ws-1",
+}
+
+
+async def _edited(fetch, row=None):
+    """The card's media edit run with *fetch* behind it: the receipt, the Bot
+    API methods called and the transport."""
+    calls = []
+    t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=fetch)
+    receipt = await t.for_chat("7")(row or EDIT_ROW)
+    return receipt, _methods(calls), t
 
 
 class TestMediaCards:
-    """The card IS the photo or video, the account and slot its caption. The
-    transport fetches the bytes through the injected `media_fetch` and uploads
-    them; when the file cannot be fetched or Telegram refuses the upload, the
-    text card is sent instead — a chat that is gone, or a dead token, still
-    propagate."""
+    """A media card is sent as its text; its photo or video lands on that
+    message by the edit that follows (`editMessageMedia`), the card's only
+    upload. The transport fetches the bytes through the injected `media_fetch`
+    for that edit; when the file cannot be fetched or Telegram refuses the
+    media, the text card stands and the edit brings the line and the keyboard
+    alone — a chat that is gone, or a dead token, still propagate."""
 
-    async def test_an_image_card_is_a_sendphoto_upload_with_caption_and_keyboard(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"] = str(request.url)
-            seen["body"] = _multipart(request)
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        assert await t.for_chat("7")(MEDIA_ROW) == "77"
-        assert seen["url"].endswith("/sendPhoto")
-        body = seen["body"]
-        assert b'name="photo"; filename="sunset.jpg"' in body
-        assert b"Content-Type: image/jpeg" in body and b"JPEGBYTES" in body
-        assert b'name="chat_id"' in body and b"\r\n7\r\n" in body
-        assert b'name="caption"' in body and "@example.brand".encode() in body
-        assert b'name="reply_markup"' in body and b"v1:posted:x" in body
-
-    async def test_a_video_card_is_a_sendvideo_upload(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"] = str(request.url)
-            seen["body"] = _multipart(request)
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 78}})
+    async def test_a_media_cards_create_is_its_text_and_fetches_nothing(self):
+        """The card goes out as a small message answered at once; the fetch and
+        the upload belong to the edit that follows."""
+        calls, fetched = [], []
 
         async def fetch(media):
-            return b"MP4BYTES", "clip.mp4", "video/mp4"
+            fetched.append(media)
+            return await _fetch_ok(media)
 
-        row = dict(
-            MEDIA_ROW,
-            payload={
-                **MEDIA_ROW["payload"],
-                "media": {
-                    **MEDIA_ROW["payload"]["media"],
-                    "kind": "video",
-                    "mime": "video/mp4",
-                    "file_name": "clip.mp4",
-                },
-            },
+        t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=fetch)
+        ref = await t.for_chat("7")(MEDIA_ROW)
+        ((method, body),) = calls
+        assert method == "sendMessage"
+        assert json.loads(body)["text"] == MEDIA_ROW["payload"]["text"]
+        assert ref.sent_as == "text" and fetched == []
+
+    async def test_the_media_edit_is_one_editmessagemedia_with_caption_file_and_keyboard(
+        self,
+    ):
+        calls = []
+        t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=_fetch_ok)
+        ref = await t.for_chat("7")(EDIT_ROW)
+        ((method, body),) = calls
+        assert method == "editMessageMedia"
+        assert _multipart_field(body, "chat_id") == "7"
+        assert _multipart_field(body, "message_id") == "555"
+        assert json.loads(_multipart_field(body, "media")) == {
+            "type": "photo",
+            "media": "attach://photo",
+            "caption": MEDIA_ROW["payload"]["caption"],
+        }
+        assert b'name="photo"; filename="sunset.jpg"' in body
+        assert b"Content-Type: image/jpeg" in body and b"JPEGBYTES" in body
+        markup = json.loads(_multipart_field(body, "reply_markup"))
+        assert markup == EDIT_ROW["payload"]["reply_markup"]
+        assert ref == "555" and ref.sent_as == "media"
+
+    @pytest.mark.parametrize(
+        "kind, mime, name, media_type",
+        [
+            pytest.param(
+                "image", "image/png", "shot.png", "photo", id="a PNG is a photo"
+            ),
+            pytest.param(
+                "video", "video/mp4", "clip.mp4", "video", id="an MP4 is a video"
+            ),
+            pytest.param(
+                "image",
+                "image/heic",
+                "shot.heic",
+                "document",
+                id="a HEIC is a document",
+            ),
+        ],
+    )
+    async def test_a_video_rides_as_video_and_a_heic_as_document(
+        self, kind, mime, name, media_type
+    ):
+        """Telegram takes a JPEG or PNG as a photo and an MP4 or QuickTime file
+        as a video; anything else goes as a document, which still previews
+        inline."""
+        calls = []
+
+        async def fetch(media):
+            return b"BYTES", name, mime
+
+        block = {
+            **EDIT_ROW["payload"]["media"],
+            "kind": kind,
+            "mime": mime,
+            "file_name": name,
+        }
+        row = dict(EDIT_ROW, payload={**EDIT_ROW["payload"], "media": block})
+        t = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=fetch)
+        await t.for_chat("7")(row)
+        ((method, body),) = calls
+        assert method == "editMessageMedia"
+        sent = json.loads(_multipart_field(body, "media"))
+        assert (sent["type"], sent["media"]) == (media_type, f"attach://{media_type}")
+        assert f'name="{media_type}"; filename="{name}"'.encode() in body
+
+    async def test_the_media_edit_waits_out_its_own_class_not_the_shared_upload(
+        self, monkeypatch
+    ):
+        """A card's photo is uploaded under the `card_upload` wait, long enough for
+        Telegram to take in the file; the shared `upload` class keeps its 60 s."""
+        from src.services.target.egress import TIMEOUT_CLASSES
+
+        seen = {}
+
+        async def call(method, payload=None, *, data=None, files=None, policy=None):
+            seen["method"], seen["policy"] = method, policy
+            return {"message_id": 7}
+
+        def handler(request):
+            raise AssertionError("a request was made past the stand-in `_call`")
+
+        t = _transport(handler)
+        monkeypatch.setattr(t, "_call", call)
+        result = await t.edit_media(
+            "-100555",
+            "555",
+            kind="image",
+            content=b"jpeg",
+            filename="card.jpg",
+            mime="image/jpeg",
+            caption="caption",
+            reply_markup=None,
         )
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
-        assert await t.for_chat("7")(row) == "78"
-        assert seen["url"].endswith("/sendVideo")
-        assert b'name="video"; filename="clip.mp4"' in seen["body"]
 
-    async def test_a_failed_fetch_falls_back_to_the_text_card(self):
+        policy = seen["policy"]
+        assert result == {"message_id": 7}
+        assert seen["method"] == "editMessageMedia"
+        assert policy.timeout_class == "card_upload"
+        assert policy.timeout_s == TIMEOUT_CLASSES["card_upload"] == 120.0
+        assert policy.total_budget_s > policy.timeout_s
+        assert policy.retry_after_send is False
+        assert TIMEOUT_CLASSES["upload"] == 60.0
+
+    @pytest.mark.parametrize(
+        "status, description",
+        [
+            pytest.param(
+                400,
+                "Bad Request: PHOTO_INVALID_DIMENSIONS",
+                id="a file Telegram will not take",
+            ),
+            pytest.param(413, "Request Entity Too Large", id="a file too large"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "outcome, then",
+        [
+            pytest.param(None, "editMessageReplyMarkup", id="the keyboard alone"),
+            pytest.param(
+                "✅ Posted by YOLO", "editMessageText", id="the line and the keyboard"
+            ),
+        ],
+    )
+    async def test_a_refused_media_lands_the_keyboard_alone_and_says_the_card_stays_text(
+        self, status, description, outcome, then, caplog
+    ):
+        """A definitive refusal of the media leaves the text card, which still
+        gets its line and its keyboard; the receipt says `text`, so the sender
+        records that no media is owed."""
         calls = []
+        row = dict(EDIT_ROW)
+        if outcome:
+            row["payload"] = {**EDIT_ROW["payload"], "outcome_text": outcome}
+        t = TelegramTransport(
+            TOKEN,
+            client=_client(_bot(calls, {"editMessageMedia": (status, description)})),
+            media_fetch=_fetch_ok,
+        )
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref = await t.for_chat("7")(row)
+        assert _methods(calls) == ["editMessageMedia", then]
+        landed = json.loads(calls[1][1])
+        assert landed["reply_markup"] == EDIT_ROW["payload"]["reply_markup"]
+        if outcome:
+            assert landed["text"] == f"{MEDIA_ROW['payload']['caption']}\n{outcome}"
+        assert ref == "555" and ref.sent_as == "text"
+        assert _levels(caplog) == ["WARNING"]
 
-        def handler(request):
-            calls.append(str(request.url))
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_fails)
-        assert await t.for_chat("7")(MEDIA_ROW) == "5"
-        assert len(calls) == 1 and calls[0].endswith("/sendMessage")
-
-    async def test_a_refused_upload_falls_back_to_the_text_card_once(self):
+    async def test_a_media_edit_that_already_stands_is_done(self):
+        """A "message is not modified" answer says the picture is already on
+        the message: the edit is confirmed as any other."""
         calls = []
+        refusals = {"editMessageMedia": (400, "Bad Request: message is not modified")}
+        t = TelegramTransport(
+            TOKEN, client=_client(_bot(calls, refusals)), media_fetch=_fetch_ok
+        )
+        ref = await t.for_chat("7")(EDIT_ROW)
+        assert _methods(calls) == ["editMessageMedia"]
+        assert ref.sent_as == "media"
 
-        def handler(request):
-            calls.append(str(request.url))
-            if calls[-1].endswith("/sendPhoto"):
-                return httpx.Response(
-                    400,
-                    json={
-                        "ok": False,
-                        "error_code": 400,
-                        "description": "Bad Request: PHOTO_INVALID_DIMENSIONS",
-                    },
-                )
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 6}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        assert await t.for_chat("7")(MEDIA_ROW) == "6"
-        assert [c.rsplit("/", 1)[1] for c in calls] == ["sendPhoto", "sendMessage"]
+    async def test_a_gone_message_fails_the_media_edit_after_one_call(self):
+        """A "message to edit not found" answer says the message is gone: no
+        other call can land on it, so the row fails at once."""
+        calls = []
+        refusals = {"editMessageMedia": (400, "Bad Request: message to edit not found")}
+        t = TelegramTransport(
+            TOKEN, client=_client(_bot(calls, refusals)), media_fetch=_fetch_ok
+        )
+        with pytest.raises(TelegramRefused):
+            await t.for_chat("7")(EDIT_ROW)
+        assert _methods(calls) == ["editMessageMedia"], "no call after it"
 
     async def test_a_chat_that_is_gone_propagates_without_a_fallback(self):
         calls = []
@@ -550,14 +739,25 @@ class TestMediaCards:
         assert await t.for_chat("7")(MEDIA_ROW) == "8"
         assert calls[0].endswith("/sendMessage")
 
+    async def test_without_a_fetch_the_edit_brings_the_keyboard_and_the_card_stays_text(
+        self,
+    ):
+        calls = []
+        ref = await _transport(_bot(calls)).for_chat("7")(EDIT_ROW)
+        assert _methods(calls) == ["editMessageReplyMarkup"]
+        assert ref.sent_as == "text", "no media is owed on a card that cannot fetch it"
+
 
 class TestMediaCardsStayHonest:
-    """#1259: only a DEFINITIVE refusal of the upload falls back —
-    a lost answer, a 429 or a 5xx may have posted the card and propagate for
-    the outbox's ambiguity policy; a dead token is a dead token; and a fetch
-    that fails for a reason that is not the file's is loud and counted."""
+    """#1259: only a DEFINITIVE refusal of the media edit falls back — a lost
+    answer, a flood wait or a 5xx may have put the picture on the message and
+    propagate for the outbox's ambiguity policy, with no second upload inside
+    the call; a dead token is a dead token; and a fetch that fails for a reason
+    that is not the file's is loud and counted."""
 
-    async def test_a_lost_upload_answer_propagates_without_a_text_fallback(self):
+    async def test_a_lost_media_answer_propagates_with_no_fallback_and_no_second_upload(
+        self,
+    ):
         calls = []
 
         def handler(request):
@@ -565,13 +765,14 @@ class TestMediaCardsStayHonest:
             raise httpx.ReadTimeout("no answer")
 
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        with pytest.raises(TelegramSendError):
-            await t.for_chat("7")(MEDIA_ROW)
-        assert calls == ["sendPhoto"], "one attempt, no re-upload, no text card"
+        with pytest.raises(TelegramSendError) as exc:
+            await t.for_chat("7")(EDIT_ROW)
+        assert not isinstance(exc.value, TelegramRefused)
+        assert calls == ["editMessageMedia"], "one upload: no fallback, no re-upload"
 
-    async def test_an_upload_that_never_left_is_attempted_again(self):
-        # No connection was made, so no card can stand: a second attempt
-        # cannot be a second card.
+    async def test_a_media_edit_that_never_left_is_attempted_again(self):
+        # No connection was made, so the picture cannot be on the message: a
+        # second attempt is the first one.
         calls = []
 
         def handler(request):
@@ -581,11 +782,14 @@ class TestMediaCardsStayHonest:
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
 
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        assert await t.for_chat("7")(MEDIA_ROW) == "5"
-        assert calls == ["sendPhoto", "sendPhoto"]
+        ref = await t.for_chat("7")(EDIT_ROW)
+        assert calls == ["editMessageMedia", "editMessageMedia"]
+        assert ref == "555" and ref.sent_as == "media"
 
     @pytest.mark.parametrize("code", [429, 500, 502])
-    async def test_a_429_or_5xx_on_the_upload_is_ambiguous_not_a_refusal(self, code):
+    async def test_a_429_or_5xx_on_the_media_edit_is_ambiguous_not_a_refusal(
+        self, code
+    ):
         calls = []
 
         def handler(request):
@@ -596,143 +800,116 @@ class TestMediaCardsStayHonest:
 
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
         with pytest.raises(TelegramSendError) as exc:
-            await t.for_chat("7")(MEDIA_ROW)
+            await t.for_chat("7")(EDIT_ROW)
         assert not isinstance(exc.value, TelegramRefused)
-        assert calls == ["sendPhoto"]
+        assert calls == ["editMessageMedia"]
 
-    async def test_a_401_on_the_upload_is_the_dead_credential(self):
-        def handler(request):
-            return httpx.Response(
-                401,
-                json={"ok": False, "error_code": 401, "description": "Unauthorized"},
-            )
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        with pytest.raises(TelegramAuthDead):
-            await t.for_chat("7")(MEDIA_ROW)
-        assert t.auth_failures == 1
-
-    async def test_a_media_block_for_another_workspace_is_refused_loudly(self):
+    async def test_a_401_on_the_media_edit_is_the_dead_credential(self):
         calls = []
+        refusals = {"editMessageMedia": (401, "Unauthorized")}
+        t = TelegramTransport(
+            TOKEN, client=_client(_bot(calls, refusals)), media_fetch=_fetch_ok
+        )
+        with pytest.raises(TelegramAuthDead):
+            await t.for_chat("7")(EDIT_ROW)
+        assert _methods(calls) == ["editMessageMedia"] and t.auth_failures == 1
+
+    async def test_a_chat_that_is_gone_propagates_from_the_media_edit(self):
+        calls = []
+        refusals = {
+            "editMessageMedia": (403, "Forbidden: bot was kicked from the group chat")
+        }
+        t = TelegramTransport(
+            TOKEN, client=_client(_bot(calls, refusals)), media_fetch=_fetch_ok
+        )
+        with pytest.raises(TelegramChatGone):
+            await t.for_chat("7")(EDIT_ROW)
+        assert _methods(calls) == ["editMessageMedia"], "no keyboard call into it"
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param(
+                dict(EDIT_ROW, workspace_id="ws-OTHER"),
+                id="a block for another workspace",
+            ),
+            pytest.param(
+                {k: v for k, v in EDIT_ROW.items() if k != "workspace_id"},
+                id="a row that cannot vouch for its workspace",
+            ),
+        ],
+    )
+    async def test_a_media_block_the_row_cannot_vouch_for_is_refused_loudly(
+        self, row, caplog
+    ):
         fetched = []
 
         async def fetch(media):
             fetched.append(media)
             return b"x", "a.jpg", "image/jpeg"
 
-        def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[1])
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
-        row = dict(MEDIA_ROW, workspace_id="ws-OTHER")
-        assert await t.for_chat("7")(row) == "9"
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref, methods, t = await _edited(fetch, row)
         assert fetched == [], "the grant is never asked for another tenant's file"
-        assert calls == ["sendMessage"] and t.media_fetch_failures == 1
+        assert methods == ["editMessageReplyMarkup"] and ref.sent_as == "text"
+        assert t.media_fetch_failures == 1
+        assert _levels(caplog) == ["ERROR"]
 
-    async def test_the_files_own_failure_is_quiet_but_anything_else_is_counted(self):
-        calls = []
-
-        def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[1])
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 3}})
-
+    async def test_the_files_own_failure_is_quiet_but_anything_else_is_counted(
+        self, caplog
+    ):
         async def too_large(media):
             raise MediaUnavailable("11 bytes; the cap is 10")
 
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=too_large)
-        assert await t.for_chat("7")(MEDIA_ROW) == "3"
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref, methods, t = await _edited(too_large)
+        assert methods == ["editMessageReplyMarkup"] and ref.sent_as == "text"
         assert t.media_fetch_failures == 0
+        assert _levels(caplog) == ["WARNING"]
 
-        t2 = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_fails)
-        assert await t2.for_chat("7")(MEDIA_ROW) == "3"
-        assert t2.media_fetch_failures == 1
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref, methods, t = await _edited(_fetch_fails)
+        assert methods == ["editMessageReplyMarkup"] and ref.sent_as == "text"
+        assert t.media_fetch_failures == 1
+        assert _levels(caplog) == ["ERROR"]
 
-    async def test_a_transient_fetch_failure_propagates_so_the_photo_is_resent_later(
-        self,
+    @pytest.mark.parametrize("attempts", [1, 3])
+    async def test_a_transient_fetch_failure_leaves_the_card_text_at_once(
+        self, attempts, caplog
     ):
-        calls = []
-
-        def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[1])
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 3}})
+        """A blip costs the card its picture, not its keyboard: the edit lands
+        now, on any attempt, rather than raising to be resent with a media the
+        outbox would give up anyway."""
 
         async def blip(media):
             raise MediaTransient("drive answered 503")
 
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=blip)
-        with pytest.raises(TelegramSendError):
-            await t.for_chat("7")(MEDIA_ROW)
-        assert calls == [] and t.media_fetch_failures == 0, "no text card for a blip"
-        # The second attempt does not loop the card forever: the text card goes.
-        assert await t.for_chat("7")(dict(MEDIA_ROW, attempts=2)) == "3"
-        assert calls == ["sendMessage"] and t.media_fetch_failures == 0
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref, methods, t = await _edited(blip, dict(EDIT_ROW, attempts=attempts))
+        assert methods == ["editMessageReplyMarkup"] and ref.sent_as == "text"
+        assert t.media_fetch_failures == 0
+        assert _levels(caplog) == ["WARNING"]
 
-    async def test_a_mime_telegram_will_not_take_as_a_photo_goes_as_a_document(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"] = str(request.url)
-            seen["body"] = _multipart(request)
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 12}})
+    @pytest.mark.parametrize("attempts", [1, 3])
+    @pytest.mark.parametrize("preparation_failed", [False, True])
+    async def test_a_media_not_admitted_leaves_the_card_text_at_once(
+        self, attempts, preparation_failed, caplog
+    ):
+        from src.services.target.outbox import MediaAdmissionNotSent
 
         async def fetch(media):
-            return b"HEICBYTES", "shot.heic", "image/heic"
+            raise MediaAdmissionNotSent(
+                "past_posts_revalidation_required",
+                preparation_failed=preparation_failed,
+            )
 
-        row = dict(
-            MEDIA_ROW,
-            payload={
-                **MEDIA_ROW["payload"],
-                "media": {
-                    **MEDIA_ROW["payload"]["media"],
-                    "mime": "image/heic",
-                    "file_name": "shot.heic",
-                },
-            },
-        )
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
-        assert await t.for_chat("7")(row) == "12"
-        assert seen["url"].endswith("/sendDocument")
-        assert b'name="document"; filename="shot.heic"' in seen["body"]
-
-    async def test_a_413_is_a_definitive_refusal_and_falls_back(self):
-        calls = []
-
-        def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[1])
-            if calls[-1] == "sendPhoto":
-                return httpx.Response(
-                    413,
-                    json={
-                        "ok": False,
-                        "error_code": 413,
-                        "description": "Request Entity Too Large",
-                    },
-                )
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 6}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        assert await t.for_chat("7")(MEDIA_ROW) == "6"
-        assert calls == ["sendPhoto", "sendMessage"]
-
-    async def test_a_row_that_cannot_vouch_for_its_workspace_is_refused_too(self):
-        calls = []
-        fetched = []
-
-        async def fetch(media):
-            fetched.append(media)
-            return b"x", "a.jpg", "image/jpeg"
-
-        def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[1])
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": 4}})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
-        row = {k: v for k, v in MEDIA_ROW.items() if k != "workspace_id"}
-        assert await t.for_chat("7")(row) == "4"
-        assert (
-            fetched == [] and calls == ["sendMessage"] and t.media_fetch_failures == 1
-        )
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref, methods, t = await _edited(fetch, dict(EDIT_ROW, attempts=attempts))
+        assert methods == ["editMessageReplyMarkup"] and ref.sent_as == "text"
+        assert t.media_fetch_failures == int(preparation_failed)
+        expected = ["ERROR", "WARNING"] if preparation_failed else ["WARNING"]
+        assert _levels(caplog) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +966,10 @@ class TestTheSupersedeRowEditsTheCard:
     plus the outcome line with an empty keyboard in the same request (one
     Telegram message per tap per binding). A row without an outcome strips
     alone; a refused combined edit falls back to the type-agnostic strip —
-    the call that must land — unless the refusal says the message is gone."""
+    the call that must land — unless the refusal says the message is gone, and
+    after a refusal that says the message is not the type the record says (no
+    text to edit in a photo, no caption on text) the other edit is tried
+    once."""
 
     async def test_one_caption_edit_carries_the_line_and_removes_the_keyboard(self):
         calls = []
@@ -881,7 +1061,7 @@ class TestTheSupersedeRowEditsTheCard:
                     json={
                         "ok": False,
                         "error_code": 400,
-                        "description": "Bad Request: there is no caption",
+                        "description": "Bad Request: message caption is too long",
                     },
                 )
             return _ok()
@@ -1067,7 +1247,7 @@ class TestTheSupersedeRowEditsTheCard:
                     json={
                         "ok": False,
                         "error_code": 400,
-                        "description": "Bad Request: no caption",
+                        "description": "Bad Request: message caption is too long",
                     },
                 )
             return _ok()
@@ -1174,6 +1354,133 @@ class TestTheSupersedeRowEditsTheCard:
             "the strip was tried after the edit, and its refusal fails the row"
         )
 
+    @staticmethod
+    def _line_row(sent_as):
+        """A supersede row that writes a line under the card's header, the
+        card's record saying the message stands as *sent_as*."""
+        return {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "✅ Approved by Sam",
+                "header": "📸 @brand\nSlot: 2026-09-09 14:00 UTC",
+                "sent_as": sent_as,
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": "x", "callback_data": "v1:cfg:x"}]]
+                },
+            },
+        }
+
+    async def test_a_text_edit_refused_because_the_message_is_a_photo_is_tried_as_a_caption(
+        self,
+    ):
+        """The record says text but the message is a photo or video (an upload
+        whose answer was lost landed after all): Telegram says there is no text
+        to edit, so the line is written as the caption, once, and the receipt
+        says the message is media."""
+        calls = []
+        refusals = {
+            "editMessageText": (
+                400,
+                "Bad Request: there is no text in the message to edit",
+            )
+        }
+        row = self._line_row("text")
+        ref = await _transport(_bot(calls, refusals)).for_chat("-100")(row)
+        assert _methods(calls) == ["editMessageText", "editMessageCaption"]
+        retry = json.loads(calls[1][1])
+        assert retry["caption"] == (
+            "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Sam"
+        )
+        assert retry["reply_markup"] == row["payload"]["reply_markup"]
+        assert ref == "555" and ref.sent_as == "media"
+
+    async def test_a_caption_edit_refused_because_the_message_is_text_is_tried_as_text(
+        self,
+    ):
+        """The record says media but the message is text: Telegram says there
+        is no caption to edit, so the line is written as the text, once, and
+        the receipt says the message is text."""
+        calls = []
+        refusals = {
+            "editMessageCaption": (
+                400,
+                "Bad Request: there is no caption in the message to edit",
+            )
+        }
+        row = self._line_row("media")
+        ref = await _transport(_bot(calls, refusals)).for_chat("-100")(row)
+        assert _methods(calls) == ["editMessageCaption", "editMessageText"]
+        retry = json.loads(calls[1][1])
+        assert retry["text"] == (
+            "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Sam"
+        )
+        assert retry["reply_markup"] == row["payload"]["reply_markup"]
+        assert ref == "555" and ref.sent_as == "text"
+
+    async def test_a_refused_retry_still_strips_the_keyboard(self, caplog):
+        """The other edit is refused too (a caption that is too long, say): the
+        keyboard still lands by the type-agnostic strip, and the receipt says
+        an edit, as it does for any combined edit that was refused."""
+        calls = []
+        refusals = {
+            "editMessageText": (
+                400,
+                "Bad Request: there is no text in the message to edit",
+            ),
+            "editMessageCaption": (400, "Bad Request: message caption is too long"),
+        }
+        row = self._line_row("text")
+        with caplog.at_level("WARNING", logger=transport_logger.name):
+            ref = await _transport(_bot(calls, refusals)).for_chat("-100")(row)
+        assert _methods(calls) == [
+            "editMessageText",
+            "editMessageCaption",
+            "editMessageReplyMarkup",
+        ]
+        assert json.loads(calls[2][1])["reply_markup"] == row["payload"]["reply_markup"]
+        assert ref == "555" and ref.sent_as == "edit"
+        assert _levels(caplog) == ["WARNING"]
+
+    async def test_a_retry_that_finds_the_message_gone_fails_the_edit_with_no_strip(
+        self,
+    ):
+        calls = []
+        refusals = {
+            "editMessageText": (
+                400,
+                "Bad Request: there is no text in the message to edit",
+            ),
+            "editMessageCaption": (400, "Bad Request: message to edit not found"),
+        }
+        with pytest.raises(TelegramRefused):
+            await _transport(_bot(calls, refusals)).for_chat("-100")(
+                self._line_row("text")
+            )
+        assert _methods(calls) == ["editMessageText", "editMessageCaption"], (
+            "no strip into a message that is gone"
+        )
+
+    async def test_a_retry_that_already_stands_is_done(self):
+        """A "message is not modified" answer to the other edit is success, as
+        it is for any edit: the message stands as the retry says."""
+        calls = []
+        refusals = {
+            "editMessageText": (
+                400,
+                "Bad Request: there is no text in the message to edit",
+            ),
+            "editMessageCaption": (400, "Bad Request: message is not modified"),
+        }
+        ref = await _transport(_bot(calls, refusals)).for_chat("-100")(
+            self._line_row("text")
+        )
+        assert _methods(calls) == ["editMessageText", "editMessageCaption"]
+        assert ref.sent_as == "media"
+
 
 class TestASendReceiptSaysHowTheCardWent:
     async def test_a_text_send_reports_text(self):
@@ -1183,13 +1490,17 @@ class TestASendReceiptSaysHowTheCardWent:
         ref = await _transport(handler).for_chat("7")(ROW)
         assert ref == "99" and ref.sent_as == "text"
 
-    async def test_a_media_send_reports_media(self):
-        def handler(request):
-            return _ok({"message_id": 77})
-
-        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
-        ref = await t.for_chat("7")(MEDIA_ROW)
-        assert ref == "77" and ref.sent_as == "media"
+    async def test_a_media_cards_create_reports_text_and_its_media_edit_reports_media(
+        self,
+    ):
+        t = TelegramTransport(TOKEN, client=_client(_bot([])), media_fetch=_fetch_ok)
+        create = await t.for_chat("7")(MEDIA_ROW)
+        assert create == "555" and create.sent_as == "text"
+        edit = await t.for_chat("7")(EDIT_ROW)
+        assert edit == "555" and edit.sent_as == "media"
+        line = {**EDIT_ROW["payload"], "sent_as": "media", "outcome_text": "x"}
+        line_edit = await t.for_chat("7")(dict(EDIT_ROW, payload=line))
+        assert line_edit.sent_as == "edit", "a line or keyboard edit is neither"
 
 
 class TestTransportFromEnv:
@@ -1301,27 +1612,86 @@ class TestAFloodLimitIsPacedNotFailed:
         assert info.value.scope == "global"
 
 
+class TestAFloodWaitSentAsA400IsPacedToo:
+    """Telegram sometimes re-codes its flood wait as a 400 whose description
+    names it ("Too Many Requests: retry after N") with no `retry_after`
+    parameter. It is the same wait as a 429: the message did not go, so it is
+    `TelegramPaced`, never a refusal that loses a card's media or fails a row,
+    and the call is made once, with no fallback into the flood."""
+
+    FLOOD = "Bad Request: too Many Requests: retry after 8"
+
+    @pytest.mark.parametrize(
+        "row, method",
+        [
+            pytest.param(ROW, "sendMessage", id="a message"),
+            pytest.param(EDIT_ROW, "editMessageMedia", id="a card's media edit"),
+            pytest.param(
+                {
+                    "id": "ob-9",
+                    "kind": "prompt_supersede",
+                    "intent_id": "i1",
+                    "payload": {"v": 1, "supersedes_ref": "555"},
+                },
+                "editMessageReplyMarkup",
+                id="a keyboard edit",
+            ),
+        ],
+    )
+    async def test_it_is_paced_after_one_call(self, row, method):
+        calls = []
+        t = TelegramTransport(
+            TOKEN,
+            client=_client(_bot(calls, {method: (400, self.FLOOD)})),
+            media_fetch=_fetch_ok,
+        )
+        with pytest.raises(TelegramPaced) as info:
+            await t.for_chat("7")(row)
+        assert info.value.retry_after_s == 8.0
+        assert info.value.code == 400
+        assert info.value.scope == "chat"
+        assert _methods(calls) == [method], "one call: no fallback into the flood"
+
+    async def test_any_other_400_is_still_a_refusal(self):
+        calls = []
+        refusals = {"sendMessage": (400, "Bad Request: message is too long")}
+        t = _transport(_bot(calls, refusals))
+        with pytest.raises(TelegramRefused):
+            await t.send_text("555", "hi")
+        assert _methods(calls) == ["sendMessage"]
+
+
 @pytest.mark.parametrize("attempts", [1, 3])
-async def test_selected_past_posts_no_send_never_falls_back_to_actionable_text(
-    attempts,
+async def test_a_past_posts_cards_text_goes_without_a_fetch_and_its_media_edit_stays_text_when_admission_is_refused(
+    attempts, caplog
 ):
     from src.services.target.outbox import MediaAdmissionNotSent
 
-    sent = []
+    calls, fetched = [], []
 
     async def fetch(media):
+        fetched.append(media)
         raise MediaAdmissionNotSent("past_posts_revalidation_required")
 
-    def handler(request):
-        sent.append(request)
-        return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
-
-    transport = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
-    with pytest.raises(MediaAdmissionNotSent):
-        await transport.for_chat("7")(
-            {**MEDIA_ROW, "workspace_id": "ws-1", "attempts": attempts}
-        )
-    assert sent == [] and transport.media_fetch_failures == 0
+    block = {**MEDIA_ROW["payload"]["media"], "intent_id": MEDIA_ROW["intent_id"]}
+    create = {
+        **MEDIA_ROW,
+        "attempts": attempts,
+        "payload": {**MEDIA_ROW["payload"], "media": block},
+    }
+    edit = {
+        **EDIT_ROW,
+        "attempts": attempts,
+        "payload": {**EDIT_ROW["payload"], "media": block},
+    }
+    transport = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=fetch)
+    card = await transport.for_chat("7")(create)
+    assert card.sent_as == "text" and fetched == [], "the create fetches nothing"
+    with caplog.at_level("WARNING", logger=transport_logger.name):
+        receipt = await transport.for_chat("7")(edit)
+    assert _methods(calls) == ["sendMessage", "editMessageReplyMarkup"]
+    assert receipt.sent_as == "text" and transport.media_fetch_failures == 0
+    assert _levels(caplog) == ["WARNING"]
 
 
 async def test_past_posts_media_intent_mismatch_refuses_before_fetch_or_send():
@@ -1352,41 +1722,37 @@ async def test_past_posts_media_intent_mismatch_refuses_before_fetch_or_send():
 
 
 async def test_unexpected_past_posts_preparation_failure_is_no_send_and_counted(
-    monkeypatch,
+    monkeypatch, caplog
 ):
     from src import worker
-    from src.services.target.outbox import MediaAdmissionNotSent
     from tests.src.services.target.test_media_adapters import _source_factory
 
     _source_factory(
         monkeypatch, {"provider": "instagram_past_posts", "config": {"v": 1}}
     )
-    sent = []
+    calls = []
 
     async def selected(**kwargs):
         raise RuntimeError("synthetic-secret-never-log")
 
-    def handler(request):
-        sent.append(request)
-        return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
-
     fetch = worker._card_media_fetch(object(), {}, fetch_selected=selected)
-    transport = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
+    transport = TelegramTransport(TOKEN, client=_client(_bot(calls)), media_fetch=fetch)
     row = {
-        **MEDIA_ROW,
-        "workspace_id": "ws-1",
+        **EDIT_ROW,
         "payload": {
-            **MEDIA_ROW["payload"],
+            **EDIT_ROW["payload"],
             "media": {
-                **MEDIA_ROW["payload"]["media"],
-                "intent_id": MEDIA_ROW["intent_id"],
+                **EDIT_ROW["payload"]["media"],
+                "intent_id": EDIT_ROW["intent_id"],
             },
         },
     }
-    with pytest.raises(MediaAdmissionNotSent) as error:
-        await transport.for_chat("7")(row)
-    assert sent == [] and transport.media_fetch_failures == 1
-    assert "synthetic-secret" not in str(error.value)
+    with caplog.at_level("WARNING", logger=transport_logger.name):
+        receipt = await transport.for_chat("7")(row)
+    assert _methods(calls) == ["editMessageReplyMarkup"]
+    assert receipt.sent_as == "text" and transport.media_fetch_failures == 1
+    assert _levels(caplog) == ["ERROR", "WARNING"]
+    assert "synthetic-secret" not in caplog.text
 
 
 @pytest.mark.parametrize("fault", ["foreign_workspace", "unsupported_kind", "no_fetch"])
