@@ -1,0 +1,3 @@
+### Tests
+
+- **Every egress failure a message-creating call can meet is pinned, and so is an edit's retry (#41).** A write that timed out or broke and a read that broke (`WriteTimeout`, `WriteError`, `ReadError`) are lost answers, like `ReadTimeout` and `RemoteProtocolError`: the egress floor raises `EgressAnswerLost`, and the Telegram transport sends no second message. A request that never left (`ConnectError`, `ConnectTimeout`, `PoolTimeout`) is attempted again. A plain edit (`editMessageText`) whose first answer is lost keeps the floor's retries and is attempted again, since a second edit rewrites the same message.

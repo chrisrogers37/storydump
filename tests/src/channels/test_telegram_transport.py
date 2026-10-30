@@ -218,7 +218,14 @@ class TestSendText:
         assert sent == [{"chat_id": "7", "text": "hi"}]
 
     @pytest.mark.parametrize(
-        "lost", [httpx.ReadTimeout("no answer"), httpx.RemoteProtocolError("cut")]
+        "lost",
+        [
+            httpx.ReadTimeout("no answer"),
+            httpx.RemoteProtocolError("cut"),
+            httpx.WriteTimeout("no answer"),
+            httpx.WriteError("cut"),
+            httpx.ReadError("cut"),
+        ],
     )
     async def test_a_lost_answer_is_not_sent_again_inside_the_call(self, lost):
         # The request reached Telegram and its answer did not come back: the
@@ -312,6 +319,20 @@ class TestTheEditSeam:
             "text": "Cancelled.",
             "reply_markup": {"inline_keyboard": []},
         }
+
+    async def test_an_edit_whose_answer_is_lost_is_attempted_again(self):
+        """An edit creates no message: sent twice, it rewrites the same one,
+        so it keeps the floor's retries where a send is made once."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("no answer")
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        await _transport(handler).edit("555", "77", text="Cancelled.")
+        assert calls == ["editMessageText", "editMessageText"]
 
     @pytest.mark.parametrize(
         "change",
