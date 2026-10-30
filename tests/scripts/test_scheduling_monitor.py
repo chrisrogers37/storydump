@@ -153,11 +153,13 @@ class TestNothingToSeeIsNotTheSameAsNothingWrong:
 
     def test_but_it_does_not_stay_quiet_forever(self, notice):
         # "We have no monitoring coverage" must not fade from memory because it
-        # was said once a month ago.
+        # was said once a month ago. A week, as a number: quiet through the rest
+        # of the week, said again after it.
+        week = 7 * 24 * 3600
         state, _ = step(notice, {}, now=1000.0)
-        _, later = step(
-            notice, state, now=1000.0 + monitor.RENOTICE_NO_SIGNAL_AFTER_S + 1
-        )
+        _, soon = step(notice, state, now=1000.0 + week - 1)
+        assert soon is None
+        _, later = step(notice, state, now=1000.0 + week + 1)
         assert later is not None
 
     def test_the_day_it_gains_sight_it_says_so(self, notice):
@@ -359,12 +361,15 @@ class TestDeliveryIsItsOwnAxis:
         for status in (503, 404):
             assert monitor.read_delivery(status, good) is None
         assert monitor.read_delivery(200, "not json") is None
-        assert monitor.read_delivery(200, json.dumps({"sent_in_window": 1})) is None
         no_classes = {k: v for k, v in FAILING_HOUR.items() if k != "by_class"}
         assert monitor.read_delivery(200, json.dumps(no_classes)) is None
-        for count in (True, -1):
-            bad = {**FAILING_HOUR, "failed_or_ambiguous": count}
-            assert monitor.read_delivery(200, json.dumps(bad)) is None
+        # Each count on its own: missing, a bool, negative, or not a number.
+        for key in ("sent_in_window", "failed_or_ambiguous"):
+            missing = {k: v for k, v in FAILING_HOUR.items() if k != key}
+            assert monitor.read_delivery(200, json.dumps(missing)) is None, key
+            for count in (True, -1, "3"):
+                bad = {**FAILING_HOUR, key: count}
+                assert monitor.read_delivery(200, json.dumps(bad)) is None, bad
 
     def test_the_delivery_surface_sits_beside_the_scheduling_one(self):
         assert (
