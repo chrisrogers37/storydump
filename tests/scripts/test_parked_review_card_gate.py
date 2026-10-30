@@ -185,6 +185,170 @@ async def test_a_chat_gets_a_second_card_only_if_the_first_never_reached_it(
     ]
 
 
+def _hold_a_card(sync_conn, origin, chat, intent):
+    """A card of the story already in *chat*: an `approval_prompt` row sent,
+    carrying its message ref. Which earlier cards count as held is the
+    predicate's, pinned above."""
+    with sync_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, attempts, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s, %s, 'sent', 1, '41')",
+            (origin["ws"], chat, intent, '{"v": 2, "text": "card"}'),
+        )
+    sync_conn.commit()
+
+
+def _cards(rows, chat):
+    """The story's `approval_prompt` rows in *chat*, as (state, payload)."""
+    return [
+        (state, payload)
+        for c, kind, state, payload in rows
+        if c == chat and kind == "approval_prompt"
+    ]
+
+
+def _assert_review_cards_only_where_owed(rows, *, has_card, has_none):
+    """The park wrote the review card in the chats that hold no card of the
+    story and nowhere else: *has_card* keeps its sent card alone, *has_none*
+    gets one, and it says the story needs review."""
+    assert [s for s, _ in _cards(rows, has_card)] == ["sent"]
+    [(state, payload)] = _cards(rows, has_none)
+    assert state == "pending"
+    assert payload["outcome_text"].startswith("👀 Needs review")
+
+
+async def test_the_publish_jobs_poison_gives_a_chat_without_a_card_its_review_card(
+    past_posts_engine, origin, sync_conn
+):
+    """A publish job whose last try meets a retryable refusal at the container
+    create poisons the story into review. The park's courtesy writes the review
+    card in every chat that holds no card of it, beside one notice per chat."""
+    from src.services.target import publish_pipeline
+    from src.services.target.meta_adapter import StubMetaAdapter
+    from tests.scripts import test_instagram_publish_gate as publish_gate
+
+    async def forbidden_fetch(subject):
+        pytest.fail("a past post fetches no media")
+
+    has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
+    src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        await conn.execute(
+            text("UPDATE post_intents SET state='approved' WHERE id=:id"),
+            dict(id=intent),
+        )
+    _hold_a_card(sync_conn, origin, has_card, intent)
+    meta = StubMetaAdapter(create_outcomes=["retryable"])
+    # The claim has counted the job's last try, so the refusal is not retried.
+    job = {**job, "attempts": job["max_attempts"]}
+    outcome = await publish_pipeline.run_publish_pipeline(
+        job,
+        engine=past_posts_engine,
+        meta=meta,
+        transit=publish_gate.Transit(),
+        media_fetch=forbidden_fetch,
+        past_posts=c,
+        sleep=publish_gate.no_sleep,
+    )
+    assert outcome == publish_pipeline.POISONED
+    assert len(meta.create_calls) == 1, (
+        "pins the route: the park came after the container create, through the"
+        " job's poison, not by a refusal before it"
+    )
+    rows = _outbox_rows(sync_conn, intent)
+    _assert_review_cards_only_where_owed(rows, has_card=has_card, has_none=has_none)
+    for chat in (has_card, has_none):
+        notices = [r for r in rows if r[0] == chat and r[1] == "notification"]
+        assert len(notices) == 1, "the poison tells every chat once"
+
+
+async def test_the_reconcilers_park_gives_a_chat_without_a_card_its_review_card(
+    past_posts_engine, origin, sync_conn
+):
+    """A publish whose answer was lost, and that the reconcile ladder never
+    confirms, parks the story in review. The park writes the review card in
+    every chat that holds no card of it, and no notice: that waits out its
+    window."""
+    from src.services.target import reconciler
+    from tests.scripts import test_instagram_publish_gate as publish_gate
+
+    has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
+    src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        # The state a lost publish answer leaves (`ck_ambiguous_called`: only a
+        # publish call on record is ambiguous).
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state='publishing_ambiguous',"
+                " publish_step='publish_called' WHERE id=:id"
+            ),
+            dict(id=intent),
+        )
+    _hold_a_card(sync_conn, origin, has_card, intent)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        outcome = await reconciler.reconcile_intent(
+            conn,
+            intent_id=intent,
+            workspace_id=str(origin["ws"]),
+            status_code="IN_PROGRESS",
+            checks=99,
+        )
+    assert outcome == "review_required"
+    rows = _outbox_rows(sync_conn, intent)
+    _assert_review_cards_only_where_owed(rows, has_card=has_card, has_none=has_none)
+    assert [r for r in rows if r[1] == "notification"] == [], "the notice waits"
+
+
+async def test_the_reconcilers_park_stands_when_its_card_step_fails_in_the_database(
+    past_posts_engine, origin, sync_conn, monkeypatch
+):
+    """A database error in the card step aborts only its own savepoint, so the
+    park commits: the story leaves the ladder and the restate of the card a chat
+    holds is kept, with no review card and no notice written."""
+    from src.services.target import outbox, reconciler
+    from tests.scripts import test_instagram_publish_gate as publish_gate
+
+    async def failing_read(session, *, workspace_id, intent_id):
+        await session.execute(text("SELECT 1 / 0"))
+
+    has_card, has_none = [_bind(sync_conn, origin["ws"]) for _ in range(2)]
+    src, item, intent, job, c, _ = await publish_gate.ready(past_posts_engine, origin)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        # The state a lost publish answer leaves (`ck_ambiguous_called`: only a
+        # publish call on record is ambiguous).
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state='publishing_ambiguous',"
+                " publish_step='publish_called' WHERE id=:id"
+            ),
+            dict(id=intent),
+        )
+    _hold_a_card(sync_conn, origin, has_card, intent)
+    monkeypatch.setattr(outbox, "chats_without_card", failing_read)
+    async with observations.uow(past_posts_engine, origin) as conn:
+        outcome = await reconciler.reconcile_intent(
+            conn,
+            intent_id=intent,
+            workspace_id=str(origin["ws"]),
+            status_code="IN_PROGRESS",
+            checks=99,
+        )
+    assert outcome == "review_required"
+    with sync_conn.cursor() as cur:
+        cur.execute("SELECT state FROM post_intents WHERE id = %s", (intent,))
+        (parked,) = cur.fetchone()
+    sync_conn.commit()
+    assert parked == "review_required", "the park committed"
+    rows = _outbox_rows(sync_conn, intent)
+    assert sorted((kind, s) for chat, kind, s, _ in rows if chat == has_card) == [
+        ("approval_prompt", "sent"),
+        ("prompt_supersede", "pending"),
+    ], "the restate of the card it holds stood"
+    assert not [r for r in rows if r[0] == has_none and r[1] == "approval_prompt"]
+    assert [r for r in rows if r[1] == "notification"] == [], "the notice waits"
+
+
 async def test_a_changed_slide_parked_by_the_senders_last_try_says_why(
     past_posts_engine, origin, sync_conn
 ):

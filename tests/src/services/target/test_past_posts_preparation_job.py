@@ -308,7 +308,7 @@ async def test_a_spent_prepare_job_parks_its_waiting_story_saying_what_it_tried(
 
     flipped = []
 
-    async def flip_to_review(session, *, intent_id, from_state):
+    async def flip_to_review(session, *, intent_id, from_state, error=None):
         flipped.append((intent_id, from_state))
         return True
 

@@ -111,15 +111,18 @@ async def settled_line(
         from src.services.target import identity  # noqa: PLC0415 — cycle
 
         by = await identity.display_name_for(session, user_id=settled["by_user_id"])
-    # A story in review says why, in the words of its refusal's evidence.
+    state = state or settled["state"]
+    # A story in review says why, in the words of its refusal's evidence. A
+    # row keeps its reason past review (a retry's, after "It posted"), so no
+    # other line reads it.
     return outcome_line(
-        state or settled["state"],
+        state,
         by=by,
         at=settled.get("at") or at,
         tz=tz,
         published_via=settled.get("published_via"),
         rule=settled.get("approval_rule"),
-        refusal=settled.get("refusal"),
+        refusal=settled.get("refusal") if state == "review_required" else None,
     )
 
 
@@ -181,23 +184,38 @@ async def prompt_review(session, *, workspace_id: str, intent_id: str) -> int:
     one `approval_prompt` row per such binding, as `prompt_intent` writes a
     story's first card. The sender renders it again at claim. Returns the
     rows written. The park's flip holds the story's row, so no other writer
-    adds its card between the read and the write."""
-    chats = await outbox.chats_without_card(
-        session, workspace_id=workspace_id, intent_id=intent_id
-    )
-    card = await rerender_prompt(session, intent_id=intent_id) if chats else None
-    if card is None:
-        return 0
-    for binding_id in chats:
-        await outbox.enqueue(
-            session,
-            workspace_id=workspace_id,
-            binding_id=binding_id,
-            kind="approval_prompt",
-            payload=card,
-            intent_id=intent_id,
+    adds its card between the read and the write.
+
+    The card rides a savepoint of its own: the park is the record and the
+    card a courtesy, so a card that cannot be written is logged and the park
+    stands, never rolled back with it (0)."""
+    try:
+        async with session.begin_nested():
+            chats = await outbox.chats_without_card(
+                session, workspace_id=workspace_id, intent_id=intent_id
+            )
+            card = (
+                await rerender_prompt(session, intent_id=intent_id) if chats else None
+            )
+            if card is None:
+                return 0
+            for binding_id in chats:
+                await outbox.enqueue(
+                    session,
+                    workspace_id=workspace_id,
+                    binding_id=binding_id,
+                    kind="approval_prompt",
+                    payload=card,
+                    intent_id=intent_id,
+                )
+            return len(chats)
+    except Exception:  # noqa: BLE001 — logged; the park stands without the card
+        logger.exception(
+            "intent %s parked for review; its review card was NOT written for"
+            " the chats that hold no card of it",
+            intent_id,
         )
-    return len(chats)
+        return 0
 
 
 #: Everything a card is rendered from — the one spelling for the prompt sweep

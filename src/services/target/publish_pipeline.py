@@ -914,7 +914,7 @@ async def _retry_or_poison(
     resolve_op_id=None,
     resolve_response: Optional[dict] = None,
     step_back_to: Optional[str] = None,
-    error: Optional[dict] = None,
+    error: dict,
     poison_now: bool = False,
     wait: _Wait = _Wait(),
     notice: Optional[str] = None,
@@ -922,8 +922,11 @@ async def _retry_or_poison(
 ) -> str:
     """The retryable-failure edge: reschedule on the ladder while the budget
     holds; poison (`publishing → review_required`, debit retained) when it
-    is spent. *resolve_op_id* records a definitive failure on the permit in
-    the same transaction; *step_back_to* rewinds the ladder (the dead- or
+    is spent. *error* is why, the story's `last_error` from now on: every
+    failure records its own, so the card of a story this poisons never shows
+    an earlier attempt's (`_review_error` when no provider error explains it).
+    *resolve_op_id* records a definitive failure on the permit in the same
+    transaction; *step_back_to* rewinds the ladder (the dead- or
     gone-container case).
 
     The float: every wait STEPS BACK — `publishing → approved` in
@@ -951,16 +954,15 @@ async def _retry_or_poison(
             error = {**error, "error": {**error["error"], "spec_drift": drift}}
     now = now_fn()
     async with _leased_tx(uow, ctx.job) as session:
-        if error is not None:
-            # The reason, on the row, for whichever surface reads it next —
-            # the operator's review queue or the customer notice. Written
-            # before the flip; `review_required` is not terminal-frozen.
-            await session.execute(
-                text(
-                    "UPDATE post_intents SET last_error = CAST(:e AS jsonb) WHERE id = :intent"
-                ),
-                {"e": json.dumps(error), "intent": ctx.intent_id},
-            )
+        # The reason, on the row, for whichever surface reads it next —
+        # the operator's review queue or the customer notice. Written
+        # before the flip; `review_required` is not terminal-frozen.
+        await session.execute(
+            text(
+                "UPDATE post_intents SET last_error = CAST(:e AS jsonb) WHERE id = :intent"
+            ),
+            {"e": json.dumps(error), "intent": ctx.intent_id},
+        )
         if resolve_op_id is not None:
             await provider_ops.resolve_permit(
                 session,
@@ -1001,30 +1003,20 @@ async def _retry_or_poison(
                 raise ValueError(
                     f"intent {ctx.intent_id} left 'publishing' during poison"
                 )
-            # Said at once, not six hours later: the card gains the review
-            # line and the workspace hears; the reconciler's own notice reads
-            # the latch and stays silent.
-            told = await _say_outcome(
+            # Said at once, not six hours later: the courtesy every park is
+            # owed (`tell_review`), so a chat that holds no card of the story
+            # gets its review card. The reconciler's own notice reads the
+            # latch and stays silent; the latch is stamped only when an
+            # audience heard, so a workspace with no push binding at poison
+            # time keeps its six-hour backstop (`reconciler.py`).
+            await tell_review(
                 session,
-                ctx,
-                state="review_required",
-                at=now,
+                workspace_id=ctx.workspace_id,
+                intent_id=ctx.intent_id,
+                tz=ctx.tz,
                 notice=notice or _poison_notice(ctx, now),
+                at=now,
             )
-            if told:
-                # The latch is the reconciler's own rule (`reconciler.py`): it is
-                # stamped only when an audience heard, so a workspace with no
-                # push binding at poison time keeps its six-hour backstop.
-                await session.execute(
-                    text(
-                        "UPDATE post_intents SET "
-                        + intent_ledger.EVIDENCE_MERGE.format(
-                            seed="{}", key="customer_notified", value="true"
-                        )
-                        + " WHERE id = :intent"
-                    ),
-                    {"intent": ctx.intent_id},
-                )
             await finalize_job(
                 session, ctx.job["id"], ctx.job["lease_token"], "review_required"
             )
@@ -1252,7 +1244,18 @@ async def _route_readiness(
             poison_now=True,
         )
     if verdict == "pending":
-        return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
+        return await _retry_or_poison(
+            uow,
+            ctx,
+            backoff_seconds,
+            now_fn,
+            error=_review_error(
+                "ContainerNotReady",
+                "the container was not reported ready before the poll ran out",
+                "container_pending",
+                tries=int(ctx.job["attempts"]),
+            ),
+        )
     return None
 
 
@@ -1580,6 +1583,12 @@ async def _ladder(
                         elapsed_ms=ms_since(started),
                         probe=probe,
                     ),
+                    error=_review_error(
+                        "MetaLostResponse",
+                        "the container create's answer was lost",
+                        "answer_lost",
+                        tries=int(ctx.job["attempts"]),
+                    ),
                 )
             elapsed_ms = ms_since(started)
             async with _leased_tx(uow, ctx.job) as session:
@@ -1803,6 +1812,17 @@ def _permit_record(
             "http_status": detail.get("http_status"),
         }
     return record
+
+
+def _review_error(error_type: str, message: str, kind: str, **facts) -> dict:
+    """What `post_intents.last_error` records for a route into review that no
+    provider error explains: its own reason and what the route counted
+    (`refusal_evidence.review_error`), replacing an earlier attempt's, so the
+    card of a story it parks says why it is in review."""
+    return {
+        "v": 1,
+        "error": refusal_evidence.review_error(error_type, message, kind, **facts),
+    }
 
 
 def _error_of(exc: BaseException) -> dict:
@@ -2109,8 +2129,14 @@ async def _fail_terminal(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during fail")
-        await _say_outcome(
-            session, ctx, state="failed", at=at, notice=_failure_notice(exc)
+        await _restate_and_notify(
+            session,
+            workspace_id=ctx.workspace_id,
+            intent_id=ctx.intent_id,
+            state="failed",
+            at=at,
+            tz=ctx.tz,
+            notice=_failure_notice(exc),
         )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "failed")
     await _destroy_transit_best_effort(ctx, transit)
@@ -2128,30 +2154,6 @@ def _failure_notice(exc: BaseException) -> str:
     return "A story didn't post. Open the Queue on the web to see which."
 
 
-async def _say_outcome(
-    session,
-    ctx: _Ctx,
-    *,
-    state: str,
-    at,
-    notice: str,
-) -> int:
-    """Restate every card of the intent with the outcome line (the posted
-    line's own path — the tap already superseded the card, so only a restate
-    by ref can reach it) and write ONE notification per push binding, in the
-    caller's transaction. Returns how many bindings could hear it — zero
-    means nobody was told, and the caller must not pretend otherwise."""
-    return await _restate_and_notify(
-        session,
-        workspace_id=ctx.workspace_id,
-        intent_id=ctx.intent_id,
-        state=state,
-        at=at,
-        tz=ctx.tz,
-        notice=notice,
-    )
-
-
 async def _restate_and_notify(
     session,
     *,
@@ -2162,7 +2164,13 @@ async def _restate_and_notify(
     tz: str,
     notice: str,
 ) -> int:
-    """The card's keyboard is the sender's to render, from the story as it is
+    """Restate every card of the intent with the outcome line (the tap
+    already superseded the card, so only a restate by ref can reach it) and
+    write ONE notification per push binding, in the caller's transaction.
+    Returns how many bindings could hear it — zero means nobody was told,
+    and the caller must not pretend otherwise (`tell_review`'s latch).
+
+    The card's keyboard is the sender's to render, from the story as it is
     when the edit goes: a parked story's card keeps its review
     buttons because it is `review_required`. Its line says why the story was
     refused when its refusal says anything, as the card rendered again does
@@ -2207,16 +2215,27 @@ _INTENT_FOR_PARK = (
 )
 
 
-async def flip_to_review(session, *, intent_id: str, from_state: str) -> bool:
+async def flip_to_review(
+    session, *, intent_id: str, from_state: str, error: Optional[dict] = None
+) -> bool:
     """`from_state → review_required` (edges `intent_ledger.py` and `post_intent_transitions`), in the caller's
-    transaction. False when the row had already moved on."""
+    transaction. *error*, when given, becomes the story's `last_error` in the
+    same statement: why it went into review, which its card says
+    (`intent_ledger.settlement`), in place of an earlier attempt's. False when
+    the row had already moved on."""
+    sets, params = (
+        "state = 'review_required'",
+        {"intent": intent_id, "from_state": from_state},
+    )
+    if error is not None:
+        sets, params["e"] = sets + ", last_error = CAST(:e AS jsonb)", json.dumps(error)
     moved = (
         await session.execute(
             text(
-                "UPDATE post_intents SET state = 'review_required'"
+                f"UPDATE post_intents SET {sets}"
                 " WHERE id = :intent AND state = :from_state RETURNING id"
             ),
-            {"intent": intent_id, "from_state": from_state},
+            params,
         )
     ).fetchone()
     return moved is not None
@@ -2229,19 +2248,20 @@ async def tell_review(
     intent_id: str,
     tz: str,
     notice: str,
+    at: Optional[datetime] = None,
 ) -> None:
     """The courtesy a story parked for review is owed: its card restated with
     the review keyboard, its review card in every chat that holds no card of
     it (`prompts.prompt_review`; a story parked before it was served has none
     anywhere), one notice per push binding, and the `customer_notified` latch
-    when anyone heard — in the caller's transaction."""
-    at = datetime.now(timezone.utc)
+    when anyone heard — in the caller's transaction. *at* is when it was
+    parked, for its card's line: now, when not given."""
     told = await _restate_and_notify(
         session,
         workspace_id=workspace_id,
         intent_id=intent_id,
         state="review_required",
-        at=at,
+        at=at or utcnow(),
         tz=tz,
         notice=notice,
     )
@@ -2267,11 +2287,14 @@ async def park_for_review(
     from_state: str,
     tz: str,
     notice: str,
+    error: Optional[dict] = None,
 ) -> bool:
-    """`from_state → review_required` and the courtesy it is owed
-    (`tell_review`), together in the caller's transaction. False when the row
-    had already moved on."""
-    if not await flip_to_review(session, intent_id=intent_id, from_state=from_state):
+    """`from_state → review_required` with *error* as its reason
+    (`flip_to_review`), and the courtesy it is owed (`tell_review`), together
+    in the caller's transaction. False when the row had already moved on."""
+    if not await flip_to_review(
+        session, intent_id=intent_id, from_state=from_state, error=error
+    ):
         return False
     await tell_review(
         session,
@@ -2319,14 +2342,22 @@ async def flip_exhausted(
     )
     if row is None or row["state"] not in from_states:
         return None
-    if not await flip_to_review(
-        session, intent_id=str(intent_id), from_state=row["state"]
-    ):
-        return None
     tries = (
         int(job.get("attempts") or job.get("max_attempts") or 0)
         or jobs.LANE_BUDGETS["bulk"][0]
     )
+    if not await flip_to_review(
+        session,
+        intent_id=str(intent_id),
+        from_state=row["state"],
+        error=_review_error(
+            "JobBudgetSpent",
+            "the publish job's budget is spent",
+            "budget_spent",
+            tries=tries,
+        ),
+    ):
+        return None
     return {
         "workspace_id": str(row["workspace_id"]),
         "intent_id": str(intent_id),
@@ -2480,6 +2511,12 @@ async def _park_or_cancel_stale(
         notice=(
             f"We lost track of this story for {days} days: choose on its card,"
             " or open the Queue on the web."
+        ),
+        error=_review_error(
+            "ApprovedStale",
+            "the story stayed approved past the reaper's TTL",
+            "approved_stale",
+            days=days,
         ),
     )
     return 1 if parked else 0

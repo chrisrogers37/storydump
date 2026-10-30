@@ -166,9 +166,10 @@ def outcome_line(
     *rule* is the story's `approval_rule` (`_line_actor`). *series* is what
     became of the story's series when the act ended it (`SERIES_STOPPED`,
     `SERIES_ENDED`), since the header still says how it repeats. *refusal* is
-    why a story in review was refused (`last_error -> 'error' -> 'refusal'`):
-    a second line in its words (`refusal_evidence.plain`), when they say
-    anything."""
+    why a story is in review (`last_error -> 'error' -> 'refusal'`): a second
+    line in its words (`refusal_evidence.plain`), opened by "Refused" or, for a
+    route that refused nothing, "Why" (`refusal_evidence.label`), when they
+    say anything."""
     word = outcome_word(state, published_via)
     by = _line_actor(state, by=by, rule=rule)
     who = f" by {by}" if by else ""
@@ -176,7 +177,9 @@ def outcome_line(
     if series:
         line = f"{line} · {series}"
     reason = refusal_evidence.plain(refusal)
-    return f"{line}\nRefused: {reason}." if reason else line
+    if not reason:
+        return line
+    return f"{line}\n{refusal_evidence.label(refusal)}: {reason}."
 
 
 def _line_actor(state: str, *, by: Optional[str], rule: Optional[str]) -> Optional[str]:
