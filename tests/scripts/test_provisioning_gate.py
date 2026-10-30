@@ -179,6 +179,34 @@ def _owner(world, sql: str, params=()):
     return fetch_one(world["stream"], sql, params)
 
 
+#: The schedule a back-date walks: `eff(tz, hs, he, ppd, inst)` for the account
+#: `%(id)s` and the instant `%(at)s`, each setting the account's own or else its
+#: workspace's, as `fn_clock_tick` resolves them.
+_EFF = """
+eff AS (
+  SELECT COALESCE(a.tz, w.tz) AS tz,
+         COALESCE(a.posting_hours_start, w.posting_hours_start) AS hs,
+         COALESCE(a.posting_hours_end, w.posting_hours_end) AS he,
+         COALESCE(a.posts_per_day, w.posts_per_day) AS ppd,
+         CAST(%(at)s AS timestamptz) AS inst
+    FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
+   WHERE a.id = %(id)s
+)"""
+
+#: The latest slot of the account's schedule at or before the instant, walked
+#: slot by slot with `fn_next_slot` from two days before it.
+_BACKDATE = f"""
+WITH RECURSIVE {_EFF}, grid(at) AS (
+  SELECT fn_next_slot(inst - interval '2 days', tz, hs, he, ppd) FROM eff
+  UNION ALL
+  SELECT fn_next_slot(grid.at, eff.tz, eff.hs, eff.he, eff.ppd)
+    FROM grid, eff
+   WHERE grid.at <= eff.inst
+)
+SELECT max(grid.at) FROM grid, eff WHERE grid.at <= eff.inst
+"""
+
+
 def _make_due(world, account_id: str) -> None:
     """Back-date the cursor so the next tick finds this account due.
 
@@ -188,6 +216,14 @@ def _make_due(world, account_id: str) -> None:
     posting slot, not immediately. Back-dating tests reachability given a
     value. The rows that have NO value are tested unchanged, and no amount of
     waiting or back-dating can help them, which is exactly the point.
+
+    The back-date is a slot of the account's own schedule, the latest at or
+    before now (`_BACKDATE`). The tick that plans it moves the cursor to the
+    next slot, which is after now, so a second tick finds nothing for the
+    account at any time of day (short of a slot falling in the moment between
+    this back-date and the tick). A time off the schedule does not do that: a
+    minute ago, in the minute after the day's first slot, is before that slot,
+    so the tick moves the cursor onto it and the account is due again.
     """
     conn = psycopg2.connect(world["stream"])
     try:
@@ -195,13 +231,21 @@ def _make_due(world, account_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
             cur.execute(
-                "UPDATE ig_accounts SET next_slot_at = now() - interval '1 minute'"
-                " WHERE id = %s",
-                (account_id,),
+                f"UPDATE ig_accounts SET next_slot_at = ({_BACKDATE}) WHERE id = %(id)s",
+                {"id": account_id, "at": "now"},
             )
         conn.commit()
     finally:
         conn.close()
+
+
+def _slot_jobs(world, account_id: str) -> int:
+    """The `plan_slot` jobs minted for one account, which a test about it counts rather than the tick's total."""
+    return _owner(
+        world,
+        "SELECT count(*) FROM jobs WHERE kind = 'plan_slot' AND serialization_key = %s",
+        (f"acct:{account_id}",),
+    )[0]
 
 
 def _force_state(world, table: str, row_id: str, state: str) -> None:
@@ -297,7 +341,8 @@ class TestADestinationIsScheduledIntoExistence:
         account_id, _ = destination(world, ref=ref)
         _make_due(world, account_id)
 
-        assert tick(world) == 1
+        tick(world)
+        assert _slot_jobs(world, account_id) == 1
 
         row = _owner(
             world,
@@ -316,9 +361,11 @@ class TestADestinationIsScheduledIntoExistence:
         destination this writer seeded wrongly."""
         account_id, _ = destination(world, ref=_ref("advance"))
         _make_due(world, account_id)
-        assert tick(world) == 1
-        # Immediately again: the cursor moved forward, so nothing is due.
-        assert tick(world) == 0
+        tick(world)
+        assert _slot_jobs(world, account_id) == 1
+        # Immediately again: the cursor moved forward, so nothing new is due.
+        tick(world)
+        assert _slot_jobs(world, account_id) == 1
 
     def test_schedule_false_leaves_it_permanently_invisible(self, world):
         """The opt-out, and the proof that seeding is the load-bearing part.
@@ -333,7 +380,55 @@ class TestADestinationIsScheduledIntoExistence:
             world, "SELECT next_slot_at FROM ig_accounts WHERE id = %s", (account_id,)
         )
         assert row[0] is None
-        assert tick(world) == 0
+        tick(world)
+        assert _slot_jobs(world, account_id) == 0
+
+
+#: The instants the back-date is checked at, each with the slot it must be on
+#: the fixture workspace's default schedule (UTC, posting from 14:00 to 02:00,
+#: three slots a day: 14:00, 18:00 and 22:00): the day's first slot, the second
+#: before it and the minute after it, the day's other slots, and times outside
+#: the posting window.
+BACKDATE_INSTANTS = [
+    ("2026-10-26T13:59:59Z", "2026-10-25T22:00:00Z"),
+    ("2026-10-26T14:00:00Z", "2026-10-26T14:00:00Z"),
+    ("2026-10-26T14:00:15Z", "2026-10-26T14:00:00Z"),
+    ("2026-10-26T14:00:45Z", "2026-10-26T14:00:00Z"),
+    ("2026-10-26T16:30:00Z", "2026-10-26T14:00:00Z"),
+    ("2026-10-26T18:00:30Z", "2026-10-26T18:00:00Z"),
+    ("2026-10-26T22:00:00Z", "2026-10-26T22:00:00Z"),
+    ("2026-10-27T02:00:00Z", "2026-10-26T22:00:00Z"),
+    ("2026-10-27T09:00:00Z", "2026-10-26T22:00:00Z"),
+]
+
+
+class TestTheBackdateIsPlannedOnce:
+    @pytest.mark.parametrize(
+        ("at", "slot"), BACKDATE_INSTANTS, ids=[at for at, _ in BACKDATE_INSTANTS]
+    )
+    def test_a_tick_at_the_instant_plans_the_backdate_once(self, world, at, slot):
+        """`_make_due`'s back-date at an instant is the schedule's latest slot
+        at or before it, and the slot after that is later than the instant, so
+        one tick plans the account and the next finds nothing for it. The
+        database's clock cannot be set, so this checks the back-date's query
+        and the tick's own slot arithmetic (`fn_next_slot`) at fixed instants;
+        it does not run a tick at them."""
+        row = _owner(
+            world,
+            f"WITH {_EFF}, backdate(at) AS ({_BACKDATE})"
+            " SELECT backdate.at,"
+            "        fn_next_slot(backdate.at, eff.tz, eff.hs, eff.he, eff.ppd)"
+            "          > eff.inst"
+            "   FROM backdate, eff",
+            {"id": str(world["a"]["iga"]), "at": at},
+        )
+        assert row[0] == datetime.fromisoformat(slot.replace("Z", "+00:00")), (
+            "the back-date is not the schedule's latest slot at or before the instant"
+        )
+        assert row[1] is True, (
+            "the back-date's next slot is due at the instant too, so a second"
+            " tick would plan the account again"
+        )
 
 
 class TestDestinationsAreIdempotentAndTenantBound:
@@ -476,13 +571,9 @@ class TestATypedHandleBecomesADestination:
         _make_due(world, account_id)
         tick(world)
 
-        row = _owner(
-            world,
-            "SELECT count(*) FROM jobs"
-            " WHERE kind = 'plan_slot' AND serialization_key = %s",
-            (f"acct:{account_id}",),
+        assert _slot_jobs(world, account_id) == 1, (
+            "the clock minted no plan_slot for the typed handle"
         )
-        assert row[0] == 1, "the clock minted no plan_slot for the typed handle"
 
     def test_an_explicit_reference_is_not_gated_by_its_display_handle(self, world):
         """An explicit reference wins for validation as well as for storage:

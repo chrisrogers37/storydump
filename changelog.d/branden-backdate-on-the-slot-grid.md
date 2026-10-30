@@ -1,0 +1,3 @@
+### Tests
+
+- **The provisioning gate's clock tests no longer fail in the minute after the fixture's first slot of the day.** They back-dated an account to a minute before the tick, a time off its schedule. In the minute after 14:00 UTC that was before the day's first slot, so the tick moved the cursor onto that slot, already due, and the next tick planned the account again. They now back-date to the latest slot of the account's own schedule, and each test counts its own account's `plan_slot` jobs rather than the tick's total. A parametrized check pins the back-date's slot at fixed instants, the minute after the day's first slot among them.
