@@ -210,14 +210,14 @@ class TestACreatingCallIsNeverSentTwice:
     async def test_a_request_that_never_left_is_attempted_again(self, never_left):
         calls = {"n": 0}
 
-        async def refused_then_answered(request):
+        async def never_left_then_answered(request):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise never_left("refused", request=request)
+                raise never_left("never left", request=request)
             return httpx.Response(200, json={"ok": True})
 
         async with httpx.AsyncClient(
-            transport=_transport(refused_then_answered)
+            transport=_transport(never_left_then_answered)
         ) as client:
             response = await request(
                 client, "POST", ALLOWED, policy=EgressPolicy(retry_after_send=False)
