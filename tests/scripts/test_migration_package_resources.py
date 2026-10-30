@@ -40,12 +40,16 @@ def test_built_wheel_contains_migrations_manifest_and_ddl(tmp_path):
 
     wheels = list(wheel_dir.glob("*.whl"))
     assert len(wheels) == 1
+    # Every migration the source tree holds, counted there rather than written
+    # down, so the pin follows the directory.
+    migrations = len(list((ROOT / "scripts" / "migrations").glob("*.sql")))
     isolated_import = (
         "import sys; sys.path.insert(0, sys.argv[1]); "
         "from importlib.resources import files; "
         "p=files('scripts').joinpath('migrations'); "
         "assert p.joinpath('adoption_manifest.json').is_file(); "
-        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')]) == 6"
+        "assert len([item for item in p.iterdir() if item.name.endswith('.sql')])"
+        f" == {migrations}"
     )
     subprocess.run(
         [sys.executable, "-c", isolated_import, str(wheels[0])],

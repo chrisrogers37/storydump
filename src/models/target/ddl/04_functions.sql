@@ -515,17 +515,21 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
     FROM ig_accounts WHERE state = 'active'
 $$;
 
--- The cursor lag for /health/scheduling: active accounts whose slot is due and
--- unadvanced, every active account, and the worst lag. Owned by
--- svc_maintenance; EXECUTE for svc_ingress.
+-- The cursor lag for /health/scheduling, over the accounts the clock advances
+-- (fn_clock_tick's population: an active account of an active, unpaused
+-- workspace): those whose slot is due and unadvanced, all of them, and the
+-- worst lag. A paused workspace's cursor is owed no tick, so it is no stall.
+-- An active account with no cursor is a provisioning fault, counted but never
+-- stalled. Owned by svc_maintenance; EXECUTE for svc_ingress.
 CREATE FUNCTION fn_health_scheduling_lag()
 RETURNS TABLE (o_stalled bigint, o_accounts_active bigint, o_max_lag_seconds numeric)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-  SELECT count(*) FILTER (WHERE next_slot_at IS NOT NULL AND next_slot_at <= now()),
+  SELECT count(*) FILTER (WHERE a.next_slot_at IS NOT NULL AND a.next_slot_at <= now()),
          count(*),
-         max(EXTRACT(EPOCH FROM now() - next_slot_at))
-           FILTER (WHERE next_slot_at IS NOT NULL AND next_slot_at <= now())
-    FROM ig_accounts WHERE state = 'active'
+         max(EXTRACT(EPOCH FROM now() - a.next_slot_at))
+           FILTER (WHERE a.next_slot_at IS NOT NULL AND a.next_slot_at <= now())
+    FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
+   WHERE a.state = 'active' AND w.state = 'active' AND NOT w.is_paused
 $$;
 
 -- The backpressure signal's ready lanes: due, unclaimed jobs per lane and the

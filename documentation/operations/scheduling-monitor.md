@@ -21,8 +21,9 @@ API, the worker or the outbox cannot silence it.
 The script classifies each reading with
 `storydump_cli/health_classify/scheduling.py`, the same classifier
 `storydump health` uses, and keeps only the polling: fetch, decide and announce,
-the state file and the notify command. It needs no install: it runs on the system
-Python from a checkout.
+the state file and the notify command. The delivery axis and the commit split
+below are the script's own: `storydump health` judges neither. It needs no
+install: it runs on the system Python from a checkout.
 
 ## Two axes
 
@@ -73,9 +74,51 @@ Both repeat weekly, since "we have no coverage" must not fade because it was sai
 once. They never render like `healthy`: "nothing is late" and "nothing exists to
 be late" have opposite remedies.
 
+An estate that HAD destinations and now has none is not that empty estate.
+Either notice then says `NO ACTIVE DESTINATIONS`, with the most destinations any
+reading has shown, because nothing will be scheduled or posted until one is
+re-authorized or resumed. That one repeats daily.
+
+A fault a human was told about, followed by a reading that can see nothing, is
+closed in the notice's first words:
+- after `worker-down` or `unreachable`, `RECOVERED from <state>`;
+- after `stalled`, "the stall is no longer observable", never `RECOVERED`,
+  because pausing the only workspace takes away the stall's evidence, not the
+  stall.
+
 `healthy` is silent except for `RECOVERED`, after an alert, and `SIGNAL ACQUIRED`,
 after a notice. Both key on what a human was last told, not on the last reading,
 so one `unreachable` reading that never paged ends in silence.
+
+## Delivery, its own axis
+
+Each poll also reads `/health/delivery`: the one beside `--url`, or
+`--delivery-url`. Cards can fail while posts land, so delivery keeps its own
+surface and is judged with its own state. One axis never masks the other.
+
+- **Pages:** any send in the last hour that failed or is ambiguous, the
+  endpoint's `failed_or_ambiguous`, pages with its count, the hour's sends and
+  the alerting classes with their provider codes. A deferral (a 429) is never a
+  failure.
+- **Repeats:** every 6 hours while it lasts, and `RECOVERED` once an hour passes
+  with none.
+- **Skips:** a reading that is not a whole one (a non-200, not a JSON object,
+  missing counts) is skipped for that poll and changes nothing. The scheduling
+  axis already says when the API cannot be reached.
+
+## A version split
+
+The scheduling reading carries the API's commit (`api_commit`) beside the
+worker's (`worker.commit`). The two services deploy one after the other, so they
+disagree for a deploy's length.
+
+- **Pages:** a split that lasts `SPLIT_AFTER_S` (30 minutes) pages with both
+  commits. A deploy then reached one service and not the other.
+- **Repeats:** daily while it lasts, and `VERSION SPLIT RESOLVED` once the
+  commits match.
+- **Never said:** a split that ends inside the window.
+- **Changes nothing:** a reading without both commits, such as an unreachable
+  one or rows written before the worker stamped its commit.
 
 ## A broken instrument is not a clean bill of health
 
@@ -117,6 +160,14 @@ and what a human last heard:
 - `observed_at`: when that reading was taken, in Unix time
 - `announced` and `spoke_at`: the state of the last message a human was actually
   told, and when it was delivered, in Unix time
+- `max_active_seen`: the most active destinations any reading has shown. A
+  reading with no counts, such as an `unreachable` one, never lowers it. Losing
+  the file makes the monitor speak LESS about a lost destination: the estate then
+  reads as one that never had any, until a reading shows one again.
+- `delivery`: the delivery axis's own `state`, `observed_at`, `announced` and
+  `spoke_at`, kept apart from the scheduling axis's.
+- `split`: the version split's `state` (`split` or `same`), `since`, the two
+  commits, `announced` and `spoke_at`.
 
 `announced` and `spoke_at` describe the last *delivered* message and move only
 when the notify command exits 0. A failed delivery leaves them where they were,
