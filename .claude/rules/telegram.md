@@ -143,8 +143,10 @@ buttons because it is rejected. ⚙️ **Configure** is on every card for the
 card's whole life, except a rejected story's or a removed item's:
 - a waiting card shows the decision buttons, with Configure beside 📱 Open Instagram;
 - a `review_required` card shows the three resolutions, then Configure, and
-  one whose item is removed shows 🚫 Give up alone: the item cannot post
-  again, and giving the story up resolves it;
+  one whose item is removed shows 🚫 Give up: the item cannot post again, and
+  giving the story up resolves it. Once a publish call was made
+  (`publish_step`) and no cancel is pending, ✅ It posted stays above it, as on
+  the web, since the story may have posted before its item was removed;
 - any other card shows Configure alone.
 
 Configure opens a menu one level down (`menu_keyboard`): 🔁 Auto-approve this
@@ -157,8 +159,9 @@ item (on/off, the member command `set_item_auto_approve`), ⚙️ Approval setti
   `editMessageReplyMarkup`). It never goes through the outbox.
 - **Healing:** a menu tap on a card that cannot post again (a rejected
   story's, a removed item's) heals it on touch to its story's own keyboard:
-  none, or Give up alone for a removed item's story in review. Back and the
-  heal read the story as the sender does (`card_facts`, `keyboard_of`).
+  none, or, for a removed item's story in review, the review keyboard above.
+  Back and the heal read the story as the sender does (`card_facts`,
+  `keyboard_of`).
 - **The toggle:** it never decides the card it was tapped on; the flag
   acts the next time the item is served. Its answer names what still holds
   the flag back as the serve step decides it (`auto_approval.decide`, read

@@ -541,6 +541,7 @@ class TestTheConfigureMenu:
     ROW = {
         "state": "awaiting_approval",
         "cancel_requested": False,
+        "publish_step": "none",
         "media_item_id": "m-1",
         "item_state": "available",
         "auto_approve": False,
@@ -594,9 +595,13 @@ class TestTheConfigureMenu:
         return seams
 
     @pytest.mark.asyncio
-    async def test_configure_opens_the_menu_and_runs_no_command(self, menu):
+    # A story in review whose item is still there opens the menu too: only a
+    # card that cannot post again heals.
+    @pytest.mark.parametrize("state", ["awaiting_approval", "review_required"])
+    async def test_configure_opens_the_menu_and_runs_no_command(self, menu, state):
         from src.services.target import prompts
 
+        menu["menu_row"]["state"] = state
         r = await telegram_dispatch.TelegramDispatcher()(None, tap("cfg"))
         assert r.outcome == "menu" and r.answer_text == ""
         assert r.edit_markup == prompts.menu_keyboard(

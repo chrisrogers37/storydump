@@ -862,8 +862,7 @@ class TelegramDispatcher:
         leaves). The toggle decides nothing about the card it was tapped on:
         the flag acts the next time the item is served. A card that cannot
         post again — a rejected story's, a removed item's — heals on touch to
-        its story's own keyboard: none, or 🚫 Give up alone while a removed
-        item's story waits in review."""
+        its story's own keyboard (`keyboard_of`)."""
         await commands.authorize(
             conn, MENU_COMMAND, workspace_id=tenant.workspace_id, actor_user_id=user_id
         )
