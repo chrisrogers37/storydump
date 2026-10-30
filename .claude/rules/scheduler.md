@@ -236,7 +236,9 @@ be written. Only the empty library's notice, where nothing was minted, parks a
 - **A refusal of a checked file is a drift, recorded and told.** When Meta
   refuses a container or a publish and the refusal ends the story (a dead
   container with status `ERROR`, or any create or publish error that parks or
-  fails it, except a dead token and throttling, `NOT_ABOUT_THE_FILE`), its
+  fails it, except an answer that says nothing about the file: no call made,
+  a dead token, a session, capability or permission answer, the posting cap,
+  a limit or throttling, `NOT_ABOUT_THE_FILE`), its
   `spec_drift`, our facts beside Meta's answer, goes on the permit, or beside
   a dead container's reason in `last_error`. After the run the operators get
   one direct message per Meta answer per day (`WorkerDeps.ops_notice`,
