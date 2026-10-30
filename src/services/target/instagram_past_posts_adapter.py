@@ -20,6 +20,7 @@ probe reads a time, never a post, so it changes no coverage claim.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -139,6 +140,9 @@ class _Turn:
     #: of an app-scoped owner when no verified id is recorded. Never persisted.
     profile: Optional[dict] = None
     profile_read: bool = False
+    #: The HTTP status of this turn's last Graph answer that was not an error,
+    #: for the evidence of a fetch that succeeded.
+    last_graph_status: Optional[int] = None
 
     @property
     def remaining(self):
@@ -209,6 +213,20 @@ class _Ownership:
     ok: bool
     test: str
     match: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SlideRead:
+    """The read of a post that lists its selected part: the part, the post and
+    the status its read answered, and its children as listed, with the status
+    of their read (None for a post read with no children)."""
+
+    part: dict
+    parent: dict
+    post_status: Optional[int]
+    parts: list
+    complete: bool
+    children_status: Optional[int]
 
 
 def _graph_refusal(response, error, url: str, token: str) -> dict:
@@ -469,6 +487,7 @@ class InstagramPastPostsAdapter:
             ) from None
         if not isinstance(body, dict):
             raise MediaRetryableError("Instagram returned an invalid response")
+        turn.last_graph_status = response.status_code
         error = body.get("error") or {}
         if error or response.is_error:
             code = error.get("code") if isinstance(error, dict) else None
@@ -1138,9 +1157,11 @@ class InstagramPastPostsAdapter:
             },
         }
 
-    async def _owned_parent(self, mid: str, turn: _Turn) -> dict:
-        """Post `mid` as Graph returns it now: owned by this account, same id."""
+    async def _owned_parent(self, mid: str, turn: _Turn) -> tuple[dict, Optional[int]]:
+        """Post `mid` as Graph returns it now, owned by this account and with the
+        same id, and the status that read answered."""
         parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
+        status = turn.last_graph_status
         ownership = await self._ownership(parent.get("owner"), turn)
         if not ownership.ok:
             raise refusal_evidence.attach(
@@ -1158,13 +1179,13 @@ class InstagramPastPostsAdapter:
                 MediaTerminalError("Instagram returned a different media item"),
                 refusal_evidence.evidence("identity_mismatch", id_matches=False),
             )
-        return parent
+        return parent, status
 
     async def _current_slide(
         self, mid, turn, selected_asset_id, expected_slide_count
-    ) -> dict:
-        """The selected part of post `mid` as Graph lists it now, or why it
-        cannot be fetched.
+    ) -> _SlideRead:
+        """The read of post `mid` that lists its selected part now, or why the
+        part cannot be fetched.
 
         One read that lacks the slide proves nothing, so a complete one is
         followed by a second, fresh read of the parent and its children. The
@@ -1176,11 +1197,14 @@ class InstagramPastPostsAdapter:
         """
         listed = []
         for _ in range(2):
-            parent = await self._owned_parent(mid, turn)
+            parent, post_status = await self._owned_parent(mid, turn)
+            turn.last_graph_status = None
             parts, complete = await self._children(parent, turn, seek=selected_asset_id)
             part = _slide(parts, selected_asset_id)
             if part is not None:
-                return part
+                return _SlideRead(
+                    part, parent, post_status, parts, complete, turn.last_graph_status
+                )
             if not complete:
                 raise _missing_slide(parts, complete, gone=False)
             listed.append({p.get("id") for p in parts})
@@ -1202,6 +1226,7 @@ class InstagramPastPostsAdapter:
         selected_asset_id: Optional[str] = None,
         expected_slide_count: Optional[int] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
+        on_evidence: Optional[Callable[[dict], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
         """Fetch current bytes; bound validation/effect callers supply selection.
 
@@ -1213,7 +1238,11 @@ class InstagramPastPostsAdapter:
         post, None for a single post or when none was recorded: a selected
         slide the reads lack is judged gone only against it (`_current_slide`).
         on_counters is a synchronous local observer (no I/O), called once even
-        on failure/cancellation. Observer exceptions cannot alter read outcomes.
+        on failure/cancellation. on_evidence is one too, called once with a
+        successful fetch's evidence (`refusal_evidence`, kind "fetched"): each
+        answer's status and media type, the children read, and the file's
+        status, content type, size, sha256, host and expiry. Observer exceptions
+        cannot alter read outcomes.
         """
         turn = None
         try:
@@ -1226,9 +1255,10 @@ class InstagramPastPostsAdapter:
             # Every link status the CDN answered, so a second refusal keeps the first.
             link_statuses = []
             for attempt in range(2):
-                part = await self._current_slide(
+                read = await self._current_slide(
                     mid, turn, selected_asset_id, expected_slide_count
                 )
+                part = read.part
                 kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
                 url = part.get("media_url")
                 if kind is None or not isinstance(url, str) or not url:
@@ -1305,6 +1335,39 @@ class InstagramPastPostsAdapter:
                             host=link["host"],
                         ),
                     )
+                if on_evidence is not None:
+                    fetched = refusal_evidence.evidence(
+                        "fetched",
+                        post={
+                            "http_status": read.post_status,
+                            "media_type": refusal_evidence.short(
+                                read.parent.get("media_type")
+                            ),
+                        },
+                        children=None
+                        if read.children_status is None
+                        else {
+                            "http_status": read.children_status,
+                            "returned": len(read.parts),
+                            "complete": read.complete,
+                        },
+                        part={
+                            "media_type": refusal_evidence.short(part.get("media_type"))
+                        },
+                        file={
+                            "http_status": response.status_code,
+                            "content_type": refusal_evidence.short(mime),
+                            "bytes": len(response.content),
+                            "sha256": hashlib.sha256(response.content).hexdigest(),
+                            **link,
+                        },
+                        link_statuses=list(link_statuses),
+                    )
+                    try:
+                        on_evidence(fetched)
+                    except Exception:  # noqa: BLE001 - a diagnostic observer
+                        # cannot replace a successful read.
+                        pass
                 # This is a byte fetch, not video eligibility. Ingest activation
                 # must validate duration/codec before admitting video candidates.
                 return (

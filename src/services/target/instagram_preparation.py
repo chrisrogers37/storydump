@@ -289,10 +289,15 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected.capture, selected.subject["config"]
         )
         counters = media_adapters.MediaTurnCounters()
+        fetched = None
 
         def observe(value):
             nonlocal counters
             counters = value
+
+        def observe_fetch(value):
+            nonlocal fetched
+            fetched = value
 
         try:
             content, _, _ = await adapter.fetch_bytes(
@@ -306,6 +311,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                     selected.subject["media_kind"]
                 ],
                 on_counters=observe,
+                on_evidence=observe_fetch,
             )
         except media_adapters.MediaSelectedAssetChanged as exc:
             # A truncated children read cannot prove the selected slide left: it
@@ -378,6 +384,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             validation,
             refusal=refusal,
             passed=_validation_pass(validation, counters),
+            fetch=None
+            if fetched is None
+            else {**fetched, "counters": asdict(counters)},
         )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
@@ -476,6 +485,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         reason=None,
         refusal=None,
         passed=None,
+        fetch=None,
     ):
         """Record the fetch's outcome on the slide's capture. A refusal with no
         `reason` is the retry rule's to decide (`past_posts_retry`): True when
@@ -572,6 +582,10 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 evidence["refusal"] = refusal
             if passed is not None:
                 evidence["passed"] = passed
+            # What the fetch that got these bytes read (`refusal_evidence`, kind
+            # "fetched"), whatever the validation then found.
+            if fetch is not None:
+                evidence["fetch"] = fetch
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,
