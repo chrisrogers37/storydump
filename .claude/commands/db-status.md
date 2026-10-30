@@ -38,7 +38,7 @@ checked, never as fine. From `data.api`: `target_database` (false means every da
 route answers 503), `db_role` (the login the API holds, and whether it bypasses
 RLS), `pool` (`size`, `checked_out`, `checked_out_peak` — in the table's `api`
 facts and in the JSON). `data.verdicts` judges `api`,
-`scheduling`, `posting` and `webhook` by the rules in
+`scheduling`, `posting`, `delivery` and `webhook` by the rules in
 `storydump_cli/health_classify/` and `storydump_cli/commands/env.py`; exit 4
 when one is not well — the report is still printed, so read it.
 

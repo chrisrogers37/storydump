@@ -807,9 +807,9 @@ def _render_health(console: Console, data: Any) -> None:
         health.get("verdicts") if isinstance(health.get("verdicts"), dict) else {}
     )
 
-    def _verdict(name: str) -> str:
+    def _verdict(name: str, field: str = "state", absent: str = "reported") -> str:
         entry = verdicts.get(name) if isinstance(verdicts.get(name), dict) else {}
-        return _text(entry.get("state"), "reported")
+        return _text(entry.get(field), absent)
 
     console.print("health ok" if health.get("ok") else "health NOT OK")
     table = _table("surface", "verdict", "facts")
@@ -866,6 +866,9 @@ def _render_health(console: Console, data: Any) -> None:
         _verdict("posting"),
         _facts(posting, *[k for k in posting if k != "status"]),
     )
+    # The classifier's own sentence: the hour's sends, and the classes and
+    # codes that failed, or why the surface could not be read.
+    table.add_row("delivery", _verdict("delivery"), _verdict("delivery", "detail", ""))
     console.print(table)
     read = health.get("details") if isinstance(health.get("details"), dict) else {}
     if read.get("read") is False:

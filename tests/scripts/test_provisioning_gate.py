@@ -218,6 +218,23 @@ def _force_state(world, table: str, row_id: str, state: str) -> None:
         conn.close()
 
 
+def _pause_workspace(world, ws_id: str, paused: bool) -> None:
+    """Pause or resume a workspace by hand, as `_force_state` puts a row in a
+    state: the edge the clock reads (`NOT w.is_paused`), with no service call
+    in between."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE workspaces SET is_paused = %s WHERE id = %s", (paused, ws_id)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _ref(tag: str) -> str:
     return f"17841{uuid.uuid4().hex[:12]}-{tag}"
 
@@ -832,6 +849,28 @@ class TestSchedulingLagSeesBothOutageShapes:
         # aggregates with no identifiers by design. An absolute `== 0` here
         # would be a tautology dressed as an assertion.
         assert after == before - 1
+
+    def test_a_paused_workspaces_account_is_not_stalled(self, world):
+        """`fn_clock_tick` advances only the accounts of an active, unpaused
+        workspace, so a paused workspace's due cursor is not owed a tick and
+        must not read as an outage: pausing the only workspace would page
+        STALLED on its first reading and every 6 h after.
+
+        Deltas, as above. While the workspace is paused, leaving one of its
+        cursors due changes nothing. Once it is resumed, every one of its
+        accounts counts again, that cursor among them: the control.
+        """
+        acct = destination(world, ref="lag-workspace-paused")[0]
+        ws = str(world["a"]["ws"])
+        unpaused = _lag(world)["stalled"]
+        _pause_workspace(world, ws, True)
+        try:
+            before = _lag(world)["stalled"]
+            _rewind(world, acct, hours=5)
+            assert _lag(world)["stalled"] == before
+        finally:
+            _pause_workspace(world, ws, False)
+        assert _lag(world)["stalled"] == unpaused + 1
 
     def test_it_distinguishes_nothing_stalled_from_nothing_to_stall(self, world):
         """An estate with no active accounts is healthy AND unmonitorable, and

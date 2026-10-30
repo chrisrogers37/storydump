@@ -62,7 +62,7 @@ from uvicorn.middleware.proxy_headers import (
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.admissions import router as admissions_router
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
+from src.api.routes.health import VERSION, AnswerCache
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -73,6 +73,7 @@ from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.api.routes.public import WaitlistSlots, full_notices
 from src.api.routes.public import router as public_router
+from src.config import release
 from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
     CrossSiteRefused,
@@ -889,12 +890,12 @@ def create_app(
     from src.services.target import mix_conversion
 
     app.state.mix_conversion_evidence = mix_conversion.release_evidence(
-        env.get(COMMIT_VAR)
+        env.get(release.COMMIT_VAR)
     )
     app.state.source_mix_capability = mix_conversion.capability(
         env, "api", app.state.mix_conversion_evidence
     )
-    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
+    app.state.commit = release.short_commit(env)
     app.state.engine = engine if engine is not None else _engine_from_env(env)
     # The past-posts source, armed wherever the key ring loads (a deletion receipt is
     # durable with the ring, and only with it); the capability and the preview
@@ -1080,7 +1081,7 @@ def create_app(
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)
-    # Railway's probe and the two dependency-touching axes (`routes/health.py`).
+    # Railway's probe and the dependency-touching surfaces (`routes/health.py`).
     # Included LAST, so these routes sit last in the route table.
     app.include_router(health_router)
 

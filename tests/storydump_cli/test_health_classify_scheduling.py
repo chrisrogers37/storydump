@@ -12,6 +12,7 @@ from storydump_cli.health_classify.scheduling import (
     WORKER_DOWN,
     WORKER_UNKNOWN,
     classify,
+    commits,
 )
 
 
@@ -124,15 +125,25 @@ class TestTheWorkerAxisIsNotAllowedToReadAsHealthyWhenItCannotTell:
     each blind condition gets a state of its own here.
     """
 
-    @pytest.mark.parametrize("active", [0, 1, 5])
+    @pytest.mark.parametrize(
+        "stalled,active,lag",
+        [(0, 0, 0), (0, 1, 0), (0, 5, 0), (2, 5, 9999)],
+        ids=["none-active", "one-active", "five-active", "a-stall"],
+    )
     def test_a_reading_without_the_worker_block_is_unreachable_never_healthy(
-        self, active
+        self, stalled, active, lag
     ):
         """The route always serves the block, so a reading without it is a broken
         instrument. With a destination active, the cursor axis alone would
         answer `HEALTHY` and the worker axis would be gone without a word;
-        with none, `WORKER_UNKNOWN` would page nobody."""
-        v = classify(200, body(active=active, lag=0, worker=None), threshold_s=T)
+        with none, `WORKER_UNKNOWN` would page nobody. With a stall the
+        instrument still comes first: read as `STALLED`, it would page one poll
+        sooner and drop the worker axis without a word."""
+        v = classify(
+            200,
+            body(stalled=stalled, active=active, lag=lag, worker=None),
+            threshold_s=T,
+        )
         assert v.state == UNREACHABLE
         assert v.detail == "the endpoint does not serve a worker block"
 
@@ -211,6 +222,24 @@ class TestTheTwoWorkerSignalsCoverEachOthersBlindSpot:
             threshold_s=T,
         )
         assert v.state == WORKER_DOWN
+
+
+class TestTheTwoCommits:
+    """`commits` reads the API's and the worker's commits from one reading:
+    hex of seven characters or more, compared on the first seven."""
+
+    @staticmethod
+    def reading(api, worker):
+        return {"api_commit": api, "worker": {**ALIVE_WORKER, "commit": worker}}
+
+    def test_a_full_commit_and_its_short_form_are_one_commit(self):
+        full = "abc1234" + "0" * 33
+        assert commits(self.reading(full, "abc1234")) == ("abc1234", "abc1234")
+
+    def test_anything_but_a_hex_commit_is_no_commit(self):
+        for bad in ("not-hex!", "abc12", None, 7):
+            assert commits(self.reading(bad, "abc1234")) is None
+            assert commits(self.reading("abc1234", bad)) is None
 
 
 def test_a_live_worker_does_not_mask_a_stalled_cursor():

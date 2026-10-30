@@ -36,6 +36,7 @@ import asyncio
 from typing import Optional
 import logging
 
+from src.config import release
 from src.config.settings import settings
 import os
 import signal
@@ -506,6 +507,11 @@ def compose(
     )
     session_for = unit_of_work.make_session_for(engine)
     name = f"{socket.gethostname()}-{os.getpid()}"
+    # The deployment's commit goes LAST in each claimer name, which lands in
+    # `jobs.locked_by`: a hostname may hold `-` but never `@`, so
+    # `/health/scheduling` can read back what the worker runs.
+    commit = release.short_commit(env)
+    stamp = f"@{commit}" if commit else ""
     # K claim-and-run tasks per lane, each claiming on a
     # pooled checkout it returns at once — K bounds tasks, not connections.
     # The ceiling is asserted HERE, at composition, so an oversubscribed
@@ -524,7 +530,7 @@ def compose(
             registry=registry,
             heartbeat=heartbeat,
             config=config,
-            worker_name=f"{name}-{lane}-{k}",
+            worker_name=f"{name}-{lane}-{k}{stamp}",
             past_posts_capability=deps.past_posts_capability,
         )
         for lane in ("interactive", "bulk")

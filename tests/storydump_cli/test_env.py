@@ -1,6 +1,6 @@
 """The environment verbs: ``health``, ``deploys`` and ``doctor``.
 
-``health`` reads the API's three health surfaces and exits 0 only when every
+``health`` reads the API's four health surfaces and exits 0 only when every
 one reports well (4 otherwise — "API unreachable or failed" — with
 the report still printed). ``deploys`` shells out to the ``railway`` binary
 through one seam: it checks the login and the linked project before reading
@@ -70,7 +70,7 @@ HEALTH = {
     },
     "backpressure": {"lanes": {"interactive": {"ready": 0}, "bulk": {"ready": 2}}},
 }
-#: The real shapes (`src/api/app.py`'s three routes): the two dependency
+#: The real shapes (`src/api/app.py`'s routes): the three dependency
 #: surfaces carry aggregates, never a `status` — `health` hands them to the
 #: classifiers' own `classify`, whose strictness these fixtures satisfy.
 SCHEDULING = {
@@ -94,6 +94,12 @@ POSTING = {
     "accounts_active": 1,
     "oldest_active_destination_age_seconds": 86400,
 }
+DELIVERY = {
+    "window_seconds": 3600,
+    "sent_in_window": 40,
+    "failed_or_ambiguous": 0,
+    "by_class": {},
+}
 POSTURE = {
     "ledger": "present",
     "migrations": [{"version": v, "status": "applied"} for v in range(1, 78)],
@@ -116,6 +122,7 @@ def health_api(over=None) -> Api:
         ("GET", DETAILS): (200, HEALTH),
         ("GET", "/health/scheduling"): (200, SCHEDULING),
         ("GET", "/health/posting"): (200, POSTING),
+        ("GET", "/health/delivery"): (200, DELIVERY),
         ("GET", "/api/v1/me/principal"): (200, PERSON),
         ("GET", "/api/v1/ops/posture"): (
             200,
@@ -213,14 +220,15 @@ def env_runtime(tmp_path, api: Api, rail=None, **kw):
 # --- health -------------------------------------------------------------------
 
 
-def test_health_reads_the_three_surfaces_and_is_ok(tmp_path):
+def test_health_reads_the_four_surfaces_and_is_ok(tmp_path):
     api = health_api()
     result = run(env_runtime(tmp_path, api), "health")
     assert result.exit_code == EXIT_OK, result.output
-    assert api.paths("GET")[:4] == [
+    assert api.paths("GET")[:5] == [
         "/health",
         "/health/scheduling",
         "/health/posting",
+        "/health/delivery",
         DETAILS,
     ]
     signed = {r.url.path for r in api.calls if "Authorization" in r.headers}
@@ -233,11 +241,12 @@ def test_health_reads_the_three_surfaces_and_is_ok(tmp_path):
         "backpressure",
         "healthy",
         "posting",
+        "delivering",
     ):
         assert word in result.stdout, (word, result.stdout)
 
 
-def test_health_json_is_one_envelope_with_the_three_payloads(tmp_path):
+def test_health_json_is_one_envelope_with_the_four_payloads(tmp_path):
     result = run(env_runtime(tmp_path, health_api()), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
     document = one_envelope(result)
@@ -249,6 +258,7 @@ def test_health_json_is_one_envelope_with_the_three_payloads(tmp_path):
         "api": HEALTH,
         "scheduling": SCHEDULING,
         "posting": POSTING,
+        "delivery": DELIVERY,
         "details": {"read": True},
         "verdicts": {
             "api": {"state": "ok", "detail": "/health says ok"},
@@ -257,6 +267,10 @@ def test_health_json_is_one_envelope_with_the_three_payloads(tmp_path):
                 "detail": verdicts["scheduling"]["detail"],
             },
             "posting": {"state": "posting", "detail": verdicts["posting"]["detail"]},
+            "delivery": {
+                "state": "delivering",
+                "detail": "no send failed or is ambiguous in the last hour (40 sent)",
+            },
             "webhook": {
                 "state": "registered",
                 "detail": verdicts["webhook"]["detail"],
@@ -285,6 +299,54 @@ def test_health_exits_4_when_a_surface_is_not_well_but_still_prints(tmp_path):
     )
     assert document["data"]["scheduling"]["worker"]["overdue_ready"] == 3
     assert document["data"]["verdicts"]["scheduling"]["state"] == "worker-down"
+
+
+def test_health_reads_a_failed_send_as_not_well_and_names_it(tmp_path):
+    """The scheduling monitor pages on one failed or ambiguous send in the
+    hour; the CLI is not well on the same reading, and says which class."""
+    failing = {
+        **DELIVERY,
+        "failed_or_ambiguous": 1,
+        "by_class": {"refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}}},
+    }
+    api = health_api({("GET", "/health/delivery"): (200, failing)})
+    result = run(env_runtime(tmp_path, api), "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    assert "failing" in result.stdout and "refused: 400×1" in result.stdout
+    document = one_envelope(
+        run(env_runtime(tmp_path, api), "--json", "health"),
+    )
+    assert document["data"]["ok"] is False
+    assert document["data"]["verdicts"]["delivery"]["state"] == "failing"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param((503, {"detail": "busy — try again"}), id="a-503"),
+        pytest.param((200, {**DELIVERY, "failed_or_ambiguous": "3"}), id="mistyped"),
+        pytest.param((200, {"sent_in_window": 1}), id="missing-keys"),
+    ],
+)
+def test_health_reads_an_unreadable_delivery_surface_as_not_well(tmp_path, answer):
+    """A delivery surface the CLI cannot read is not well: a broken instrument
+    is not a clean bill of health, on this surface as on the others."""
+    api = health_api({("GET", "/health/delivery"): answer})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    verdict = one_envelope(result)["data"]["verdicts"]["delivery"]
+    assert verdict["state"] == "unreachable", verdict
+
+
+def test_health_reads_an_hour_with_nothing_sent_as_quiet_and_well(tmp_path):
+    """Nothing sent and nothing failed is no fault, and the verdict says the
+    hour was quiet rather than that it delivered."""
+    quiet = {**DELIVERY, "sent_in_window": 0}
+    api = health_api({("GET", "/health/delivery"): (200, quiet)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_OK, result.output
+    verdict = one_envelope(result)["data"]["verdicts"]["delivery"]
+    assert verdict["state"] == "quiet", verdict
 
 
 def test_health_reads_a_due_job_inside_the_grace_as_well(tmp_path):

@@ -31,7 +31,7 @@ GitHub repo (main)
     |    - /auth               Google sign-in; the Drive and Instagram callbacks
     |    - /webhooks/telegram  the bot's one inbound door
     |    - /webhooks/meta      Meta's deauthorize and data-deletion callbacks
-    |    - /health, /health/scheduling, /health/posting
+    |    - /health, /health/scheduling, /health/posting, /health/delivery
     |
     ├──► Vercel (landing/)              the web front end
     |                                   (landing-vercel-deployment.md)
@@ -193,9 +193,10 @@ commands.
   connected role, the pool and the webhook this process registered at startup
   are `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone. Neither opens a
   connection, by design.
-  `GET /health/scheduling` and `GET /health/posting` are the two surfaces for
-  an external poller: whether the clock is advancing, and whether posts are
-  going out.
+  `GET /health/scheduling`, `GET /health/posting` and `GET /health/delivery`
+  are the three surfaces for an external poller: whether the clock is
+  advancing, whether posts are going out, and whether sends are getting
+  through.
 
 ---
 
@@ -453,7 +454,7 @@ railway logs --service storydump
 ### Health Monitoring
 
 From a laptop with a token minted under Settings › API tokens:
-- `storydump health` — the API's three health surfaces and the bot's webhook, judged (exit 4 when not well)
+- `storydump health` — the API's four health surfaces and the bot's webhook, judged (exit 4 when not well)
 - `storydump deploys` — the latest deployment of each service; `storydump doctor` for the local setup
 
 ### Service Management
@@ -527,7 +528,7 @@ rate- or quota-limited.
 5. [ ] Create the Telegram bot via BotFather; enable groups, disable privacy mode
 6. [ ] Configure the Meta app (the Instagram Login redirect URI)
 7. [ ] Configure the Google client (both redirect URIs)
-8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 11)
+8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling`, `posting` and `delivery` well (the webhook reads `not_checked` until step 11)
 9. [ ] Admit your own email: sign-up is invite-only (`fn_signup_admitted`) and the first account is no exception, so as the owner (the `DATABASE_URL` login), in lower case: `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
 10. [ ] Sign in on the web with that Google account, create a workspace
 11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API and worker services to the `user` line of `storydump whoami`, let them redeploy; `storydump health` now exits 0

@@ -672,6 +672,33 @@ class TestSchedulingHealthIsASecondSurface:
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
 
+    def test_it_publishes_the_apis_own_commit(self, monkeypatch):
+        """The API's half of the version split is the deployed commit, as
+        `/health` names it. Published as None, every poll would read as "no
+        commit" and the split axis would be off with nothing failing."""
+
+        async def fake_lag(executor):
+            return {"stalled": 0, "accounts_active": 1, "max_lag_seconds": 3}
+
+        async def fake_worker(executor):
+            return {
+                "succeeded_ever": 1,
+                "last_success_age_seconds": 30,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+                "commit": "def5678",
+            }
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        app = create_app(
+            engine=FakeEngine(),
+            env={"RAILWAY_GIT_COMMIT_SHA": "abc1234aaaabbbbccccdddd"},
+        )
+        reading = TestClient(app).get("/health/scheduling").json()
+        assert reading["api_commit"] == "abc1234"
+        assert reading["worker"]["commit"] == "def5678"
+
     def test_the_public_payloads_are_exactly_what_the_classifiers_read(
         self, client, monkeypatch
     ):
@@ -693,6 +720,7 @@ class TestSchedulingHealthIsASecondSurface:
                 "last_success_age_seconds": 30,
                 "overdue_ready": 0,
                 "max_overdue_seconds": None,
+                "commit": None,
             }
 
         async def fake_freshness(executor):
@@ -720,8 +748,12 @@ class TestSchedulingHealthIsASecondSurface:
         monkeypatch.setattr(posting_health, "destinations", fake_destinations)
 
         scheduling = client.get("/health/scheduling").json()
-        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER}
-        assert set(scheduling[sm._WORKER]) == {*sm._WORKER_COUNTS, *sm._WORKER_AGES}
+        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER, sm._API_COMMIT}
+        assert set(scheduling[sm._WORKER]) == {
+            *sm._WORKER_COUNTS,
+            *sm._WORKER_AGES,
+            sm._WORKER_COMMIT,
+        }
         posting = client.get("/health/posting").json()
         assert set(posting) == set(pm._COUNTS + pm._AGES)
 
@@ -896,7 +928,7 @@ class TestPostingHealthIsATHIRDSurface:
         assert verdict.state == NEVER_POSTED_OVERDUE
 
     def test_the_railway_probe_still_opens_no_connection(self):
-        """Three health surfaces, and one reason for the split: liveness must
+        """Four health surfaces, and one reason for the split: liveness must
         not open a connection or a database blip takes the service down for a
         fault no restart repairs."""
         app = create_app(env={})
@@ -951,6 +983,21 @@ class TestDeliveryHealthIsAFOURTHSurface:
         resp = client.get("/health/delivery")
         assert resp.status_code == 200, resp.text
         return resp, doors
+
+    def test_the_real_body_is_what_the_shared_classifier_reads(self, engine, client):
+        """The real route over the real `delivery_health`, read by the classifier
+        `storydump health` and the scheduling monitor share: the body carries
+        exactly its keys, and a failed send in it reads as failing."""
+        from storydump_cli.health_classify import delivery as dm
+
+        resp, _ = self._get(
+            engine, client, [("refused", 400, 1, 1), ("rate_limited", 429, 9, 0)]
+        )
+        assert set(resp.json()) == {"window_seconds", *dm._COUNTS, dm._BY_CLASS}
+        verdict = dm.classify(resp.status_code, resp.text)
+        assert verdict.state == dm.FAILING, verdict
+        assert "refused: 400×1" in verdict.detail
+        assert "rate_limited" not in verdict.detail
 
     def test_the_body_is_aggregates_only(self, engine, client):
         """The route is unauthenticated: counts and codes, and nothing that

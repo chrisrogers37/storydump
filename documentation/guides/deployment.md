@@ -185,7 +185,7 @@ railway logs --service worker
 curl https://your-app.up.railway.app/health
 
 # From a laptop, with a token (Settings › API tokens, then `storydump login`)
-storydump health            # the three health surfaces and the webhook, judged
+storydump health            # the four health surfaces and the webhook, judged
 storydump webhook status    # the bot, the registration, the door
 storydump doctor            # this laptop: token, API, config, Railway, the ledger
 ```
@@ -449,10 +449,10 @@ non-zero — the worker does, when a supervised task dies — is restarted.
 
 ### From a laptop
 
-- `storydump health` — the API's `/health`, `/health/scheduling` and
-  `/health/posting`, and the bot's webhook from the operating details (for a
-  token whose person is in `OPS_USER_IDS`; otherwise `not_checked`), each
-  judged; exit 4 when not well
+- `storydump health` — the API's `/health`, `/health/scheduling`,
+  `/health/posting` and `/health/delivery`, and the bot's webhook from the
+  operating details (for a token whose person is in `OPS_USER_IDS`; otherwise
+  `not_checked`), each judged; exit 4 when not well
 - `storydump deploys --watch --commit <sha>` — follows a deploy of both services
 
 ### External Monitoring (Optional)
