@@ -119,8 +119,12 @@ names.
 6. **The video derivation Meta receives.** Meta never fetches a video's source file: it
    fetches the transit store's story derivation, delivered as MP4 in the story frame.
    So the validator judges a past-posts video only on what the derivation keeps from it
-   (its size, a well-formed self-contained container, a stream `ffprobe` can open, its
-   duration and its frame rate). The transformation trims the derivation to 60 seconds
+   (its size against what the transit store takes, a well-formed self-contained
+   container, a stream `ffprobe` can open, its duration, which is the container's or
+   its longest stream's, and its frame rate). A container the walker cannot read
+   whole, a file with more streams than the probe opens (16) and a duration nothing
+   states are left to the derivation and recorded, never left pending. The
+   transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
    validation matrix (`media_validation.story_video_encoding`); its container layout is

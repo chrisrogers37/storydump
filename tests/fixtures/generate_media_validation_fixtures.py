@@ -78,7 +78,7 @@ def generate(directory):
     raw = (directory / "srgb.jpg").read_bytes()
     (directory / "truncated.jpg").write_bytes(raw[:-100])
     record("truncated.jpg", "image", "unsupported", "malformed_image")
-    for cap in (7_999_999, 8_000_000, 8_000_001):
+    for cap in (8_388_607, 8_388_608, 8_388_609):
         remaining = cap - len(raw)
         chunks = []
         while remaining:
@@ -94,8 +94,8 @@ def generate(directory):
         record(
             name,
             "image",
-            "unsupported" if cap > 8_000_000 else "supported",
-            "byte_limit" if cap > 8_000_000 else "validated",
+            "unsupported" if cap > 8_388_608 else "supported",
+            "byte_limit" if cap > 8_388_608 else "validated",
         )
 
     def video(
@@ -197,26 +197,16 @@ def generate(directory):
     )
     video("mpeg4.mp4", codec="mpeg4", state="unsupported", reason="video_codec")
     base = directory / "h264.mp4"
-    for name, opts, state, reason in (
-        ("late-moov.mp4", (), "supported", "validated"),
-        (
-            "edits.mp4",
-            ("-movflags", "+faststart", "-use_editlist", "1"),
-            "supported",
-            "validated",
-        ),
-        (
-            "fragmented.mp4",
-            ("-movflags", "+empty_moov+frag_keyframe"),
-            "validation_pending",
-            "container_evidence_incomplete",
-        ),
+    for name, opts in (
+        ("late-moov.mp4", ()),
+        ("edits.mp4", ("-movflags", "+faststart", "-use_editlist", "1")),
+        ("fragmented.mp4", ("-movflags", "+empty_moov+frag_keyframe")),
     ):
         ffmpeg(
             name,
             ["-i", str(base), "-map", "0", "-c", "copy", "-use_editlist", "0", *opts],
         )
-        record(name, "video", state, reason)
+        record(name, "video", "supported", "validated")
     for rate, channels in ((44100, 1), (48000, 2), (96000, 2), (48000, 3)):
         name = f"audio-{rate}-{channels}.mp4"
         ffmpeg(
