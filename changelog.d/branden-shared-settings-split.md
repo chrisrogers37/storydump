@@ -1,0 +1,3 @@
+### Added
+
+- **`storydump doctor` names a setting the API and the worker must share that differs between them, or that one of them lacks (#78).** It reads both Railway services' variables through your own `railway` login, as `storydump deploys` reads their deployments, reduces each value to a digest as it reads it, and reports the setting's name, never its value or its digest. The shared settings are the deployment guide's "Both services" rows, `OPS_USER_IDS`, and `RESEND_API_KEY` and `EMAIL_FROM` once the worker has them; `TARGET_DATABASE_URL` is compared on its host, port and database name, `OPS_USER_IDS` as a set, and `ENCRYPTION_KEYS` in order. A mismatch shows when `doctor` runs; nothing pages on it.

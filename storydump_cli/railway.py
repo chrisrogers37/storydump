@@ -8,7 +8,10 @@ known to drop or swap the link), and only then is a deployment read. Every
 call goes through one ``run`` callable so a test scripts the binary's
 answers; the JSON parsers are written against
 :data:`TESTED_VERSION`, and the fixture they are tested with is stamped
-with it. No secret is ever read here — the binary holds the credential.
+with it. The binary holds the credential. The one read that carries secrets,
+a service's variables (:meth:`Railway.variables`), reduces each value to a
+fingerprint as it is parsed: no value leaves it, and no failure repeats what
+the binary printed.
 """
 
 from __future__ import annotations
@@ -251,3 +254,41 @@ class Railway:
         # the first row
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         return rows[:limit]
+
+    def variables(
+        self, service: str, fingerprint: Callable[[str, str], Optional[str]]
+    ) -> dict[str, str]:
+        """*service*'s production variables as ``{name: fingerprint(name,
+        value)}``, each value reduced as it is read; a name *fingerprint*
+        answers None for is left out. The values are production's credentials,
+        so none is returned, and a refusal names the service and the exit code,
+        never the binary's output."""
+        code, out, _ = self._call(
+            "variables",
+            "--service",
+            service,
+            "--environment",
+            ENVIRONMENT,
+            "--json",
+        )
+        if code != 0:
+            raise RailwayUnavailable(
+                f"railway variables failed for {service} (exit {code})", LOGIN_FIX
+            )
+        try:
+            raw = json_from(out)
+        except ValueError:
+            # refused below, after the handler: a decode error holds the whole
+            # document, and even `raise ... from None` leaves it on __context__
+            raw = None
+        if not isinstance(raw, dict):
+            raise RailwayUnavailable(
+                f"railway variables for {service} answered no JSON object", LOGIN_FIX
+            )
+        prints: dict[str, str] = {}
+        for name, value in raw.items():
+            if isinstance(value, str):
+                digest = fingerprint(name, value)
+                if digest is not None:
+                    prints[name] = digest
+        return prints

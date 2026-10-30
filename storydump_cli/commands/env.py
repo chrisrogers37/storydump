@@ -29,6 +29,7 @@ from src.services.target.vocabulary import (
     EXIT_USAGE,
     envelope,
 )
+from storydump_cli import shared_settings
 from storydump_cli import webhook as webhook_tool
 from storydump_cli.client import ApiError, Unreachable
 from storydump_cli.commands import (
@@ -512,6 +513,7 @@ CHECK_CODES: Mapping[str, int] = {
     "storage": EXIT_NOT_AUTHORIZED,
     "config": EXIT_USAGE,
     "railway": EXIT_RAILWAY_UNREACHABLE,
+    "settings": EXIT_API_UNREACHABLE,
     "ledger": EXIT_API_UNREACHABLE,
 }
 
@@ -576,7 +578,7 @@ def _storage_name(runtime: Any) -> str:
 #: One `doctor` check's answer: the rows it decided, keyed the way `doctor`
 #: orders them. A dict rather than a bare row because the token check decides
 #: TWO — its own, and `api` when it learns that `/health` answered and
-#: `/me/principal` did not — and one shape for all six beats a special case.
+#: `/me/principal` did not — and one shape for every check beats a special case.
 Rows = dict[str, tuple[str, str, str]]
 
 
@@ -751,6 +753,24 @@ def _check_railway(runtime: Any) -> Rows:
     return checks
 
 
+def _check_settings(runtime: Any, *, railway_ok: bool) -> Rows:
+    """The settings the API and the worker must share, compared by
+    fingerprint (:mod:`storydump_cli.shared_settings`): each value is reduced
+    to a digest as it is read, and the row names settings only. Skipped
+    unless the railway check passed — they are read through it."""
+    if not railway_ok:
+        return {"settings": ("skipped", "needs the railway check to pass", "")}
+    rail = Railway.from_env(runtime.run_process, runtime.env)
+    try:
+        prints = {
+            service: rail.variables(service, shared_settings.fingerprint)
+            for service in SERVICES
+        }
+    except RailwayUnavailable as exc:
+        return {"settings": ("wrong", exc.detail, exc.fix)}
+    return {"settings": shared_settings.verdict(prints)}
+
+
 def _check_ledger(
     runtime: Any, *, token: Optional[str], principal: Optional[dict[str, Any]]
 ) -> Rows:
@@ -828,9 +848,10 @@ def _check_ledger(
 @click.pass_context
 def doctor(ctx: click.Context) -> int:
     """Check the token, the API, the token store, the local configuration,
-    the Railway login and link, and the migration ledger against this
-    checkout; each line ok, wrong, missing or skipped, with its fix. Exit 0
-    when everything is ok, else the first wrong check's own code.
+    the Railway login and link, the settings the API and the worker must
+    share, and the migration ledger against this checkout; each line ok,
+    wrong, missing or skipped, with its fix. Exit 0 when everything is ok,
+    else the first wrong check's own code.
 
     \b
     Example:
@@ -839,11 +860,12 @@ def doctor(ctx: click.Context) -> int:
     runtime = begin(ctx, "doctor")
     checks: Rows = {}
 
-    # Six checks, in the order they must RUN rather than the order they are
-    # reported: the API first because the token can only be checked through it,
+    # The checks, in the order they must RUN rather than the order they are
+    # reported (CHECK_CODES'): the API first because the token can only be checked through it,
     # the token before the ledger because the ledger needs the principal it
-    # resolves. Each returns the rows it decided; only the token check decides
-    # more than its own.
+    # resolves, Railway before the settings that are read through it. Each
+    # returns the rows it decided; only the token check decides more than its
+    # own.
     api_rows, api_up = _check_api(runtime)
     checks.update(api_rows)
     token_rows, token, principal = _check_token(runtime, api_up=api_up)
@@ -851,14 +873,12 @@ def doctor(ctx: click.Context) -> int:
     checks.update(_check_storage(runtime))
     checks.update(_check_config(runtime))
     checks.update(_check_railway(runtime))
+    checks.update(_check_settings(runtime, railway_ok=checks["railway"][0] == "ok"))
     checks.update(_check_ledger(runtime, token=token, principal=principal))
 
     ordered = [
         {"check": name, "state": state, "value": value, "fix": fix}
-        for name, (state, value, fix) in (
-            (name, checks[name])
-            for name in ("token", "api", "storage", "config", "railway", "ledger")
-        )
+        for name, (state, value, fix) in ((name, checks[name]) for name in CHECK_CODES)
     ]
     ok = all(row["state"] in ("ok", "skipped") for row in ordered)
     emit(envelope("doctor", {"ok": ok, "checks": ordered}), json_mode=runtime.json_mode)
