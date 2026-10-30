@@ -1966,6 +1966,18 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             landed.source,
         )
         await g.index(landed.source, smaller, whole=True)
+        # The second story holds the dropped slide, so the complete reindex
+        # keeps it for that story's own fetch to judge.
+        assert g.rows("SELECT state FROM media_items WHERE id=%s", second["item"]) == [
+            {"state": "available"}
+        ]
+        assert g.rows(
+            "SELECT count(*) AS n FROM instagram_media_assets WHERE source_id=%s",
+            landed.source,
+        ) == [{"n": 10}]
+        await g.sweep_prompts()
+        # Its fetch reads the post twice, both reads lack the slide, and the
+        # slide is retired before the story parks.
         assert g.rows("SELECT state FROM media_items WHERE id=%s", second["item"]) == [
             {"state": "removed"}
         ]
@@ -1973,7 +1985,6 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             "SELECT count(*) AS n FROM instagram_media_assets WHERE source_id=%s",
             landed.source,
         ) == [{"n": 9}]
-        await g.sweep_prompts()
         assert g.state_of(second["id"]) == "review_required"
         assert g.rows(
             "SELECT last_error#>>'{error,reason}' AS reason FROM post_intents WHERE id=%s",

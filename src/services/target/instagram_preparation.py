@@ -64,7 +64,7 @@ SELECT i.id AS intent_id,i.state AS intent_state,i.cancel_requested,
  m.id AS media_item_id,m.source_id,m.state AS media_item_state,m.media_kind,s.config,s.origin_ig_account_id,
  x.parent_media_id,x.data_generation_id,x.observation_revision,a.validation_fingerprint AS current_fingerprint,
  pol.revision AS policy_revision,
- a.asset_media_id AS selected_asset_id,x.slide_count,
+ a.asset_media_id AS selected_asset_id,a.position,x.slide_count,
  a.validation_capture AS current_capture,clock_timestamp() AS db_now
 FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
 JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
@@ -116,6 +116,9 @@ def _refusal(exc, counters, selected) -> dict:
     facts["counters"] = asdict(counters)
     if facts["kind"] == "slide_gone":
         facts["slide_count"] = selected.subject.get("slide_count")
+        facts["expected_slide_count"] = instagram_catalog.expected_slide_count(
+            selected.subject["slide_count"], selected.subject["position"]
+        )
     return facts
 
 
@@ -301,7 +304,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 source_id=selected.capture.source_id,
                 workspace_id=selected.capture.workspace_id,
                 selected_asset_id=selected.subject["selected_asset_id"],
-                expected_slide_count=selected.subject["slide_count"],
+                expected_slide_count=instagram_catalog.expected_slide_count(
+                    selected.subject["slide_count"], selected.subject["position"]
+                ),
                 max_bytes=media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"][
                     selected.subject["media_kind"]
                 ],
