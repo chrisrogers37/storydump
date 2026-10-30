@@ -327,10 +327,15 @@ _CHECKS = {
     ),
 }
 
+#: What a publish job is trying to do: a spent budget's `trying_to` when its
+#: record names none.
+PUBLISH_TRYING_TO = "post this story"
+
 #: Why a story went into review by a route that refused nothing, given what
 #: the route counted: its container never reported ready, Instagram's answer
 #: to preparing its media was lost, its job's budget is spent, its publish was
-#: never confirmed, or it waited approved until the reaper parked it.
+#: never confirmed, or it waited approved until the reaper parked it. A spent
+#: budget says what its job was trying to do (`trying_to`).
 _REVIEW = {
     "container_pending": lambda r: (
         "Instagram did not report this story's media as ready on the last of"
@@ -342,7 +347,7 @@ _REVIEW = {
     ),
     "budget_spent": lambda r: (
         f"we hit a fault on our side {_counted(r.get('tries'), 'time', 'times')}"
-        " trying to post this story"
+        f" trying to {short(r.get('trying_to')) or PUBLISH_TRYING_TO}"
     ),
     "publish_unconfirmed": lambda r: (
         "Instagram's answer to the post was lost, and it could not be confirmed"

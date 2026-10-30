@@ -2311,15 +2311,16 @@ async def flip_exhausted(
     job: dict,
     *,
     from_states=("publishing", "approved"),
-    trying_to: str = "post this story",
+    trying_to: str = refusal_evidence.PUBLISH_TRYING_TO,
 ) -> Optional[dict]:
     """A job whose budget is spent on untyped crashes: the story it carried is
     flipped to review from wherever it stood among *from_states* — for a
     `publish_pipeline` job, `publishing` mid-ladder or `approved` between
     attempts; for a past-posts story's prepare job, any state it waits in.
-    Its notice says what the job was *trying_to* do. Returns the `tell_review`
-    arguments for its courtesy, or None when nothing was parked: no story, a
-    story already settled, or an `intent_id` that is not a uuid (logged)."""
+    Its notice and its card's reason say what the job was *trying_to* do.
+    Returns the `tell_review` arguments for its courtesy, or None when
+    nothing was parked: no story, a story already settled, or an `intent_id`
+    that is not a uuid (logged)."""
     payload = job.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -2352,9 +2353,10 @@ async def flip_exhausted(
         from_state=row["state"],
         error=_review_error(
             "JobBudgetSpent",
-            "the publish job's budget is spent",
+            "the job's budget is spent",
             "budget_spent",
             tries=tries,
+            trying_to=trying_to,
         ),
     ):
         return None

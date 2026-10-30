@@ -302,14 +302,14 @@ async def test_a_spent_prepare_job_parks_its_waiting_story_saying_what_it_tried(
     monkeypatch, state
 ):
     """A prepare job whose faults spend its budget parks its story through the
-    publish pipeline's flip, from any state the story waits in, saying it was
-    fetching the story's file."""
-    from src.services.target import publish_pipeline, vocabulary
+    publish pipeline's flip, from any state the story waits in, recording for
+    its card what its notice says: that it was fetching the story's file."""
+    from src.services.target import publish_pipeline, refusal_evidence, vocabulary
 
     flipped = []
 
     async def flip_to_review(session, *, intent_id, from_state, error=None):
-        flipped.append((intent_id, from_state))
+        flipped.append((intent_id, from_state, error))
         return True
 
     monkeypatch.setattr(publish_pipeline, "flip_to_review", flip_to_review)
@@ -319,7 +319,11 @@ async def test_a_spent_prepare_job_parks_its_waiting_story_saying_what_it_tried(
         from_states=vocabulary.WAITING_STATES,
         trying_to="fetch this story's file from Instagram",
     )
-    assert flipped == [(STORY, state)]
+    [(intent_id, from_state, error)] = flipped
+    assert (intent_id, from_state) == (STORY, state)
+    assert error["error"]["refusal"] == refusal_evidence.evidence(
+        "budget_spent", tries=8, trying_to="fetch this story's file from Instagram"
+    ), "the record its card reads names what the job was doing"
     assert parked["notice"].startswith(
         "We hit a fault on our side 8 times trying to fetch this story's file"
     )

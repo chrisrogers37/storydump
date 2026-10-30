@@ -3246,7 +3246,14 @@ class TestTheFloatsSafetyNets:
         binding = _seed_card(pipe_db, intent)
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
         _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
-        _says_why(pipe_db, intent, binding, "budget_spent", tries=5)
+        _says_why(
+            pipe_db,
+            intent,
+            binding,
+            "budget_spent",
+            tries=5,
+            trying_to="post this story",
+        )
 
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
 

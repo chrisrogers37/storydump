@@ -1264,6 +1264,14 @@ REVIEW_SENTENCES = [
         id="budget-spent",
     ),
     pytest.param(
+        refusal_evidence.evidence(
+            "budget_spent", tries=8, trying_to="fetch this story's file from Instagram"
+        ),
+        "we hit a fault on our side 8 times trying to fetch this story's file"
+        " from Instagram",
+        id="budget-spent-fetching",
+    ),
+    pytest.param(
         refusal_evidence.evidence("publish_unconfirmed", checks=12),
         "Instagram's answer to the post was lost, and it could not be confirmed"
         " as posted (12 checks)",
