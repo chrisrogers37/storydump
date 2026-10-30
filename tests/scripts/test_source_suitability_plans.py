@@ -165,7 +165,7 @@ async def test_10k_suitability_and_selective_paths_are_bounded(
         body = (
             await conn.execute(
                 text(
-                    "SELECT prosrc FROM pg_proc WHERE oid='fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean)'::regprocedure"
+                    "SELECT prosrc FROM pg_proc WHERE oid='fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean,text)'::regprocedure"
                 )
             )
         ).scalar_one()
@@ -179,6 +179,7 @@ async def test_10k_suitability_and_selective_paths_are_bounded(
             "p_media_item_id": "CAST(:media AS uuid)",
             "p_existing_intent_id": "CAST(:intent AS uuid)",
             "p_require_validation": "true",
+            "p_matrix_version": "CAST(:matrix AS text)",
         }
         expanded = re.sub(r"\bp_[a-z_]+\b", lambda m: substitutions[m.group()], body)
         queries = {

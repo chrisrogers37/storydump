@@ -1425,11 +1425,16 @@ END; $$;
 -- canonical retained locks. Drive is workspace-wide. Existing-intent context
 -- excludes only its own matching live intent; lock facts do not override base
 -- suitability or the database duplicate INSERT arbiter.
+-- A stored unsupported verdict counts only while its capture is stamped with
+-- the p_matrix_version the caller passes, the matrix the validator runs now; an
+-- older or unstamped one is judged again. A call that passes no version (NULL),
+-- as a call written before the parameter existed does, honours every stored
+-- verdict, as before.
 CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
   p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid DEFAULT NULL, p_media_item_id uuid DEFAULT NULL,
-  p_existing_intent_id uuid DEFAULT NULL)
+  p_existing_intent_id uuid DEFAULT NULL, p_matrix_version text DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
   suitable boolean, base_suitable boolean, reason text,
   data_generation_id uuid, observation_revision bigint, policy_revision bigint,
@@ -1439,7 +1444,7 @@ LANGUAGE sql STABLE SECURITY INVOKER
 SET search_path=pg_catalog,public,pg_temp AS $$
  SELECT * FROM fn_source_asset_suitability(p_workspace_id,p_destination_id,
   p_resolved_repost_ttl_days,p_evaluated_at,p_past_posts_enabled,p_source_id,
-  p_media_item_id,p_existing_intent_id,true)
+  p_media_item_id,p_existing_intent_id,true,p_matrix_version)
 $$;
 
 -- Internal current source-read facts only; no item, age, attribution, credit
@@ -1831,7 +1836,8 @@ CREATE FUNCTION fn_source_asset_suitability(
   p_workspace_id uuid, p_destination_id uuid, p_resolved_repost_ttl_days integer,
   p_evaluated_at timestamptz, p_past_posts_enabled boolean,
   p_source_id uuid, p_media_item_id uuid,
-  p_existing_intent_id uuid, p_require_validation boolean)
+  p_existing_intent_id uuid, p_require_validation boolean,
+  p_matrix_version text DEFAULT NULL)
 RETURNS TABLE (source_id uuid, media_item_id uuid, provider text,
   suitable boolean, base_suitable boolean, reason text,
   data_generation_id uuid, observation_revision bigint, policy_revision bigint,
@@ -1896,11 +1902,12 @@ WITH source_facts AS (
       WHEN a.availability IS NOT NULL AND a.availability<>'available' THEN 'unavailable'
       WHEN m.id IS NOT NULL AND m.state<>'available' THEN 'unavailable'
       WHEN s.carousel_slides='first' AND a.position>1 THEN 'slide_not_first'
-      WHEN a.validation_state='unsupported' OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
+      WHEN (a.validation_state='unsupported' AND (p_matrix_version IS NULL OR a.validation_capture->>'matrix_version'=p_matrix_version)) OR a.exclusion_reason='unsupported_media' THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id
-        AND a.validation_capture->>'state'='unsupported' THEN 'unsupported'
+        AND a.validation_capture->>'state'='unsupported'
+        AND (p_matrix_version IS NULL OR a.validation_capture->>'matrix_version'=p_matrix_version) THEN 'unsupported'
       WHEN a.validation_capture->>'generation_id'=s.generation_id::text
         AND a.validation_capture->>'observation_revision'=a.observation_revision::text
         AND a.validation_capture->>'selected_asset_id'=a.asset_media_id

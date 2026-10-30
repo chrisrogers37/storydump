@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import text
 
-from src.services.target import instagram_sync, source_policy
+from src.services.target import instagram_sync, media_validation, source_policy
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts import test_source_read_admission_gate as admission
@@ -50,6 +50,7 @@ async def seed_10k(conn, origin, old, current):
         old=old["generation_id"],
         gid=current["generation_id"],
         recent=datetime.now(timezone.utc) + timedelta(days=1),
+        matrix=media_validation.MATRIX_VERSION,
     )
     # Setwise fixture setup, no per-parent writer/query loop. One index-only
     # unsupported group proves coverage does not depend on a media projection.
@@ -86,12 +87,16 @@ async def seed_10k(conn, origin, old, current):
     """),
         binds,
     )
+    # The asset-level unsupported group carries the current matrix version in
+    # its capture, as preparation stamps a refusal: an unstamped one is judged
+    # again.
     await conn.execute(
         text("""
         INSERT INTO instagram_media_assets(workspace_id,source_id,parent_media_id,
           asset_media_id,data_generation_id,observation_revision,position,media_kind,
           availability,media_item_id,validation_state,validation_generation_id,
-          validation_observation_revision,validation_fingerprint,validated_at)
+          validation_observation_revision,validation_fingerprint,validated_at,
+          validation_capture)
         SELECT i.workspace_id,i.source_id,i.parent_media_id,i.parent_media_id,
           i.data_generation_id,i.observation_revision,1,'image',i.availability,
           i.media_item_id,
@@ -101,7 +106,12 @@ async def seed_10k(conn, origin, old, current):
           CASE WHEN i.parent_media_id::integer<=8000 THEN i.data_generation_id END,
           CASE WHEN i.parent_media_id::integer<=8000 THEN i.observation_revision END,
           CASE WHEN i.parent_media_id::integer<=8000 THEN 'fixture' END,
-          CASE WHEN i.parent_media_id::integer<=8000 THEN now() END
+          CASE WHEN i.parent_media_id::integer<=8000 THEN now() END,
+          CASE WHEN i.parent_media_id::integer BETWEEN 6001 AND 7000
+            THEN jsonb_build_object('generation_id',i.data_generation_id::text,
+              'observation_revision',i.observation_revision,
+              'selected_asset_id',i.parent_media_id,'state','unsupported',
+              'matrix_version',CAST(:matrix AS text)) END
         FROM instagram_media_index i WHERE i.workspace_id=CAST(:ws AS uuid)
           AND i.source_id=CAST(:sid AS uuid) AND i.media_item_id IS NOT NULL
     """),

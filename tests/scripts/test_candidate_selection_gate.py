@@ -6,7 +6,7 @@ from decimal import Decimal
 import json
 import pytest
 from sqlalchemy import text
-from src.services.target import category_mix, source_policy
+from src.services.target import category_mix, media_validation, source_policy
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.test_source_suitability_gate import activate
@@ -1058,12 +1058,85 @@ async def test_database_refuses_incoherent_unsupported_byte_proof(
                     )
                 )
         assert (await verdict(conn, origin, src))["suitable"]
-        await conn.execute(
-            text(
-                "UPDATE instagram_media_assets SET validation_state='unsupported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='synthetic',validated_at=now()"
-            )
-        )
+        await obs.stamp_refusal(conn, origin, item, media_validation.MATRIX_VERSION)
         assert (await verdict(conn, origin, src))["reason"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "version", ["instagram-story-older", None], ids=["older", "unstamped"]
+)
+async def test_a_stored_refusal_from_another_matrix_version_is_a_candidate_again(
+    past_posts_engine, origin, version
+):
+    """A stored refusal stamped with an older matrix version, or with none, is
+    a candidate again, `validation_pending` in strict mode."""
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await obs.stamp_refusal(conn, origin, item, version)
+        candidate = await verdict(conn, origin, src)
+        strict = await verdict(conn, origin, src, strict=True)
+    assert candidate["suitable"]
+    assert strict["reason"] == "validation_pending"
+
+
+#: The call the running services make until they restart on this code: the
+#: eight arguments `fn_source_asset_suitability` took before it took a matrix
+#: version.
+UNVERSIONED_SUITABILITY_SQL = (
+    "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
+    "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid))"
+)
+
+
+#: The candidate call they make until then: the same eight arguments and the
+#: validation flag, `false`.
+UNVERSIONED_CANDIDATE_SQL = (
+    "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
+    "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid),false)"
+)
+
+
+@pytest.mark.parametrize(
+    "version", ["instagram-story-older", None], ids=["older", "unstamped"]
+)
+async def test_a_call_that_passes_no_matrix_version_honours_every_stored_refusal(
+    past_posts_engine, origin, version
+):
+    """The calls that predate the matrix version, strict and candidate, still
+    resolve and read a stored refusal as `unsupported` whatever its stamp. The
+    current version judges the same slide again: `validation_pending` in strict
+    mode, a candidate otherwise."""
+    src, item = await metadata(past_posts_engine, origin)
+    async with obs.uow(past_posts_engine, origin) as conn:
+        await obs.stamp_refusal(conn, origin, item, version)
+        context = await source_policy.suitability_context(
+            conn,
+            workspace_id=str(origin["ws"]),
+            ig_account_ids=[origin["iga"]],
+            capability=foundation.capability(),
+        )
+        binds = dict(
+            context.binds(),
+            acct=str(origin["iga"]),
+            sid=src["source_id"],
+            media=None,
+            intent=None,
+        )
+        without_matrix = {name: v for name, v in binds.items() if name != "matrix"}
+
+        async def read(sql, params):
+            return (await conn.execute(text(sql), params)).mappings().one()
+
+        unversioned = await read(UNVERSIONED_SUITABILITY_SQL, without_matrix)
+        unversioned_candidate = await read(UNVERSIONED_CANDIDATE_SQL, without_matrix)
+        versioned = await read(source_policy.SUITABILITY_SQL, binds)
+        versioned_candidate = await read(source_policy.CANDIDATE_SQL, binds)
+    assert unversioned["reason"] == "unsupported"
+    assert unversioned_candidate["reason"] == "unsupported"
+    assert versioned["reason"] == "validation_pending"
+    assert versioned_candidate["suitable"]
 
 
 async def test_pool_rejects_supplied_expired_context_even_before_conversion(

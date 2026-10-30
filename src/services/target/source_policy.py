@@ -14,7 +14,13 @@ from datetime import datetime
 from sqlalchemy import text
 
 from src.exceptions import StorydumpError
-from src.services.target import audit, intent_ledger, readers, source_state
+from src.services.target import (
+    audit,
+    intent_ledger,
+    media_validation,
+    readers,
+    source_state,
+)
 from src.services.target.instagram_sources import PastPostsCapability, is_activated
 
 # Reader compatibility, distinct from the schema's future-extensible positive versions.
@@ -266,7 +272,9 @@ class SuitabilityContext:
 
     Consumers must enter before later item/intent/job locks, keep the builder's
     workspace/source locks until their query commits, and never reuse this after
-    commit or supply client overrides. Direct SQL uses these same binds.
+    commit or supply client overrides. Direct SQL uses these same binds. The
+    binds also carry the validator's current matrix version (`matrix`): a stored
+    refusal counts only when stamped with it.
     """
 
     workspace_id: str
@@ -282,6 +290,7 @@ class SuitabilityContext:
             ttl=self.resolved_repost_ttl_days,
             at=self.evaluated_at,
             activated=self.past_posts_enabled,
+            matrix=media_validation.MATRIX_VERSION,
         )
 
 
@@ -376,11 +385,19 @@ def require_context(executor, context, workspace_id):
 SUITABILITY_SQL = (
     "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
     "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
-    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid))"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid),"
+    "CAST(:matrix AS text))"
 )
 
 
-CANDIDATE_SQL = SUITABILITY_SQL[:-1] + ",false)"
+#: The same verdict without the byte proof, from the overload that takes the
+#: validation flag, which sits ahead of the matrix version.
+CANDIDATE_SQL = (
+    "SELECT * FROM fn_source_asset_suitability(CAST(:ws AS uuid),CAST(:acct AS uuid),"
+    "CAST(:ttl AS integer),CAST(:at AS timestamptz),CAST(:activated AS boolean),"
+    "CAST(:sid AS uuid),CAST(:media AS uuid),CAST(:intent AS uuid),false,"
+    "CAST(:matrix AS text))"
+)
 
 
 async def suitability(
