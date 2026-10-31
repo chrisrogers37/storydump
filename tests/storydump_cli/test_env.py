@@ -31,7 +31,7 @@ from src.services.target.vocabulary import (
     EXIT_WATCH_FAILED,
     check_envelope,
 )
-from storydump_cli import railway
+from storydump_cli import railway, shared_settings
 from storydump_cli.commands import UNREACHABLE_FIX
 from storydump_cli.health_classify.scheduling import DEFAULT_WORKER_STALE_S
 from storydump_cli.storage import StorageUnavailable
@@ -170,6 +170,12 @@ LIST_API = (
 )
 NEWEST = FIXTURE["deployments"]["worker"][0]
 NEWEST_COMMIT = NEWEST["meta"]["commitHash"][:7]
+# the same service and environment flags as a deployment list
+VARS_API = ("variables", *LIST_API[2:])
+VARS_WORKER = ("variables", *LIST_WORKER[2:])
+#: Each service's variables: the shared settings alike, the runtime logins
+#: each their own, and the variables only one service reads.
+VARIABLES = FIXTURE["variables"]
 
 
 def ok_json(value) -> tuple[int, str, str]:
@@ -183,6 +189,8 @@ def railway_answers(over=None) -> dict:
         ("status", "--json"): ok_json(FIXTURE["status"]),
         LIST_WORKER: ok_json(FIXTURE["deployments"]["worker"]),
         LIST_API: ok_json(FIXTURE["deployments"]["storydump"]),
+        VARS_API: ok_json(VARIABLES["storydump"]),
+        VARS_WORKER: ok_json(VARIABLES["worker"]),
     }
     answers.update(over or {})
     return answers
@@ -1047,6 +1055,7 @@ def checks_of(document) -> dict[str, dict]:
         "storage",
         "config",
         "railway",
+        "settings",
         "ledger",
     ]
     for check in checks:
@@ -1068,6 +1077,7 @@ def test_doctor_reports_every_check_ok_and_exits_0(tmp_path):
     assert checks["token"]["value"].startswith("sam-laptop")
     assert "operator" in checks["token"]["value"]
     assert "2.1.0" in checks["api"]["value"] and "abc1234" in checks["api"]["value"]
+    assert checks["settings"]["value"] == "11 shared settings agree"
     assert "4.30.3" in checks["railway"]["value"]
     assert "@" not in checks["railway"]["value"], (
         "no account line in a value an agent pastes"
@@ -1080,7 +1090,7 @@ def test_doctor_human_output_is_one_line_per_check(tmp_path):
     rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
     result = run(rt, "doctor")
     assert result.exit_code == EXIT_OK, result.output
-    for check in ("token", "api", "storage", "config", "railway", "ledger"):
+    for check in ("token", "api", "storage", "config", "railway", "settings", "ledger"):
         assert re.search(rf"^{check}\s+ok\s", result.stdout, re.M), (
             check,
             result.stdout,
@@ -1202,6 +1212,8 @@ def test_doctor_with_a_logged_out_railway_says_missing(tmp_path):
     checks = checks_of(one_envelope(result))
     assert checks["railway"]["state"] == "missing", "a missing login is missing"
     assert "railway login" in checks["railway"]["fix"]
+    assert checks["settings"]["state"] == "skipped", "they are read through Railway"
+    assert VARS_API not in rail.calls and VARS_WORKER not in rail.calls
 
 
 def test_doctor_without_a_project_id_says_missing_and_names_the_variable(tmp_path):
@@ -1245,6 +1257,201 @@ def test_doctor_without_railway_says_missing_and_exits_5(tmp_path):
     checks = checks_of(one_envelope(result))
     assert checks["railway"]["state"] == "missing"
     assert "install" in checks["railway"]["fix"].lower()
+
+
+#: A hex run as long as a digest's prefix: the settings check prints none.
+DIGEST_SHAPED = re.compile(r"[0-9a-f]{16,}")
+
+
+def settings_doctor(tmp_path, *, api=None, worker=None, json_mode=True):
+    """`doctor` over the fixture's variables with each service's own changes
+    (None removes a variable): the result, and the scripted binary."""
+
+    def variables(service, changes):
+        merged = {**VARIABLES[service], **(changes or {})}
+        return {name: value for name, value in merged.items() if value is not None}
+
+    rail = ScriptedRailway(
+        railway_answers(
+            {
+                VARS_API: ok_json(variables("storydump", api)),
+                VARS_WORKER: ok_json(variables("worker", worker)),
+            }
+        )
+    )
+    rt = env_runtime(tmp_path, health_api(), rail)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    return run(rt, *(["--json"] if json_mode else []), "doctor"), rail
+
+
+def assert_names_only(result, *values: str) -> None:
+    """No shared setting's value, and nothing shaped like a digest, anywhere
+    the run printed: the values are production's credentials."""
+    shared = [
+        value
+        for service in VARIABLES.values()
+        for name, value in service.items()
+        if name in shared_settings.SHARED
+    ]
+    for value in (*shared, *values):
+        assert value not in result.output, "a setting's value was printed"
+    assert not DIGEST_SHAPED.search(result.output), "a digest was printed"
+
+
+def test_doctor_reads_the_settings_both_services_share_alike_as_ok(tmp_path):
+    result, rail = settings_doctor(tmp_path)
+    assert result.exit_code == EXIT_OK, result.output
+    row = checks_of(one_envelope(result))["settings"]
+    assert (row["state"], row["value"], row["fix"]) == (
+        "ok",
+        "11 shared settings agree",
+        "",
+    )
+    assert VARS_API in rail.calls and VARS_WORKER in rail.calls
+    assert_names_only(result)
+
+
+@pytest.mark.parametrize("worker_has", [None, "  "], ids=["unset", "blank"])
+def test_doctor_says_when_the_worker_lacks_the_apis_operators(tmp_path, worker_has):
+    """The API holds OPS_USER_IDS and the worker does not (a blank value reads
+    as unset): the worker's ops notice is off, and every other check reads
+    well."""
+    result, _ = settings_doctor(tmp_path, worker={"OPS_USER_IDS": worker_has})
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == "missing"
+    assert row["value"] == "only on storydump: OPS_USER_IDS"
+    assert "both services" in row["fix"]
+    assert_names_only(result)
+
+
+def test_doctor_names_the_settings_that_differ_and_prints_no_value(tmp_path):
+    other = {
+        "OPS_USER_IDS": "22222222-2222-4222-8222-222222222222",
+        "TARGET_TELEGRAM_BOT_TOKEN": "placeholder-other-bot-token",
+    }
+    result, _ = settings_doctor(tmp_path, worker=other)
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == "wrong"
+    assert row["value"] == "differ: OPS_USER_IDS, TARGET_TELEGRAM_BOT_TOKEN"
+    assert_names_only(result, *other.values())
+    (tmp_path / "human").mkdir()
+    human, _ = settings_doctor(tmp_path / "human", worker=other, json_mode=False)
+    assert re.search(r"^settings\s+wrong\s", human.stdout, re.M), human.stdout
+    assert_names_only(human, *other.values())
+
+
+def test_the_operators_compare_as_a_set(tmp_path):
+    """Order, spacing and spelling say nothing: each id is read as the API
+    reads it."""
+    first = "11111111-1111-4111-8111-111111111111"
+    second = "33333333-3333-4333-8333-333333333333"
+    result, _ = settings_doctor(
+        tmp_path,
+        api={"OPS_USER_IDS": f"{first},{second}"},
+        worker={"OPS_USER_IDS": f" {{{second.upper()}}} , {first.replace('-', '')} "},
+    )
+    assert checks_of(one_envelope(result))["settings"]["state"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "worker_keys, state",
+    [
+        ("placeholder-new-key, placeholder-old-key", "ok"),
+        ("placeholder-old-key,placeholder-new-key", "wrong"),
+        ("placeholder-new-key", "wrong"),
+    ],
+    ids=["same-ring", "other-order", "a-key-short"],
+)
+def test_the_rotation_list_compares_in_order(tmp_path, worker_keys, state):
+    """The first key encrypts and the rest only decrypt, so the same keys in
+    another order are another ring."""
+    result, _ = settings_doctor(
+        tmp_path,
+        api={"ENCRYPTION_KEYS": "placeholder-new-key,placeholder-old-key"},
+        worker={"ENCRYPTION_KEYS": worker_keys},
+    )
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == state, row
+    if state == "wrong":
+        assert row["value"] == "differ: ENCRYPTION_KEYS"
+
+
+@pytest.mark.parametrize(
+    "worker_url, state",
+    [
+        (
+            "postgresql://svc_worker@ep-example.neon.example:5432/storydump"
+            "?sslmode=require",
+            "ok",
+        ),
+        (
+            "postgresql://svc_worker@ep-example.neon.example/storydump_copy"
+            "?sslmode=require",
+            "wrong",
+        ),
+        (
+            "postgresql://svc_worker@ep-other.neon.example/storydump?sslmode=require",
+            "wrong",
+        ),
+        (
+            "postgresql://svc_worker@ep-example.neon.example:6543/storydump"
+            "?sslmode=require",
+            "wrong",
+        ),
+    ],
+    ids=["own-login", "other-database", "other-host", "other-port"],
+)
+def test_the_runtime_login_compares_where_it_points(tmp_path, worker_url, state):
+    """Each service logs in as its own role (the fixture's API as svc_ingress),
+    so only the host, the port and the database name must agree."""
+    result, _ = settings_doctor(tmp_path, worker={"TARGET_DATABASE_URL": worker_url})
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == state, row
+    if state == "wrong":
+        assert row["value"] == "differ: TARGET_DATABASE_URL"
+
+
+def test_email_settings_only_the_api_holds_are_said_not_faulted(tmp_path):
+    """The worker is given RESEND_API_KEY and EMAIL_FROM after the API."""
+    result, _ = settings_doctor(
+        tmp_path, worker={"RESEND_API_KEY": None, "EMAIL_FROM": None}
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == "ok"
+    assert row["value"] == (
+        "9 shared settings agree; only on storydump so far: EMAIL_FROM, RESEND_API_KEY"
+    )
+
+
+def test_email_settings_both_services_hold_must_match(tmp_path):
+    result, _ = settings_doctor(
+        tmp_path, worker={"EMAIL_FROM": "Other <hello@example.org>"}
+    )
+    row = checks_of(one_envelope(result))["settings"]
+    assert (row["state"], row["value"]) == ("wrong", "differ: EMAIL_FROM")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (1, "OPS_USER_IDS=placeholder-leak\n", "near placeholder-leak\n"),
+        (0, "placeholder-leak, which is not JSON\n", ""),
+        (0, json.dumps(["placeholder-leak"]) + "\n", ""),
+    ],
+    ids=["exit-1", "not-json", "not-an-object"],
+)
+def test_a_failed_variables_read_repeats_none_of_its_output(tmp_path, answer):
+    rail = ScriptedRailway(railway_answers({VARS_WORKER: answer}))
+    rt = env_runtime(tmp_path, health_api(), rail)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    row = checks_of(one_envelope(result))["settings"]
+    assert row["state"] == "wrong" and "worker" in row["value"], row
+    assert "placeholder-leak" not in result.output
 
 
 def test_doctor_names_the_migrations_the_ledger_lacks(tmp_path):

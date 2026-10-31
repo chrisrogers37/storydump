@@ -362,8 +362,12 @@ client, never a database connection. Install it with
    · `storydump webhook status|register|deregister` (the bot's Telegram
    webhook, the deployment's variables read from this shell, no secret ever
    printed; exit 4 when a check fails) · `storydump doctor` (the token, the
-   API, the token store, the config, Railway, the migration ledger against
-   this checkout — each ok, wrong, missing or skipped with a one-line fix).
+   API, the token store, the config, Railway, the settings the API and the
+   worker must share, the migration ledger against this checkout — each ok,
+   wrong, missing or skipped with a one-line fix; the settings are read
+   through your own `railway` login and compared by a digest of each value,
+   and a setting that differs, or that one service lacks, is named, never its
+   value).
 
 `storydump --help` is the authoritative list. A new verb is classified for the
 safety block above before it ships: `tests/test_agent_docs.py` pins the names
