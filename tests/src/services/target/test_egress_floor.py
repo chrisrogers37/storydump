@@ -161,7 +161,7 @@ class TestACreatingCallIsNeverSentTwice:
 
     @pytest.mark.asyncio
     # A write that timed out or broke may have delivered the request already,
-    # and a read comes after it: none of them is the never-sent kind.
+    # and a read or a close comes after it: none of them is the never-sent kind.
     @pytest.mark.parametrize(
         "lost",
         [
@@ -170,6 +170,7 @@ class TestACreatingCallIsNeverSentTwice:
             httpx.WriteTimeout,
             httpx.WriteError,
             httpx.ReadError,
+            httpx.CloseError,
         ],
     )
     async def test_a_request_that_left_is_attempted_once(self, lost):

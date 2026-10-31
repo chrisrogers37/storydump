@@ -225,13 +225,15 @@ class TestSendText:
             httpx.WriteTimeout("no answer"),
             httpx.WriteError("cut"),
             httpx.ReadError("cut"),
+            httpx.CloseError("cut"),
         ],
         ids=lambda exc: type(exc).__name__,
     )
     async def test_a_lost_answer_is_not_sent_again_inside_the_call(self, lost):
         # The request may have reached Telegram (a write that failed may still
-        # have delivered it) and no answer came back: the message may stand, so
-        # a second sendMessage would be a second copy.
+        # have delivered it, and a failed close comes after it was) and no
+        # answer came back: the message may stand, so a second sendMessage
+        # would be a second copy.
         calls = []
 
         def handler(request):
