@@ -1,0 +1,89 @@
+# Scratch: the egress pins' mutant run. This branch is never merged.
+name: Egress pin mutants
+
+on:
+  push:
+    branches: ['scratch/egress-pins-mutants-3']
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit's test files are read from history.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e '.[cli]'
+
+      - name: Run the mutants
+        timeout-minutes: 10
+        env:
+          PYTHONHASHSEED: "0"
+          # No bytecode: two mutants can be the same size, and a cached .pyc
+          # written in the same second as the next edit would run the previous.
+          PYTHONDONTWRITEBYTECODE: "1"
+          # Nothing listens here, so the database tests skip.
+          DB_PORT: "65432"
+        run: python .github/scratch/mutants.py
+
+  # Report only: nothing waits on this job and it gates nothing, so its own
+  # pass or fail is the report. The pins' tests run on this branch with the
+  # head of PR 70 merged in. Nothing is mutated.
+  with-pr-70:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge the head of PR 70
+        env:
+          # `git merge` asks for a committer identity even with --no-commit. No
+          # commit is made here, so this one is never recorded.
+          GIT_COMMITTER_NAME: scratch
+          GIT_COMMITTER_EMAIL: scratch@example.invalid
+        run: |
+          git fetch origin dff1df9c8186bc37f591287200965675c2d47c3b
+          git merge --no-commit --no-ff dff1df9c8186bc37f591287200965675c2d47c3b
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e '.[cli]'
+
+      - name: Run the pins' tests
+        timeout-minutes: 10
+        env:
+          PYTHONHASHSEED: "0"
+          PYTHONDONTWRITEBYTECODE: "1"
+          # Nothing listens here, so the database tests skip.
+          DB_PORT: "65432"
+        run: |
+          ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+          export ENCRYPTION_KEY
+          python -m pytest -o addopts= -q -p no:cacheprovider --tb=short \
+            tests/src/services/target/test_egress_floor.py \
+            tests/src/channels/test_telegram_transport.py
