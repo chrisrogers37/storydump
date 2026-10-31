@@ -54,11 +54,14 @@ def _entries(value: str) -> list[str]:
     return [entry.strip() for entry in value.split(",") if entry.strip()]
 
 
-def _operators(value: str) -> str:
-    """A set: the order and the spacing say nothing, and each id is spelled
-    as the API's parser reads it (`parse_ops_user_ids` in
-    `src/config/settings.py`, which this package may not import)."""
-    return "\n".join(sorted({as_uuid(e) or e.lower() for e in _entries(value)}))
+def _operators(value: str) -> Optional[str]:
+    """The ids the API's parser admits (`parse_ops_user_ids` in
+    `src/config/settings.py`, which this package may not import), as a set:
+    the order, the spacing and the spelling say nothing. An entry that is not
+    an id admits nobody, so it is left out, and a value with no id left reads
+    as unset, as both services read it."""
+    ids = sorted({uid for uid in map(as_uuid, _entries(value)) if uid})
+    return "\n".join(ids) if ids else None
 
 
 def _key_ring(value: str) -> str:
@@ -82,8 +85,9 @@ def _points_at(url: str) -> str:
     return f"{host}\n{port}\n{parts.path.lstrip('/')}"
 
 
-#: How a setting is read before it is compared; any other is compared exactly.
-READ_AS: Mapping[str, Callable[[str], str]] = {
+#: How a setting is read before it is compared, None where its services read
+#: it as unset; any other setting is compared exactly.
+READ_AS: Mapping[str, Callable[[str], Optional[str]]] = {
     "OPS_USER_IDS": _operators,
     "ENCRYPTION_KEYS": _key_ring,
     DATABASE_URL_VAR: _points_at,
@@ -92,12 +96,13 @@ READ_AS: Mapping[str, Callable[[str], str]] = {
 
 def fingerprint(name: str, value: str) -> Optional[str]:
     """The SHA-256 digest of *value* as the services read the shared setting
-    *name*; None for a setting outside :data:`SHARED`, or a blank one, which
-    every service reads as unset."""
+    *name*; None for a setting outside :data:`SHARED`, or one its services
+    read as unset: a blank value, or one whose :data:`READ_AS` reader answers
+    None."""
     if name not in SHARED or not value.strip():
         return None
-    read = READ_AS.get(name)
-    return hashlib.sha256((read(value) if read else value).encode()).hexdigest()
+    text = READ_AS[name](value) if name in READ_AS else value
+    return None if text is None else hashlib.sha256(text.encode()).hexdigest()
 
 
 def _held_alone(

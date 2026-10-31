@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -87,15 +88,56 @@ def test_an_operator_id_reads_as_the_apis_parser_reads_it(spelling):
     )
 
 
-def test_a_truncated_answer_leaves_no_trace_of_its_values():
-    """The refusal carries neither the document nor, on ``__context__``, the
-    decode error that holds it."""
-    answer = '{"GOOGLE_CLIENT_SECRET": "placeholder-leak", '
-    rail = Railway(lambda args: (0, answer, ""))
+def _raising(exc):
+    def run(args):
+        raise exc
+
+    return run
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        # a truncated document: the decode error holds all of it
+        lambda args: (0, '{"GOOGLE_CLIENT_SECRET": "placeholder-leak", ', ""),
+        # a timeout carries the output so far
+        _raising(
+            subprocess.TimeoutExpired(
+                ["railway", "variables"],
+                60,
+                output=b'{"GOOGLE_CLIENT_SECRET": "placeholder-leak"}',
+            )
+        ),
+        # an answer that is not UTF-8 carries the whole answer
+        _raising(
+            UnicodeDecodeError(
+                "utf-8",
+                b'{"GOOGLE_CLIENT_SECRET": "placeholder-leak\xff"}',
+                42,
+                43,
+                "invalid start byte",
+            )
+        ),
+    ],
+    ids=["truncated", "timed-out", "not-utf-8"],
+)
+def test_a_refused_read_keeps_nothing_the_binary_printed(run):
+    """The refusal holds no value, in its message or on ``__context__``."""
     with pytest.raises(RailwayUnavailable) as caught:
-        rail.variables("worker", fingerprint)
+        Railway(run).variables("worker", fingerprint)
     assert caught.value.__context__ is None and caught.value.__cause__ is None
     assert "placeholder-leak" not in f"{caught.value.detail} {caught.value!r}"
+
+
+def test_an_entry_that_is_not_an_id_admits_nobody_and_is_left_out():
+    """As the API's parser refuses it, so does the comparison, and a value
+    with no id left reads as unset, as both services read it."""
+    from src.config.settings import parse_ops_user_ids
+
+    stray = f"{CANONICAL}, not-an-id"
+    assert parse_ops_user_ids(stray)[0] == frozenset({CANONICAL})
+    assert fingerprint("OPS_USER_IDS", stray) == fingerprint("OPS_USER_IDS", CANONICAL)
+    assert fingerprint("OPS_USER_IDS", "not-an-id, also-not") is None
 
 
 def test_the_seam_keeps_only_the_fingerprints_it_is_asked_for():
