@@ -2670,63 +2670,6 @@ class TestACardsKeyboardArrivesOnlyByAConfirmedEdit:
         assert f"v1:cfg:{intent}" in tokens, "the edit brings the story's keyboard"
 
     @pytest.mark.asyncio
-    async def test_a_card_whose_every_send_is_lost_fails_and_the_chat_is_told_once(
-        self, outbox_db, caplog
-    ):
-        """A card is resent `MAX_PROMPT_RESENDS` times and then fails. No copy
-        of it is known to the ledger, so the chat holds nothing it can decide
-        from: it is told once, in a notification, that the story's card could
-        not be confirmed and the story waits in the Queue, and the worker log
-        gives the row up once."""
-        from src.channels.telegram_transport import SendReceipt, TelegramSendError
-        from src.services.target import outbox
-
-        binding, intent, card = self._pending_card(outbox_db)
-        sends = outbox.MAX_PROMPT_RESENDS + 1
-        telegram = _ScriptedTransport(
-            *[TelegramSendError("sendMessage: transport failure")] * sends,
-            SendReceipt("tg-notice", sent_as="text"),
-        )
-        async with self._sender(outbox_db, binding, telegram) as (poller, _):
-            for n in range(1, sends + 1):
-                lost = await poller.tick()
-                assert lost is not None and lost["state"] == "ambiguous"
-                _backdate(
-                    outbox_db, card, outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS * n + 1
-                )
-            caplog.clear()
-            with caplog.at_level("WARNING", logger=outbox.__name__):
-                told = await poller.tick()
-        assert told is not None and told["kind"] == "notification"
-        assert told["state"] == "sent"
-        assert _state(outbox_db, card) == ("failed", sends, None)
-        notices = _owner_exec(
-            outbox_db,
-            "SELECT payload->>'text', state, intent_id FROM channel_outbox"
-            " WHERE binding_id = %s AND kind = 'notification'",
-            (binding,),
-            fetch=True,
-        )
-        assert [(t, s, str(i)) for t, s, i in notices] == [
-            (outbox.CARD_UNCONFIRMED_NOTICE, "sent", intent)
-        ], "the chat is told once"
-        assert len(telegram.sent("approval_prompt")) == sends
-        assert self._edits(outbox_db, binding) == [], "no copy had a ref to edit"
-        (gave_up,) = [
-            r.getMessage()
-            for r in caplog.records
-            if r.name == outbox.__name__ and r.levelname == "WARNING"
-        ]
-        for part in (
-            str(card),
-            binding,
-            "approval_prompt",
-            f"gave up after {sends} sends",
-            "ambiguous",
-        ):
-            assert part in gave_up
-
-    @pytest.mark.asyncio
     async def test_a_refused_edit_leaves_an_inert_card_and_the_next_change_repaints_it(
         self, outbox_db
     ):

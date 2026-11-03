@@ -274,9 +274,9 @@ class TestTheErrorCarriesItsClassAndCode:
 
 
 #: The columns `resolve_ambiguous` selects after the policy's four (kind,
-#: attempts, newer edit, fresh): the row's workspace, binding and story, and
-#: its last failure's class and code.
-_RESOLVED_ROW_TAIL = ("ws", "b-1", None, "ambiguous", None)
+#: attempts, newer edit, fresh): the row's binding and story, and its last
+#: failure's class and code.
+_RESOLVED_ROW_TAIL = ("b-1", None, "ambiguous", None)
 
 
 class TestTheOtherWriters:

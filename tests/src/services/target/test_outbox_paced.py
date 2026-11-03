@@ -262,33 +262,20 @@ class TestThePromptResendIsCapped:
     row that fails in `resolve_ambiguous` is said once."""
 
     class _Session:
-        def __init__(
-            self,
-            kind,
-            attempts,
-            newer_edit=False,
-            fresh=True,
-            *,
-            no_card_reached=True,
-            code=None,
-        ):
+        def __init__(self, kind, attempts, newer_edit=False, fresh=True, *, code=None):
             # The columns `resolve_ambiguous` selects: the policy's four, the
-            # row's tenant, binding and story (an invitation has none), and
-            # its last failure's class and code.
+            # row's binding and story (an invitation has none), and its last
+            # failure's class and code.
             self.row = (
                 kind,
                 attempts,
                 newer_edit,
                 fresh,
-                "ws",
                 "b",
                 None if kind == "invitation" else "i",
                 "ambiguous",
                 code,
             )
-            # Whether the binding holds no card of the story, the answer
-            # `chats_without_card` gives (patched below).
-            self.no_card_reached = no_card_reached
             self.updates = []
 
         async def execute(self, stmt, params=None):
@@ -306,30 +293,11 @@ class TestThePromptResendIsCapped:
                 self.updates.append(params["s"])
             return _R()
 
-    @pytest.fixture(autouse=True)
-    def enqueued(self, monkeypatch):
-        """`outbox.enqueue`, recorded with the writes the session had seen
-        when it was called; `outbox.chats_without_card` answers from the
-        session."""
-        seen = []
-
-        async def enqueue(session, **kw):
-            seen.append((list(session.updates), kw))
-            return "ob-new"
-
-        async def chats_without_card(session, *, workspace_id, intent_id):
-            assert (workspace_id, intent_id) == ("ws", "i")
-            return ["b"] if session.no_card_reached else []
-
-        monkeypatch.setattr(outbox, "enqueue", enqueue)
-        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
-        return seen
-
     async def test_under_the_cap_the_prompt_is_resent(self):
         s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
 
-    async def test_past_the_cap_the_prompt_fails(self, enqueued, caplog):
+    async def test_past_the_cap_the_prompt_fails(self, caplog):
         s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS + 1, code=502)
         with caplog.at_level("WARNING", logger=outbox.__name__):
             assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
@@ -343,28 +311,6 @@ class TestThePromptResendIsCapped:
             "last failure ambiguous, code 502",
         ):
             assert part in message
-        assert len(enqueued) == 1, "the chat is told once"
-        after, call = enqueued[0]
-        assert after == ["failed"], "after the row failed, in the same transaction"
-        assert call == {
-            "workspace_id": "ws",
-            "binding_id": "b",
-            "kind": "notification",
-            "intent_id": "i",
-            "payload": {"v": 1, "text": outbox.CARD_UNCONFIRMED_NOTICE},
-        }
-
-    async def test_the_give_up_tells_the_chat_only_when_no_card_reached_it(
-        self, enqueued, caplog
-    ):
-        s = self._Session(
-            "approval_prompt", outbox.MAX_PROMPT_RESENDS + 1, no_card_reached=False
-        )
-        with caplog.at_level("WARNING", logger=outbox.__name__):
-            assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
-        (message,) = _warnings(caplog)
-        assert "gave up after" in message and "no card of the story" not in message
-        assert enqueued == [], "another card of the story is in the chat"
 
     @pytest.mark.parametrize(
         "kind, attempts, fresh",
@@ -374,15 +320,12 @@ class TestThePromptResendIsCapped:
             ("prompt_supersede", 2, False),
         ],
     )
-    async def test_every_give_up_is_said_once(
-        self, enqueued, caplog, kind, attempts, fresh
-    ):
+    async def test_every_give_up_is_said_once(self, caplog, kind, attempts, fresh):
         s = self._Session(kind, attempts, fresh=fresh)
         with caplog.at_level("WARNING", logger=outbox.__name__):
             assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
         (message,) = _warnings(caplog)
         assert f"({kind})" in message and f"gave up after {attempts} sends" in message
-        assert enqueued == [], "only a card that left the chat nothing is told of"
 
     async def test_a_lost_card_edit_is_resent_until_confirmed(self):
         """A `prompt_supersede`, the card's edit, is idempotent, so a lost

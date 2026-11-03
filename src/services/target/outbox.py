@@ -80,9 +80,7 @@ unresolved send becomes `ambiguous` and the per-kind policy decides.
   second live card; what the lost answers can leave is up to
   `MAX_PROMPT_RESENDS + 1` such copies, which no tap reaches (Telegram has no
   idempotent send and no read-back to find them). A card whose every send
-  loses its answer ends `failed` and logs a WARNING; when its chat holds no
-  other card of the story, the chat is told once that the story waits in the
-  Queue (`CARD_UNCONFIRMED_NOTICE`).
+  loses its answer ends `failed` and logs a WARNING.
 * **`prompt_supersede`** — resend until Telegram confirms it: an edit is
   idempotent ("message is not modified" is success), so it is never failed
   for a lost answer, only for a definitive refusal, and an older edit of the
@@ -250,15 +248,6 @@ class ChannelRefused(ChannelSendError):
 #: binding's sender on the same schedule. The policy's "retry once after
 #: backoff" — this is the backoff.
 AMBIGUOUS_RESOLVE_AFTER_SECONDS = 30
-
-#: What a chat hears when every send of a story's card lost its answer and
-#: no card of the story in that chat is known to the ledger: the row ends
-#: `failed` (`resolve_ambiguous`), and the story is not lost, it waits on
-#: the web. Said once per such card.
-CARD_UNCONFIRMED_NOTICE = (
-    "A story's card could not be confirmed in this chat after several tries."
-    " The story waits for a decision: open the Queue on the web."
-)
 
 #: How many of a binding's aged `ambiguous` rows one pass resolves. Bounded
 #: like every sweep; the next pass takes the rest.
@@ -568,11 +557,7 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     its story, the binding, the sends and the last failure's class and code
     (never the provider's text); a paced claim later in the same transaction
     rolls the give-up back, and the tick that gives the row up again logs it
-    again. An `approval_prompt` that fails while its chat holds no other card
-    of the story, and none is on its way (`chats_without_card`), has left the
-    chat nothing it can decide from, so one `notification` also tells the chat
-    once that the story's card could not be confirmed and the story waits in
-    the Queue (`CARD_UNCONFIRMED_NOTICE`), in this transaction.
+    again.
     """
     row = (
         await session.execute(
@@ -589,7 +574,7 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
                 "                  AND n.payload->>'supersedes_ref' = o.payload->>'supersedes_ref'"
                 "                  AND n.created_at > o.created_at) AS newer_edit,"
                 "       o.created_at > now() - make_interval(secs => :horizon) AS fresh,"
-                "       o.workspace_id, o.binding_id, o.intent_id,"
+                "       o.binding_id, o.intent_id,"
                 "       o.last_failure_class, o.last_error_code"
                 "  FROM channel_outbox o"
                 " WHERE o.id = :i AND o.state = 'ambiguous'"
@@ -606,7 +591,6 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
         attempts,
         newer_edit,
         fresh,
-        workspace_id,
         binding_id,
         intent_id,
         failure_class,
@@ -644,14 +628,6 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     if result.rowcount == 0:
         raise OutboxFenced(f"outbox {outbox_id}: resolved by someone else first")
     if to_state == "failed":
-        tell = (
-            kind == "approval_prompt"
-            and intent_id is not None
-            and str(binding_id)
-            in await chats_without_card(
-                session, workspace_id=str(workspace_id), intent_id=str(intent_id)
-            )
-        )
         # Every give-up is said: the row, its kind, its story, its binding,
         # the sends, and the last failure's class and code — never the
         # provider's text. A paced claim later in this transaction rolls the
@@ -659,7 +635,7 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
         # so again: the line names its row.
         logger.warning(
             "outbox row %s (%s) of story %s on binding %s gave up after %s sends"
-            " (last failure %s%s)%s",
+            " (last failure %s%s)",
             outbox_id,
             kind,
             intent_id if intent_id is not None else "-",
@@ -667,19 +643,7 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
             attempts,
             failure_class or "ambiguous",
             f", code {code}" if code is not None else "",
-            "; no card of the story reached this chat — it is told once, and"
-            " the story waits in the Queue"
-            if tell
-            else "",
         )
-        if tell:
-            await fanout_notification(
-                session,
-                workspace_id=workspace_id,
-                bindings=[str(binding_id)],
-                text=CARD_UNCONFIRMED_NOTICE,
-                intent_id=intent_id,
-            )
     return to_state
 
 

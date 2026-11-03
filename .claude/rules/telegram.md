@@ -236,9 +236,7 @@ says so in one line under its slot (`prompt_rendering.block_note`).
   A card's resend leaves no second live card, since a card leaves as its text
   without its keyboard; what the lost answers can leave is up to
   `MAX_PROMPT_RESENDS + 1` inert text copies, which no tap reaches. A card
-  whose every send loses its answer ends `failed`; when its chat holds no
-  other card of the story (`chats_without_card`), the chat is told once that
-  the story waits in the Queue (`CARD_UNCONFIRMED_NOTICE`). Every give-up and
+  whose every send loses its answer ends `failed`. Every give-up and
   every lost answer logs a WARNING naming its row; a give-up that a paced
   claim rolls back is logged again when the next tick redoes it. A duplicate
   notification is bounded at one.
