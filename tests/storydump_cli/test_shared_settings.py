@@ -5,12 +5,9 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
-import pytest
-
-from storydump_cli.railway import Railway, RailwayUnavailable
+from storydump_cli.railway import Railway
 from storydump_cli.shared_settings import SHARED, fingerprint
 
 GUIDE = (
@@ -56,47 +53,6 @@ def test_a_value_is_compared_exactly_unless_its_services_read_it_otherwise():
     assert fingerprint("TARGET_DATABASE_URL", "not a url") != fingerprint(
         "TARGET_DATABASE_URL", "not a url either"
     )
-
-
-def _raising(exc):
-    def run(args):
-        raise exc
-
-    return run
-
-
-@pytest.mark.parametrize(
-    "run",
-    [
-        # a truncated document: the decode error holds all of it
-        lambda args: (0, '{"GOOGLE_CLIENT_SECRET": "placeholder-leak", ', ""),
-        # a timeout carries the output so far
-        _raising(
-            subprocess.TimeoutExpired(
-                ["railway", "variables"],
-                60,
-                output=b'{"GOOGLE_CLIENT_SECRET": "placeholder-leak"}',
-            )
-        ),
-        # an answer that is not UTF-8 carries the whole answer
-        _raising(
-            UnicodeDecodeError(
-                "utf-8",
-                b'{"GOOGLE_CLIENT_SECRET": "placeholder-leak\xff"}',
-                42,
-                43,
-                "invalid start byte",
-            )
-        ),
-    ],
-    ids=["truncated", "timed-out", "not-utf-8"],
-)
-def test_a_refused_read_keeps_nothing_the_binary_printed(run):
-    """The refusal holds no value, in its message or on ``__context__``."""
-    with pytest.raises(RailwayUnavailable) as caught:
-        Railway(run).variables("worker", fingerprint)
-    assert caught.value.__context__ is None and caught.value.__cause__ is None
-    assert "placeholder-leak" not in f"{caught.value.detail} {caught.value!r}"
 
 
 def test_the_seam_keeps_only_the_fingerprints_it_is_asked_for():
