@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+import hashlib
 import json
 import uuid
 
@@ -46,7 +47,7 @@ def png(color="red"):
     return output.getvalue()
 
 
-async def selected(engine, chain):
+async def selected(engine, chain, *, carousel=False):
     async with obs.uow(engine, chain) as conn:
         await conn.execute(
             text("UPDATE ig_accounts SET provider_account_ref=:ref WHERE id=:id"),
@@ -55,7 +56,7 @@ async def selected(engine, chain):
                 "ref": str(int(uuid.UUID(str(chain["iga"])).int % 10**16) + 10**16),
             },
         )
-    src, item = await selection.metadata(engine, chain)
+    src, item = await selection.metadata(engine, chain, carousel=carousel)
     async with obs.uow(engine, chain) as conn:
         intent = str(
             (
@@ -253,6 +254,77 @@ async def test_selected_bytes_bind_before_dispatch_and_real_proof_is_strict(
     )(card["media"])
     assert data == jpeg() and mime == "image/jpeg" and len(calls) == 6
     assert validations == [jpeg()] * 3, "each returned byte stream is validated once"
+
+
+#: The turn's counts for the fetch of one media item that needs no profile or
+#: children read: one Graph answer and one download.
+ONE_READ = {
+    "graph_attempts": 1,
+    "observed_parents": 0,
+    "source_fence_drop": 0,
+    "listed_parents": 0,
+    "cdn_attempts": 1,
+}
+
+
+async def test_a_fetch_records_what_it_read_beside_the_validation(
+    past_posts_engine, origin
+):
+    """The fetch that returned the bytes lands under `validation_capture ->
+    'fetch'` beside the validation's state, with the turn's counters: each answer's
+    status and the media types, and the file's status, type, size, sha256 and host
+    as served (its link carries no expiry). A fetch is not a refusal, so none
+    rides with it."""
+    content = jpeg()
+    _, _, intent = await selected(past_posts_engine, origin)
+    prepared, _ = service(past_posts_engine, origin, content=content)
+    result = await prepared.fetch_selected(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    assert result.content == content and result.validation.state == "supported"
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert capture["state"] == "supported" and "refusal" not in capture
+    assert capture["fetch"] == {
+        "v": 1,
+        "kind": "fetched",
+        "post": {"http_status": 200, "media_type": "IMAGE"},
+        "children": None,
+        "part": {"media_type": "IMAGE"},
+        "file": {
+            "http_status": 200,
+            "content_type": "image/jpeg",
+            "bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "host": "scontent-test.cdninstagram.com",
+            "expiry": None,
+        },
+        "link_statuses": [],
+        "counters": ONE_READ,
+    }
+
+
+async def test_unsupported_bytes_record_the_fetch_that_got_them(
+    past_posts_engine, origin
+):
+    """Bytes that fail a local check still land the fetch's evidence beside the
+    check's refusal: what the CDN served, by size and sha256, is the first thing
+    to read when its bytes are refused."""
+    content = png()
+    _, _, intent = await selected(past_posts_engine, origin)
+    prepared, _ = service(past_posts_engine, origin, content=content)
+    with pytest.raises(source_policy.MediaAdmissionPending) as err:
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert err.value.reason == "unsupported"
+    capture = (await proof(past_posts_engine, origin, intent))["validation_capture"]
+    assert capture["state"] == "unsupported"
+    assert capture["refusal"]["check"] == "image_format"
+    fetched = capture["fetch"]
+    assert fetched["kind"] == "fetched"
+    assert fetched["file"]["bytes"] == len(content)
+    assert fetched["file"]["sha256"] == hashlib.sha256(content).hexdigest()
+    assert fetched["counters"] == ONE_READ
 
 
 async def test_second_slide_prepares_its_own_identity_and_bytes(
@@ -585,8 +657,9 @@ TURN = {
 }
 
 
-def refusing(error):
-    """A preparation whose adapter reports `TURN`, then raises `error`."""
+def refusing(error, *, given=None):
+    """A preparation whose adapter reports `TURN`, then raises `error`; the
+    keyword arguments each fetch receives are appended to `given`."""
     from src.services.target.instagram_preparation import (
         PastPostsPreparationPorts,
         SelectedPreparation,
@@ -594,6 +667,8 @@ def refusing(error):
 
     class RefusingAdapter:
         async def fetch_bytes(self, *args, **kwargs):
+            if given is not None:
+                given.append(kwargs)
             kwargs["on_counters"](media_adapters.MediaTurnCounters(**TURN))
             raise error
 
@@ -960,7 +1035,9 @@ async def test_remote_changed_first_asset_is_coherent_unavailable_without_cdn(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert error.value.reason == "asset_unavailable"
-    assert calls == ["graph.instagram.com"] * 2
+    # Parent and children, then both again: the slide is gone only when a
+    # second read agrees with the first.
+    assert calls == ["graph.instagram.com"] * 4
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(
@@ -1085,6 +1162,25 @@ async def test_truncated_children_missing_selected_slide_defers_without_cdn(
         )
 
 
+@pytest.mark.parametrize("carousel", [False, True], ids=["single", "carousel"])
+async def test_the_fetch_is_given_the_slide_count_the_index_recorded(
+    past_posts_engine, origin, carousel
+):
+    """A missing slide is judged against the index's own count, so the
+    preparation hands the fetch the selected post's recorded slide count, and
+    none for a single post."""
+    src, item, intent = await selected(past_posts_engine, origin, carousel=carousel)
+    given = []
+    prepared = refusing(media_adapters.MediaRetryableError("synthetic"), given=given)
+    with pytest.raises(media_adapters.MediaRetryableError):
+        await prepared.selected_prepare(
+            engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+        )
+    assert [kwargs.get("expected_slide_count", "not passed") for kwargs in given] == [
+        2 if carousel else None
+    ]
+
+
 async def test_a_changed_slide_inside_its_wait_is_deferred_without_a_read(
     past_posts_engine, origin
 ):
@@ -1151,7 +1247,9 @@ async def test_a_changed_slide_parks_with_its_evidence_once_its_tries_are_spent(
 async def test_selected_gone_fresh_cas_refuses_stale_or_cancelled_turn(
     past_posts_engine, origin, stale
 ):
-    src, item, intent = await selected(past_posts_engine, origin)
+    # A carousel, so the two reads that lack slide 123 prove it gone against
+    # the indexed count and the retirement's own check is what refuses.
+    src, item, intent = await selected(past_posts_engine, origin, carousel=True)
 
     async def change_while_fetching():
         if stale == "reobserved":
@@ -1184,7 +1282,7 @@ async def test_selected_gone_fresh_cas_refuses_stale_or_cancelled_turn(
             engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
         )
     assert error.value.reason == "past_posts_revalidation_required"
-    assert calls == ["graph.instagram.com"] * 2
+    assert calls == ["graph.instagram.com"] * 4
     async with obs.uow(past_posts_engine, origin) as conn:
         assert (
             await conn.scalar(

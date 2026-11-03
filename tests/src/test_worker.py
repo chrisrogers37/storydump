@@ -8,6 +8,7 @@ and the heartbeat/lease numbers agreeing.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -1161,6 +1162,33 @@ class TestKTasksPerLane:
         assert all(wl._registry is app.registry for wl in app.loops)
         assert all(wl._connect is app.engine.connect for wl in app.loops)
 
+    def test_each_loop_name_ends_with_the_deployments_commit(self):
+        """The claimer name lands in `jobs.locked_by`, so stamping the commit
+        LAST lets `/health/scheduling` say what the worker runs. A hostname may
+        hold `-` but never `@`, so the stamp parses unambiguously; with no
+        commit configured the name carries none."""
+        import re
+        from types import SimpleNamespace
+
+        from src.config.release import COMMIT_VAR
+        from src.services.target.work_loop import WorkerConfig
+        from src.worker import compose
+
+        engine = SimpleNamespace(connect=lambda: None)
+        app = compose(
+            engine=engine,
+            config=WorkerConfig(),
+            env={COMMIT_VAR: "abc1234def5678abc1234def5678abc1234def56"},
+        )
+        # Each loop's own lane, so the test holds for whatever lanes compose
+        # builds.
+        assert app.loops and all(
+            re.fullmatch(rf".+-{re.escape(wl.lane)}-\d+@abc1234", wl._worker_name)
+            for wl in app.loops
+        )
+        plain = self._compose(WorkerConfig())
+        assert not any("@" in wl._worker_name for wl in plain.loops)
+
     def test_an_oversubscribed_config_refuses_at_composition(self):
         from src.services.target.work_loop import WorkerConfig
 
@@ -1285,6 +1313,90 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
             None, {"id": "j", "kind": "publish_pipeline"}
         )
         assert seen["precheck"] is sentinel
+
+
+_OPERATOR = "00000000-0000-4000-8000-000000000001"
+
+
+async def _send_text(chat_id, text, *, reply_markup=None):
+    return "1"
+
+
+def _Bot():
+    """A transport with the operator-facing `send_text` the ops notice uses."""
+    return SimpleNamespace(send_text=_send_text)
+
+
+class TestTheOpsNoticeIsComposedFromTheBotAndTheOperators:
+    """The operators' notice (`telegram_ops_notice`) needs the bot and
+    `OPS_USER_IDS`, read through settings as the API reads them. Without
+    either, the seam is None and the deploy log says which is missing once,
+    so a refusal nobody was told of is explained."""
+
+    def _compose(self, monkeypatch, operators, transport):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "OPS_USER_IDS", operators)
+        return compose(
+            engine=object(),
+            config=WorkerConfig(),
+            env={},
+            transport=transport,
+            adapters={"gdrive": object()},
+        )
+
+    def test_the_bot_and_the_operators_compose_it(self, monkeypatch):
+        from src.channels.telegram_ops_notice import OpsNotice
+
+        app = self._compose(monkeypatch, _OPERATOR, _Bot())
+        assert isinstance(app.deps.ops_notice, OpsNotice)
+
+    @pytest.mark.parametrize(
+        "operators,transport,missing",
+        [
+            ("", _Bot(), "OPS_USER_IDS"),
+            (_OPERATOR, None, "TARGET_TELEGRAM_BOT_TOKEN"),
+        ],
+        ids=["no-operators", "no-bot"],
+    )
+    def test_without_either_it_is_off_and_says_which(
+        self, monkeypatch, operators, transport, missing, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="target.worker"):
+            app = self._compose(monkeypatch, operators, transport)
+        assert app.deps.ops_notice is None
+        assert any(
+            "ops notice: off" in r.getMessage() and missing in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_pipeline_receives_the_composed_ops_notice(self, monkeypatch):
+        from src.services.target import publish_pipeline, work_loop
+
+        seen = {}
+
+        async def run_publish_pipeline(job, **kw):
+            seen.update(kw)
+            return "posted"
+
+        monkeypatch.setattr(
+            publish_pipeline, "run_publish_pipeline", run_publish_pipeline
+        )
+        sentinel = object()
+        deps = work_loop.WorkerDeps(
+            meta=object(),
+            transit=object(),
+            media_fetch=lambda row: None,
+            ops_notice=sentinel,
+            engine=object(),
+        )
+        await work_loop.build_registry(deps)["publish_pipeline"](
+            None, {"id": "j", "kind": "publish_pipeline"}
+        )
+        assert seen["ops_notice"] is sentinel
 
 
 def _documented_numbers(label: str, pattern: str) -> tuple:

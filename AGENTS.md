@@ -104,9 +104,7 @@ command that shows its commits, and a pull request's title and body are yours
 to check.
 
 A commit message, and a pull request's title and body, describe the change:
-its behavior and its tests. They carry no attribution lines — no
-`Co-authored-by` trailer, no "Generated with" footer — and name no review,
-reviewer or tool behind the change.
+its behavior and its tests.
 
 ### Main is production
 
@@ -353,9 +351,11 @@ client, never a database connection. Install it with
    operating details, `GET /api/v1/ops/health`, which answers only the user ids
    in the API's `OPS_USER_IDS` — `storydump whoami` prints yours; without
    them the webhook is `not_checked`, not well, and `data.details` says why;
-   exit 4 then, the report and each verdict still printed. Two bounds against
-   the pollers: one reading has no watch clock, and one unreachable reading
-   is reported where the pollers wait for two) · `storydump deploys
+   exit 4 then, the report and each verdict still printed. Three bounds against
+   the pollers: one reading has no watch clock, one unreachable reading is
+   reported where the pollers wait for two, and neither `/health/delivery` nor
+   the API/worker commit split is judged here, though the scheduling monitor
+   pages on both) · `storydump deploys
    [--watch --commit <sha> --timeout <s>]` (the latest deployments on Railway
    through your own `railway` login, with the linked project checked first;
    exit 5 with the fix when Railway cannot be read; `--watch` ends 0 on both
@@ -398,6 +398,16 @@ PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH" \
 DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password \
 DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
   pytest tests/scripts/
+```
+
+To run only the database-free tests, with no server at hand, point the
+fixtures at a port where nothing listens, and the database-gated tests skip.
+A port that answers counts as a configured database (another PostgreSQL on
+5432, say), so a failed login there fails the run rather than skipping
+(`tests/conftest.py`, `server_is_listening`):
+
+```bash
+DB_HOST=127.0.0.1 DB_PORT=65499 pytest --no-cov tests/src/services/target/
 ```
 
 ## Services

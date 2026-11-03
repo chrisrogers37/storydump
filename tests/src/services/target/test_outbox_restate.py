@@ -76,11 +76,26 @@ class TestTheSupersedePayload:
 
 
 class _Session:
-    """Records statements; the restate UPDATE returns the rows given."""
+    """Records statements and savepoints; the restate UPDATE returns the rows
+    given."""
 
     def __init__(self, rows):
         self.rows = rows
         self.sql = []
+        self.savepoints = []
+
+    @asynccontextmanager
+    async def begin_nested(self):
+        """A savepoint: released on a clean exit; on a raise it is rolled back
+        and the error let through."""
+        self.savepoints.append("savepoint")
+        try:
+            yield
+        except BaseException:
+            self.savepoints.append("rolled back")
+            raise
+        else:
+            self.savepoints.append("released")
 
     async def execute(self, statement, params=None):
         self.sql.append((str(statement), params))
@@ -92,6 +107,8 @@ class _Session:
 
             def first(self_inner):
                 return rows[0] if rows else None
+
+            fetchone = first
 
         return _R()
 
@@ -160,9 +177,10 @@ class TestTheChatsWithoutACard:
 
 
 class TestThePromptForAParkedStory:
-    """`prompts.prompt_review`, the park's courtesy (`tell_review`): the
-    review card goes to every chat that holds no card of the story, and is
-    rendered only when one does."""
+    """`prompts.prompt_review`, the park's courtesy: the review card goes to
+    every chat that holds no card of the story, and is rendered only when one
+    does. Every route into review gives it: the parks and the publish job's
+    poison through `tell_review`, the reconciler's park on its own."""
 
     @pytest.fixture
     def doors(self, monkeypatch):
@@ -188,7 +206,7 @@ class TestThePromptForAParkedStory:
 
     async def test_each_chat_without_a_card_gets_the_review_card(self, doors):
         prompts, seen = doors
-        n = await prompts.prompt_review(None, workspace_id="ws", intent_id="i")
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
         assert n == 2 and seen["rendered"] == 1, "rendered once"
         assert [
             (w["binding_id"], w["kind"], w["payload"]) for w in seen["written"]
@@ -201,7 +219,8 @@ class TestThePromptForAParkedStory:
     async def test_no_chat_without_a_card_renders_and_writes_nothing(self, doors):
         prompts, seen = doors
         seen["chats"] = []
-        assert await prompts.prompt_review(None, workspace_id="ws", intent_id="i") == 0
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
+        assert n == 0
         assert seen["rendered"] == 0 and seen["written"] == []
 
     async def test_the_park_gives_its_cards_after_the_restate_and_notice(
@@ -225,6 +244,144 @@ class TestThePromptForAParkedStory:
             _Session([]), workspace_id="ws", intent_id="i", tz="UTC", notice="n"
         )
         assert order == [("courtesy", "review_required"), ("cards", "i")]
+
+    async def test_the_publish_jobs_poison_gives_the_parked_story_the_same_courtesy(
+        self, monkeypatch
+    ):
+        """A job whose tries are spent parks its story through `tell_review`,
+        at the run's own time: the restate and notice, then the review card for
+        the chats that hold none, then the latch, all before the job is
+        finalized."""
+        from src.services.target import prompts, publish_pipeline
+
+        now = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        job = {
+            "id": "job-1",
+            "lease_token": "tok",
+            "workspace_id": "ws",
+            "attempts": 5,
+            "max_attempts": 5,
+        }
+        story = {
+            "id": "i1",
+            "eff_tz": "Europe/Paris",
+            "attempts_by_step": {"v": 1, "float_since": "2026-09-12T12:28:00+00:00"},
+        }
+        ctx = publish_pipeline._Ctx(job, story, [])
+        seen = []
+
+        class Session(_Session):
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                if "customer_notified" in sql:
+                    seen.append(("latch",))
+                elif "state = 'review_required'" in sql:
+                    seen.append(("flip",))
+                return await super().execute(statement, params)
+
+        @asynccontextmanager
+        async def leased_tx(uow, job):
+            yield Session([("i1",)])
+
+        async def restate_and_notify(session, **kw):
+            seen.append(("courtesy", kw["state"], kw["at"], kw["tz"], kw["notice"]))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def finalize_job(session, job_id, token, state):
+            seen.append(("finalize", state))
+
+        monkeypatch.setattr(publish_pipeline, "_leased_tx", leased_tx)
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", restate_and_notify)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(publish_pipeline, "finalize_job", finalize_job)
+
+        outcome = await publish_pipeline._retry_or_poison(
+            object(),
+            ctx,
+            [60],
+            lambda: now,
+            error={"v": 1, "error": {"type": "MetaRetryableError", "code": 4}},
+        )
+        assert outcome == publish_pipeline.POISONED
+        notice = publish_pipeline._poison_notice(ctx, now)
+        assert "after 34 minutes of trying" in notice, (
+            "the notice reads the run's clock"
+        )
+        assert seen == [
+            ("flip",),
+            ("courtesy", "review_required", now, "Europe/Paris", notice),
+            ("cards", "ws", "i1"),
+            ("latch",),
+            ("finalize", "review_required"),
+        ]
+
+    async def test_the_reconcilers_park_gives_its_cards_after_the_restate_and_no_notice(
+        self, monkeypatch
+    ):
+        """The reconciler's park restates every card of the story by ref, then
+        gives the review card to the chats that hold none, with ids as text.
+        It writes no notice: that comes after the notify window."""
+        from uuid import UUID
+
+        from src.services.target import prompts, reconciler
+
+        workspace, story = UUID(int=1), UUID(int=2)
+        seen = []
+
+        async def restate_everywhere(session, *, workspace_id, intent_id, outcome_text):
+            seen.append(("restate", workspace_id, intent_id))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def fanout_notification(session, **kw):
+            seen.append(("notice", kw))
+
+        monkeypatch.setattr(outbox, "restate_everywhere", restate_everywhere)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+
+        conn = _Session([("UTC",)])
+        await reconciler._park_review_required(
+            conn, intent_id=story, workspace_id=workspace, checks=4
+        )
+        assert len(conn.sql) == 1, "the park's flip is the only write of its own"
+        flip, params = conn.sql[0]
+        assert "state = 'review_required'" in flip and params["intent"] == str(story)
+        assert seen == [
+            ("restate", str(workspace), str(story)),
+            ("cards", str(workspace), str(story)),
+        ]
+
+    async def test_a_review_card_that_cannot_be_written_leaves_the_park_standing(
+        self, monkeypatch, caplog
+    ):
+        """`prompt_review` writes in a savepoint of its own, for every park: a
+        card that cannot be written is rolled back there and logged with its
+        cause, and nothing is raised, so the caller's park stands."""
+        import logging
+
+        from src.services.target import prompts
+
+        async def chats_without_card(session, *, workspace_id, intent_id):
+            raise RuntimeError("card read failed")
+
+        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
+        session = _Session([])
+        with caplog.at_level(logging.ERROR, logger=prompts.__name__):
+            written = await prompts.prompt_review(
+                session, workspace_id="ws", intent_id="i1"
+            )
+        assert written == 0
+        assert session.savepoints == ["savepoint", "rolled back"]
+        [record] = [r for r in caplog.records if r.name == prompts.__name__]
+        assert "i1" in record.getMessage() and record.exc_info is not None
 
 
 class TestTheReviewRestateSaysWhy:

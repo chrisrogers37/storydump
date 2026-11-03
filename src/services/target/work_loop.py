@@ -151,6 +151,10 @@ class WorkerConfig:
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # The "no media available" notice for a missed slot: once per account per 24 h.
     no_media_notice_after_seconds: int = 24 * 3600
+    # An operator notice goes out once per key per window
+    # (`telegram_ops_notice`): an Instagram refusal of a checked file, once a
+    # day per Meta answer.
+    ops_notice_window_seconds: int = 24 * 3600
     # The runway notice's level, in days of eligible content: told once
     # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
     low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
@@ -289,6 +293,10 @@ class WorkerDeps:
     #: The advisory Meta usage pre-check, or None — off by default;
     #: `TARGET_USAGE_PRECHECK_ENABLED` composes it.
     precheck: Any = None
+    #: The operators' notice (`telegram_ops_notice.OpsNotice`), handed to the
+    #: publish pipeline; None without a bot or `OPS_USER_IDS`, and then what it
+    #: would say is logged instead.
+    ops_notice: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
     #: Selected-only preparation, outside SQL; strict fresh DB evidence remains authoritative.
@@ -594,6 +602,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             media_fetch=deps.media_fetch,
             precheck=deps.precheck,
             past_posts=deps.past_posts,
+            ops_notice=deps.ops_notice,
         )
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
         # The pipeline finalizes or reschedules its own job in its own

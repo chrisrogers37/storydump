@@ -45,6 +45,7 @@ from src.services.target.publish_pipeline import (
     DEFERRED_META_CAP,
     FETCH_RETRY_SECONDS,
     FAILED,
+    NOT_ABOUT_THE_FILE,
     PARKED_AMBIGUOUS,
     POISONED,
     POSTED,
@@ -1682,6 +1683,50 @@ class TestDefinitiveFailureClassification:
         assert edit["outcome_text"].endswith(f"\nRefused: {sentence}.")
 
 
+class TestAPoisonNoProviderErrorExplainsSaysItsOwnReason:
+    """A rung that spends the ladder with no provider error to record still
+    records why, in place of an earlier attempt's dead container, so the card
+    of the story it parks says the reason it went into review."""
+
+    def test_a_container_still_not_ready_on_the_last_try_says_so(self, pipe_db):
+        from src.services.target.publish_pipeline import POLL_BUDGET
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(status_script=["IN_PROGRESS"] * POLL_BUDGET)
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta))) == POISONED
+        _says_why(pipe_db, intent, binding, "container_pending", tries=5)
+
+    def test_a_lost_answer_to_the_container_create_on_the_last_try_says_so(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["transport"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        assert [
+            op["response"]["error"]
+            for op in _ops(pipe_db, intent)
+            if op["op_kind"] == "container_create"
+        ] == ["lost_response"]
+        _says_why(pipe_db, intent, binding, "answer_lost", tries=5)
+
+
 class TestADeadContainerIdDoesNotOutliveItsContainer:
     """On the RETRY path a stale container id lives only "between two
     instants" — the step-back and the next run.
@@ -2127,6 +2172,50 @@ def _notices(pipe_db, intent, binding):
             fetch=True,
         )
     ]
+
+
+#: An earlier attempt's dead container, as `_route_readiness` records it: the
+#: reason a story's card would show if a later route into review wrote none.
+EARLIER_DEAD_STATUS = "Error: Media upload has failed with error code 2207026"
+EARLIER_DEAD = {
+    "v": 1,
+    "error": {
+        "type": "ContainerDead",
+        "code": None,
+        "message": "Meta reported the container ERROR or EXPIRED",
+        "status_code": "ERROR",
+        "status": EARLIER_DEAD_STATUS,
+        "refusal": {
+            "v": 1,
+            "kind": "container_dead",
+            "status_code": "ERROR",
+            "status": EARLIER_DEAD_STATUS,
+        },
+    },
+}
+
+
+def _after_a_dead_container(pipe_db, intent):
+    _exec(
+        pipe_db,
+        "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+        (json.dumps(EARLIER_DEAD), intent),
+    )
+
+
+def _says_why(pipe_db, intent, binding, kind, **facts):
+    """The parked story records its own reason in place of the earlier
+    attempt's, and its card's review line says it, opened by "Why"."""
+    from src.services.target import refusal_evidence
+
+    row = _intent_row(pipe_db, intent)
+    assert row["state"] == "review_required"
+    refusal = row["last_error"]["error"]["refusal"]
+    assert refusal == refusal_evidence.evidence(kind, **facts)
+    line = _review_edit(pipe_db, intent, binding)["outcome_text"]
+    assert line.startswith("👀 Needs review")
+    assert line.endswith(f"\nWhy: {refusal_evidence.plain(refusal)}.")
+    assert EARLIER_DEAD_STATUS not in line and "Refused" not in line
 
 
 class TestTheFirstFetch:
@@ -3146,6 +3235,18 @@ class TestTheFloatsSafetyNets:
         assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
         assert len(_notices(pipe_db, intent, binding)) == 1
 
+    def test_a_dead_job_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
+        _says_why(pipe_db, intent, binding, "budget_spent", tries=5)
+
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
 
         intent, ref = _new_intent(pipe_db, state="skipped")
@@ -3299,6 +3400,30 @@ class TestTheFloatsSafetyNets:
         assert _intent_row(pipe_db, floating)["state"] == "approved", (
             "inside the TTL: untouched"
         )
+
+    def test_the_reaper_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, _ = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, stale)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days',"
+            " cap_consumed_on = current_date WHERE id = %s",
+            (stale,),
+        )
+        _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        _says_why(pipe_db, stale, binding, "approved_stale", days=3)
 
     def test_the_reaper_lists_through_a_door_and_parks_as_the_worker_role(
         self, pipe_db
@@ -4007,3 +4132,308 @@ class TestTheSweepsLegOrder:
 
         assert _sweep(pipe_db, 500) == 3
         assert _states(pipe_db, flagged) == ["cancelled"] * 3
+
+
+class _Told:
+    """The operators' notice, recording each (key, text) it is handed."""
+
+    def __init__(self):
+        self.told = []
+
+    async def __call__(self, key, text):
+        self.told.append((key, text))
+
+
+class TestARefusalOfACheckedFileIsRecordedAndTold:
+    """When Meta refuses a file our checks passed and the refusal ends the
+    story, its `spec_drift` (our facts beside Meta's answer) is recorded on
+    the permit, or beside a dead container's reason, and the run tells the
+    operators. A refusal that says nothing about the file, or one the story
+    still retries, records and tells nothing."""
+
+    def _container_permit(self, pipe_db, intent):
+        return [o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"][
+            -1
+        ]
+
+    def test_a_create_refusal_that_ends_the_story_is_recorded_and_told(self, pipe_db):
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        class _Refuses(StubMetaAdapter):
+            async def create_container(self, *args, **kwargs):
+                raise MetaRetryableError(
+                    code=36003,
+                    subcode=2207009,
+                    message="The aspect ratio is not supported.",
+                    detail={"fbtrace_id": "trace-1"},
+                )
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, _Refuses(), FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        drift = self._container_permit(pipe_db, intent)["response"]["spec_drift"]
+        assert drift["meta"] == {
+            "type": "MetaRetryableError",
+            "code": 36003,
+            "subcode": 2207009,
+            "message": "meta error 36003/2207009: The aspect ratio is not supported.",
+            "fbtrace_id": "trace-1",
+        }, "the reason as last_error records it"
+        assert drift["ours"]["length"] == 137673
+        assert drift["ours"]["limits"] == {"bytes": 8_000_000}
+        assert [key for key, _ in told.told] == ["spec_drift:36003/2207009"]
+        assert "The aspect ratio is not supported." in told.told[0][1]
+
+    def test_throttling_that_ends_the_story_is_not_a_drift(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        told = _Told()
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        assert "spec_drift" not in self._container_permit(pipe_db, intent)["response"]
+        assert told.told == []
+
+    def test_a_refusal_the_story_still_retries_records_nothing_yet(self, pipe_db):
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        class _Refuses(StubMetaAdapter):
+            async def create_container(self, *args, **kwargs):
+                raise MetaRetryableError(code=36003, message="aspect ratio")
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, _Refuses(), FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == RETRY_SCHEDULED
+        assert "spec_drift" not in self._container_permit(pipe_db, intent)["response"]
+        assert told.told == []
+
+    def test_a_dead_container_that_ends_the_story_records_it_beside_its_reason(
+        self, pipe_db
+    ):
+        from src.services.target.instagram_graph import ContainerStatus
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        reason = "Error: Media upload has failed with error code 2207026"
+        meta = StubMetaAdapter(status_script=[ContainerStatus("ERROR", reason)])
+        told = _Told()
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+            )
+        )
+        assert outcome == POISONED
+        error = _intent_row(pipe_db, intent)["last_error"]["error"]
+        meta = error["spec_drift"]["meta"]
+        assert (meta["type"], meta["status_code"], meta["status"]) == (
+            "ContainerDead",
+            "ERROR",
+            reason,
+        )
+        assert error["spec_drift"]["ours"]["length"] == 137673
+        assert [key for key, _ in told.told] == ["spec_drift:container:ERROR"]
+
+    def _drifts(self, pipe_db, intent):
+        """Every `spec_drift` the story records: on its permits, and beside
+        its reason."""
+        drifts = [
+            o["response"]["spec_drift"]
+            for o in _ops(pipe_db, intent)
+            if "spec_drift" in (o["response"] or {})
+        ]
+        error = (_intent_row(pipe_db, intent)["last_error"] or {}).get("error") or {}
+        if "spec_drift" in error:
+            drifts.append(error["spec_drift"])
+        return drifts
+
+    def _refusing(self, edge, refusal):
+        """A Meta stub whose create call (*edge* "create") or publish call
+        (*edge* "publish") raises *refusal()*."""
+
+        class _Refuses(StubMetaAdapter):
+            async def create_container(self, *args, **kwargs):
+                if edge == "create":
+                    raise refusal()
+                return await super().create_container(*args, **kwargs)
+
+            async def publish(self, *args, **kwargs):
+                if edge == "publish":
+                    raise refusal()
+                return await super().publish(*args, **kwargs)
+
+        return _Refuses()
+
+    def _ends(self, pipe_db, meta, told):
+        """A fresh story on its last attempt, run once against *meta*."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+            )
+        )
+        return intent, outcome
+
+    def test_the_answers_that_say_nothing_about_the_file_are_pinned(self):
+        """Pinned here, so dropping a code from the set fails its cases below
+        instead of taking them with it."""
+        named = {0, 9, 190, 3, 102, 10, 341, 368, 4, 17, 32, 613, 80002}
+        assert NOT_ABOUT_THE_FILE == named | set(range(200, 300))
+
+    @pytest.mark.parametrize("edge", ["create", "publish"])
+    @pytest.mark.parametrize(
+        "code", [0, 9, 190, 3, 102, 10, 200, 299, 341, 368, 4, 17, 32, 613, 80002]
+    )
+    def test_a_refusal_that_says_nothing_about_the_file_is_not_a_drift(
+        self, pipe_db, edge, code
+    ):
+        """An answer that is not the file's that ends the story, at the create
+        call or at the publish call, records and tells nothing: no call made
+        (0), the posting cap (9), a dead token (190), a session or capability
+        answer (3, 102), a permission answer (10, and 200 and 299 for the
+        range), a limit (341, 368) or throttling."""
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        meta = self._refusing(
+            edge, lambda: MetaRetryableError(code=code, message="not the file")
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
+        kinds = {o["op_kind"] for o in _ops(pipe_db, intent)}
+        assert ("publish" in kinds) == (edge == "publish"), "refused at the edge"
+        assert self._drifts(pipe_db, intent) == []
+        assert told.told == []
+
+    def test_the_posting_cap_at_the_container_call_is_not_a_drift(self, pipe_db):
+        """The cap reaches the pipeline as `MetaCapDeferral` (code 9). The
+        publish call defers on it; at the container call it ends the story on
+        its last attempt like any other answer, and records and tells
+        nothing."""
+        from src.services.target.meta_adapter import CAP_ERROR_CODE, MetaCapDeferral
+
+        meta = self._refusing(
+            "create",
+            lambda: MetaCapDeferral(
+                code=CAP_ERROR_CODE, subcode=2207042, message="posting cap reached"
+            ),
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
+        assert self._drifts(pipe_db, intent) == []
+        assert told.told == []
+
+    def test_a_publish_refusal_that_ends_the_story_is_recorded_and_told(self, pipe_db):
+        from src.services.target.meta_adapter import MetaRetryableError
+
+        meta = self._refusing(
+            "publish",
+            lambda: MetaRetryableError(
+                code=36003,
+                subcode=2207009,
+                message="The aspect ratio is not supported.",
+            ),
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
+        (permit,) = [o for o in _ops(pipe_db, intent) if o["op_kind"] == "publish"]
+        assert permit["response"]["spec_drift"]["meta"]["code"] == 36003
+        assert [key for key, _ in told.told] == ["spec_drift:36003/2207009"]
+
+    @pytest.mark.parametrize(
+        "waits,outcome,keys",
+        [
+            (1, RETRY_SCHEDULED, []),
+            (len(FETCH_RETRY_SECONDS), POISONED, ["spec_drift:9004/2207052"]),
+        ],
+        ids=["waits-left", "waits-spent"],
+    )
+    def test_a_fetch_refusal_is_a_drift_once_its_waits_are_spent(
+        self, pipe_db, waits, outcome, keys
+    ):
+        """Meta's "media could not be fetched" (9004) waits on its own ladder:
+        while a wait is left the story waits and records nothing; once the
+        waits are spent it ends, recorded and told."""
+        intent, ref = _new_intent(pipe_db)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET attempts_by_step = %s::jsonb WHERE id = %s",
+            (
+                json.dumps(
+                    {
+                        "v": 1,
+                        "fetch_refusals": 4 * waits,
+                        "fetch_waits": waits,
+                        "float_since": "2030-01-01T00:00:00+00:00",
+                    }
+                ),
+                intent,
+            ),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        told = _Told()
+        assert (
+            _run(
+                run_publish_pipeline(
+                    job, **_deps(pipe_db, meta, FakeTransit(), ops_notice=told)
+                )
+            )
+            == outcome
+        )
+        assert len(self._drifts(pipe_db, intent)) == len(keys)
+        assert [key for key, _ in told.told] == keys
+
+    def test_an_expired_container_is_not_a_drift(self, pipe_db):
+        """An EXPIRED container only waited too long: ending the story on it
+        says nothing about the file, so nothing is recorded or told."""
+        from src.services.target.instagram_graph import ContainerStatus
+
+        meta = StubMetaAdapter(
+            status_script=[ContainerStatus("EXPIRED", "The container expired")]
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
+        error = _intent_row(pipe_db, intent)["last_error"]["error"]
+        assert (error["type"], error["status_code"]) == ("ContainerDead", "EXPIRED")
+        assert self._drifts(pipe_db, intent) == []
+        assert told.told == []
+
+    def test_the_latch_claims_a_key_once_a_window_under_the_worker_login(self, pipe_db):
+        """The ops notice's latch (`worker._claim_ops_notice`): the first claim
+        of a key in a window is the only one that wins, and its row is in the
+        `ops_notice` scope, the one migration 005 admits."""
+        from src.channels import telegram_ops_notice
+        from src.worker import _claim_ops_notice
+
+        key = f"spec_drift:test/{uuid.uuid4()}"
+        claims = [
+            _run(_claim_ops_notice(pipe_db["engine"], key, 86400)) for _ in range(2)
+        ]
+        assert claims == [True, False]
+        assert telegram_ops_notice.SCOPE == "ops_notice"
+        assert _exec(
+            pipe_db,
+            "SELECT scope FROM rate_counters WHERE key = %s",
+            (key,),
+            fetch=True,
+        ) == [("ops_notice",)]

@@ -1916,6 +1916,20 @@ class TestReadiness:
         store, probes = self._store_with([(206, "image/jpeg")])
         ready = await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
         assert ready and len(probes) == 1 and "container" not in ready.observation
+        assert "derivation" not in ready.observation
+
+    @pytest.mark.asyncio
+    async def test_a_video_frame_records_the_encoding_it_was_derived_with(self):
+        """The encoding rides the observation onto the container permit, so
+        every video story records it, from Drive or from past posts."""
+        from src.services.target import media_validation
+
+        store, _ = self._video_store(derivation(pad=4096))
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert ready
+        assert ready.observation["derivation"] == (
+            media_validation.story_video_encoding()
+        )
 
 
 class TestFreshUrls:
