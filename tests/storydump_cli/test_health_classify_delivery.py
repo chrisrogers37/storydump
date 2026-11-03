@@ -21,7 +21,7 @@ def delivery():
 
 
 def reading(**over):
-    """A quiet, readable hour, overridden per test. Every key the route
+    """A readable hour that delivered, overridden per test. Every key the route
     publishes is present, so a test of one key never trips another's check."""
     base = {
         "window_seconds": 3600,
@@ -92,8 +92,8 @@ class TestWhatAReadingSays:
 
 class TestAnUnreadableReadingIsNeverAHealthyOne:
     """A broken instrument is not a clean bill of health: every reading the
-    classifier cannot read is `unreachable`, and the CLI and the monitor both
-    say so instead of passing over it."""
+    classifier cannot read is `unreachable`, and the monitor says so instead of
+    passing over it."""
 
     @pytest.mark.parametrize("status", [404, 500, 503])
     def test_every_non_200_is_unreachable(self, delivery, status):
