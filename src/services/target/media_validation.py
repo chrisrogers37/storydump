@@ -59,6 +59,9 @@ from typing import Literal, Mapping
 
 from .vocabulary import PUBLISH_MAX_BYTES
 
+#: Stamped on every stored verdict. A stored refusal stamped with any other
+#: value is judged again (`fn_source_asset_suitability`), so it changes
+#: whenever a check could refuse or pass a file differently.
 MATRIX_VERSION = "instagram-story-2026-10-26-v5"
 EVIDENCE_VERSION = 4
 #: Meta: "File size: 100MB maximum"

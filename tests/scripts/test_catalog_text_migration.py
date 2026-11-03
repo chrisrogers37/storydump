@@ -61,8 +61,10 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 def test_replaced_functions_are_exact_schema_definitions():
     """Every function a migration defines is the schema's text, unless a later
     one redefined what that text names: 003 renamed the archive's to past
-    posts', and 009 rewrote the reaper and the preparation door and added the
-    reaper's late door and the rule it shares with the cadence leg. Every one 009 defines is the schema's text."""
+    posts', 009 rewrote the reaper and the preparation door and added the
+    reaper's late door and the rule it shares with the cadence leg, and 010
+    added the matrix version to both suitability overloads. Every one 009
+    defines is the schema's text."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
@@ -78,9 +80,17 @@ def test_replaced_functions_are_exact_schema_definitions():
         if (name, text) not in schema
     }
     assert replaced <= {name for name, _ in rename} | relaned
-    assert all(
-        definition in schema for definition in rename if definition[0] not in relaned
-    )
+    migrations = [m for m in discover_migrations(MIGRATIONS_DIR) if m.version >= 3]
+    for index, current in enumerate(migrations):
+        superseded = {
+            name
+            for later in migrations[index + 1 :]
+            for name, _ in _definitions(later.sql)
+        }
+        assert all(
+            definition in schema or definition[0] in superseded
+            for definition in _definitions(current.sql)
+        ), current.version
     assert relaned == {
         "fn_reaper_sweep",
         "fn_reaper_late_past_posts",
@@ -455,6 +465,7 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         5,
         8,
         9,
+        10,
     ]
 
     assert fetch_all(
@@ -481,6 +492,7 @@ def test_base_with_catalog_refresh_equals_current_code(
         5,
         8,
         9,
+        10,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)
