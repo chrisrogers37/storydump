@@ -136,6 +136,7 @@ def test_build_targets_public_and_restores_the_callers_search_path(
             4,
             5,
             6,
+            8,
         ]
         assert apply_pending(owner, MIGRATIONS_DIR).applied == []
         assert main(["init", "--database-url", owner]) == 0
