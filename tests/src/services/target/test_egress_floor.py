@@ -160,7 +160,19 @@ class TestACreatingCallIsNeverSentTwice:
     the same lost answer is attempted again."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("lost", [httpx.ReadTimeout, httpx.RemoteProtocolError])
+    # A write that timed out or broke may have delivered the request already,
+    # and a read or a close comes after it: none of them is the never-sent kind.
+    @pytest.mark.parametrize(
+        "lost",
+        [
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.WriteTimeout,
+            httpx.WriteError,
+            httpx.ReadError,
+            httpx.CloseError,
+        ],
+    )
     async def test_a_request_that_left_is_attempted_once(self, lost):
         calls = {"n": 0}
 
@@ -193,17 +205,20 @@ class TestACreatingCallIsNeverSentTwice:
         assert calls["n"] == EgressPolicy().max_attempts
 
     @pytest.mark.asyncio
-    async def test_a_request_that_never_left_is_attempted_again(self):
+    @pytest.mark.parametrize(
+        "never_left", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+    )
+    async def test_a_request_that_never_left_is_attempted_again(self, never_left):
         calls = {"n": 0}
 
-        async def refused_then_answered(request):
+        async def never_left_then_answered(request):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise httpx.ConnectError("refused", request=request)
+                raise never_left("never left", request=request)
             return httpx.Response(200, json={"ok": True})
 
         async with httpx.AsyncClient(
-            transport=_transport(refused_then_answered)
+            transport=_transport(never_left_then_answered)
         ) as client:
             response = await request(
                 client, "POST", ALLOWED, policy=EgressPolicy(retry_after_send=False)

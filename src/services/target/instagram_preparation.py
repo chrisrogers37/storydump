@@ -73,7 +73,7 @@ SELECT i.id AS intent_id,i.state AS intent_state,i.cancel_requested,
  m.id AS media_item_id,m.source_id,m.state AS media_item_state,m.media_kind,s.config,s.origin_ig_account_id,
  x.parent_media_id,x.data_generation_id,x.observation_revision,a.validation_fingerprint AS current_fingerprint,
  pol.revision AS policy_revision,
- a.asset_media_id AS selected_asset_id,x.slide_count,
+ a.asset_media_id AS selected_asset_id,a.position,x.slide_count,
  a.validation_capture AS current_capture
 FROM post_intents i JOIN media_items m ON m.workspace_id=i.workspace_id AND m.id=i.media_item_id
 JOIN media_sources s ON s.workspace_id=m.workspace_id AND s.id=m.source_id
@@ -115,6 +115,9 @@ def _refusal(exc, counters, selected) -> dict:
     facts["counters"] = asdict(counters)
     if facts["kind"] == "slide_gone":
         facts["slide_count"] = selected.subject.get("slide_count")
+        facts["expected_slide_count"] = instagram_catalog.expected_slide_count(
+            selected.subject["slide_count"], selected.subject["position"]
+        )
     return facts
 
 
@@ -285,10 +288,15 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected.capture, selected.subject["config"]
         )
         counters = media_adapters.MediaTurnCounters()
+        fetched = None
 
         def observe(value):
             nonlocal counters
             counters = value
+
+        def observe_fetch(value):
+            nonlocal fetched
+            fetched = value
 
         try:
             content, _, _ = await adapter.fetch_bytes(
@@ -300,11 +308,14 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 download_budget_s=self.ports.download_seconds.get(
                     selected.subject["media_kind"]
                 ),
-                expected_slide_count=selected.subject["slide_count"],
+                expected_slide_count=instagram_catalog.expected_slide_count(
+                    selected.subject["slide_count"], selected.subject["position"]
+                ),
                 max_bytes=media_validation.SUPPORTED_MEDIA_MATRIX["byte_caps"][
                     selected.subject["media_kind"]
                 ],
                 on_counters=observe,
+                on_evidence=observe_fetch,
             )
         except media_adapters.MediaSelectedAssetChanged as exc:
             # A truncated children read cannot prove the selected slide left:
@@ -366,6 +377,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             validation,
             refusal=refusal,
             passed=_validation_pass(validation, counters),
+            fetch=None
+            if fetched is None
+            else {**fetched, "counters": asdict(counters)},
         )
         if validation.state != "supported":
             raise source_policy.MediaAdmissionPending(
@@ -459,7 +473,16 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 )
 
     async def _land(
-        self, engine, ws, iid, selected, validation, *, refusal=None, passed=None
+        self,
+        engine,
+        ws,
+        iid,
+        selected,
+        validation,
+        *,
+        refusal=None,
+        passed=None,
+        fetch=None,
     ):
         """Record the fetch's outcome on the slide's capture. A refused fetch
         (no validation) is the retry rule's to decide (`past_posts_retry`): True
@@ -561,6 +584,10 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 evidence["refusal"] = refusal
             if passed is not None:
                 evidence["passed"] = passed
+            # What the fetch that got these bytes read (`refusal_evidence`, kind
+            # "fetched"), whatever the validation then found.
+            if fetch is not None:
+                evidence["fetch"] = fetch
             if validation:
                 evidence.update(
                     fingerprint=validation.fingerprint,

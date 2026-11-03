@@ -1,0 +1,131 @@
+"""What one `/health/delivery` reading means.
+
+The scheduling monitor judges delivery with this verdict; how it repeats and
+recovers is pinned in `tests/scripts/test_scheduling_monitor.py`.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+
+@pytest.fixture
+def delivery():
+    """The module under test, imported per test, so a missing or broken module
+    fails each test by name instead of failing collection for every shard."""
+    from storydump_cli.health_classify import delivery
+
+    return delivery
+
+
+def reading(**over):
+    """A readable hour that delivered, overridden per test. Every key the route
+    publishes is present, so a test of one key never trips another's check."""
+    base = {
+        "window_seconds": 3600,
+        "sent_in_window": 40,
+        "failed_or_ambiguous": 0,
+        "by_class": {},
+    }
+    return json.dumps({**base, **over})
+
+
+def without(key):
+    """A whole reading less one key."""
+    data = json.loads(reading())
+    del data[key]
+    return json.dumps(data)
+
+
+REFUSED = {"refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}}}
+DEFERRED = {"rate_limited": {"rows": 4, "alerting": 0, "codes": {"429": 4}}}
+
+
+class TestWhatAReadingSays:
+    def test_an_hour_with_no_failure_is_delivering(self, delivery):
+        v = delivery.classify(200, reading())
+        assert v.state == delivery.DELIVERING
+        assert v.detail == "no send failed or is ambiguous in the last hour (40 sent)"
+
+    def test_an_hour_with_nothing_sent_is_quiet_not_delivering(self, delivery):
+        """No send and no failure is not an hour that delivered: the sent count
+        is read against it."""
+        v = delivery.classify(200, reading(sent_in_window=0))
+        assert v.state == delivery.QUIET
+        assert v.detail == "nothing was sent in the last hour, and nothing failed"
+
+    def test_a_failure_in_an_hour_with_no_send_is_failing(self, delivery):
+        v = delivery.classify(
+            200, reading(sent_in_window=0, failed_or_ambiguous=1, by_class=REFUSED)
+        )
+        assert v.state == delivery.FAILING
+
+    def test_one_failed_send_is_failing(self, delivery):
+        v = delivery.classify(200, reading(failed_or_ambiguous=1, by_class=REFUSED))
+        assert v.state == delivery.FAILING
+        assert v.detail == (
+            "1 of the last hour's sends failed or are ambiguous "
+            "(40 sent; refused: 400×1)"
+        )
+
+    def test_a_deferral_is_context_never_a_failure(self, delivery):
+        both = {
+            "ambiguous": {"rows": 2, "alerting": 2, "codes": {"none": 2}},
+            **DEFERRED,
+        }
+        v = delivery.classify(200, reading(failed_or_ambiguous=2, by_class=both))
+        assert v.state == delivery.FAILING
+        assert "ambiguous: none×2" in v.detail
+        assert "rate_limited" not in v.detail and "429" not in v.detail
+
+    def test_an_hour_of_deferrals_alone_is_delivering(self, delivery):
+        v = delivery.classify(200, reading(by_class=DEFERRED))
+        assert v.state == delivery.DELIVERING
+
+    def test_a_failure_with_no_class_still_says_so(self, delivery):
+        v = delivery.classify(200, reading(failed_or_ambiguous=2))
+        assert v.state == delivery.FAILING
+        assert v.detail.endswith("(40 sent; no class recorded)")
+
+
+class TestAnUnreadableReadingIsNeverAHealthyOne:
+    """A broken instrument is not a clean bill of health: every reading the
+    classifier cannot read is `unreachable`, and the monitor says so instead of
+    passing over it."""
+
+    @pytest.mark.parametrize("status", [404, 500, 503])
+    def test_every_non_200_is_unreachable(self, delivery, status):
+        v = delivery.classify(status, reading())
+        assert v.state == delivery.UNREACHABLE
+        assert v.detail == f"HTTP {status}"
+
+    def test_a_transport_failure_names_itself(self, delivery):
+        v = delivery.classify(0, "  connection refused  ")
+        assert v.state == delivery.UNREACHABLE
+        assert v.detail == "connection refused"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param("not json", id="not-json"),
+            pytest.param(json.dumps([1, 2]), id="not-an-object"),
+            # Each count on its own, in an otherwise whole reading.
+            *(
+                pytest.param(raw, id=f"{key}-{case}")
+                for key in ("sent_in_window", "failed_or_ambiguous")
+                for case, raw in (
+                    ("missing", without(key)),
+                    ("null", reading(**{key: None})),
+                    ("bool", reading(**{key: True})),
+                    ("negative", reading(**{key: -1})),
+                    ("string", reading(**{key: "3"})),
+                )
+            ),
+            pytest.param(reading(by_class=[]), id="by-class-not-an-object"),
+            pytest.param(without("by_class"), id="no-by-class"),
+        ],
+    )
+    def test_every_malformed_reading_is_unreachable(self, delivery, raw):
+        assert delivery.classify(200, raw).state == delivery.UNREACHABLE

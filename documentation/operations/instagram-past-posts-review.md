@@ -119,8 +119,15 @@ names.
 6. **The video derivation Meta receives.** Meta never fetches a video's source file: it
    fetches the transit store's story derivation, delivered as MP4 in the story frame.
    So the validator judges a past-posts video only on what the derivation keeps from it
-   (its size, a well-formed self-contained container, a stream `ffprobe` can open, its
-   duration and its frame rate). The transformation trims the derivation to 60 seconds
+   (its size against what the transit store takes, a well-formed self-contained
+   container, its video stream, its duration, which is the container's or
+   its longest stream's, and its frame rate). A container the walker cannot read
+   whole, a stream `ffprobe` does not decode (`closed_decoders` names the decoders it
+   declined, as it names them), a file with more streams than the probe opens (16, by
+   the walker's count of tracks or at the probe's own stream bound, where an attached
+   picture is one more) and a duration nothing states are left to the derivation and
+   recorded, never left pending. The
+   transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
    validation matrix (`media_validation.story_video_encoding`); its container layout is
@@ -313,7 +320,7 @@ that hold no unresolved upload.
 - **Likes and comments** can be unavailable. Missing values do not mean zero.
 - **Videos.** A candidate video is checked when its story is prepared: a video at least
   3 seconds long, at 23 to 60 frames a second where its file states a rate, in a
-  well-formed MP4 or MOV that `ffprobe` can open, is `supported`, and one longer than
+  well-formed MP4 or MOV that `ffprobe` can read, is `supported`, and one longer than
   60 seconds is trimmed to 60 by its derivation. Meta receives the
   transit store's derivation of it, never the file itself, so the file's edit lists,
   `moov` position, codec settings and audio settings are not judged.
@@ -370,8 +377,15 @@ link, generation and revision, and its validation evidence.
 **Coverage rules for a walk:**
 - A children response with more pages keeps its returned slides, records incomplete
   coverage, and makes no second request.
-- At sync, only a complete response can retire a missing slide. A selected slide
-  has its own, stricter rule (below).
+- At sync, only a complete response that lists slides can retire a missing slide,
+  and only on the second such response that lacks it. The first one keeps the slide
+  out of the draw (its item `missing`, its asset `unlisted`), and a later response
+  that lists it brings it back. A response that lists no slides proves nothing. A
+  slide excluded as unsupported, never drawn, retires on the first.
+- No response retires a slide a live story holds: the story's own fetch judges it,
+  by its own rule (below). The exception is a source that takes only each post's
+  first slide. A kept slide would no longer be first, so its story could never
+  fetch it, and the response holds it out like any other.
 - A listing capped or windowed this way never proves a post was deleted
   (`checkpoint_whole` is false).
 

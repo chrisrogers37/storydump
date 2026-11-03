@@ -327,6 +327,10 @@ _CHECKS = {
     ),
 }
 
+#: Checks the validator no longer makes (`media_validation.UNSUPPORTED_CHECKS`
+#: holds the rest): a refusal stored under one still reads as its own sentence.
+LEGACY_CHECKS = frozenset({"video_codec"})
+
 #: What a publish job is trying to do: a spent budget's `trying_to` when its
 #: record names none.
 PUBLISH_TRYING_TO = "post this story"
