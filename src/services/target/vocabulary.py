@@ -615,7 +615,7 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
 IN_THE_WAY: Mapping[str, str] = {
     "item_removed": "it was removed from the library",
     "item_unsupported": "Instagram cannot post it",
-    "item_missing": "its file is no longer in its Drive folder",
+    "item_missing": "its file is no longer listed by its source",
     "reject": "it was rejected",
     "unsupported": "it is marked as one that cannot be posted",
     "hold": "it is on hold",
