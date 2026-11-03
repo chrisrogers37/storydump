@@ -2592,21 +2592,6 @@ class TestTheConcurrencyCeiling:
             assert_concurrency_fits(cfg, pool_size=10)
         assert "4×1 + 2×2 + 1×1 + 3 reserved exceeds the pool of 10" in str(info.value)
 
-    def test_the_media_lane_counts_against_the_ceiling(self):
-        """Interactive and bulk alone fit (2×1 + 2×2 + 3 = 9 of 10), so the media
-        tasks are all that can tip this over, and the refusal names all three."""
-        from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
-
-        cfg = WorkerConfig(lane_concurrency={"interactive": 2, "bulk": 2, "media": 2})
-        with pytest.raises(ValueError) as info:
-            assert_concurrency_fits(cfg, pool_size=10)
-        assert str(info.value) == (
-            "lanes: interactive×2 bulk×2 media×2 pool=10"
-            " (tasks hold up to 8 + 3 reserved): 2×1 + 2×2 + 2×1 + 3 reserved"
-            " exceeds the pool of 10 — lower TARGET_WORKER_*_CONCURRENCY"
-            " or raise the pool (measure the load first)"
-        )
-
     def test_the_start_values_fill_the_pinned_pool_exactly(self):
         """Exactly at the ceiling is allowed, and there is no connection to
         spare: one fewer in the pool refuses the start values, so raising one

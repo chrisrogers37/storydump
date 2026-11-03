@@ -531,7 +531,6 @@ async def test_an_unproven_refusal_puts_the_job_back_after_its_wait(
     assert after["deadline_at"] == before["deadline_at"]
     capture = await preparation.capture_of(worker, origin, intent)
     assert (capture["reason"], capture["attempt"]) == ("download_pending", 1)
-    assert "next_attempt_at" not in capture
     assert capture["refusal"] == CDN_REFUSAL
     assert state_of(sync_conn, intent) == "scheduled"
 

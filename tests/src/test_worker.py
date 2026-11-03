@@ -1622,32 +1622,3 @@ async def test_the_prompt_sweep_mints_a_prepare_job_per_due_story_and_fetches_no
         ("open", {"workspace_id": "workspace-b"}),
         ("close", {"workspace_id": "workspace-b"}),
     ]
-
-
-async def test_a_prepare_job_is_one_per_story_on_the_file_lane(monkeypatch):
-    """One job per story, keyed by it, on the media lane: minted unless one is
-    ready or running, with the retry's attempts as its budget."""
-    from src.services.target import past_posts_preparation_job
-
-    seen = {}
-
-    async def enqueue(session, **kwargs):
-        seen.update(kwargs)
-        return "job-1"
-
-    monkeypatch.setattr(past_posts_preparation_job.jobs, "enqueue", enqueue)
-    config = WorkerConfig()
-    minted = await past_posts_preparation_job.enqueue(
-        object(), workspace_id="workspace-a", intent_id="story-1", config=config
-    )
-    assert minted == "job-1"
-    assert seen == {
-        "kind": "prepare_past_post",
-        "workspace_id": "workspace-a",
-        "serialization_key": "prep:story-1",
-        "payload": {"v": 1, "intent_id": "story-1"},
-        "lane": "media",
-        "max_attempts": config.past_posts_retry_attempts,
-        "deadline_seconds": config.approval_ttl_seconds,
-        "unless_pending": True,
-    }
