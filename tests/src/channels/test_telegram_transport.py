@@ -967,9 +967,8 @@ class TestTheSupersedeRowEditsTheCard:
     Telegram message per tap per binding). A row without an outcome strips
     alone; a refused combined edit falls back to the type-agnostic strip —
     the call that must land — unless the refusal says the message is gone, and
-    after a refusal that says the message is not the type the record says (no
-    text to edit in a photo, no caption on text) the other edit is tried
-    once."""
+    a text edit refused because the message is a photo or video (a lost
+    upload that landed late) is tried once as a caption."""
 
     async def test_one_caption_edit_carries_the_line_and_removes_the_keyboard(self):
         calls = []
