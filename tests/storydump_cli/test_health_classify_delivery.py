@@ -32,6 +32,13 @@ def reading(**over):
     return json.dumps({**base, **over})
 
 
+def without(key):
+    """A whole reading less one key."""
+    data = json.loads(reading())
+    del data[key]
+    return json.dumps(data)
+
+
 REFUSED = {"refused": {"rows": 1, "alerting": 1, "codes": {"400": 1}}}
 DEFERRED = {"rate_limited": {"rows": 4, "alerting": 0, "codes": {"429": 4}}}
 
@@ -104,25 +111,20 @@ class TestAnUnreadableReadingIsNeverAHealthyOne:
         [
             pytest.param("not json", id="not-json"),
             pytest.param(json.dumps([1, 2]), id="not-an-object"),
-            pytest.param(
-                json.dumps({"window_seconds": 3600, "failed_or_ambiguous": 0}),
-                id="no-sent-count",
+            # Each count on its own, in an otherwise whole reading.
+            *(
+                pytest.param(raw, id=f"{key}-{case}")
+                for key in ("sent_in_window", "failed_or_ambiguous")
+                for case, raw in (
+                    ("missing", without(key)),
+                    ("null", reading(**{key: None})),
+                    ("bool", reading(**{key: True})),
+                    ("negative", reading(**{key: -1})),
+                    ("string", reading(**{key: "3"})),
+                )
             ),
-            pytest.param(reading(sent_in_window=None), id="null-count"),
-            pytest.param(reading(sent_in_window=True), id="bool-count"),
-            pytest.param(reading(failed_or_ambiguous=-1), id="negative-count"),
-            pytest.param(reading(failed_or_ambiguous="3"), id="string-count"),
             pytest.param(reading(by_class=[]), id="by-class-not-an-object"),
-            pytest.param(
-                json.dumps(
-                    {
-                        "window_seconds": 3600,
-                        "sent_in_window": 1,
-                        "failed_or_ambiguous": 0,
-                    }
-                ),
-                id="no-by-class",
-            ),
+            pytest.param(without("by_class"), id="no-by-class"),
         ],
     )
     def test_every_malformed_reading_is_unreachable(self, delivery, raw):
