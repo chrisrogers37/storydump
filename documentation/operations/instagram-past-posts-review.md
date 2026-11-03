@@ -122,7 +122,7 @@ names.
    (its size, a well-formed self-contained container, a stream `ffprobe` can open, its
    duration and its frame rate). The transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
-   frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
+   frame-rate range (23 to 60 fps) and its bit rates (12 Mbit/s for the video, 128 kbit/s for the audio), from the
    validation matrix (`media_validation.story_video_encoding`); its container layout is
    Cloudinary's. Confirm on an owned account what a derived video carries (an edit
    list, where `moov` sits, its audio channels) and that Meta accepts it.

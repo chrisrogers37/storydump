@@ -249,20 +249,37 @@ def test_a_video_records_the_encoding_its_derivation_is_sent():
         "audio_codec": "aac",
         "audio_hz": 48_000,
         "fps": [23, 60],
-        "video_bits_per_second": 13_000_000,
-        "longest_seconds": 60,
+        "video_bits_per_second": 12_000_000,
+        "audio_bits_per_second": 128_000,
+        "trim_seconds": 59.95,
     }
 
 
-def test_the_bit_rate_cap_honours_both_of_metas_limits():
-    """Meta's VBR maximum, and its file size at the longest story with the
-    audio's share."""
+def test_the_bit_rates_honour_metas_limits_with_a_rate_buffer_to_spare():
+    """The audio at Meta's audio rate, and the video under Meta's VBR maximum
+    and under its file size at the longest story, with the audio's share and
+    one rate buffer of room, since the encoder's maximum binds the average
+    over its buffer, not over the whole video."""
     matrix = v.SUPPORTED_MEDIA_MATRIX
-    cap = v.story_video_encoding()["video_bits_per_second"]
+    encoding = v.story_video_encoding()
+    cap = encoding["video_bits_per_second"]
+    audio = encoding["audio_bits_per_second"]
     longest = matrix["duration_seconds"][1]
-    audio = matrix["provider_audio_bits_per_second"]
+    assert audio == matrix["provider_audio_bits_per_second"] == 128_000
     assert cap <= matrix["provider_video_bits_per_second"]
-    assert (cap + audio) * longest <= matrix["provider_video_bytes"] * 8
+    room = matrix["provider_video_bytes"] * 8 - audio * longest
+    assert cap * (longest + v.RATE_BUFFER_SECONDS) <= room
+
+
+@pytest.mark.parametrize("fps", [23, 24000 / 1001, 25, 30000 / 1001, 30, 50, 60])
+def test_the_trim_ends_the_last_frame_before_the_longest_story(fps):
+    """The trim keeps every frame that starts before it, so the last frame
+    kept runs one frame past it; at every rate the derivation allows, that
+    frame still ends before the longest story."""
+    trim = v.story_video_encoding()["trim_seconds"]
+    longest = v.SUPPORTED_MEDIA_MATRIX["duration_seconds"][1]
+    assert trim < longest
+    assert trim + 1 / fps < longest
 
 
 @pytest.mark.parametrize(
