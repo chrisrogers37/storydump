@@ -28,10 +28,9 @@ _BY_CLASS = "by_class"
 class Verdict:
     """What one reading means, before any history is applied."""
 
-    def __init__(self, state: str, detail: str, payload: dict | None = None):
+    def __init__(self, state: str, detail: str):
         self.state = state
         self.detail = detail
-        self.payload = payload or {}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Verdict({self.state!r}, {self.detail!r})"
@@ -107,14 +106,9 @@ def classify(status: int, body: str) -> Verdict:
             FAILING,
             f"{failed} of the last hour's sends failed or are ambiguous "
             f"({sent} sent; {_failures(data[_BY_CLASS])})",
-            data,
         )
     if not sent:
-        return Verdict(
-            QUIET, "nothing was sent in the last hour, and nothing failed", data
-        )
+        return Verdict(QUIET, "nothing was sent in the last hour, and nothing failed")
     return Verdict(
-        DELIVERING,
-        f"no send failed or is ambiguous in the last hour ({sent} sent)",
-        data,
+        DELIVERING, f"no send failed or is ambiguous in the last hour ({sent} sent)"
     )

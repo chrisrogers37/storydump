@@ -82,10 +82,6 @@ class TestWhatAReadingSays:
         assert v.state == delivery.FAILING
         assert v.detail.endswith("(40 sent; no class recorded)")
 
-    def test_a_readable_verdict_carries_its_reading(self, delivery):
-        v = delivery.classify(200, reading(sent_in_window=7))
-        assert v.payload["sent_in_window"] == 7
-
 
 class TestAnUnreadableReadingIsNeverAHealthyOne:
     """A broken instrument is not a clean bill of health: every reading the
