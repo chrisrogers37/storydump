@@ -61,14 +61,14 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 def test_replaced_functions_are_exact_schema_definitions():
     """Every function a migration defines is the schema's text, unless a later
     one redefined what that text names: 003 renamed the archive's to past
-    posts', and 006 rewrote the reaper and the preparation door and added the
-    reaper's late door and the rule it shares with the cadence leg. Every one 006 defines is the schema's text."""
+    posts', and 009 rewrote the reaper and the preparation door and added the
+    reaper's late door and the rule it shares with the cadence leg. Every one 009 defines is the schema's text."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
     migration = _definitions((MIGRATIONS_DIR / "001_catalog_text.sql").read_text())
     rename = _definitions((MIGRATIONS_DIR / "003_instagram_past_posts.sql").read_text())
-    lane = _definitions((MIGRATIONS_DIR / "006_prepare_past_post_lane.sql").read_text())
+    lane = _definitions((MIGRATIONS_DIR / "009_prepare_past_post_lane.sql").read_text())
     relaned = {name for name, _ in lane}
     assert len(migration) >= 16
     assert len([name for name, _ in migration if name == "fn_clock_tick"]) == 2
@@ -453,8 +453,8 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         3,
         4,
         5,
-        6,
         8,
+        9,
     ]
 
     assert fetch_all(
@@ -479,8 +479,8 @@ def test_base_with_catalog_refresh_equals_current_code(
         3,
         4,
         5,
-        6,
         8,
+        9,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)
