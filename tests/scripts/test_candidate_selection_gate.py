@@ -98,12 +98,15 @@ async def carousel(engine, chain, count=10):
     return src, [dict(row) for row in rows]
 
 
-async def verdict(conn, chain, src, *, strict=False, intent=None, destination=None):
+async def verdict(
+    conn, chain, src, *, strict=False, intent=None, destination=None, media=None
+):
     result = await source_policy.suitability(
         conn,
         workspace_id=str(chain["ws"]),
         ig_account_id=str(destination or chain["iga"]),
         source_id=src["source_id"],
+        media_item_id=media,
         existing_intent_id=intent,
         require_validation=strict,
         capability=foundation.capability(),
@@ -730,7 +733,18 @@ async def test_bound_card_identity_cannot_inherit_new_observation(
                 "UPDATE instagram_media_assets SET validation_state='supported',validation_generation_id=data_generation_id,validation_observation_revision=observation_revision,validation_fingerprint='second',validated_at=now()"
             )
         )
-        v = await verdict(conn, origin, src, strict=True, intent=intent)
+        # The story still holds slide 123, so the complete read that lacked it
+        # kept it; slide 456's new observation still cannot serve the card.
+        slide_456 = await conn.scalar(
+            text(
+                "SELECT media_item_id FROM instagram_media_assets "
+                "WHERE source_id=:sid AND asset_media_id='456'"
+            ),
+            {"sid": src["source_id"]},
+        )
+        v = await verdict(
+            conn, origin, src, strict=True, intent=intent, media=str(slide_456)
+        )
         assert not v["suitable"] and v["reason"] == "selected_asset_changed"
 
 

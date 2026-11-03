@@ -18,8 +18,11 @@ from typing import Mapping
 
 from sqlalchemy import text
 
-from src.services.target import readers, source_state, vocabulary
-from src.services.target.instagram_past_posts_adapter import identity
+from src.services.target import intent_ledger, readers, source_state, vocabulary
+from src.services.target.instagram_past_posts_adapter import (
+    CAROUSEL_SLIDE_LIMIT,
+    identity,
+)
 from src.services.target.instagram_sources import PastPostsRefused, require_activation
 
 _ID = re.compile(r"[0-9]{1,64}\Z")
@@ -314,30 +317,93 @@ async def write_observation(
         )
 
 
-def _bundle_assets(o, previous):
-    """Keep unseen slides after a partial response without position collisions."""
+def _bundle_assets(o, previous, held=frozenset()):
+    """Keep unseen slides after a partial response, and the `held` slides a
+    complete one lacks, without position collisions."""
     observed_ids = {a.selected_asset_id for a in o.assets}
-    # The response's positions win. A partial page keeps unseen rows after it,
-    # in their old order, so the deferrable position key never collides.
+    # The response's positions win. Kept rows follow it, in their old order,
+    # so the deferrable position key never collides.
     assets = list(o.assets)
-    if not o.slides_complete:
-        unseen = sorted(
-            (r for r in previous if r["asset_media_id"] not in observed_ids),
-            key=lambda r: (r["position"], r["asset_media_id"]),
-        )
-        for row in unseen:
-            assets.append(
-                PastPostsAsset(
-                    row["asset_media_id"],
-                    row["media_kind"],
-                    row["mime_type"],
-                    row["file_size"],
-                    position=len(assets) + 1,
-                    availability=row["availability"],
-                    exclusion_reason=row["exclusion_reason"],
-                )
+    unseen = sorted(
+        (
+            r
+            for r in previous
+            if r["asset_media_id"] not in observed_ids
+            and (not o.slides_complete or r["asset_media_id"] in held)
+        ),
+        key=lambda r: (r["position"], r["asset_media_id"]),
+    )
+    for row in unseen:
+        assets.append(
+            PastPostsAsset(
+                row["asset_media_id"],
+                row["media_kind"],
+                row["mime_type"],
+                row["file_size"],
+                position=len(assets) + 1,
+                availability=row["availability"],
+                exclusion_reason=row["exclusion_reason"],
             )
+        )
     return assets
+
+
+def expected_slide_count(slide_count, position):
+    """The slide count a slide missing from a read is judged against: the
+    fetch's `expected_slide_count`, from the index's count for the post and
+    the slide's position. None for a single post.
+
+    A landing puts the read's own slides at positions 1 to `slide_count`, and
+    any slide it carries after them (`_bundle_assets`: unseen after a partial
+    read, held after a complete one). A listed slide is judged against the
+    count of the read that listed it. A carried slide, one past that count, is
+    judged against the count plus itself. So no sibling's state moves another
+    slide's count.
+    """
+    if slide_count is not None and position > slide_count:
+        return slide_count + 1
+    return slide_count
+
+
+async def _held_slides(executor, ws, sid, o, missing):
+    """The slides a complete read lacks (`missing`, id to item) whose item a
+    live story holds.
+
+    A slide is its own entity: one read that lacks it is no proof it left. So
+    while a story that is neither terminal nor asked to cancel holds the
+    slide, the index keeps it for that story's own fetch to judge
+    (`instagram_past_posts_adapter`'s two-read proof). None is kept when the
+    read lists CAROUSEL_SLIDE_LIMIT slides, since a complete read of a full
+    carousel leaves no room for another. None is kept either on a source that
+    takes only each post's first slide, since a kept slide follows the read's
+    own and is no longer first.
+    """
+    if (
+        not missing
+        or not o.slides_complete
+        or o.slide_count is None
+        or len(o.assets) >= CAROUSEL_SLIDE_LIMIT
+    ):
+        return frozenset()
+    policy = await readers.row(
+        executor,
+        "SELECT carousel_slides FROM instagram_source_policies "
+        "WHERE workspace_id=:ws AND source_id=:sid",
+        ws=ws,
+        sid=sid,
+    )
+    if policy is None or policy["carousel_slides"] != "all":
+        return frozenset()
+    rows = await readers.rows(
+        executor,
+        "SELECT DISTINCT media_item_id FROM post_intents WHERE workspace_id=:ws "
+        "AND media_item_id=ANY(CAST(:items AS uuid[])) AND NOT cancel_requested "
+        f"AND {intent_ledger.NOT_TERMINAL}",
+        ws=ws,
+        items=sorted(set(missing.values())),
+    )
+    holding = {str(row["media_item_id"]) for row in rows}
+    return frozenset(mid for mid, item in missing.items() if item in holding)
 
 
 async def _land(executor, ws, sid, gid, o, keys):
@@ -368,11 +434,9 @@ async def _land(executor, ws, sid, gid, o, keys):
         parent=o.parent_media_id,
     )
     observed_ids = {a.selected_asset_id for a in o.assets}
-    assets = _bundle_assets(o, previous)
+    # Every slide the bundle can hold was observed now or held before.
     wanted_ids = sorted(
-        {o.parent_media_id}
-        | {a.selected_asset_id for a in assets}
-        | {row["asset_media_id"] for row in previous}
+        {o.parent_media_id} | observed_ids | {row["asset_media_id"] for row in previous}
     )
     version_rows = await readers.rows(
         executor,
@@ -433,6 +497,16 @@ async def _land(executor, ws, sid, gid, o, keys):
             previous_ids[mid] = str(row["media_item_id"])
         elif found is not None and str(found["source_id"]) == sid:
             previous_ids[mid] = str(found["id"])
+    # The slides the read lacks that the index holds an item for.
+    missing = {
+        mid: item for mid, item in previous_ids.items() if mid not in observed_ids
+    }
+    held = await _held_slides(executor, ws, sid, o, missing)
+    assets = _bundle_assets(o, previous, held)
+    # A list that keeps a slide the read lacked is no longer one complete read;
+    # its count stays what the read listed.
+    list_complete = o.slides_complete and not held
+    kept_ids = {a.selected_asset_id for a in assets}
     revision = (
         max(
             [
@@ -474,7 +548,7 @@ async def _land(executor, ws, sid, gid, o, keys):
             vocabulary.PAST_POSTS_SLIDE_NAME.format(
                 position=asset.position, count=o.slide_count
             )
-            if slide and o.slides_complete
+            if slide and list_complete
             else vocabulary.PAST_POSTS_SLIDE_NAME_UNKNOWN.format(
                 position=asset.position
             )
@@ -508,7 +582,7 @@ async def _land(executor, ws, sid, gid, o, keys):
         if post_reason == "origin_identity_conflict"
         or not rows
         and o.availability == "available"
-        and o.slides_complete
+        and list_complete
         else o.availability
     )
     await executor.execute(
@@ -541,32 +615,24 @@ async def _land(executor, ws, sid, gid, o, keys):
             "availability": post_availability,
             "reason": post_reason,
             "slide_count": o.slide_count,
-            "slides_complete": o.slides_complete,
+            "slides_complete": list_complete,
         },
     )
     if o.slides_complete:
-        for prior in previous:
-            if (
-                prior["asset_media_id"] in observed_ids
-                or prior["asset_media_id"] not in previous_ids
-            ):
-                continue
-            prior_matches = by_tombstone.get(prior["asset_media_id"], ())
+        retiring = {mid: item for mid, item in missing.items() if mid not in held}
+        for mid, item in retiring.items():
             if any(
-                str(t["source_id"]) != sid
-                or str(t["media_item_id"]) != previous_ids[prior["asset_media_id"]]
-                for t in prior_matches
+                str(t["source_id"]) != sid or str(t["media_item_id"]) != item
+                for t in by_tombstone.get(mid, ())
             ):
                 raise PastPostsRefused("past_posts_identity_inconsistent")
         removed = [
             {
-                "asset_id": row["asset_media_id"],
-                "item": previous_ids[row["asset_media_id"]],
-                "digest": keys.digest(keys.current_version, row["asset_media_id"]),
+                "asset_id": mid,
+                "item": item,
+                "digest": keys.digest(keys.current_version, mid),
             }
-            for row in previous
-            if row["asset_media_id"] not in observed_ids
-            and row["asset_media_id"] in previous_ids
+            for mid, item in retiring.items()
         ]
         if removed:
             await executor.execute(
@@ -591,18 +657,18 @@ async def _land(executor, ws, sid, gid, o, keys):
             text(
                 "UPDATE media_items m SET state='removed' FROM instagram_media_assets a "
                 "WHERE a.workspace_id=:ws AND a.source_id=:sid AND a.parent_media_id=:parent "
-                "AND a.asset_media_id <> ALL(CAST(:observed AS text[])) "
+                "AND a.asset_media_id <> ALL(CAST(:kept AS text[])) "
                 "AND m.workspace_id=a.workspace_id AND m.source_id=a.source_id "
                 "AND (m.id=a.media_item_id OR m.content_hash='instagram_past_posts:media:'||a.asset_media_id)"
             ),
-            {**params, "observed": sorted(observed_ids)},
+            {**params, "kept": sorted(kept_ids)},
         )
         await executor.execute(
             text(
                 "DELETE FROM instagram_media_assets WHERE workspace_id=:ws AND source_id=:sid "
-                "AND parent_media_id=:parent AND asset_media_id <> ALL(CAST(:observed AS text[]))"
+                "AND parent_media_id=:parent AND asset_media_id <> ALL(CAST(:kept AS text[]))"
             ),
-            {**params, "observed": sorted(observed_ids)},
+            {**params, "kept": sorted(kept_ids)},
         )
     if rows:
         payload = json.dumps(rows)

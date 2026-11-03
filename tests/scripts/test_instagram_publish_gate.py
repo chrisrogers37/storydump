@@ -814,8 +814,48 @@ async def test_bound_early_card_content_failure_parks_review(
     assert "scontent.cdninstagram.com" not in calls if failure == "gone" else True
 
 
+async def test_a_story_whose_slide_a_complete_read_lacked_parks_with_proof(
+    past_posts_engine, origin
+):
+    """A complete read that lacked the story's slide leaves the slide to the
+    story's own fetch, so the story is parked for review with the slide's
+    evidence, never left to expire unnoticed."""
+    src, item, intent = await preparation.selected(
+        past_posts_engine, origin, carousel=True
+    )
+    await observations.observe(
+        past_posts_engine, origin, src, preparation.lacking_123("456")
+    )
+    selected, calls = preparation.service(
+        past_posts_engine, origin, changed_child="456"
+    )
+    c = module().PastPostsPipeline(
+        capability=foundation.capability(),
+        fetch_selected=selected.fetch_selected,
+        prepare_selected=selected.selected_prepare,
+    )
+    await c.selected_prepare(
+        engine=past_posts_engine, workspace_id=str(origin["ws"]), intent_id=intent
+    )
+    async with observations.uow(past_posts_engine, origin) as conn:
+        row = await observations.row(
+            conn, "SELECT state,last_error FROM post_intents WHERE id=:id", id=intent
+        )
+    assert row["state"] == "review_required"
+    error = row["last_error"]["error"]
+    assert error["reason"] == "past_posts_content_unavailable"
+    refusal = error["refusal"]
+    assert (
+        refusal["kind"],
+        refusal["slide_count"],
+        refusal["expected_slide_count"],
+    ) == ("slide_gone", 1, 2)
+    assert calls == ["graph.instagram.com"] * 4
+
+
 #: A slide judged gone as the preparation raises it: the adapter's facts, the
-#: turn's counters and the slide count the index recorded.
+#: turn's counters, the slide count the index recorded and the count the slide
+#: was judged against.
 REFUSAL = {
     "v": 1,
     "kind": "slide_gone",
@@ -829,6 +869,7 @@ REFUSAL = {
         "cdn_attempts": 5,
     },
     "slide_count": 2,
+    "expected_slide_count": 2,
 }
 
 
