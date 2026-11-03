@@ -5,5 +5,4 @@
 
 ### Added
 
-- **A failed attempt of a call that creates something now logs how long it waited and how it failed.** For a card's upload, a Telegram message or any other call the egress floor never sends again once it may have reached the provider, the worker logs each attempt that fails at the transport: the provider's host, the seconds it waited and the transport's exception (a read or write timeout, a connection that failed), and whether the request may have reached the provider. A slow answer can then be told from a lost one. The path is never logged.
 - **Each lost answer and each give-up in the outbox logs a warning.** It names the row, its kind, the attempt and the failure's class and code, and, for a card whose upload lost its answer, that its picture is given up, so a card or an edit sent again after a lost answer, and a row that ran out of resends, are visible in the worker log.
