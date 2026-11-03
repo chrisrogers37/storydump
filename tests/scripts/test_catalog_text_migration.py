@@ -62,7 +62,7 @@ def test_replaced_functions_are_exact_schema_definitions():
     """Every function a migration defines is the schema's text, unless a later
     one redefined what that text names: 003 renamed the archive's to past
     posts', 009 rewrote the reaper and the preparation door and added the
-    reaper's late door and the rule it shares with the cadence leg, and 007
+    reaper's late door and the rule it shares with the cadence leg, and 010
     added the matrix version to both suitability overloads. Every one 009
     defines is the schema's text."""
     schema = _definitions(
@@ -463,9 +463,9 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         3,
         4,
         5,
-        7,
         8,
         9,
+        10,
     ]
 
     assert fetch_all(
@@ -490,9 +490,9 @@ def test_base_with_catalog_refresh_equals_current_code(
         3,
         4,
         5,
-        7,
         8,
         9,
+        10,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)

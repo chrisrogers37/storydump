@@ -152,9 +152,9 @@ def test_conversion_preserves_every_old_field_and_adopts_the_current_base(
         3,
         4,
         5,
-        7,
         8,
         9,
+        10,
     ]
     assert [(row["version"], row["status"]) for row in ledger_rows(retired_ledger)] == [
         (0, "adopted")
