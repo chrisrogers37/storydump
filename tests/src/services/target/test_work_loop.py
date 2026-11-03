@@ -13,6 +13,7 @@ the DB-backed halves are exercised by tests/scripts/test_w1_worker_gate.py.
 """
 
 import copy
+import json
 import logging
 import pytest
 import re
@@ -2008,9 +2009,11 @@ class TestTheBudgetCeiling:
             params
             for _, params in self._statements(calls, "SET state = 'review_required'")
         ]
-        assert flips == [{"intent": self.INTENT, "from_state": "publishing"}], (
-            "the courtesy's rollback took the park's flip with it"
-        )
+        assert [(p["intent"], p["from_state"]) for p in flips] == [
+            (self.INTENT, "publishing")
+        ], "the courtesy's rollback took the park's flip with it"
+        reason = json.loads(flips[0]["e"])["error"]["refusal"]
+        assert reason["kind"] == "budget_spent", "the flip records why, with it"
 
     async def test_a_dead_publish_job_with_a_malformed_intent_parks_nothing(
         self, monkeypatch

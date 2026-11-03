@@ -438,6 +438,7 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         3,
         4,
         5,
+        8,
     ]
 
     assert fetch_all(
@@ -462,6 +463,7 @@ def test_base_with_catalog_refresh_equals_current_code(
         3,
         4,
         5,
+        8,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)

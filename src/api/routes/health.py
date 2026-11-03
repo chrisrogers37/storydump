@@ -44,8 +44,6 @@ from src.services.target.work_loop import WorkerConfig
 #: Read from the package rather than typed.
 #: A number that has to be remembered in two places is a number that drifts.
 VERSION = __version__
-#: The commit Railway deployed, which it sets on every Git-triggered deploy.
-COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
 #: How long `/health/scheduling`, `/health/posting`, `/health/delivery` and the
@@ -207,6 +205,7 @@ async def scheduling_health_check(request: Request):
     engine = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="target database not configured")
+    api_commit = request.app.state.commit
 
     async def read():
         # A DIRECT CONNECTION, not a unit of work: `UnitOfWork.__init__`
@@ -241,9 +240,10 @@ async def scheduling_health_check(request: Request):
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
             # Exactly what `storydump_cli/health_classify/scheduling.py` reads,
-            # and nothing else: the queue's backpressure is in the operating
-            # details (`queue_pressure`).
-            return {**lag, "worker": worker}
+            # plus the API's own commit beside the worker's, which the
+            # scheduling monitor compares for a version split. The queue's
+            # backpressure is in the operating details (`queue_pressure`).
+            return {**lag, "worker": worker, "api_commit": api_commit}
 
     return await request.app.state.health_cache.answer("scheduling", read)
 
