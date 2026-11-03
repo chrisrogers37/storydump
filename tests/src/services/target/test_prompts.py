@@ -382,7 +382,9 @@ REFUSED = refusal_evidence.plain(REFUSAL)
 class TestTheCardKeyboard:
     """`card_keyboard`: the one spelling of an approval card's
     keyboard for its story as it is now. Configure is on every card but a
-    rejected story's or a removed item's, which carry none."""
+    rejected story's or a removed item's, which carry none — except a removed
+    item's story in review, which carries Give up, and It posted above it once
+    a publish call was made."""
 
     @staticmethod
     def _datas(kb):
@@ -431,6 +433,53 @@ class TestTheCardKeyboard:
         ]
         assert rows[1][0]["text"] == "🚫 Give up"
 
+    @pytest.mark.parametrize("api_publishing_enabled", [True, False])
+    def test_a_removed_items_card_in_review_carries_give_up_alone(
+        self, api_publishing_enabled
+    ):
+        """A removed item cannot post again, so its story in review, never
+        asked of Instagram, offers the one resolution that ends it: no retry,
+        no Configure, whichever way the workspace posts."""
+        kb = prompts.card_keyboard(
+            INTENT,
+            state="review_required",
+            api_publishing_enabled=api_publishing_enabled,
+            item_state="removed",
+        )
+        assert kb == {
+            "inline_keyboard": [
+                [{"text": "🚫 Give up", "callback_data": f"v1:giveup:{INTENT}"}]
+            ]
+        }
+
+    @pytest.mark.parametrize("api_publishing_enabled", [True, False])
+    @pytest.mark.parametrize(
+        "publish_step, cancelling, actions",
+        [
+            # The story may have posted before its item was removed.
+            ("publish_called", False, ("itposted", "giveup")),
+            # Before the call it cannot have, and the port refuses It posted.
+            ("container_ready", False, ("giveup",)),
+            # On its way to `cancelled`, where It posted is refused too.
+            ("publish_called", True, ("giveup",)),
+        ],
+    )
+    def test_a_removed_items_story_keeps_it_posted_once_a_publish_call_was_made(
+        self, api_publishing_enabled, publish_step, cancelling, actions
+    ):
+        """It posted stays above Give up once a publish call was made and no
+        cancel is pending, as the web's Queue offers it; a retry still cannot
+        post the removed item again."""
+        kb = prompts.card_keyboard(
+            INTENT,
+            state="review_required",
+            api_publishing_enabled=api_publishing_enabled,
+            item_state="removed",
+            cancelling=cancelling,
+            publish_step=publish_step,
+        )
+        assert self._datas(kb) == [[f"v1:{a}:{INTENT}"] for a in actions]
+
     @pytest.mark.parametrize(
         "state",
         [
@@ -468,6 +517,10 @@ class TestTheCardKeyboard:
             ("rejected", "available"),
             ("awaiting_approval", "removed"),
             ("posted", "removed"),
+            # A story given up ends `cancelled`, and its card keeps no keyboard
+            # while its item stays removed.
+            ("cancelled", "removed"),
+            ("rejected", "removed"),
         ],
     )
     def test_a_rejected_story_or_a_removed_item_carries_none(self, state, item_state):
@@ -693,9 +746,29 @@ class TestARendersAgainForAResend:
         )
 
     @pytest.mark.asyncio
+    async def test_a_story_a_route_parked_says_why_rather_than_refused(self):
+        """A route into review that refused nothing (here a spent job budget)
+        records its own reason, and the line opens it with "Why"."""
+        at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        spent = refusal_evidence.evidence("budget_spent", tries=5)
+        s = self._Session(
+            {
+                **self.LIVE,
+                "state": "review_required",
+                "source_provider": "instagram_past_posts",
+            },
+            settled=self._settled("review_required", None, at=at, refusal=spent),
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload["outcome_text"] == (
+            "👀 Needs review · 2026-09-12 09:02 America/New_York\nWhy: we hit a"
+            " fault on our side 5 times trying to post this story."
+        )
+
+    @pytest.mark.asyncio
     async def test_a_parked_story_with_no_refusal_keeps_its_plain_line(self):
-        """A story parked with nothing recorded about a refused fetch (a dead job,
-        a lost answer) says only which state it is in."""
+        """A story parked with nothing recorded (a refusal raised without
+        evidence) says only which state it is in."""
         at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
         s = self._Session(
             {
@@ -1153,7 +1226,10 @@ class TestTheSettledLineSaysWhyAStoryWasRefused:
     async def test_a_story_that_is_not_in_review_keeps_its_line(
         self, state, rule, line
     ):
-        assert await self._line(self._settlement(state, rule=rule)) == line
+        """Even with a reason still on its row: a retry's, or one kept after
+        "It posted"."""
+        settled = self._settlement(state, rule=rule, refusal=REFUSAL)
+        assert await self._line(settled) == line
 
 
 class TestWaitingLine:

@@ -16,7 +16,7 @@
     "runway_days": "candidates // daily_slots, whole days rounded down (content_runway.days_left); share 1 means the one source supplies the whole pool"
   },
   "about": "Hand-authored expectations fixed before the carousel-heavy fixture or harness is run. These are item counts derived from the position cycles, never the output of the suitability evaluator.",
-  "budget_note": "At indices 0 and 1 modulo 10 the post is a single image; the other eight are carousels. Carousel ordinal j has 2,3,5,10,20 slides at j modulo 5. Thus a 50-post block has 40 carousels, 320 slides and 10 singles: 330 items. The accepted image stays single. The final 2022 image replaces a 20-slide carousel, subtracting 19 items. Carousel ordinal 0 (recent index 2) is empty instead of two slides: subtract 2 items and add one unavailable post exclusion; represented=N-1. Ordinal 4 (recent index 6) has a twenty-first child beyond the one permitted page: 20 indexed slides and one truncation, with no follow-up read. Therefore items=6.6N-21 and slides=6.4N-22. For N=500,2000,10000 the old range is whole 450-post cycles (LCM 50 kinds/sizes, 9 attribution), giving not-detected:credited:unknown=6:2:1, then subtract 19 from not-detected. For N=100 the nine ten-post old blocks sum by attribution to 426/130/52 before replacing the final 20-slide carousel, hence 407/130/52. Recent weighted counts are 50/328/1318/6598. Every fourth carousel has video at position 1 and its distinct middle position; metadata candidacy is unaffected. All ceilings remain the original post-based ceilings.",
+  "budget_note": "At indices 0 and 1 modulo 10 the post is a single image; the other eight are carousels. Carousel ordinal j has 2,3,5,10,20 slides at j modulo 5. Thus a 50-post block has 40 carousels, 320 slides and 10 singles: 330 items. The accepted image stays single. The final 2022 image replaces a 20-slide carousel, subtracting 19 items. Carousel ordinal 0 (recent index 2) lists no slides instead of two: subtract 2 items. A read that lists no slides proves nothing, so the post lands as one not yet read: one validation_pending candidate and one more truncated carousel; represented=N-1. Ordinal 4 (recent index 6) has a twenty-first child beyond the one permitted page: 20 indexed slides and one truncation, with no follow-up read. Therefore items=6.6N-21 and slides=6.4N-22. For N=500,2000,10000 the old range is whole 450-post cycles (LCM 50 kinds/sizes, 9 attribution), giving not-detected:credited:unknown=6:2:1, then subtract 19 from not-detected. For N=100 the nine ten-post old blocks sum by attribution to 426/130/52 before replacing the final 20-slide carousel, hence 407/130/52. Recent weighted counts are 50/328/1318/6598. Every fourth carousel has video at position 1 and its distinct middle position; metadata candidacy is unaffected. All ceilings remain the original post-based ceilings.",
   "carousel": {
     "100": {
       "groups": {
@@ -34,7 +34,7 @@
         "too_recent": 50,
         "credited_excluded": 130,
         "attribution_unknown": 52,
-        "unavailable": 1
+        "validation_pending": 1
       },
       "oldest_observed_at": "2022-06-15T09:30:00+00:00",
       "destination": {
@@ -62,7 +62,7 @@
       },
       "items": 639,
       "slides": 618,
-      "carousel_children_truncated": 1,
+      "carousel_children_truncated": 2,
       "carousels": 79
     },
     "500": {
@@ -81,7 +81,7 @@
         "too_recent": 328,
         "credited_excluded": 660,
         "attribution_unknown": 330,
-        "unavailable": 1
+        "validation_pending": 1
       },
       "oldest_observed_at": "2022-06-15T09:30:00+00:00",
       "destination": {
@@ -109,7 +109,7 @@
       },
       "items": 3279,
       "slides": 3178,
-      "carousel_children_truncated": 1,
+      "carousel_children_truncated": 2,
       "carousels": 399
     },
     "2000": {
@@ -128,7 +128,7 @@
         "too_recent": 1318,
         "credited_excluded": 2640,
         "attribution_unknown": 1320,
-        "unavailable": 1
+        "validation_pending": 1
       },
       "oldest_observed_at": "2022-06-15T09:30:00+00:00",
       "destination": {
@@ -156,7 +156,7 @@
       },
       "items": 13179,
       "slides": 12778,
-      "carousel_children_truncated": 1,
+      "carousel_children_truncated": 2,
       "carousels": 1599
     },
     "10000": {
@@ -175,7 +175,7 @@
         "too_recent": 6598,
         "credited_excluded": 13200,
         "attribution_unknown": 6600,
-        "unavailable": 1
+        "validation_pending": 1
       },
       "oldest_observed_at": "2022-06-15T09:30:00+00:00",
       "destination": {
@@ -210,7 +210,7 @@
       },
       "items": 65979,
       "slides": 63978,
-      "carousel_children_truncated": 1,
+      "carousel_children_truncated": 2,
       "carousels": 7999
     }
   }

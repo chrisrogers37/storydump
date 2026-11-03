@@ -210,15 +210,15 @@ async def destinations(executor) -> dict[str, Any]:
     can only make it speak SOONER, never suppress it.
 
     **Deliberately not a `WHERE state = 'active'` shared with
-    `scheduling_health.scheduling_lag`**, which computes an identical
-    `accounts_active` on the neighbouring endpoint. They agree and the
-    duplication is real, but the two are different questions — that one asks
-    which cursors could stall, this one asks which destinations could receive —
-    and `ck_ig_accounts_state` carries four states, so they can legitimately
-    diverge (`reauth_required` cannot receive a post; its cursor still
-    advances). They stay separate, and the hazard is that they diverge
-    SILENTLY under the same key name: whoever changes one must change or fork
-    the other deliberately.
+    `scheduling_health.scheduling_lag`**, whose `accounts_active` on the
+    neighbouring endpoint is forked on purpose: it counts the clock's
+    population, an active account of an active, unpaused workspace, because it
+    asks which cursors could stall; this one asks which destinations exist to
+    receive. A paused workspace's account counts here and not there, and
+    `ck_ig_accounts_state` carries four states, so they diverge in other ways
+    too (`reauth_required` cannot receive a post; its cursor still advances).
+    They stay separate under the same key name, so whoever changes one must
+    change or fork the other deliberately.
     """
     row = (
         (

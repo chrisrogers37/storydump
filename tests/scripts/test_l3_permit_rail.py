@@ -15,6 +15,7 @@ here would make a permit failure and a policy failure indistinguishable.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import timedelta
 
@@ -1197,11 +1198,9 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         )
         assert any("stories" in e for e in trail), "the exhaustion tail must run"
 
-    def test_the_park_puts_the_review_on_the_card_with_the_three_buttons(self, ops_db):
-        """The workspace resolves its own review: the park restates the card
-        the approve tap already superseded — by ref — with the review line and
-        ✅ It posted · 🔁 Not there — post again · 🚫 Give up."""
-        intent, _ = self._ambiguous(ops_db)
+    def _seed_superseded_card(self, ops_db, intent):
+        """A chat holding the story's card, which the approve tap superseded:
+        the card the park restates, by its ref."""
         # `channel_bindings` is governance-audited: the trigger refuses an
         # actor-less write, so the seed names the migration actor.
         binding = _exec(
@@ -1221,10 +1220,10 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             " \"outcome_text\": \"✅ Approved by Ada · 12:00 UTC\"}', 'superseded', '88001')",
             (ops_db["ws"], binding, intent),
         )
-        outcome = self._reconcile(
-            ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
-        )
-        assert outcome == "review_required"
+        return binding
+
+    def _review_edit(self, ops_db, intent, binding):
+        """The one card edit the park queued on *binding* — its payload."""
         rows = _exec(
             ops_db,
             "SELECT payload FROM channel_outbox WHERE intent_id = %s AND binding_id = %s"
@@ -1233,13 +1232,69 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             fetch=True,
         )
         assert len(rows) == 1, "one edit per card ref"
-        payload = rows[0][0]
+        return rows[0][0]
+
+    def test_the_park_puts_the_review_on_the_card_with_the_three_buttons(self, ops_db):
+        """The workspace resolves its own review: the park restates the card
+        the approve tap already superseded — by ref — with the review line and
+        ✅ It posted · 🔁 Not there — post again · 🚫 Give up."""
+        intent, _ = self._ambiguous(ops_db)
+        binding = self._seed_superseded_card(ops_db, intent)
+        outcome = self._reconcile(
+            ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
+        )
+        assert outcome == "review_required"
+        payload = self._review_edit(ops_db, intent, binding)
         assert payload["supersedes_ref"] == "88001"
         assert "Needs review" in payload["outcome_text"]
         # The edit stores no keyboard: the sender renders the three
         # resolutions (and Configure) when it claims it, from the story's
         # state (#1477; `test_auto_approval_gate.py`).
         assert "reply_markup" not in payload
+
+    def test_the_park_says_why_on_the_card_and_keeps_the_trail(self, ops_db):
+        """A publish whose answer was lost and that the ladder never confirmed:
+        the park records that reason beside the trail, in place of an earlier
+        attempt's dead container, and the restated card says it, opened by
+        "Why"."""
+        from src.services.target import refusal_evidence
+
+        intent, _ = self._ambiguous(ops_db)
+        dead = refusal_evidence.evidence(
+            "container_dead",
+            status_code="ERROR",
+            status="Error: Media upload has failed with error code 2207026",
+        )
+        _exec(
+            ops_db,
+            "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+            (
+                json.dumps(
+                    {"v": 1, "error": {"type": "ContainerDead", "refusal": dead}}
+                ),
+                intent,
+            ),
+        )
+        binding = self._seed_superseded_card(ops_db, intent)
+        outcome = self._reconcile(
+            ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
+        )
+        assert outcome == "review_required"
+        last_error = _exec(
+            ops_db,
+            "SELECT last_error FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        refusal = last_error["error"]["refusal"]
+        assert refusal == refusal_evidence.evidence("publish_unconfirmed", checks=100)
+        assert any(
+            e.get("status_code") == "PUBLISHED" for e in last_error["evidence"]["trail"]
+        ), "the trail stays beside the reason"
+        line = self._review_edit(ops_db, intent, binding)["outcome_text"]
+        assert line.startswith("👀 Needs review")
+        assert line.endswith(f"\nWhy: {refusal_evidence.plain(refusal)}.")
+        assert "could not process" not in line and "Refused" not in line
 
 
 class TestTheGuardsAreLoadBearing:

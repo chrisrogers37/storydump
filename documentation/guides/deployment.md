@@ -187,7 +187,7 @@ curl https://your-app.up.railway.app/health
 # From a laptop, with a token (Settings › API tokens, then `storydump login`)
 storydump health            # the three health surfaces and the webhook, judged
 storydump webhook status    # the bot, the registration, the door
-storydump doctor            # this laptop: token, API, config, Railway, the ledger
+storydump doctor            # this laptop: token, API, config, Railway, the shared settings, the ledger
 ```
 
 ---

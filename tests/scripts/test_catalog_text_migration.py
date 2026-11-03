@@ -59,15 +59,19 @@ def test_catalog_refresh_is_wrapped_with_three_structural_postconditions():
 
 
 def test_replaced_functions_are_exact_schema_definitions():
-    """Every function 001 defines is the schema's text unless 003 replaced it
-    when it renamed what that text names; every function 003 or a later
-    migration defines is the schema's text unless a later migration defines it
-    again."""
+    """Every function a migration defines is the schema's text, unless a later
+    one redefined what that text names: 003 renamed the archive's to past
+    posts', 009 rewrote the reaper and the preparation door and added the
+    reaper's late door and the rule it shares with the cadence leg, and 007
+    added the matrix version to both suitability overloads. Every one 009
+    defines is the schema's text."""
     schema = _definitions(
         (REPO_ROOT / "src/models/target/ddl/04_functions.sql").read_text()
     )
     migration = _definitions((MIGRATIONS_DIR / "001_catalog_text.sql").read_text())
     rename = _definitions((MIGRATIONS_DIR / "003_instagram_past_posts.sql").read_text())
+    lane = _definitions((MIGRATIONS_DIR / "009_prepare_past_post_lane.sql").read_text())
+    relaned = {name for name, _ in lane}
     assert len(migration) >= 16
     assert len([name for name, _ in migration if name == "fn_clock_tick"]) == 2
     replaced = {
@@ -75,7 +79,7 @@ def test_replaced_functions_are_exact_schema_definitions():
         for name, text in migration
         if (name, text) not in schema
     }
-    assert replaced <= {name for name, _ in rename}
+    assert replaced <= {name for name, _ in rename} | relaned
     migrations = [m for m in discover_migrations(MIGRATIONS_DIR) if m.version >= 3]
     for index, current in enumerate(migrations):
         superseded = {
@@ -87,6 +91,13 @@ def test_replaced_functions_are_exact_schema_definitions():
             definition in schema or definition[0] in superseded
             for definition in _definitions(current.sql)
         ), current.version
+    assert relaned == {
+        "fn_reaper_sweep",
+        "fn_reaper_late_past_posts",
+        "fn_reaper_parks_late",
+        "fn_selected_preparation_due",
+    }
+    assert all(definition in schema for definition in lane)
 
 
 @pytest.fixture(scope="module")
@@ -208,7 +219,7 @@ def test_fresh_schema_adopts_two_versions_before_the_archive_drop(
 
 @pytest.mark.parametrize("guard", ["legacy_queue_item_id", "legacy_backfill"])
 def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
-    from scripts.schema_parity import schema_diff, schema_signature
+    from scripts.schema_parity import schema_signature
 
     with psycopg2.connect(base_world) as conn:
         chain = seed_workspace_chain(conn, "guard-example")
@@ -247,7 +258,9 @@ def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
         base_world,
         "SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.post_intents'::regclass AND attname = 'legacy_queue_item_id' AND NOT attisdropped",
     ) == (1,)
-    assert schema_diff(before_schema, schema_signature(base_world)) == []
+    # The count floors describe the schema code at its head, and this world is
+    # the pinned base's, so the rollback is judged on the catalog alone.
+    assert schema_signature(base_world)["catalog"] == before_schema["catalog"]
 
 
 def test_catalog_refresh_targets_public_with_an_alternate_search_path(base_world):
@@ -451,6 +464,8 @@ def test_the_rename_carries_stored_jobs_to_the_new_kinds(base_world):
         4,
         5,
         7,
+        8,
+        9,
     ]
 
     assert fetch_all(
@@ -476,6 +491,8 @@ def test_base_with_catalog_refresh_equals_current_code(
         4,
         5,
         7,
+        8,
+        9,
     ]
     lifecycle = _scratch(admin_conn, owner=owner_actor)
     database = next(lifecycle)

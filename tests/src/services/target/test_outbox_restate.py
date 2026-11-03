@@ -24,11 +24,14 @@ from src.services.target.outbox import OutboxPaced
 PARKED = "00000000-0000-4000-8000-0000000000aa"
 
 
-def _facts(state="awaiting_approval", *, item_state="available", cancel=False):
+def _facts(
+    state="awaiting_approval", *, item_state="available", cancel=False, step="none"
+):
     """A card's story as `prompts.card_facts` reads it."""
     return {
         "state": state,
         "cancel_requested": cancel,
+        "publish_step": step,
         "media_item_id": "m-1",
         "item_state": item_state,
         "auto_approve": False,
@@ -76,22 +79,42 @@ class TestTheSupersedePayload:
 
 
 class _Session:
-    """Records statements; the restate UPDATE returns the rows given."""
+    """Records statements and savepoints; the restate UPDATE returns the rows
+    given."""
 
     def __init__(self, rows):
         self.rows = rows
         self.sql = []
+        self.savepoints = []
+
+    @asynccontextmanager
+    async def begin_nested(self):
+        """A savepoint: released on a clean exit; on a raise it is rolled back
+        and the error let through."""
+        self.savepoints.append("savepoint")
+        try:
+            yield
+        except BaseException:
+            self.savepoints.append("rolled back")
+            raise
+        else:
+            self.savepoints.append("released")
 
     async def execute(self, statement, params=None):
         self.sql.append((str(statement), params))
         rows = self.rows
 
         class _R:
+            # A write that changed its row, as `_leave_sending`'s CAS reads.
+            rowcount = 1
+
             def fetchall(self_inner):
                 return rows
 
             def first(self_inner):
                 return rows[0] if rows else None
+
+            fetchone = first
 
         return _R()
 
@@ -142,6 +165,17 @@ class TestRestateEverywhere:
 
 CARD = {"v": 2, "text": "📸 card", "outcome_text": "👀 Needs review"}
 
+#: The `media` block of a card whose story has a picture
+#: (`prompt_rendering.render_card`).
+MEDIA = {
+    "workspace_id": "ws",
+    "source_id": "src",
+    "ref": "file-1",
+    "kind": "image",
+    "mime": "image/jpeg",
+    "file_name": "f.jpg",
+}
+
 
 class TestTheChatsWithoutACard:
     """`chats_without_card`: the push bindings holding no card of a story,
@@ -160,9 +194,10 @@ class TestTheChatsWithoutACard:
 
 
 class TestThePromptForAParkedStory:
-    """`prompts.prompt_review`, the park's courtesy (`tell_review`): the
-    review card goes to every chat that holds no card of the story, and is
-    rendered only when one does."""
+    """`prompts.prompt_review`, the park's courtesy: the review card goes to
+    every chat that holds no card of the story, and is rendered only when one
+    does. Every route into review gives it: the parks and the publish job's
+    poison through `tell_review`, the reconciler's park on its own."""
 
     @pytest.fixture
     def doors(self, monkeypatch):
@@ -188,7 +223,7 @@ class TestThePromptForAParkedStory:
 
     async def test_each_chat_without_a_card_gets_the_review_card(self, doors):
         prompts, seen = doors
-        n = await prompts.prompt_review(None, workspace_id="ws", intent_id="i")
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
         assert n == 2 and seen["rendered"] == 1, "rendered once"
         assert [
             (w["binding_id"], w["kind"], w["payload"]) for w in seen["written"]
@@ -201,7 +236,8 @@ class TestThePromptForAParkedStory:
     async def test_no_chat_without_a_card_renders_and_writes_nothing(self, doors):
         prompts, seen = doors
         seen["chats"] = []
-        assert await prompts.prompt_review(None, workspace_id="ws", intent_id="i") == 0
+        n = await prompts.prompt_review(_Session([]), workspace_id="ws", intent_id="i")
+        assert n == 0
         assert seen["rendered"] == 0 and seen["written"] == []
 
     async def test_the_park_gives_its_cards_after_the_restate_and_notice(
@@ -225,6 +261,144 @@ class TestThePromptForAParkedStory:
             _Session([]), workspace_id="ws", intent_id="i", tz="UTC", notice="n"
         )
         assert order == [("courtesy", "review_required"), ("cards", "i")]
+
+    async def test_the_publish_jobs_poison_gives_the_parked_story_the_same_courtesy(
+        self, monkeypatch
+    ):
+        """A job whose tries are spent parks its story through `tell_review`,
+        at the run's own time: the restate and notice, then the review card for
+        the chats that hold none, then the latch, all before the job is
+        finalized."""
+        from src.services.target import prompts, publish_pipeline
+
+        now = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        job = {
+            "id": "job-1",
+            "lease_token": "tok",
+            "workspace_id": "ws",
+            "attempts": 5,
+            "max_attempts": 5,
+        }
+        story = {
+            "id": "i1",
+            "eff_tz": "Europe/Paris",
+            "attempts_by_step": {"v": 1, "float_since": "2026-09-12T12:28:00+00:00"},
+        }
+        ctx = publish_pipeline._Ctx(job, story, [])
+        seen = []
+
+        class Session(_Session):
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                if "customer_notified" in sql:
+                    seen.append(("latch",))
+                elif "state = 'review_required'" in sql:
+                    seen.append(("flip",))
+                return await super().execute(statement, params)
+
+        @asynccontextmanager
+        async def leased_tx(uow, job):
+            yield Session([("i1",)])
+
+        async def restate_and_notify(session, **kw):
+            seen.append(("courtesy", kw["state"], kw["at"], kw["tz"], kw["notice"]))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def finalize_job(session, job_id, token, state):
+            seen.append(("finalize", state))
+
+        monkeypatch.setattr(publish_pipeline, "_leased_tx", leased_tx)
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", restate_and_notify)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(publish_pipeline, "finalize_job", finalize_job)
+
+        outcome = await publish_pipeline._retry_or_poison(
+            object(),
+            ctx,
+            [60],
+            lambda: now,
+            error={"v": 1, "error": {"type": "MetaRetryableError", "code": 4}},
+        )
+        assert outcome == publish_pipeline.POISONED
+        notice = publish_pipeline._poison_notice(ctx, now)
+        assert "after 34 minutes of trying" in notice, (
+            "the notice reads the run's clock"
+        )
+        assert seen == [
+            ("flip",),
+            ("courtesy", "review_required", now, "Europe/Paris", notice),
+            ("cards", "ws", "i1"),
+            ("latch",),
+            ("finalize", "review_required"),
+        ]
+
+    async def test_the_reconcilers_park_gives_its_cards_after_the_restate_and_no_notice(
+        self, monkeypatch
+    ):
+        """The reconciler's park restates every card of the story by ref, then
+        gives the review card to the chats that hold none, with ids as text.
+        It writes no notice: that comes after the notify window."""
+        from uuid import UUID
+
+        from src.services.target import prompts, reconciler
+
+        workspace, story = UUID(int=1), UUID(int=2)
+        seen = []
+
+        async def restate_everywhere(session, *, workspace_id, intent_id, outcome_text):
+            seen.append(("restate", workspace_id, intent_id))
+            return 1
+
+        async def prompt_review(session, *, workspace_id, intent_id):
+            seen.append(("cards", workspace_id, intent_id))
+            return 1
+
+        async def fanout_notification(session, **kw):
+            seen.append(("notice", kw))
+
+        monkeypatch.setattr(outbox, "restate_everywhere", restate_everywhere)
+        monkeypatch.setattr(prompts, "prompt_review", prompt_review)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+
+        conn = _Session([("UTC",)])
+        await reconciler._park_review_required(
+            conn, intent_id=story, workspace_id=workspace, checks=4
+        )
+        assert len(conn.sql) == 1, "the park's flip is the only write of its own"
+        flip, params = conn.sql[0]
+        assert "state = 'review_required'" in flip and params["intent"] == str(story)
+        assert seen == [
+            ("restate", str(workspace), str(story)),
+            ("cards", str(workspace), str(story)),
+        ]
+
+    async def test_a_review_card_that_cannot_be_written_leaves_the_park_standing(
+        self, monkeypatch, caplog
+    ):
+        """`prompt_review` writes in a savepoint of its own, for every park: a
+        card that cannot be written is rolled back there and logged with its
+        cause, and nothing is raised, so the caller's park stands."""
+        import logging
+
+        from src.services.target import prompts
+
+        async def chats_without_card(session, *, workspace_id, intent_id):
+            raise RuntimeError("card read failed")
+
+        monkeypatch.setattr(outbox, "chats_without_card", chats_without_card)
+        session = _Session([])
+        with caplog.at_level(logging.ERROR, logger=prompts.__name__):
+            written = await prompts.prompt_review(
+                session, workspace_id="ws", intent_id="i1"
+            )
+        assert written == 0
+        assert session.savepoints == ["savepoint", "rolled back"]
+        [record] = [r for r in caplog.records if r.name == prompts.__name__]
+        assert "i1" in record.getMessage() and record.exc_info is not None
 
 
 class TestTheReviewRestateSaysWhy:
@@ -415,6 +589,8 @@ class TestACardIsRenderedAgainAtClaimTime:
             "facts": {},
             "keyed": [],
             "paced": False,
+            "cards": {},
+            "asked": [],
         }
 
         async def recover_stranded(session, *, binding_id):
@@ -439,9 +615,14 @@ class TestACardIsRenderedAgainAtClaimTime:
             seen["keyed"].append(intent_id)
             return seen["facts"].get(intent_id)
 
+        async def _card_of(session, row, *, ref):
+            seen["asked"].append(ref)
+            return seen["cards"].get(ref)
+
         # The real `card_keyboard_for` and `keyboard_of` run over the story's
         # facts: what the sender sends is `card_keyboard`'s, per state.
         monkeypatch.setattr(prompts, "card_facts", card_facts)
+        monkeypatch.setattr(outbox, "_card_of", _card_of, raising=False)
         monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
         monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
         monkeypatch.setattr(outbox, "claim_next", claim_next)
@@ -615,6 +796,14 @@ class TestACardIsRenderedAgainAtClaimTime:
             (_facts("awaiting_approval", cancel=True), ["cfg"]),
             (_facts("rejected"), None),
             (_facts("posted", item_state="removed"), None),
+            # A removed item's story in review: the item cannot post again, so
+            # the edit leaves with Give up, and It posted above it once a
+            # publish call was made.
+            (_facts("review_required", item_state="removed"), ["giveup"]),
+            (
+                _facts("review_required", item_state="removed", step="publish_called"),
+                ["itposted", "giveup"],
+            ),
         ],
     )
     async def test_every_states_edit_leaves_with_its_storys_keyboard(
@@ -623,7 +812,9 @@ class TestACardIsRenderedAgainAtClaimTime:
         """#1477, through the real keyboard read: an edit claimed for an
         approved, posted or skipped story carries Configure alone, a parked
         one the three resolutions and Configure, a cancelling one Configure
-        alone; a rejected story's or a removed item's carries none."""
+        alone; a rejected story's or a removed item's carries none, except a
+        removed item's story in review, which carries Give up, under It posted
+        once a publish call was made."""
         claims["claimed"] = [
             _claimed(
                 "prompt_supersede",
@@ -650,6 +841,230 @@ class TestACardIsRenderedAgainAtClaimTime:
         row = await self._claim()
         assert row["payload"] == {"v": 1, "supersedes_ref": "77"}
         assert claims["keyed"] == [] and claims["left"] == []
+
+    async def test_a_cards_edit_carries_the_cards_media_while_it_is_unconfirmed(
+        self, claims
+    ):
+        """The card's record is the one truth about its media, as the story's
+        facts are about its keyboard: an edit of a card whose record holds a
+        `media` block and does not say `media` is given that block in memory
+        (the transport sends it as the media edit), with the card's `sent_as`.
+        Nothing of it is written to the edit row."""
+        claims["claimed"] = [
+            _claimed("prompt_supersede", "i", {"v": 1, "supersedes_ref": "77"}),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {
+            "77": {"text": "t", "caption": "c", "media": MEDIA, "sent_as": "text"}
+        }
+        row = await self._claim()
+        assert row["payload"]["media"] == MEDIA
+        assert row["payload"]["sent_as"] == "text"
+        assert claims["asked"] == ["77"]
+        assert claims["left"] == [], "an edit's record is not written back"
+
+    async def test_once_the_media_is_confirmed_the_edit_carries_none(self, claims):
+        """The card's record says `media` once an edit put the picture on the
+        message: the edits after it are caption edits, as the card says."""
+        claims["claimed"] = [
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {
+                    "v": 1,
+                    "supersedes_ref": "77",
+                    "outcome_text": "x",
+                    "sent_as": "text",
+                },
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {"77": {"text": "t", "media": MEDIA, "sent_as": "media"}}
+        row = await self._claim()
+        assert "media" not in row["payload"]
+        assert row["payload"]["sent_as"] == "media"
+
+    async def test_a_card_whose_media_was_dropped_gives_its_edit_none(self, claims):
+        """A card whose upload was given up (refused, unfetchable, or its
+        answer lost) is text in its record, with no block: whatever its edit
+        row carried gives way to the record, so no edit uploads again."""
+        claims["claimed"] = [
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {"v": 1, "supersedes_ref": "77", "sent_as": "media", "media": MEDIA},
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {"77": {"text": "t", "sent_as": "text"}}
+        row = await self._claim()
+        assert "media" not in row["payload"]
+        assert row["payload"]["sent_as"] == "text"
+
+    async def test_a_settled_cards_media_edit_carries_the_line_the_card_shows(
+        self, claims
+    ):
+        """The media edit rewrites the whole message, so it carries the line
+        the card shows: the edit's own when it has one, else the card's."""
+        claims["claimed"] = [
+            _claimed("prompt_supersede", "i", {"v": 1, "supersedes_ref": "77"}),
+            _claimed(
+                "prompt_supersede",
+                "i",
+                {"v": 1, "supersedes_ref": "77", "outcome_text": "✅ Posted"},
+            ),
+        ]
+        claims["facts"] = {"i": _facts()}
+        claims["cards"] = {
+            "77": {
+                "text": "t",
+                "media": MEDIA,
+                "sent_as": "text",
+                "outcome_text": "✅ Approved",
+            }
+        }
+        without = await self._claim()
+        assert without["payload"]["outcome_text"] == "✅ Approved"
+        own = await self._claim()
+        assert own["payload"]["outcome_text"] == "✅ Posted"
+
+    async def test_a_card_never_asks_for_its_own_record(self, claims):
+        """Only an edit of a card reads the card's record: the card itself has
+        none before it is sent, and an invitation's edit, which names no story,
+        is left as it was."""
+        claims["claimed"] = [
+            _claimed("approval_prompt", "live", {"v": 2, "text": "old"}),
+            _claimed("prompt_supersede", "live", {"v": 1, "supersedes_ref": "77"}),
+            _claimed("prompt_supersede", None, {"v": 1, "supersedes_ref": "78"}),
+        ]
+        claims["rendered"] = {"live": {"v": 2, "text": "new"}}
+        claims["facts"] = {"live": _facts()}
+        await self._claim()
+        assert claims["asked"] == []
+        await self._claim()
+        assert claims["asked"] == ["77"], "the edit of a card asks for it"
+        await self._claim()
+        assert claims["asked"] == ["77"], "an intent-less edit asks for nothing"
+
+
+class TestAConfirmedEditRecordsHowTheCardStands:
+    """`settle` of an edit of a card: the card's own record says how its
+    message now stands (`_record_cards_media`), in the write after the edit's
+    own. A confirmed edit says it by its receipt; an edit that carried the
+    card's media and lost its answer, or was refused, gives the upload up."""
+
+    EDIT = {
+        "id": "ob-9",
+        "kind": "prompt_supersede",
+        "intent_id": "i",
+        "workspace_id": "ws",
+        "binding_id": "b",
+        "attempts": 1,
+        "payload": {"v": 1, "supersedes_ref": "77", "sent_as": "text"},
+    }
+    CARRYING = {**EDIT, "payload": {**EDIT["payload"], "media": MEDIA}}
+    NOTIFICATION = {
+        "id": "ob-8",
+        "kind": "notification",
+        "intent_id": None,
+        "workspace_id": "ws",
+        "binding_id": "b",
+        "attempts": 1,
+        "payload": {"v": 1, "text": "n"},
+    }
+
+    @staticmethod
+    def _receipt(sent_as):
+        from src.channels.telegram_transport import SendReceipt
+
+        return SendReceipt("77", sent_as=sent_as)
+
+    @staticmethod
+    def _lost():
+        from src.channels.telegram_transport import TelegramSendError
+
+        return TelegramSendError("editMessageMedia: transport failure")
+
+    @staticmethod
+    def _refused():
+        from src.channels.telegram_transport import TelegramRefused
+
+        return TelegramRefused(
+            "editMessageText: 400 Bad Request: message to edit not found", code=400
+        )
+
+    @staticmethod
+    def _auth_dead():
+        from src.channels.telegram_transport import TelegramAuthDead
+
+        return TelegramAuthDead("editMessageMedia: 401 Unauthorized", code=401)
+
+    @staticmethod
+    def _recorded(session):
+        """The card's write, the session's last statement, whitespace folded."""
+        sql, params = session.sql[-1]
+        return " ".join(sql.split()), params
+
+    @pytest.mark.parametrize("how", ["media", "text"])
+    async def test_a_confirmed_edit_records_how_the_message_stands(self, how):
+        s = _Session([])
+        await outbox.settle(s, self.EDIT, receipt=self._receipt(how))
+        assert len(s.sql) == 2, "the edit's own write, then the card's"
+        sql, params = self._recorded(s)
+        assert sql.startswith("UPDATE channel_outbox SET payload = CASE")
+        assert "payload || jsonb_build_object('sent_as', 'media')" in sql
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert sql.endswith("kind = 'approval_prompt' AND external_message_ref = :ref")
+        assert params == {"how": how, "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_only_an_edit_that_says_how_the_message_stands_records_it(self):
+        said = _Session([])
+        await outbox.settle(said, self.EDIT, receipt=self._receipt("media"))
+        assert len(said.sql) == 2, "positive control: this one records"
+        for row, how in ((self.EDIT, "edit"), (self.NOTIFICATION, "text")):
+            s = _Session([])
+            await outbox.settle(s, row, receipt=self._receipt(how))
+            assert len(s.sql) == 1, (row["kind"], how)
+
+    async def test_a_lost_answer_on_the_media_edit_gives_the_upload_up(self):
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._lost())
+        assert result["state"] == "ambiguous"
+        assert len(s.sql) == 2, "the ambiguous CAS, then the card's record"
+        assert s.sql[0][1]["s"] == "ambiguous"
+        sql, params = self._recorded(s)
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert params == {"how": "text", "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_only_an_edit_that_carried_the_media_gives_it_up_on_a_lost_answer(
+        self,
+    ):
+        carrying = _Session([])
+        await outbox.settle(carrying, self.CARRYING, error=self._lost())
+        assert len(carrying.sql) == 2, "positive control: this one records"
+        for row in (self.EDIT, self.NOTIFICATION):
+            s = _Session([])
+            await outbox.settle(s, row, error=self._lost())
+            assert len(s.sql) == 1, row["kind"]
+
+    async def test_a_refused_media_edit_gives_the_upload_up(self):
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._refused())
+        assert result["state"] == "failed"
+        assert len(s.sql) == 2, "the failed CAS, then the card's record"
+        assert s.sql[0][1]["s"] == "failed"
+        sql, params = self._recorded(s)
+        assert "(payload - 'media') || jsonb_build_object('sent_as', 'text')" in sql
+        assert params == {"how": "text", "ws": "ws", "b": "b", "i": "i", "ref": "77"}
+
+    async def test_a_dead_credential_keeps_the_media_the_card_is_owed(self):
+        refused = _Session([])
+        await outbox.settle(refused, self.CARRYING, error=self._refused())
+        assert len(refused.sql) == 2, "positive control: a refusal records"
+        s = _Session([])
+        result = await outbox.settle(s, self.CARRYING, error=self._auth_dead())
+        assert result["state"] == "failed"
+        assert len(s.sql) == 1, "the failed CAS alone: the card keeps its block"
 
 
 @pytest.fixture(autouse=True)

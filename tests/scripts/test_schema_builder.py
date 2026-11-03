@@ -98,7 +98,7 @@ def test_build_targets_public_and_restores_the_callers_search_path(
                         " ON n.oid = p.pronamespace WHERE n.nspname = 'public'"
                     )
                 ).scalar_one()
-                == 85
+                == 87
             )
             assert (
                 conn.execute(
@@ -136,6 +136,8 @@ def test_build_targets_public_and_restores_the_callers_search_path(
             4,
             5,
             7,
+            8,
+            9,
         ]
         assert apply_pending(owner, MIGRATIONS_DIR).applied == []
         assert main(["init", "--database-url", owner]) == 0

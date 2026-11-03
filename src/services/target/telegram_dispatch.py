@@ -860,9 +860,9 @@ class TelegramDispatcher:
         capped (`TARGET_TAP_ADMISSION_PER_MINUTE`), like its other taps that
         write. The answer is (outcome, (text, alert), the keyboard the edit
         leaves). The toggle decides nothing about the card it was tapped on:
-        the flag acts the next time the item is served. A card whose
-        story carries no keyboard — a rejected story's, a removed item's —
-        heals on touch, its buttons gone."""
+        the flag acts the next time the item is served. A card that cannot
+        post again — a rejected story's, a removed item's — heals on touch to
+        its story's own keyboard (`keyboard_of`)."""
         await commands.authorize(
             conn, MENU_COMMAND, workspace_id=tenant.workspace_id, actor_user_id=user_id
         )
@@ -872,9 +872,9 @@ class TelegramDispatcher:
         if row is None:
             raise CommandRefused("not_found", f"intent {tap.intent_id}")
         card = prompts.keyboard_of(tap.intent_id, row)
-        if card is None:
+        if card is None or row["item_state"] == "removed":
             await self._spend(conn, tenant.workspace_id, window, limit)
-            return "menu", ANSWERS["locked"], _NO_KEYBOARD
+            return "menu", ANSWERS["locked"], card or _NO_KEYBOARD
         if tap.action in ("aa1", "aa0"):
             on = tap.action == "aa1"
             command = Command(

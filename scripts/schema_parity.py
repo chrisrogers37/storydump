@@ -34,7 +34,7 @@ FORMAT_VERSION = 2
 MEMBERSHIP_OPTIONS = ("admin_option", "inherit_option", "set_option")
 FLOORS = {
     "tables": 44,
-    "functions": 85,
+    "functions": 87,
     "policies": 115,
     "triggers": 53,
     "rls_tables": 44,
