@@ -639,6 +639,10 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
     #: The three past-posts lifecycle kinds are kept too: the sweep runs late
     #: like the nudge, and its two minting doors skip a key that still holds a
     #: ready job, so ending one past its deadline would only delay the next.
+    #: The media lane's `prepare_past_post`, which fetches a story's file, is
+    #: kept for the lifecycle kinds' reason: its minting door skips a story
+    #: whose job is still ready, so ending one past its deadline would only
+    #: delay the next.
     KEPT = frozenset(
         {
             "publish_pipeline",
@@ -651,6 +655,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "past_posts_lifecycle_sweep",
             "meta_deletion_cleanup",
             "reconcile_past_posts_accounts",
+            "prepare_past_post",
         }
     )
 

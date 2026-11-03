@@ -65,10 +65,10 @@ class Job(TargetBase):
             "'retention_sweep','reencrypt_credentials','send_email',"
             "'alert_stranded_sources','activation_nudge_sweep','convert_source_mix',"
             "'past_posts_lifecycle_sweep','meta_deletion_cleanup',"
-            "'reconcile_past_posts_accounts')",
+            "'reconcile_past_posts_accounts','prepare_past_post')",
             name="ck_jobs_kind",
         ),
-        CheckConstraint("lane IN ('interactive','bulk')", name="ck_jobs_lane"),
+        CheckConstraint("lane IN ('interactive','bulk','media')", name="ck_jobs_lane"),
         CheckConstraint(
             "state IN ('ready','leased','succeeded','failed','review_required',"
             "'cancelled')",
