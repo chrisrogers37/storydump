@@ -1717,9 +1717,9 @@ async def _record_cards_media(session, row: dict, *, sent_as: Optional[str]) -> 
     the edit's fallback then landed), could not be fetched, or the edit that
     carried the upload lost its answer (the upload is
     made once: whatever it left on the message, the card stays text in the
-    record and no later edit uploads again). An edit that finds the message is
-    not the type the record says (the transport's receipt then says `media` or
-    `text`) corrects the record the same way. A plain edit of the line or the
+    record and no later edit uploads again). An edit that finds a late upload
+    on a message the record calls text (the transport's receipt then says
+    `media`) corrects the record the same way. A plain edit of the line or the
     keyboard (`edit`) records nothing."""
     if sent_as not in ("media", "text"):
         return

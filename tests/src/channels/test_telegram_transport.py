@@ -628,7 +628,7 @@ class TestMediaCards:
             filename="card.jpg",
             mime="image/jpeg",
             caption="caption",
-            reply_markup=None,
+            reply_markup={"inline_keyboard": []},
         )
 
         policy = seen["policy"]
@@ -1397,29 +1397,6 @@ class TestTheSupersedeRowEditsTheCard:
         )
         assert retry["reply_markup"] == row["payload"]["reply_markup"]
         assert ref == "555" and ref.sent_as == "media"
-
-    async def test_a_caption_edit_refused_because_the_message_is_text_is_tried_as_text(
-        self,
-    ):
-        """The record says media but the message is text: Telegram says there
-        is no caption to edit, so the line is written as the text, once, and
-        the receipt says the message is text."""
-        calls = []
-        refusals = {
-            "editMessageCaption": (
-                400,
-                "Bad Request: there is no caption in the message to edit",
-            )
-        }
-        row = self._line_row("media")
-        ref = await _transport(_bot(calls, refusals)).for_chat("-100")(row)
-        assert _methods(calls) == ["editMessageCaption", "editMessageText"]
-        retry = json.loads(calls[1][1])
-        assert retry["text"] == (
-            "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Sam"
-        )
-        assert retry["reply_markup"] == row["payload"]["reply_markup"]
-        assert ref == "555" and ref.sent_as == "text"
 
     async def test_a_refused_retry_still_strips_the_keyboard(self, caplog):
         """The other edit is refused too (a caption that is too long, say): the

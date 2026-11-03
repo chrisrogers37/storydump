@@ -185,8 +185,6 @@ _NOT_MODIFIED = "message is not modified"
 _EDIT_GONE = "message to edit not found"
 #: Telegram's answer to `editMessageText` on a photo or video message.
 _NO_TEXT = "there is no text in the message to edit"
-#: Telegram's answer to `editMessageCaption` on a text message.
-_NO_CAPTION = "there is no caption in the message to edit"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
 
 
@@ -447,10 +445,9 @@ class TelegramTransport:
         the media is refused (a file Telegram will not take) or cannot be
         fetched, the card stays text: the line and the keyboard land without
         it, and the receipt says `text`, so the sender records that no media
-        is owed. When the message is not the type the record says (a text edit
-        refused because the message is a photo or video, or a caption edit
-        refused because it is text), the other edit is tried once and the
-        receipt says how the message stands, so the sender corrects the card's
+        is owed. When a text edit is refused because the message is a photo or
+        video (a lost upload that landed late), the caption edit is tried once
+        and the receipt says `media`, so the sender corrects the card's
         record. If a combined edit is refused, the keyboard still lands by the
         type-agnostic `editMessageReplyMarkup`. Only a definitive refusal
         takes a fallback, and not one saying the message is gone: a flood
@@ -510,15 +507,14 @@ class TelegramTransport:
                     # The message is gone (deleted from the chat): no edit can
                     # land on it, so the keyboard-only call is not made.
                     raise
-                if _NO_TEXT in str(exc) or _NO_CAPTION in str(exc):
-                    # Not the type the record says: the other edit, once.
-                    caption = _NO_TEXT in str(exc)
+                if _NO_TEXT in str(exc):
+                    # A lost upload landed late: the caption edit, once.
                     method, call = _line_edit(
-                        external_ref, message_id, body, markup, caption=caption
+                        external_ref, message_id, body, markup, caption=True
                     )
                     try:
                         await self._edit(method, call)
-                        return SendReceipt(ref, sent_as="media" if caption else "text")
+                        return SendReceipt(ref, sent_as="media")
                     except TelegramRefused as again:
                         if _EDIT_GONE in str(again):
                             raise
@@ -594,7 +590,7 @@ class TelegramTransport:
         filename: str,
         mime: Optional[str],
         caption: str,
-        reply_markup: Optional[dict],
+        reply_markup: dict,
     ) -> dict:
         """One `editMessageMedia`: the card's photo or video uploaded onto the
         message *message_id* names — a text message becomes the media — with
@@ -618,9 +614,7 @@ class TelegramTransport:
                     "caption": caption[:1024],
                 }
             ),
-            "reply_markup": json.dumps(
-                reply_markup if reply_markup is not None else _EMPTY_KEYBOARD
-            ),
+            "reply_markup": json.dumps(reply_markup),
         }
         files = {media_type: (filename, content, mime or "application/octet-stream")}
         policy = _replace(
