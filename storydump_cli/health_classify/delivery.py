@@ -3,7 +3,7 @@
 Pure functions over the endpoint's JSON: the last hour's sends got through,
 nothing was sent and nothing failed, some sends failed or are ambiguous, or
 the reading cannot be read. `classify` is the entry point, and the scheduling
-monitor and `storydump health` both judge delivery with it.
+monitor judges delivery with it.
 """
 
 from __future__ import annotations

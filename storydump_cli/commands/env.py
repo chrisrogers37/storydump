@@ -4,7 +4,7 @@ Each prints a REPORT and returns a VERDICT: the report is the envelope's
 ``data`` (so an agent reads the facts whatever the verdict), and the exit
 code says whether the facts are good — 0, or the code of what is wrong (4
 for the API or its deployment, 5 for Railway, 3 for the token, 64 for the
-local configuration). ``health`` reads the API's four health surfaces;
+local configuration). ``health`` reads the API's three health surfaces;
 ``deploys`` reads Railway through the one seam that checks the login and
 the linked project first; ``webhook`` registers
 and checks the bot's webhook; ``doctor`` runs every check a fresh
@@ -20,7 +20,7 @@ from typing import Any, Mapping, Optional
 
 import click
 
-from storydump_cli.health_classify import delivery, posting, scheduling
+from storydump_cli.health_classify import posting, scheduling
 from src.services.target.vocabulary import (
     EXIT_API_UNREACHABLE,
     EXIT_NOT_AUTHORIZED,
@@ -57,12 +57,10 @@ WELL_WORDS = frozenset({"ok", "healthy"})
 DEPLOYS_EVERY = 15.0
 _MIGRATION_FILE = re.compile(r"^(\d{3})_.*\.sql$")
 
-#: The three dependency surfaces are judged by the classifiers in
+#: The two dependency surfaces are judged by the classifiers in
 #: `storydump_cli/health_classify/` (stdlib-only, so the CLI stays a pure
-#: client): scheduling and posting are not well exactly when their verdict is
-#: one of these, and delivery whenever it is neither delivering nor quiet. A quiet estate
-#: with nothing to watch is not an outage, so `no-signal` and `never-posted`
-#: inside its grace are well.
+#: client): a surface is not well exactly when its verdict is one of these. A quiet estate with nothing to watch is not an
+#: outage, so `no-signal` and `never-posted` inside its grace are well.
 SCHEDULING_ALERTS = frozenset(
     {
         scheduling.STALLED,
@@ -82,20 +80,9 @@ POSTING_ALERTS = frozenset(
 # --- health -------------------------------------------------------------------
 
 
-#: Nothing failed: sends got through, or nothing was sent. Every other state,
-#: and any state the classifier gains, is not well.
-DELIVERY_WELL = frozenset({delivery.DELIVERING, delivery.QUIET})
-
-
-def _judged(well: bool, verdict: Any) -> tuple[bool, dict[str, str]]:
-    return well, {"state": verdict.state, "detail": verdict.detail}
-
-
 def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     """``(well, {"state", "detail"})`` for one surface: `/health` by its
-    `status`; scheduling, posting and delivery by their classifiers'
-    verdicts. Delivery is well while delivering or quiet: every other state is
-    one the scheduling monitor pages on."""
+    `status`; scheduling and posting by their classifiers' verdicts."""
     if not isinstance(payload, dict):
         return False, {"state": "unreachable", "detail": "no answer"}
     if "error" in payload:
@@ -109,7 +96,10 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
         verdict = scheduling.classify(
             200, body, threshold_s=scheduling.DEFAULT_STALL_THRESHOLD_S
         )
-        return _judged(verdict.state not in SCHEDULING_ALERTS, verdict)
+        return verdict.state not in SCHEDULING_ALERTS, {
+            "state": verdict.state,
+            "detail": verdict.detail,
+        }
     if name == "posting":
         verdict = posting.classify(
             200,
@@ -118,12 +108,11 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
             grace_s=posting.DEFAULT_GRACE_S,
             watched_s=0.0,
         )
-        return _judged(verdict.state not in POSTING_ALERTS, verdict)
-    if name == "delivery":
-        verdict = delivery.classify(200, body)
-        return _judged(verdict.state in DELIVERY_WELL, verdict)
-    # A surface fetched with no rule to judge it is never a clean bill of health.
-    return False, {"state": "unjudged", "detail": f"no rule judges {name}"}
+        return verdict.state not in POSTING_ALERTS, {
+            "state": verdict.state,
+            "detail": verdict.detail,
+        }
+    return True, {"state": "reported", "detail": ""}
 
 
 def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
@@ -223,12 +212,11 @@ def _refused(exc: ApiError, verb: str) -> dict[str, Any]:
 @global_options
 @click.pass_context
 def health(ctx: click.Context) -> int:
-    """The API's four health surfaces — liveness, scheduling, posting,
-    delivery — as the API reports them, judged by the CLI's classifiers
+    """The API's three health surfaces — liveness, scheduling, posting — as the
+    API reports them, judged by the CLI's classifiers
     (`storydump_cli/health_classify/`): not well on any of these — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
-    overdue past its grace, a send in the last hour that failed or is
-    ambiguous, or a surface unreachable — and the bot's webhook
+    overdue past its grace, or a surface unreachable — and the bot's webhook
     from the API's operating details: unregistered, or a backlog behind a
     delivery error. The details answer only a token whose person is in the
     API's `OPS_USER_IDS`; without them the webhook is `not_checked`, which is

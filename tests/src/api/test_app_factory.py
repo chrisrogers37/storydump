@@ -928,7 +928,7 @@ class TestPostingHealthIsATHIRDSurface:
         assert verdict.state == NEVER_POSTED_OVERDUE
 
     def test_the_railway_probe_still_opens_no_connection(self):
-        """Four health surfaces, and one reason for the split: liveness must
+        """Three health surfaces, and one reason for the split: liveness must
         not open a connection or a database blip takes the service down for a
         fault no restart repairs."""
         app = create_app(env={})
@@ -984,10 +984,10 @@ class TestDeliveryHealthIsAFOURTHSurface:
         assert resp.status_code == 200, resp.text
         return resp, doors
 
-    def test_the_real_body_is_what_the_shared_classifier_reads(self, engine, client):
+    def test_the_real_body_is_what_the_delivery_classifier_reads(self, engine, client):
         """The real route over the real `delivery_health`, read by the classifier
-        `storydump health` and the scheduling monitor share: the body carries
-        exactly its keys, and a failed send in it reads as failing."""
+        the scheduling monitor judges delivery with: the body carries exactly
+        its keys, and a failed send in it reads as failing."""
         from storydump_cli.health_classify import delivery as dm
 
         resp, _ = self._get(
