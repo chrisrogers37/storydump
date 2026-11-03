@@ -195,7 +195,7 @@ def generate(directory):
             "open-gop=1:keyint=30:min-keyint=30:scenecut=0:bframes=3",
         ),
     )
-    video("mpeg4.mp4", codec="mpeg4", state="unsupported", reason="video_codec")
+    video("mpeg4.mp4", codec="mpeg4")
     base = directory / "h264.mp4"
     for name, opts in (
         ("late-moov.mp4", ()),

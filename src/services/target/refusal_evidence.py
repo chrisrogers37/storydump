@@ -306,6 +306,10 @@ _CHECKS = {
     ),
 }
 
+#: Checks the validator no longer makes (`media_validation.UNSUPPORTED_CHECKS`
+#: holds the rest): a refusal stored under one still reads as its own sentence.
+LEGACY_CHECKS = frozenset({"video_codec"})
+
 #: Why a story went into review by a route that refused nothing, given what
 #: the route counted: its container never reported ready, Instagram's answer
 #: to preparing its media was lost, its job's budget is spent, its publish was

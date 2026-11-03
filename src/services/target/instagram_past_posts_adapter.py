@@ -1369,7 +1369,8 @@ class InstagramPastPostsAdapter:
                         # cannot replace a successful read.
                         pass
                 # This is a byte fetch, not video eligibility. Ingest activation
-                # must validate duration/codec before admitting video candidates.
+                # must validate the file (`media_validation`) before admitting
+                # video candidates.
                 return (
                     response.content,
                     f"Instagram {mid}.{'jpg' if kind == 'image' else 'mp4'}",
