@@ -52,39 +52,9 @@ def test_only_a_shared_setting_with_a_value_has_a_fingerprint():
 def test_a_value_is_compared_exactly_unless_its_services_read_it_otherwise():
     url = "https://app.example.com"
     assert fingerprint("WEB_APP_URL", url) != fingerprint("WEB_APP_URL", url + "/")
-    # the rotation list's entries are stripped and an empty one skipped, as
-    # the key ring reads them
-    assert fingerprint("ENCRYPTION_KEYS", "new,old") == fingerprint(
-        "ENCRYPTION_KEYS", " new , old ,"
-    )
     # a database URL that names no host is compared whole
     assert fingerprint("TARGET_DATABASE_URL", "not a url") != fingerprint(
         "TARGET_DATABASE_URL", "not a url either"
-    )
-
-
-CANONICAL = "0f0e0d0c-0b0a-4908-8706-050403020100"
-
-
-@pytest.mark.parametrize(
-    "spelling",
-    [
-        CANONICAL,
-        CANONICAL.upper(),
-        "{" + CANONICAL + "}",
-        CANONICAL.replace("-", ""),
-        "urn:uuid:" + CANONICAL,
-    ],
-    ids=["canonical", "upper", "braced", "hyphen-less", "urn"],
-)
-def test_an_operator_id_reads_as_the_apis_parser_reads_it(spelling):
-    """Every spelling the API admits is the canonical id there, and the same
-    fingerprint here."""
-    from src.config.settings import parse_ops_user_ids
-
-    assert parse_ops_user_ids(spelling) == (frozenset({CANONICAL}), [])
-    assert fingerprint("OPS_USER_IDS", spelling) == fingerprint(
-        "OPS_USER_IDS", CANONICAL
     )
 
 
@@ -127,17 +97,6 @@ def test_a_refused_read_keeps_nothing_the_binary_printed(run):
         Railway(run).variables("worker", fingerprint)
     assert caught.value.__context__ is None and caught.value.__cause__ is None
     assert "placeholder-leak" not in f"{caught.value.detail} {caught.value!r}"
-
-
-def test_an_entry_that_is_not_an_id_admits_nobody_and_is_left_out():
-    """As the API's parser refuses it, so does the comparison, and a value
-    with no id left reads as unset, as both services read it."""
-    from src.config.settings import parse_ops_user_ids
-
-    stray = f"{CANONICAL}, not-an-id"
-    assert parse_ops_user_ids(stray)[0] == frozenset({CANONICAL})
-    assert fingerprint("OPS_USER_IDS", stray) == fingerprint("OPS_USER_IDS", CANONICAL)
-    assert fingerprint("OPS_USER_IDS", "not-an-id, also-not") is None
 
 
 def test_the_seam_keeps_only_the_fingerprints_it_is_asked_for():

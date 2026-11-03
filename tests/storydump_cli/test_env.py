@@ -1342,42 +1342,6 @@ def test_doctor_names_the_settings_that_differ_and_prints_no_value(tmp_path):
     assert_names_only(human, *other.values())
 
 
-def test_the_operators_compare_as_a_set(tmp_path):
-    """Order, spacing and spelling say nothing: each id is read as the API
-    reads it."""
-    first = "11111111-1111-4111-8111-111111111111"
-    second = "33333333-3333-4333-8333-333333333333"
-    result, _ = settings_doctor(
-        tmp_path,
-        api={"OPS_USER_IDS": f"{first},{second}"},
-        worker={"OPS_USER_IDS": f" {{{second.upper()}}} , {first.replace('-', '')} "},
-    )
-    assert checks_of(one_envelope(result))["settings"]["state"] == "ok"
-
-
-@pytest.mark.parametrize(
-    "worker_keys, state",
-    [
-        ("placeholder-new-key, placeholder-old-key", "ok"),
-        ("placeholder-old-key,placeholder-new-key", "wrong"),
-        ("placeholder-new-key", "wrong"),
-    ],
-    ids=["same-ring", "other-order", "a-key-short"],
-)
-def test_the_rotation_list_compares_in_order(tmp_path, worker_keys, state):
-    """The first key encrypts and the rest only decrypt, so the same keys in
-    another order are another ring."""
-    result, _ = settings_doctor(
-        tmp_path,
-        api={"ENCRYPTION_KEYS": "placeholder-new-key,placeholder-old-key"},
-        worker={"ENCRYPTION_KEYS": worker_keys},
-    )
-    row = checks_of(one_envelope(result))["settings"]
-    assert row["state"] == state, row
-    if state == "wrong":
-        assert row["value"] == "differ: ENCRYPTION_KEYS"
-
-
 @pytest.mark.parametrize(
     "worker_url, state",
     [

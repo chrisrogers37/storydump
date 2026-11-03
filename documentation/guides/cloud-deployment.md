@@ -296,10 +296,9 @@ services must share: every row of *Both services* above, `OPS_USER_IDS`, and
 value to a digest as it reads it, and names a setting that differs or that
 one service holds alone; it prints no value and no digest
 (`storydump_cli/shared_settings.py`). `TARGET_DATABASE_URL` is each service's
-own login, so only its host, port and database name are compared;
-`OPS_USER_IDS` is compared as a set, and `ENCRYPTION_KEYS` as a list in order,
-because its first key is the one that encrypts. A difference shows when
-`doctor` runs; nothing watches for one.
+own login, so only its host, port and database name are compared; every other
+setting is compared exactly. A difference shows when `doctor` runs; nothing
+watches for one.
 
 ---
 

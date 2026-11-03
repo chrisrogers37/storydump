@@ -10,7 +10,7 @@ values are production's credentials.
 from __future__ import annotations
 
 import hashlib
-from typing import Callable, Mapping, Optional
+from typing import Mapping, Optional
 from urllib.parse import urlsplit
 
 from src.services.target.vocabulary import (
@@ -18,7 +18,6 @@ from src.services.target.vocabulary import (
     TELEGRAM_BOT_VAR,
     TELEGRAM_TOKEN_VAR,
 )
-from storydump_cli.commands import as_uuid
 
 #: Held by both services: one that a single service holds is missing, and one
 #: whose fingerprints differ is wrong.
@@ -50,26 +49,6 @@ FIX = (
 )
 
 
-def _entries(value: str) -> list[str]:
-    return [entry.strip() for entry in value.split(",") if entry.strip()]
-
-
-def _operators(value: str) -> Optional[str]:
-    """The ids the API's parser admits (`parse_ops_user_ids` in
-    `src/config/settings.py`, which this package may not import), as a set:
-    the order, the spacing and the spelling say nothing. An entry that is not
-    an id admits nobody, so it is left out, and a value with no id left reads
-    as unset, as both services read it."""
-    ids = sorted({uid for uid in map(as_uuid, _entries(value)) if uid})
-    return "\n".join(ids) if ids else None
-
-
-def _key_ring(value: str) -> str:
-    """A list: the first key encrypts and the rest only decrypt
-    (`src/utils/encryption.py`), so the order is part of the value."""
-    return "\n".join(_entries(value))
-
-
 def _points_at(url: str) -> str:
     """Where a database URL points: its host, port and database name. Each
     service logs in as its own role (the API as `svc_ingress`, the worker as
@@ -85,24 +64,15 @@ def _points_at(url: str) -> str:
     return f"{host}\n{port}\n{parts.path.lstrip('/')}"
 
 
-#: How a setting is read before it is compared, None where its services read
-#: it as unset; any other setting is compared exactly.
-READ_AS: Mapping[str, Callable[[str], Optional[str]]] = {
-    "OPS_USER_IDS": _operators,
-    "ENCRYPTION_KEYS": _key_ring,
-    DATABASE_URL_VAR: _points_at,
-}
-
-
 def fingerprint(name: str, value: str) -> Optional[str]:
-    """The SHA-256 digest of *value* as the services read the shared setting
-    *name*; None for a setting outside :data:`SHARED`, or one its services
-    read as unset: a blank value, or one whose :data:`READ_AS` reader answers
-    None."""
+    """The SHA-256 digest of *value* for the shared setting *name*: the
+    runtime database URL by where it points (:func:`_points_at`), every other
+    setting exactly. None for a setting outside :data:`SHARED`, or a blank
+    value, which its services read as unset."""
     if name not in SHARED or not value.strip():
         return None
-    text = READ_AS[name](value) if name in READ_AS else value
-    return None if text is None else hashlib.sha256(text.encode()).hexdigest()
+    text = _points_at(value) if name == DATABASE_URL_VAR else value
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _held_alone(
