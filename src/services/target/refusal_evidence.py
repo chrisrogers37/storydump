@@ -11,15 +11,22 @@ evidence never reaches a log line or a traceback. A dead container's evidence,
 a `container_dead` refusal, is written by the publish pipeline straight into
 the story's `last_error -> 'error' -> 'refusal'`.
 
+A route into review that refuses nothing records its own reason in the same
+place (`review_error`, one of `REVIEW_KINDS`), so a story's review card says
+why it went into review and never an earlier attempt's refusal. The card says
+such a reason as "Why", a refusal as "Refused" (`label`).
+
 Redacted where it is captured, never later:
 
 - the access token is never copied. A builder takes named values, never a
-  request, a response or their headers, and `scrub_text` removes the token and
-  any `access_token=` parameter from provider text;
+  request, a response or their headers, and `scrub_text` removes from provider
+  text the token as given or percent-encoded, the value of any token parameter
+  however it is written, and a bearer credential;
 - a signed media or CDN link keeps only its host and its expiry parameter
   (`oe`); its path, its signature and every other parameter are dropped. In
-  provider text, `scrub_text` says a link as its host alone and masks a
-  delivery signature (`s--…--`) that stands outside one;
+  provider text, `scrub_text` says a link as its host alone, with or without
+  its scheme, and masks a delivery signature (`s--…--`) that stands outside
+  one;
 - a Graph request keeps its path, never its query.
 
 Media bytes and raw tool output are never stored.
@@ -30,7 +37,7 @@ from __future__ import annotations
 import re
 from fractions import Fraction
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 
 VERSION = 1
 
@@ -39,7 +46,22 @@ TEXT_LIMIT = 500
 #: A short field: a type, a trace id, a content type, a media type.
 FIELD_LIMIT = 100
 
-_TOKEN_PARAM = re.compile(r"access_token=[^&\s]+", re.I)
+#: A token parameter's value, however the parameter is written: as a query
+#: parameter (`=`, percent-encoded or JSON-escaped), with spaces around its
+#: sign, or as a quoted key. The value ends at a separator, a quote or a
+#: masked link; a value that runs into a path (a link written up against it)
+#: runs on to the next space, so no part of that link is left behind.
+_TOKEN_VALUE = r"""(?:(?!%26|\\u0026)[^&\s"',;}<])"""
+_TOKEN_PARAM = re.compile(
+    r"""access_token(?P<sep>["']?\s*(?:=|:|%3D|\\u003d)\s*["']?)"""
+    rf"""(?:{_TOKEN_VALUE}*/\S*|{_TOKEN_VALUE}+)""",
+    re.I,
+)
+#: A bearer credential, as an Authorization header's text says it.
+_BEARER = re.compile(r"\b(?P<scheme>bearer\s+)[A-Za-z0-9._~+/-]{8,}=*", re.I)
+#: What can split a secret without being seen: NUL (jsonb refuses it too) and
+#: the zero-width characters.
+_INVISIBLE = re.compile("[\x00\u200b\u200c\u200d\u2060\ufeff]")
 #: A provider object id, as a message names it: masked in a chat line.
 _LONG_ID = re.compile(r"\d{15,}")
 #: How many measured values the generic sentence names, and how many items of
@@ -47,6 +69,10 @@ _LONG_ID = re.compile(r"\d{15,}")
 _SAID_VALUES = 6
 _SAID_ITEMS = 8
 _LINK = re.compile(r"https?://\S+", re.I)
+#: A link written without its scheme: a host name, then a path.
+_BARE_LINK = re.compile(
+    r"(?<![\w.@/-])(?://)?(?P<host>(?:[a-z0-9-]+\.)+[a-z]{2,})/\S*", re.I
+)
 #: A delivery signature standing outside a link: the signed delivery url it
 #: comes from does not expire.
 _SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
@@ -55,6 +81,25 @@ _SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
 def evidence(kind: str, **facts) -> dict:
     """One refusal's evidence: its kind and the facts in scope."""
     return {"v": VERSION, "kind": kind, **facts}
+
+
+def review_error(error_type: str, message: str, kind: str, **facts) -> dict:
+    """The `last_error -> 'error'` a route into review records when no
+    provider error says why: a type and a message for the operator, and the
+    reason, one of `REVIEW_KINDS`, as the refusal the review card reads."""
+    return {
+        "type": error_type,
+        "code": None,
+        "message": message,
+        "refusal": evidence(kind, **facts),
+    }
+
+
+def label(refusal) -> str:
+    """The word a reason line opens with: "Why" for a review kind, since
+    nothing refused the story, else "Refused"."""
+    kind = refusal.get("kind") if isinstance(refusal, dict) else None
+    return "Why" if isinstance(kind, str) and kind in REVIEW_KINDS else "Refused"
 
 
 def attach(exc: BaseException, facts: dict) -> BaseException:
@@ -91,25 +136,44 @@ def link_evidence(url) -> dict:
     }
 
 
+def _secret_forms(secret: str) -> list:
+    """*secret* as given and percent-encoded, in either letter case of its
+    escapes, longest first, so no form is masked in part by a shorter one."""
+    forms = {secret, quote(secret, safe=""), quote_plus(secret, safe="")}
+    forms |= {re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), f) for f in forms}
+    return sorted(forms, key=len, reverse=True)
+
+
+def _masked_link(host) -> str:
+    """How provider text says a link: its host alone."""
+    return f"<link {host or 'unknown'}>"
+
+
 def scrub_text(value, *, secrets=()) -> Optional[str]:
-    """Provider text without the token, any token parameter, any link or any
-    delivery signature.
+    """Provider text without the token, any token parameter, any bearer
+    credential, any link or any delivery signature.
 
     A link becomes `<link host>`, so the text keeps where it pointed and loses
     what would open it, and a signature outside a link becomes `s--<SIG>--`.
-    NUL is dropped first (jsonb refuses it), so none can split what the scrub
-    matches, and the result is bounded.
+    A link with its scheme is masked before parameters, so a parameter's value
+    written up against it cannot leave its tail behind; one without its scheme
+    after them, so its host cannot take in a value written up against it. NUL
+    and the zero-width characters are dropped first, so none can split what
+    the scrub matches, and the result is bounded.
     """
     if not isinstance(value, str):
         return None
-    text = value.replace("\x00", "")
+    text = _INVISIBLE.sub("", value)
     for secret in secrets:
         if secret:
-            text = text.replace(secret, "<token>")
-    text = _TOKEN_PARAM.sub("access_token=<token>", text)
-    text = _LINK.sub(
-        lambda m: f"<link {link_evidence(m.group(0))['host'] or 'unknown'}>", text
+            for form in _secret_forms(secret):
+                text = text.replace(form, "<token>")
+    text = _LINK.sub(lambda m: _masked_link(link_evidence(m.group(0))["host"]), text)
+    text = _TOKEN_PARAM.sub(lambda m: f"access_token{m.group('sep')}<token>", text)
+    text = _BARE_LINK.sub(
+        lambda m: _masked_link(m.group("host").lower()[:FIELD_LIMIT]), text
     )
+    text = _BEARER.sub(lambda m: f"{m.group('scheme')}<token>", text)
     text = _SIGNATURE.sub("s--<SIG>--", text)
     return text[:TEXT_LIMIT]
 
@@ -166,6 +230,11 @@ def _with_words(sentence: str, words) -> str:
 def _count(value) -> str:
     n = whole(value)
     return f"{n:,}" if n is not None else "?"
+
+
+def _counted(value, one: str, many: str) -> str:
+    """A count and its noun: *one* for one, *many* otherwise."""
+    return f"{_count(value)} {one if whole(value) == 1 else many}"
 
 
 def _seconds(value) -> str:
@@ -236,6 +305,34 @@ _CHECKS = {
         f" stories take up to {_count(m.get('limit'))}"
     ),
 }
+
+#: Why a story went into review by a route that refused nothing, given what
+#: the route counted: its container never reported ready, Instagram's answer
+#: to preparing its media was lost, its job's budget is spent, its publish was
+#: never confirmed, or it waited approved until the reaper parked it.
+_REVIEW = {
+    "container_pending": lambda r: (
+        "Instagram did not report this story's media as ready on the last of"
+        f" {_counted(r.get('tries'), 'try', 'tries')}"
+    ),
+    "answer_lost": lambda r: (
+        "Instagram's answer was lost on the last of"
+        f" {_counted(r.get('tries'), 'try', 'tries')} to prepare this story's media"
+    ),
+    "budget_spent": lambda r: (
+        f"we hit a fault on our side {_counted(r.get('tries'), 'time', 'times')}"
+        " trying to post this story"
+    ),
+    "publish_unconfirmed": lambda r: (
+        "Instagram's answer to the post was lost, and it could not be confirmed"
+        f" as posted ({_counted(r.get('checks'), 'check', 'checks')})"
+    ),
+    "approved_stale": lambda r: (
+        f"we lost track of this story for {_counted(r.get('days'), 'day', 'days')}"
+    ),
+}
+#: The kinds `review_error` records, which a card says as "Why" (`label`).
+REVIEW_KINDS = frozenset(_REVIEW)
 
 
 def plain(refusal) -> Optional[str]:
@@ -310,10 +407,15 @@ def _plain(refusal) -> Optional[str]:
             f" ({_count(refusal.get('length'))} bytes) instead of a story's image or video"
         )
     if kind == "slide_changed":
+        listed = _count(refusal.get("children"))
+        if refusal.get("complete") is True:
+            return (
+                f"Instagram's slide list was complete ({listed} listed) but did not"
+                " include the chosen slide"
+            )
         return (
-            "Instagram's slide list was incomplete"
-            f" ({_count(refusal.get('children'))} listed), so the chosen slide could"
-            " not be confirmed"
+            f"Instagram's slide list was incomplete ({listed} listed), so the chosen"
+            " slide could not be confirmed"
         )
     if kind == "container_dead":
         code = short(refusal.get("status_code"))
@@ -325,6 +427,8 @@ def _plain(refusal) -> Optional[str]:
         if code:
             what += f" ({code})"
         return _with_words(what, refusal.get("status"))
+    if isinstance(kind, str) and kind in _REVIEW:
+        return _REVIEW[kind](refusal)
     if kind == "local_validation":
         check = short(refusal.get("check"))
         measured = refusal.get("measured") or {}

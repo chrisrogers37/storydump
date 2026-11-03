@@ -183,11 +183,13 @@ class TestNothingToSeeIsNotTheSameAsNothingWrong:
 
     def test_but_it_does_not_stay_quiet_forever(self, notice):
         # "We have no monitoring coverage" must not fade from memory because it
-        # was said once a month ago.
+        # was said once a month ago. A week, as a number: quiet through the rest
+        # of the week, said again after it.
+        week = 7 * 24 * 3600
         state, _ = step(notice, {}, now=1000.0)
-        _, later = step(
-            notice, state, now=1000.0 + monitor.RENOTICE_NO_SIGNAL_AFTER_S + 1
-        )
+        _, soon = step(notice, state, now=1000.0 + week - 1)
+        assert soon is None
+        _, later = step(notice, state, now=1000.0 + week + 1)
         assert later is not None
 
     def test_the_day_it_gains_sight_it_says_so(self, notice):

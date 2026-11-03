@@ -693,9 +693,29 @@ class TestARendersAgainForAResend:
         )
 
     @pytest.mark.asyncio
+    async def test_a_story_a_route_parked_says_why_rather_than_refused(self):
+        """A route into review that refused nothing (here a spent job budget)
+        records its own reason, and the line opens it with "Why"."""
+        at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
+        spent = refusal_evidence.evidence("budget_spent", tries=5)
+        s = self._Session(
+            {
+                **self.LIVE,
+                "state": "review_required",
+                "source_provider": "instagram_past_posts",
+            },
+            settled=self._settled("review_required", None, at=at, refusal=spent),
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload["outcome_text"] == (
+            "👀 Needs review · 2026-09-12 09:02 America/New_York\nWhy: we hit a"
+            " fault on our side 5 times trying to post this story."
+        )
+
+    @pytest.mark.asyncio
     async def test_a_parked_story_with_no_refusal_keeps_its_plain_line(self):
-        """A story parked with nothing recorded about a refused fetch (a dead job,
-        a lost answer) says only which state it is in."""
+        """A story parked with nothing recorded (a refusal raised without
+        evidence) says only which state it is in."""
         at = datetime(2026, 9, 12, 13, 2, tzinfo=timezone.utc)
         s = self._Session(
             {
@@ -1153,7 +1173,10 @@ class TestTheSettledLineSaysWhyAStoryWasRefused:
     async def test_a_story_that_is_not_in_review_keeps_its_line(
         self, state, rule, line
     ):
-        assert await self._line(self._settlement(state, rule=rule)) == line
+        """Even with a reason still on its row: a retry's, or one kept after
+        "It posted"."""
+        settled = self._settlement(state, rule=rule, refusal=REFUSAL)
+        assert await self._line(settled) == line
 
 
 class TestWaitingLine:

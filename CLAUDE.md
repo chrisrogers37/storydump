@@ -97,9 +97,7 @@ command that shows its commits, and a pull request's title and body are yours
 to check.
 
 A commit message, and a pull request's title and body, describe the change:
-its behavior and its tests. They carry no attribution lines — no
-`Co-authored-by` trailer, no "Generated with" footer — and name no review,
-reviewer or tool behind the change.
+its behavior and its tests.
 
 ### Main is production
 
