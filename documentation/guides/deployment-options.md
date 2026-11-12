@@ -61,7 +61,7 @@ pull-request branches:
   dependencies)
 - **Changelog** -- the fragment rule in `changelog.d/README.md`
 
-All CI runs on **GitHub cloud runners** (`ubuntu-latest`) -- safe for public repos.
+All CI runs on **GitHub cloud runners** -- safe for public repos.
 
 ### Continuous Deployment (Automated via Railway)
 
@@ -95,7 +95,7 @@ the commit with `storydump deploys`.
 
 See: [GitHub's security warning](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners#self-hosted-runner-security)
 
-All CI runs on **GitHub cloud runners** (`ubuntu-latest`), which are safe for public repositories.
+All CI runs on **GitHub cloud runners**, which are safe for public repositories.
 
 ---
 
@@ -126,7 +126,7 @@ share it.
 
 ## Summary
 
-- **CI uses GitHub-hosted runners** (`ubuntu-latest`) on every pull request
+- **CI uses GitHub-hosted runners** on every pull request
   and every push to `main`
 - **CD runs automatically** via Railway GitHub integration on push to `main`
 - **No manual deployment required** -- merge to main and Railway handles the rest
