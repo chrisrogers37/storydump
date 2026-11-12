@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,7 @@ import {
   destinationName,
   destinationStateBadge,
 } from "@/lib/destination";
+import { onReturnAfterHandoff } from "@/lib/handoff-return";
 import type { Destination } from "@/lib/types";
 import { ConnectChoiceDialog, type ConnectChoiceState } from "./connect-choice-dialog";
 
@@ -68,13 +69,30 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
   );
   /** The button that asked for the dialog: focus goes back to it on close. */
   const opener = useRef<HTMLElement | null>(null);
+  /** Stops listening for the page to be shown again after a hand-off. */
+  const stopListening = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopListening.current?.(), []);
+
+  /**
+   * Leave for Instagram in this tab, the connect's controls still busy. If the
+   * page is shown again instead, they return to rest: the dialog, when it is
+   * open, on the person's choice.
+   */
+  function handOff(url: string) {
+    window.location.assign(url);
+    stopListening.current?.();
+    stopListening.current = onReturnAfterHandoff(() => {
+      setLoadingAction(null);
+      setChoice((open) => (open ? { ...open, busy: false } : open));
+    });
+  }
 
   /**
    * Start an Instagram Login grant: preview, then ask or start. Busy state
-   * rides the same `loadingAction` tag the other row controls use. The page
-   * leaves on success, so the tag is deliberately not cleared there — a
-   * re-enabled button on a page that is navigating away invites a second
-   * click that retires the first state.
+   * rides the same `loadingAction` tag the other row controls use. A start
+   * that hands off keeps it while the page navigates away — a re-enabled
+   * button on a page that is leaving invites a second click, which starts the
+   * connect again — and `handOff` clears it if the page is shown again.
    */
   async function startGrant(tag: string, target: ConnectTarget, button: HTMLElement) {
     opener.current = button;
@@ -82,7 +100,7 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
     setLoadingAction(tag);
     const step = await beginConnect(target);
     if (step.kind === "redirect") {
-      window.location.assign(step.url);
+      handOff(step.url);
       return;
     }
     setLoadingAction(null);
@@ -107,7 +125,7 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
     setChoice({ ...asked, busy: true });
     const step = await confirmConnect(asked.target, asked.preview, asked.useHistory);
     if (step.kind === "redirect") {
-      window.location.assign(step.url);
+      handOff(step.url);
       return;
     }
     if (step.kind === "ask") {
