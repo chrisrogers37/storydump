@@ -777,7 +777,7 @@ class TestDestinationConnect:
         resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
         assert resp.status_code == 200, resp.text
         url = resp.json()["authorization_url"]
-        assert url.startswith("https://api.instagram.com/oauth/authorize?")
+        assert url.startswith("https://api.instagram.com/oauth/authorize/?")
         assert "state=st4te" in url
         assert "instagram-login%2Fcallback" in url
         assert tenant == [
@@ -867,7 +867,7 @@ class TestWorkspaceConnect:
         resp = client.post(self.URL)
         assert resp.status_code == 200, resp.text
         url = resp.json()["authorization_url"]
-        assert url.startswith("https://api.instagram.com/oauth/authorize?")
+        assert url.startswith("https://api.instagram.com/oauth/authorize/?")
         assert "state=st4te" in url
         assert "instagram-login%2Fcallback" in url
         assert tenant == [

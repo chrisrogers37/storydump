@@ -63,6 +63,8 @@ from src.services.target.meta_adapter import (
     MetaLostResponse,
     MetaRetryableError,
     classify_error,
+    int_of,
+    subcode_of,
 )
 from src.services.target.oauth_states import RingUnavailable
 
@@ -227,8 +229,8 @@ class InstagramGraphAdapter:
             first = rows
         config = first.get("config") if isinstance(first.get("config"), dict) else {}
         return {
-            "quota_usage": _int(first.get("quota_usage")),
-            "quota_total": _int(config.get("quota_total")),
+            "quota_usage": int_of(first.get("quota_usage")),
+            "quota_total": int_of(config.get("quota_total")),
         }
 
     async def aclose(self) -> None:
@@ -306,8 +308,8 @@ class InstagramGraphAdapter:
             ) from None
         if isinstance(body, dict) and isinstance(body.get("error"), dict):
             error = body["error"]
-            code = _int(error.get("code"))
-            subcode = _subcode_of(error.get("error_subcode"))
+            code = int_of(error.get("code"))
+            subcode = subcode_of(error.get("error_subcode"))
             message = self._scrub(error.get("message"), token) or ""
             if response.status_code >= 500:
                 raise MetaLostResponse(
@@ -343,32 +345,13 @@ class InstagramGraphAdapter:
         the trace id Meta support asks for, the transient hint Meta
         documents, and the HTTP status."""
         return {
-            "error_subcode": _subcode_of(error.get("error_subcode")),
+            "error_subcode": subcode_of(error.get("error_subcode")),
             "error_user_title": cls._scrub(error.get("error_user_title"), token),
             "error_user_msg": cls._scrub(error.get("error_user_msg"), token),
             "fbtrace_id": cls._scrub(error.get("fbtrace_id"), token),
             "is_transient": bool(error.get("is_transient")),
             "http_status": int(http_status),
         }
-
-
-def _int(value: Any) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _subcode_of(value: Any) -> Optional[int]:
-    """Meta's `error_subcode`: an int, sometimes a decimal string; never a
-    bool read as 1."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdecimal():
-        return int(value.strip())
-    return None
 
 
 __all__ = [
