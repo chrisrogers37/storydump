@@ -97,7 +97,14 @@ jobs:
       MEDIA_PACKAGES: ffmpeg
     services:
       postgres:
-        image: postgres:17
+        # Every PostgreSQL service in this workflow runs 17.11, pinned by
+        # digest. On 17.12 columns carry a pg_attver option whose value
+        # differs between two databases built the same way, so the schema
+        # comparison reports them as different; 17.11 has no such option.
+        # On 17.12 the guarded upsert in bindings.bind also fails row-level
+        # security, and the calendar's month and day reads are planned
+        # without ix_intents_workspace_slot.
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -562,7 +569,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres-code:
-        image: postgres:17
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -575,7 +582,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-replay:
-        image: postgres:17
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
