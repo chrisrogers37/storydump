@@ -8,7 +8,7 @@ uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
 
 ## Overview
 
-The CI workflow defines jobs on GitHub-hosted runners (`ubuntu-latest`). It
+The CI workflow defines jobs on GitHub-hosted runners. It
 runs on every pull request and every push to `main`, and Railway waits for it
 before deploying.
 
@@ -154,7 +154,7 @@ storydump burst --since <the deploy's time> --watch
 
 ## CI and Deployment Credentials
 
-- The CI workflow uses **GitHub-hosted runners** (`ubuntu-latest`)
+- The CI workflow uses **GitHub-hosted runners**
 - No self-hosted runners are used (avoids exposing infrastructure to malicious PRs)
 - All production secrets are stored in **Railway environment variables** (never in code)
 - Deployment is performed by Railway's GitHub integration, not by a CI job: no workflow holds a deploy credential
