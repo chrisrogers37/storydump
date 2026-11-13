@@ -1,7 +1,7 @@
 {
   "railway_version": "4.30.3",
   "captured": "synthetic",
-  "how": "Synthetic data in the shape of `railway status --json` (whole) and `railway deployment list --service <svc> --environment production --json` (the two newest, whole objects): placeholder ids and example names.",
+  "how": "Synthetic data in the shape of `railway status --json` (whole), `railway deployment list --service <svc> --environment production --json` (the two newest, whole objects) and `railway variables --service <svc> --environment production --json` (a flat object of names and values): placeholder ids, example names and placeholder values.",
   "status": {
     "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     "name": "storydump",
@@ -903,5 +903,41 @@
         }
       }
     ]
+  },
+  "variables": {
+    "storydump": {
+      "DATABASE_URL": "postgresql://owner@ep-example.neon.example/storydump?sslmode=require",
+      "ENCRYPTION_KEY": "placeholder-fernet-key",
+      "GOOGLE_CLIENT_ID": "placeholder-client.apps.example.com",
+      "GOOGLE_CLIENT_SECRET": "placeholder-google-secret",
+      "OPS_USER_IDS": "11111111-1111-4111-8111-111111111111",
+      "TARGET_TELEGRAM_BOT_TOKEN": "placeholder-bot-token",
+      "TARGET_TELEGRAM_BOT_USERNAME": "example_app_bot",
+      "WEB_APP_URL": "https://app.example.com",
+      "RESEND_API_KEY": "placeholder-resend-key",
+      "EMAIL_FROM": "Example <hello@example.com>",
+      "TARGET_DATABASE_URL": "postgresql://svc_ingress@ep-example.neon.example/storydump?sslmode=require",
+      "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN": "placeholder-webhook-secret",
+      "OAUTH_REDIRECT_BASE_URL": "https://api.example.com",
+      "RAILWAY_ENVIRONMENT_NAME": "production",
+      "RAILWAY_SERVICE_NAME": "storydump"
+    },
+    "worker": {
+      "DATABASE_URL": "postgresql://owner@ep-example.neon.example/storydump?sslmode=require",
+      "ENCRYPTION_KEY": "placeholder-fernet-key",
+      "GOOGLE_CLIENT_ID": "placeholder-client.apps.example.com",
+      "GOOGLE_CLIENT_SECRET": "placeholder-google-secret",
+      "OPS_USER_IDS": "11111111-1111-4111-8111-111111111111",
+      "TARGET_TELEGRAM_BOT_TOKEN": "placeholder-bot-token",
+      "TARGET_TELEGRAM_BOT_USERNAME": "example_app_bot",
+      "WEB_APP_URL": "https://app.example.com",
+      "RESEND_API_KEY": "placeholder-resend-key",
+      "EMAIL_FROM": "Example <hello@example.com>",
+      "TARGET_DATABASE_URL": "postgresql://svc_worker@ep-example.neon.example/storydump?sslmode=require",
+      "CLOUDINARY_CLOUD_NAME": "placeholder-cloud",
+      "WORKER_LOG_LEVEL": "INFO",
+      "RAILWAY_ENVIRONMENT_NAME": "production",
+      "RAILWAY_SERVICE_NAME": "worker"
+    }
   }
 }

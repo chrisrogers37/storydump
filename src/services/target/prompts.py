@@ -295,12 +295,12 @@ def _settled_card(row, *, intent_id: str, line: str) -> dict:
 
 
 #: What a card's keyboard is made of, and what Configure acts on: the story's
-#: state and pending cancel, its item (the item's own state, its id and its
-#: Auto-approve flag), and whether the workspace posts through the API. Every
-#: table is bound on the workspace.
+#: state, pending cancel and publish step, its item (the item's own state, its
+#: id and its Auto-approve flag), and whether the workspace posts through the
+#: API. Every table is bound on the workspace.
 _CARD_FACTS = (
-    "SELECT i.state, i.cancel_requested, i.media_item_id, m.state AS item_state,"
-    "       m.auto_approve, w.api_publishing_enabled"
+    "SELECT i.state, i.cancel_requested, i.publish_step, i.media_item_id,"
+    "       m.state AS item_state, m.auto_approve, w.api_publishing_enabled"
     "  FROM post_intents i"
     "  JOIN media_items m ON m.workspace_id = :ws AND m.id = i.media_item_id"
     "  JOIN workspaces w ON w.id = :ws"

@@ -167,7 +167,7 @@ async def test_reaper_refuses_off_capture_and_never_rearms_it(
 ):
     with sync_conn.cursor() as cur:
         cur.execute(
-            "SELECT to_regprocedure('fn_reaper_sweep(integer,interval,interval,boolean)') IS NOT NULL"
+            "SELECT to_regprocedure('fn_reaper_sweep(integer,interval,interval,boolean,boolean,interval)') IS NOT NULL"
         )
         assert cur.fetchone()[0], "source-aware reaper missing"
     src = await admission.ready(past_posts_engine, origin)

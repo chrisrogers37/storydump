@@ -119,8 +119,15 @@ names.
 6. **The video derivation Meta receives.** Meta never fetches a video's source file: it
    fetches the transit store's story derivation, delivered as MP4 in the story frame.
    So the validator judges a past-posts video only on what the derivation keeps from it
-   (its size, a well-formed self-contained container, a stream `ffprobe` can open, its
-   duration and its frame rate). The transformation trims the derivation to 60 seconds
+   (its size against what the transit store takes, a well-formed self-contained
+   container, its video stream, its duration, which is the container's or
+   its longest stream's, and its frame rate). A container the walker cannot read
+   whole, a stream `ffprobe` does not decode (`closed_decoders` names the decoders it
+   declined, as it names them), a file with more streams than the probe opens (16, by
+   the walker's count of tracks or at the probe's own stream bound, where an attached
+   picture is one more) and a duration nothing states are left to the derivation and
+   recorded, never left pending. The
+   transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit-rate cap (13 Mbit/s), from the
    validation matrix (`media_validation.story_video_encoding`); its container layout is
@@ -313,7 +320,7 @@ that hold no unresolved upload.
 - **Likes and comments** can be unavailable. Missing values do not mean zero.
 - **Videos.** A candidate video is checked when its story is prepared: a video at least
   3 seconds long, at 23 to 60 frames a second where its file states a rate, in a
-  well-formed MP4 or MOV that `ffprobe` can open, is `supported`, and one longer than
+  well-formed MP4 or MOV that `ffprobe` can read, is `supported`, and one longer than
   60 seconds is trimmed to 60 by its derivation. Meta receives the
   transit store's derivation of it, never the file itself, so the file's edit lists,
   `moov` position, codec settings and audio settings are not judged.
@@ -370,7 +377,15 @@ link, generation and revision, and its validation evidence.
 **Coverage rules for a walk:**
 - A children response with more pages keeps its returned slides, records incomplete
   coverage, and makes no second request.
-- Only a complete response can retire a missing slide.
+- At sync, only a complete response that lists slides can retire a missing slide,
+  and only on the second such response that lacks it. The first one keeps the slide
+  out of the draw (its item `missing`, its asset `unlisted`), and a later response
+  that lists it brings it back. A response that lists no slides proves nothing. A
+  slide excluded as unsupported, never drawn, retires on the first.
+- No response retires a slide a live story holds: the story's own fetch judges it,
+  by its own rule (below). The exception is a source that takes only each post's
+  first slide. A kept slide would no longer be first, so its story could never
+  fetch it, and the response holds it out like any other.
 - A listing capped or windowed this way never proves a post was deleted
   (`checkpoint_whole` is false).
 
@@ -379,13 +394,22 @@ link, generation and revision, and its validation evidence.
 - **A selected item.** Its bytes are read twice: to prepare its approval card, and
   again for publishing transit. Each read first makes a fresh Graph lookup, and retries
   once if the CDN link proves expired.
+  - The card's read runs in the story's own `prepare_past_post` job, on the worker's
+    `media` lane, never in the prompt sweep. A refusal that proves nothing is tried
+    again after a wait that doubles from 30 s to 15 min. The story parks for review
+    with its evidence on a proven refusal, on its eighth try, or when a download could
+    no longer finish within an hour of its slot.
   - The CDN request never carries the Instagram token. It goes only to
     `*.cdninstagram.com` or `*.fbcdn.net`, over HTTPS.
   - The real validator judges the bytes before a card or any publishing effect.
-  - A carousel selection reads the parent and its children once, then finds the
-    captured slide by id. A slide missing from a complete response goes to review as
-    unavailable. A truncated response is retryable, and never substitutes another
-    slide.
+  - A carousel selection follows the children's pages, with the same fields and
+    limit, until the captured slide is listed or the list ends, up to 20 slides, and
+    finds the slide by id. A slide missing from a complete read is read again: the
+    parent and its children, a second time. It is retired only when both reads are
+    complete, list the same slides, hold at least one slide and fewer than the
+    indexed count, and the parent still answers. Anything else, a truncated response
+    included, is a change, tried again on the job's waits, and it never substitutes
+    another slide.
 - **A preview** is its own bound: at most two Graph lookups and one CDN download of at
   most 2 MiB, none of them retried. A video's preview is its Graph `thumbnail_url`
   image, never the video file.

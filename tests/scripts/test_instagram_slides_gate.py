@@ -310,13 +310,21 @@ async def test_ten_slides_reorder_truncation_and_removal_keep_independent_histor
             status["carousel_children_truncated"],
         ) == (1, 10, 10, 1)
 
-    complete = await obs.observe(
-        past_posts_engine,
-        origin,
-        source,
-        carousel(ids=(109, 108, 107, 106, 104, 103, 102, 101, 100)),
-    )
+    lacking = carousel(ids=(109, 108, 107, 106, 104, 103, 102, 101, 100))
+    complete = await obs.observe(past_posts_engine, origin, source, lacking)
     assert complete.observation_revision == 4
+    # One complete read that lacks a slide only holds it out of the draw.
+    held_out = await assets(past_posts_engine, origin)
+    assert len(held_out) == 10
+    out = next(row for row in held_out if row["asset_media_id"] == "105")
+    assert (
+        out["position"],
+        out["availability"],
+        out["exclusion_reason"],
+        out["state"],
+    ) == (10, "unavailable", "unlisted", "missing")
+    again = await obs.observe(past_posts_engine, origin, source, lacking)
+    assert again.observation_revision == 5
     after_removal = await assets(past_posts_engine, origin)
     assert len(after_removal) == 9
     assert {row["asset_media_id"]: row["media_item_id"] for row in after_removal} == {
@@ -340,7 +348,7 @@ async def test_ten_slides_reorder_truncation_and_removal_keep_independent_histor
             "SELECT observation_revision FROM instagram_item_tombstones WHERE media_item_id=:item",
             item=ids["105"],
         )
-        assert tomb["observation_revision"] >= 4
+        assert tomb["observation_revision"] >= 5
 
 
 async def test_cross_origin_slide_conflict_excludes_only_the_conflicting_asset(
@@ -446,6 +454,7 @@ async def test_terminal_parent_read_retires_every_known_slide_and_keeps_empty_po
     capture = SimpleNamespace(
         workspace_id=str(origin["ws"]), source_id=source["source_id"]
     )
+    removed = {}
     for parent in ("900", "901"):
         async with obs.uow(past_posts_engine, origin) as conn:
             index = await obs.row(
@@ -456,9 +465,11 @@ async def test_terminal_parent_read_retires_every_known_slide_and_keeps_empty_po
             candidate = instagram_sync._ParentCapture(
                 parent, source["generation_id"], index["observation_revision"]
             )
-            assert await instagram_sync._capture_helper_terminal(
+            removed[parent] = await instagram_sync._capture_helper_terminal(
                 conn, capture, candidate
             )
+    # Each post is retired; the empty one had no slide item to remove.
+    assert removed == {"900": 10, "901": 0}
     current = await assets(past_posts_engine, origin)
     assert len(current) == 10
     assert all(

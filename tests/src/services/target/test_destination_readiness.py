@@ -432,8 +432,8 @@ class TestGuidance:
 def test_the_policy_reasons_are_spelled_as_the_suitability_relation_returns_them():
     # The remedy keys on these strings, so a respelling in the database would
     # silently stop naming `review_policy`. Read them back from the body that
-    # evaluates them: the 9-parameter `fn_source_asset_suitability`, whose rows
-    # the 8-parameter overload returns.
-    body = function_body("fn_source_asset_suitability", arity=9)
+    # evaluates them: the 10-parameter `fn_source_asset_suitability`, whose rows
+    # the 9-parameter overload returns.
+    body = function_body("fn_source_asset_suitability", arity=10)
     for reason in POLICY_EXCLUSIONS:
         assert f"THEN '{reason}'" in body, reason

@@ -158,7 +158,8 @@ Each layer is isolated. Do not violate the boundaries:
   (below).
 - **Worker** (`src/worker.py`, the composition root `src/main.py` dispatches
   to) → runs the same services as jobs: the elected clock (`scheduler.py`),
-  the two claim lanes `interactive` and `bulk` over the kind→executor registry
+  the three claim lanes (`interactive` 2, `bulk` 2, `media` 1 tasks; `media`
+  prepares past-posts files) over the kind→executor registry
   (`work_loop.py`, `jobs.py`), the publish pipeline (`publish_pipeline.py`)
   and the outbox sender (`outbox.py`). A kind whose seam the deployment lacks
   is parked by name, never run against a fake.
@@ -364,8 +365,12 @@ client, never a database connection. Install it with
    · `storydump webhook status|register|deregister` (the bot's Telegram
    webhook, the deployment's variables read from this shell, no secret ever
    printed; exit 4 when a check fails) · `storydump doctor` (the token, the
-   API, the token store, the config, Railway, the migration ledger against
-   this checkout — each ok, wrong, missing or skipped with a one-line fix).
+   API, the token store, the config, Railway, the settings the API and the
+   worker must share, the migration ledger against this checkout — each ok,
+   wrong, missing or skipped with a one-line fix; the settings are read
+   through your own `railway` login and compared by a digest of each value,
+   and a setting that differs, or that one service lacks, is named, never its
+   value).
 
 `storydump --help` is the authoritative list. A new verb is classified for the
 safety block above before it ships: `tests/test_agent_docs.py` pins the names
@@ -415,7 +420,7 @@ DB_HOST=127.0.0.1 DB_PORT=65499 pytest --no-cov tests/src/services/target/
 The `Procfile` names the two deployed processes; both run the one tier.
 
 - **Worker:** `python -m src.main` — see the safety rules. `src/main.py` only
-  dispatches to `src.worker.main`, which elects the clock, claims jobs on two
+  dispatches to `src.worker.main`, which elects the clock, claims jobs on three
   lanes, runs the publish pipeline and sends the Telegram cards. It reads
   `TARGET_DATABASE_URL` from the process environment and exits 2 without it,
   or when it names a pooled host, no host, or cannot be read

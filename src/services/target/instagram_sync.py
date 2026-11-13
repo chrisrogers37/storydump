@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 from datetime import datetime
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ from src.services.target.media_adapters import (
     MEDIA_FAILURES,
 )
 from src.services.target.unit_of_work import unit_of_work
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -685,7 +688,9 @@ class _ParentCapture:
 
 
 async def _capture_helper_terminal(conn, capture, candidate):
-    """One terminal parent answer retires all known slide items, atomically."""
+    """A read of the post Instagram refused for good retires all its known
+    slide items, atomically. The number of items it removed, or None when the
+    index moved meanwhile."""
     params = dict(
         ws=capture.workspace_id,
         sid=capture.source_id,
@@ -703,8 +708,8 @@ async def _capture_helper_terminal(conn, capture, candidate):
         params,
     )
     if moved.rowcount != 1:
-        return False
-    await conn.execute(
+        return None
+    removed = await conn.execute(
         text(
             "UPDATE media_items m SET state='removed' FROM instagram_media_assets a "
             "WHERE a.workspace_id=:ws AND a.source_id=:sid AND a.parent_media_id=:parent "
@@ -726,7 +731,7 @@ async def _capture_helper_terminal(conn, capture, candidate):
         ),
         params,
     )
-    return True
+    return removed.rowcount
 
 
 async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
@@ -742,8 +747,10 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
             return _attempt_result(
                 "dropped", lane, job=job, page=page, drop_reason="checkpoint_changed"
             )
+        retired_posts, told = [], []
         for candidate in failed:
-            if not await _capture_helper_terminal(conn, capture, candidate):
+            removed = await _capture_helper_terminal(conn, capture, candidate)
+            if removed is None:
                 await conn.rollback()
                 return _attempt_result(
                     "dropped",
@@ -752,6 +759,7 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
                     page=page,
                     drop_reason="helper_capture_changed",
                 )
+            retired_posts.append((candidate.parent_media_id, removed))
         # A parent the turn could not read waits for the next restart; one it did
         # not reach stays queued.
         for parent in page.failed:
@@ -781,6 +789,8 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
                     "source_capture_mismatch", capture.source_id
                 )
             committed += 1
+            if landed.kept or landed.unlisted or landed.retired:
+                told.append((observation, landed))
             parent = observation.parent_media_id
             if parent in envelope["deferred_helpers"]:
                 envelope["deferred_helpers"].remove(parent)
@@ -860,6 +870,24 @@ async def _land(engine, job, start, ports, *, page, failed=(), fault=None):
         await _fault(fault, "continuation")
         await _fault(fault, "before_commit")
         await _guard(conn, capture, job, ports)
+    # Told once the turn has committed, so no line names a change it rolled back.
+    for parent, removed in retired_posts:
+        logger.warning(
+            "instagram sync: post %s retired: Instagram refused a read of it for"
+            " good; %d slide item(s) removed",
+            parent,
+            removed,
+        )
+    for observation, landed in told:
+        logger.warning(
+            "instagram sync: post %s, a complete read of %d slide(s): kept %s for"
+            " the stories that hold them, held %s out of the draw, retired %s",
+            observation.parent_media_id,
+            len(observation.assets),
+            list(landed.kept),
+            list(landed.unlisted),
+            list(landed.retired),
+        )
     return _attempt_result("committed", lane, job=job, page=page, committed=committed)
 
 
