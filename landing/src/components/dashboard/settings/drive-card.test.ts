@@ -9,6 +9,8 @@ vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
   useState: (initial: unknown) => [initial, vi.fn()],
   useId: () => "drive-hint",
+  useRef: (initial: unknown) => ({ current: initial }),
+  useEffect: () => {},
 }));
 
 function* walk(node: unknown): Generator<ReactElement> {

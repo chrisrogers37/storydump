@@ -54,6 +54,32 @@ class TestClassification:
             await cl.ig_refresh("tok-SECRET")
         assert exc_info.value.status_code == status
 
+    @pytest.mark.asyncio
+    async def test_a_rejection_carries_metas_four_fields_and_nothing_else(
+        self, monkeypatch, caplog
+    ):
+        """What the "definitively rejected" line prints: Meta's code, subcode,
+        type and trace id, and never the token or Meta's text."""
+        caplog.set_level("DEBUG")
+        error = {
+            "message": "message-text-SENTINEL tok-SENTINEL",
+            "type": "OAuthException",
+            "code": 190,
+            "error_subcode": 460,
+            "fbtrace_id": "AbC123xyz",
+        }
+        _door_with(monkeypatch, _Resp(400, {"error": error}))
+        with pytest.raises(cl.RefreshRejected) as exc_info:
+            await cl.ig_refresh("tok-SENTINEL")
+        rejected = exc_info.value
+        assert rejected.meta_error == (
+            "Meta error code=190 subcode=460 type=OAuthException fbtrace_id=AbC123xyz"
+        )
+        said = [str(rejected), repr(rejected), rejected.meta_error]
+        said += [record.getMessage() for record in caplog.records]
+        for sentinel in ("tok-SENTINEL", "message-text-SENTINEL"):
+            assert not [line for line in said if sentinel in line]
+
     @pytest.mark.parametrize("status", [429, 500, 502, 503])
     @pytest.mark.asyncio
     async def test_faults_are_transient(self, monkeypatch, status):

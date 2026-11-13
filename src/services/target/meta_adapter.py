@@ -14,6 +14,12 @@ what the worker's composition root wires** (`worker.py::_meta_from_env`),
 which is exactly what the seam was built for: the pipeline routes on these
 error types and never learns which adapter produced them.
 
+It also holds the one reading of Meta's error object: its numbers
+(:func:`int_of`, :func:`subcode_of`), which the real adapter routes on, and
+the four fields a refused Instagram Login call's log line names
+(:func:`error_fields`), for the connect leg (`ig_login_oauth`) and the refresh
+(`credential_lifecycle`).
+
 ## The taxonomy IS the routing table
 
 The pipeline never parses provider error dicts. The adapter raises typed
@@ -52,9 +58,10 @@ below — on evidence from Meta's primary docs, not from a single incident.
 from __future__ import annotations
 
 import itertools
-from typing import Optional
+from typing import Any, Optional
 
 from src.exceptions.base import StorydumpError
+from src.services.target import refusal_evidence
 
 #: Meta's publish-cap error code (verified against primary docs).
 CAP_ERROR_CODE = 9
@@ -120,6 +127,56 @@ def classify_error(code: int) -> type:
     if code in TERMINAL_CODES:
         return MetaTerminalError
     return MetaRetryableError
+
+
+def int_of(value: Any) -> int:
+    """A number Meta answers with, as an int: 0 when it is absent or not one."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def subcode_of(value: Any) -> Optional[int]:
+    """Meta's `error_subcode`: an int, sometimes a decimal string; never a
+    bool read as 1."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return None
+
+
+#: What `error_fields` says of an answer that names none of the four.
+ERROR_FIELDS_UNREAD = "Meta's error fields could not be read"
+
+
+def error_fields(response, *, secrets=()) -> str:
+    """Meta's error code, subcode, type and trace id from a refused answer's
+    JSON body, as text for a log line, read as the publish adapter reads them:
+    the numbers by `int_of` and `subcode_of`, the two text fields through
+    `refusal_evidence.scrub_text` with *secrets* (what the request carried).
+    Nothing else in the body is read, so its message, a token, a code or
+    anything a person entered never reaches the line. A body that is not
+    JSON, or holds no `error` object naming any of the four, gets
+    `ERROR_FIELDS_UNREAD`."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ERROR_FIELDS_UNREAD
+    error = body.get("error") if isinstance(body, dict) else None
+    named = ("code", "error_subcode", "type", "fbtrace_id")
+    if not isinstance(error, dict) or not any(field in error for field in named):
+        return ERROR_FIELDS_UNREAD
+    error_type = refusal_evidence.scrub_text(error.get("type"), secrets=secrets)
+    trace = refusal_evidence.scrub_text(error.get("fbtrace_id"), secrets=secrets)
+    return (
+        f"Meta error code={int_of(error.get('code'))}"
+        f" subcode={subcode_of(error.get('error_subcode'))}"
+        f" type={error_type} fbtrace_id={trace}"
+    )
 
 
 class StubMetaAdapter:

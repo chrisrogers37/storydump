@@ -399,12 +399,12 @@ class TestTheLedgerKeepsMetasWord:
         assert exc.detail["is_transient"] is True
 
     def test_a_subcode_is_an_int_or_a_decimal_string_never_a_bool(self):
-        from src.services.target.instagram_graph import _subcode_of
+        from src.services.target.meta_adapter import subcode_of
 
-        assert _subcode_of(2207052) == 2207052
-        assert _subcode_of("2207052") == 2207052
-        assert _subcode_of(True) is None
-        assert _subcode_of("abc") is None and _subcode_of(None) is None
+        assert subcode_of(2207052) == 2207052
+        assert subcode_of("2207052") == 2207052
+        assert subcode_of(True) is None
+        assert subcode_of("abc") is None and subcode_of(None) is None
 
 
 #: Provider text holding what the scrub keeps out beyond the configured token:

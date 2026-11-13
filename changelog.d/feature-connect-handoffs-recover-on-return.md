@@ -1,0 +1,3 @@
+### Fixed
+
+- **A connect that leaves for Instagram or Google no longer freezes Settings when the page is shown again.** When the Instagram app took the link and the person came back to the browser, or Back brought the page back from the browser's cache, the Connect Instagram dialog stayed on "Opening Instagram..." with Cancel and its close button doing nothing, and the page behind it could not be used until a reload. Without the dialog, the Instagram connect buttons stayed on "Opening Instagram...", and Google Drive's on "Opening Google...". Each now returns to rest when the page is shown again: the dialog keeps the person's choice, Continue starts again, and Cancel closes it.
