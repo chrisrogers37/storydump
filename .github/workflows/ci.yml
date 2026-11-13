@@ -1,6 +1,6 @@
 # CONTINUOUS INTEGRATION
 # This workflow runs lint, tests, and security checks on every push/PR.
-# Runs on GitHub's cloud runners (ubuntu-latest).
+# Runs on GitHub's cloud runners.
 # Production deploys via Railway (auto-deploy from main branch).
 
 name: CI
@@ -76,7 +76,11 @@ jobs:
   # whole session and refuses pytest-xdist.
   test-shard:
     name: Test shard ${{ matrix.group }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: ubuntu-26.04's ffmpeg 8, refusing the
+    # MPEG-audio decoders media_validation's codec whitelist keeps closed, also
+    # prints a line the probe does not recognize, so the probe reads as
+    # incomplete. ubuntu-24.04's ffmpeg 6.1 prints only the refusals.
+    runs-on: ubuntu-24.04
     # Well inside Railway's two-hour wait on the run. Running out this clock
     # cancels a leg rather than failing it, and Railway has deployed a commit
     # whose run ended cancelled, so the steps that install packages, collect
@@ -93,7 +97,14 @@ jobs:
       MEDIA_PACKAGES: ffmpeg
     services:
       postgres:
-        image: postgres:17
+        # Every PostgreSQL service in this workflow runs 17.11, pinned by
+        # digest. On 17.12 columns carry a pg_attver option whose value
+        # differs between two databases built the same way, so the schema
+        # comparison reports them as different; 17.11 has no such option.
+        # On 17.12 the guarded upsert in bindings.bind also fails row-level
+        # security, and the calendar's month and day reads are planned
+        # without ix_intents_workspace_slot.
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -558,7 +569,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres-code:
-        image: postgres:17
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -571,7 +582,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-replay:
-        image: postgres:17
+        image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
