@@ -1,0 +1,3 @@
+### Security
+
+- **The web app's development dependencies take `@hono/node-server` 2.1.6.** It was 1.19.17, which GHSA-rmxm-3fg6-px4f and GHSA-jpvv-r467-5p4w affect: `serveStatic` decoded the request path a second time, so a request could get past middleware on static paths, and a backslash in the request path was parsed as a path separator, which could get past path-based access control at a reverse proxy. The update moves it from the 1.x line to 2.x, which `@modelcontextprotocol/sdk`, the package that pulls it in, accepts. `@hono/node-server` reaches the web app only through its development tooling and is not part of the deployed site.
