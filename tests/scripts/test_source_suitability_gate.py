@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import text
 
-from src.services.target import source_policy
+from src.services.target import media_validation, source_policy
 from tests.scripts import test_instagram_sources_gate as foundation
 from tests.scripts import test_instagram_observations_gate as obs
 from tests.scripts.conftest import seed_workspace_chain
@@ -140,7 +140,13 @@ async def test_saved_policy_versions_one_and_two_share_suitability_authority(
             "identity_conflict_or_deleted",
         ),
         (
-            "UPDATE instagram_media_assets SET validation_state='unsupported' WHERE source_id=:sid",
+            "UPDATE instagram_media_assets SET validation_state='unsupported',"
+            "validation_capture=jsonb_build_object("
+            "'generation_id',data_generation_id::text,"
+            "'observation_revision',observation_revision,"
+            "'selected_asset_id',asset_media_id,'state','unsupported',"
+            f"'matrix_version','{media_validation.MATRIX_VERSION}')"
+            " WHERE source_id=:sid",
             "unsupported",
         ),
         (
@@ -341,8 +347,8 @@ async def test_self_intent_context_and_lock_facts_leave_duplicate_arbiter_intact
 @pytest.mark.parametrize(
     "signature",
     [
-        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid)",
-        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean)",
+        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,text)",
+        "fn_source_asset_suitability(uuid,uuid,integer,timestamptz,boolean,uuid,uuid,uuid,boolean,text)",
     ],
 )
 async def test_invoker_grants_and_foreign_arguments_cannot_read(

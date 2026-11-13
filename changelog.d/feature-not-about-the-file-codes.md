@@ -1,0 +1,3 @@
+### Fixed
+
+- **An Instagram refusal that is not about the file is no longer recorded and told as spec drift (#62).** When Meta's answer ends a story whose file passed storydump's checks, the answer is recorded as spec drift and the operators are told that Instagram refused the file, unless the answer says nothing about the file. Only a dead token and throttling were exempt. So a call that never left (the egress floor refused it, or the key ring would not load: code 0), the posting cap answered at the container call (9), and session, capability, permission and limit answers (3 and 102, 10 and 200-299, 341 and 368) were told as a file fault. They are exempt now, and the story ends as it did before.

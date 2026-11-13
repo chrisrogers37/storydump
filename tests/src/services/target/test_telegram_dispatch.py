@@ -541,6 +541,7 @@ class TestTheConfigureMenu:
     ROW = {
         "state": "awaiting_approval",
         "cancel_requested": False,
+        "publish_step": "none",
         "media_item_id": "m-1",
         "item_state": "available",
         "auto_approve": False,
@@ -594,9 +595,13 @@ class TestTheConfigureMenu:
         return seams
 
     @pytest.mark.asyncio
-    async def test_configure_opens_the_menu_and_runs_no_command(self, menu):
+    # A story in review whose item is still there opens the menu too: only a
+    # card that cannot post again heals.
+    @pytest.mark.parametrize("state", ["awaiting_approval", "review_required"])
+    async def test_configure_opens_the_menu_and_runs_no_command(self, menu, state):
         from src.services.target import prompts
 
+        menu["menu_row"]["state"] = state
         r = await telegram_dispatch.TelegramDispatcher()(None, tap("cfg"))
         assert r.outcome == "menu" and r.answer_text == ""
         assert r.edit_markup == prompts.menu_keyboard(
@@ -711,6 +716,22 @@ class TestTheConfigureMenu:
         r = await telegram_dispatch.TelegramDispatcher()(None, tap(action))
         assert r.answer_text == "This item can't post again."
         assert r.edit_markup == {"inline_keyboard": []}, "its buttons go"
+        assert menu["log"]["executed"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["cfg", "back", "aa1", "aa0"])
+    async def test_a_removed_items_card_in_review_heals_to_give_up(self, menu, action):
+        """The item cannot post again, so a touch heals its story's card to the
+        story's own keyboard: Give up alone, the one resolution left, and no
+        command runs."""
+        menu["menu_row"].update(state="review_required", item_state="removed")
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap(action))
+        assert r.answer_text == "This item can't post again."
+        assert r.edit_markup == {
+            "inline_keyboard": [
+                [{"text": "🚫 Give up", "callback_data": f"v1:giveup:{INTENT}"}]
+            ]
+        }
         assert menu["log"]["executed"] == []
 
     @pytest.mark.asyncio

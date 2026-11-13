@@ -570,6 +570,12 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_reaper_stale_approved(interval '3 days', 5)",
     ),
+    # The reaper's listing of late past-posts cadence stories, read across
+    # tenants for the reap executor's per-story park.
+    "fn_reaper_late_past_posts": (
+        "svc_worker",
+        "SELECT * FROM fn_reaper_late_past_posts(interval '1 hour', 5)",
+    ),
     "fn_retention_batch": (
         "svc_worker",
         "SELECT * FROM fn_retention_batch('rate_counters', interval '90 days', 5)",

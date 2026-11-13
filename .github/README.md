@@ -56,7 +56,7 @@ request into `main` or `develop`, nine jobs (one of them a five-leg matrix):
   roles and memberships separate; catalog snapshots and differences are uploaded
   as an artifact
 
-All jobs run on **GitHub's cloud runners** (`ubuntu-latest`). The local
+All jobs run on **GitHub's cloud runners**. The local
 `scripts/pr_ready.sh` helper requires eight checks by name (every job above
 but the shards, which `Test` covers) and checks its lists against the
 workflow. GitHub rulesets govern merge policy; review that configuration when

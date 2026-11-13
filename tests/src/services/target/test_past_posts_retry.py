@@ -1,14 +1,11 @@
 """When a refused past-post fetch is tried again, and when it parks."""
 
-from datetime import datetime, timedelta, timezone
-
 import pytest
 
 from src.services.target import past_posts_retry
-from src.services.target.past_posts_retry import Retry, Tried
+from src.services.target.past_posts_retry import Retry
 from src.services.target.work_loop import WorkerConfig
 
-NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 IDENTITY = ("gen-1", 4, "17890000000000011")
 RETRY = Retry(attempts=8, base_seconds=30, cap_seconds=900)
 CDN = {"v": 1, "kind": "cdn_refused"}
@@ -18,8 +15,8 @@ def graph_error(code, subcode=None):
     return {"v": 1, "kind": "graph_error", "code": code, "error_subcode": subcode}
 
 
-def capture(attempt, *, at=NOW, identity=IDENTITY, refusal=None, reason=None):
-    """A stored capture of `attempt` failed tries for `identity`."""
+def capture(attempt, *, identity=IDENTITY, refusal=None, reason=None):
+    """A stored capture of refused try `attempt` of `identity`."""
     generation, revision, asset = identity
     return {
         "generation_id": generation,
@@ -28,7 +25,6 @@ def capture(attempt, *, at=NOW, identity=IDENTITY, refusal=None, reason=None):
         "state": "validation_pending",
         "reason": reason or "download_pending",
         "attempt": attempt,
-        "next_attempt_at": at.isoformat(),
         "refusal": refusal or CDN,
     }
 
@@ -52,6 +48,26 @@ def test_the_default_tries_fit_inside_the_late_window():
     retry = Retry.from_config(config)
     waits = sum(retry.delay(attempt) for attempt in range(1, retry.attempts))
     assert waits < config.planned_late_seconds
+    past_posts_retry.assert_fits(retry, config.planned_late_seconds)
+
+
+@pytest.mark.parametrize(
+    "numbers",
+    [(8, 0, 0), (8, 30, 3600), (2, 3600, 3600)],
+    ids=["no-wait", "waits-past-the-window", "one-wait-past-the-window"],
+)
+def test_a_ladder_that_cannot_fit_the_late_window_is_refused(numbers):
+    """The worker refuses a ladder whose tries would not all start inside the
+    late window, or that would spend them all at once."""
+    attempts, base, cap = numbers
+    with pytest.raises(ValueError):
+        past_posts_retry.assert_fits(
+            Retry(attempts=attempts, base_seconds=base, cap_seconds=cap), 3600
+        )
+
+
+def test_one_try_needs_no_wait():
+    past_posts_retry.assert_fits(past_posts_retry.ONCE, 3600)
 
 
 @pytest.mark.parametrize(
@@ -63,12 +79,7 @@ def test_the_default_tries_fit_inside_the_late_window():
     ids=["graph-says-it-does-not-exist", "a-named-byte-bound"],
 )
 def test_a_proven_refusal_parks_at_once(refusal):
-    decision = past_posts_retry.decide(refusal, Tried(), NOW, RETRY)
-    assert (decision.park, decision.attempt, decision.next_attempt_at) == (
-        True,
-        1,
-        None,
-    )
+    assert past_posts_retry.parks(refusal, attempt=1, last_refusal=None, retry=RETRY)
 
 
 @pytest.mark.parametrize(
@@ -94,24 +105,23 @@ def test_a_proven_refusal_parks_at_once(refusal):
         "no-evidence",
     ],
 )
-def test_a_refusal_that_proves_nothing_is_tried_again_after_the_wait(refusal):
-    decision = past_posts_retry.decide(refusal, Tried(), NOW, RETRY)
-    assert (decision.park, decision.attempt, decision.next_attempt_at) == (
-        False,
-        1,
-        NOW + timedelta(seconds=30),
+def test_a_refusal_that_proves_nothing_is_tried_again(refusal):
+    assert not past_posts_retry.parks(
+        refusal, attempt=1, last_refusal=None, retry=RETRY
     )
 
 
-def test_the_tries_count_on_from_the_stored_capture_of_the_same_slide():
-    tried = past_posts_retry.from_capture(capture(3), IDENTITY)
-    decision = past_posts_retry.decide(CDN, tried, NOW, RETRY)
-    assert (tried.attempts, tried.refusal, tried.next_attempt_at) == (3, CDN, NOW)
-    assert (decision.park, decision.attempt, decision.next_attempt_at) == (
-        False,
-        4,
-        NOW + timedelta(seconds=240),
-    )
+def test_a_try_before_the_last_waits_and_the_last_parks():
+    """The try's number is the prepare job's attempts: the ceiling parks."""
+    tries = [
+        past_posts_retry.parks(CDN, attempt=attempt, last_refusal=CDN, retry=RETRY)
+        for attempt in range(1, RETRY.attempts + 1)
+    ]
+    assert tries == [False] * (RETRY.attempts - 1) + [True]
+
+
+def test_the_last_refusal_is_the_stored_capture_of_the_same_slide():
+    assert past_posts_retry.last_refusal(capture(3), IDENTITY) == CDN
 
 
 @pytest.mark.parametrize(
@@ -121,30 +131,24 @@ def test_the_tries_count_on_from_the_stored_capture_of_the_same_slide():
         capture(3, identity=("gen-2", 4, "17890000000000011")),
         capture(3, identity=("gen-1", 4, "17890000000000012")),
         capture(3, reason="asset_unavailable"),
-        {**capture(3), "attempt": None},
         None,
     ],
     ids=[
         "another-observation",
         "another-generation",
         "another-slide",
-        "not-a-retry",
-        "no-count",
+        "not-a-refused-try",
         "no-capture",
     ],
 )
-def test_a_capture_of_anything_else_counts_no_tries(stored):
-    assert past_posts_retry.from_capture(stored, IDENTITY) == Tried()
-
-
-def test_the_last_try_parks_with_its_refusal():
-    decision = past_posts_retry.decide(CDN, Tried(attempts=7), NOW, RETRY)
-    assert (decision.park, decision.attempt) == (True, 8)
+def test_a_capture_of_anything_else_has_no_last_refusal(stored):
+    assert past_posts_retry.last_refusal(stored, IDENTITY) is None
 
 
 def test_a_single_try_parks_at_once():
-    decision = past_posts_retry.decide(None, Tried(), NOW, past_posts_retry.ONCE)
-    assert (decision.park, decision.attempt) == (True, 1)
+    assert past_posts_retry.parks(
+        None, attempt=1, last_refusal=None, retry=past_posts_retry.ONCE
+    )
 
 
 def test_a_file_instagram_withholds_on_two_reads_parks():
@@ -156,34 +160,37 @@ def test_a_file_instagram_withholds_on_two_reads_parks():
         "media_type": "VIDEO",
         "has_link": False,
     }
-    once = past_posts_retry.decide(withheld, Tried(), NOW, RETRY)
-    twice = past_posts_retry.decide(
-        withheld, Tried(attempts=1, refusal=withheld), NOW, RETRY
-    )
-    after_cdn = past_posts_retry.decide(
-        withheld, Tried(attempts=1, refusal=CDN), NOW, RETRY
-    )
-    assert (once.park, twice.park, twice.attempt, after_cdn.park) == (
+
+    def parks(last_refusal, attempt):
+        return past_posts_retry.parks(
+            withheld, attempt=attempt, last_refusal=last_refusal, retry=RETRY
+        )
+
+    assert (parks(None, 1), parks(withheld, 2), parks(CDN, 2)) == (
         False,
         True,
-        2,
         False,
     )
-
-
-def test_a_story_waits_until_its_next_try_and_no_longer():
-    tried = past_posts_retry.from_capture(
-        capture(2, at=NOW + timedelta(seconds=60)), IDENTITY
-    )
-    assert past_posts_retry.waiting(tried, NOW)
-    assert not past_posts_retry.waiting(tried, NOW + timedelta(seconds=60))
-    assert not past_posts_retry.waiting(Tried(), NOW)
 
 
 @pytest.mark.parametrize(
     "numbers",
-    [(0, 30, 900), (8, -1, 900), (8, 60, 30)],
-    ids=["no-attempt", "negative-base", "cap-below-base"],
+    [
+        (0, 30, 900),
+        (8, -1, 900),
+        (8, 60, 30),
+        (8, float("nan"), 900),
+        (8, 30, float("nan")),
+        (8, float("inf"), float("inf")),
+    ],
+    ids=[
+        "no-attempt",
+        "negative-base",
+        "cap-below-base",
+        "base-not-a-number",
+        "cap-not-a-number",
+        "infinite",
+    ],
 )
 def test_a_retry_refuses_numbers_that_cannot_bound_it(numbers):
     attempts, base, cap = numbers

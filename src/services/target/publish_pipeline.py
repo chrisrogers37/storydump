@@ -126,6 +126,7 @@ from src.services.target.media_adapters import (
 )
 from src.services.target.jobs import assert_lease, finalize_job, reschedule_job
 from src.services.target.meta_adapter import (
+    CAP_ERROR_CODE,
     OAUTH_ERROR_CODE,
     MetaCapDeferral,
     MetaError,
@@ -1852,11 +1853,16 @@ def _error_of(exc: BaseException) -> dict:
     return {"v": 1, "error": error}
 
 
-#: Meta's error codes that say nothing about the file: a dead or missing
-#: token, and throttling (Graph's 4, 17, 32 and 613, and Instagram's 80002).
-#: Any other refusal that ends a story whose frame passed our checks is a
-#: drift (`_about_the_file`).
-NOT_ABOUT_THE_FILE = frozenset({OAUTH_ERROR_CODE, 4, 17, 32, 613, 80002})
+#: Meta's error codes that say nothing about the file: the adapter's own 0
+#: (no call was made: the egress floor refused it, or the key ring would not
+#: load; `instagram_graph`), a dead or missing token (190), a session or
+#: capability answer (102, 3), a permission answer (10, 200-299), the posting
+#: cap (9), a limit (341, 368) and throttling (Graph's 4, 17, 32 and 613, and
+#: Instagram's 80002). Any other refusal that ends a story whose frame passed
+#: our checks is a drift (`_about_the_file`).
+NOT_ABOUT_THE_FILE = frozenset(
+    {0, CAP_ERROR_CODE, OAUTH_ERROR_CODE, 3, 10, 102, 4, 17, 32, 341, 368, 613, 80002}
+) | frozenset(range(200, 300))
 
 
 def _about_the_file(exc: BaseException) -> bool:
@@ -2306,13 +2312,21 @@ async def park_for_review(
     return True
 
 
-async def flip_exhausted(session, job: dict) -> Optional[dict]:
-    """A `publish_pipeline` job whose budget is spent (five untyped crashes):
-    the story it carried is flipped to review from wherever it stood —
-    `publishing` mid-ladder or `approved` between attempts. Returns the
-    `tell_review` arguments for its courtesy, or None when nothing was parked:
-    no story, a story already settled, or an `intent_id` that is not a uuid
-    (logged)."""
+async def flip_exhausted(
+    session,
+    job: dict,
+    *,
+    from_states=("publishing", "approved"),
+    trying_to: str = refusal_evidence.PUBLISH_TRYING_TO,
+) -> Optional[dict]:
+    """A job whose budget is spent on untyped crashes: the story it carried is
+    flipped to review from wherever it stood among *from_states* — for a
+    `publish_pipeline` job, `publishing` mid-ladder or `approved` between
+    attempts; for a past-posts story's prepare job, any state it waits in.
+    Its notice and its card's reason say what the job was *trying_to* do.
+    Returns the `tell_review` arguments for its courtesy, or None when
+    nothing was parked: no story, a story already settled, or an `intent_id`
+    that is not a uuid (logged)."""
     payload = job.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -2333,7 +2347,7 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
         .mappings()
         .first()
     )
-    if row is None or row["state"] not in ("publishing", "approved"):
+    if row is None or row["state"] not in from_states:
         return None
     tries = (
         int(job.get("attempts") or job.get("max_attempts") or 0)
@@ -2345,9 +2359,10 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
         from_state=row["state"],
         error=_review_error(
             "JobBudgetSpent",
-            "the publish job's budget is spent",
+            "the job's budget is spent",
             "budget_spent",
             tries=tries,
+            trying_to=trying_to,
         ),
     ):
         return None
@@ -2356,7 +2371,7 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
         "intent_id": str(intent_id),
         "tz": str(row["tz"] or "UTC"),
         "notice": (
-            f"We hit a fault on our side {tries} times trying to post this story:"
+            f"We hit a fault on our side {tries} times trying to {trying_to}:"
             " choose on its card, or open the Queue on the web."
         ),
     }
