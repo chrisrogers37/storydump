@@ -197,7 +197,7 @@ Access** on the two scopes this flow requests
 
 | Aspect | Instagram Login |
 |--------|-----------------|
-| Authorize URL | `https://api.instagram.com/oauth/authorize` |
+| Authorize URL | `https://api.instagram.com/oauth/authorize/` (the trailing slash keeps the login in the browser on an iPhone with the Instagram app installed) |
 | Code exchange | `POST https://api.instagram.com/oauth/access_token`, then `GET https://graph.instagram.com/access_token` (long-lived, 60 days), then `GET https://graph.instagram.com/me` |
 | Refresh | `GET https://graph.instagram.com/refresh_access_token` — the token alone, no app secret |
 | Scopes | `instagram_business_basic`, `instagram_business_content_publish` |

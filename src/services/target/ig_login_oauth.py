@@ -51,7 +51,7 @@ import httpx
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError, StorydumpError
-from src.services.target import egress, vocabulary
+from src.services.target import egress, meta_adapter, vocabulary
 from src.services.target.oauth_states import OAuthStateRefused, ring
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,13 @@ REQUIRED_SCOPES = ("instagram_business_basic", "instagram_business_content_publi
 API_BASE = "https://api.instagram.com"
 GRAPH_BASE = "https://graph.instagram.com"
 
-AUTHORIZE_URL = f"{API_BASE}/oauth/authorize"
+#: The trailing slash keeps the login in the browser on an iPhone: the
+#: Instagram iOS app's app-link file
+#: (`www.instagram.com/.well-known/apple-app-site-association`) excludes
+#: `/oauth/authorize/*` and claims every other path, so iOS hands
+#: `/oauth/authorize` without the slash to the app, which cannot finish the
+#: login. `api.instagram.com` redirects to `www` and keeps the slash.
+AUTHORIZE_URL = f"{API_BASE}/oauth/authorize/"
 TOKEN_URL = f"{API_BASE}/oauth/access_token"
 LONG_LIVED_URL = f"{GRAPH_BASE}/access_token"
 REFRESH_URL = f"{GRAPH_BASE}/refresh_access_token"
@@ -386,9 +392,17 @@ async def exchange_code(
     3. ``GET graph.instagram.com/me?fields=id,user_id,username`` — who it is
        for (`read_identity`): the account's id and the app-scoped id.
 
-    Refuses BY NAME at each step; bodies are never logged (they carry tokens).
+    Refuses BY NAME at each step. A refused call's message names the call, its
+    HTTP status and Meta's error code, subcode, type and trace id
+    (`meta_adapter.error_fields`); nothing else from a body reaches a message
+    or a log line, since a 200 carries a token and Meta's text can echo the
+    request.
     """
     policy = egress.EgressPolicy(timeout_class="standard")
+    # Instagram appends a literal `#_` to the code it hands back; strip
+    # exactly that suffix — `rstrip` would eat a trailing `_` that is part of
+    # the code.
+    code = code.removesuffix("#_")
 
     short = await egress.request(
         client,
@@ -400,15 +414,13 @@ async def exchange_code(
             "client_secret": client_secret,
             "grant_type": "authorization_code",
             "redirect_uri": redirect_uri,
-            # Instagram appends a literal `#_` to the code it hands back; strip
-            # exactly that suffix — `rstrip` would eat a trailing `_` that is
-            # part of the code.
-            "code": code.removesuffix("#_"),
+            "code": code,
         },
     )
     if short.status_code != 200:
+        meta = meta_adapter.error_fields(short, secrets=(client_secret, code))
         raise IgOAuthRefused(
-            "exchange_failed", f"token endpoint answered {short.status_code}"
+            "exchange_failed", f"token endpoint answered {short.status_code}; {meta}"
         )
     body = _json_object(short, reason="malformed_response")
     # Instagram Login wraps the answer in a one-element `data` list.
@@ -435,9 +447,12 @@ async def exchange_code(
         },
     )
     if long_lived.status_code != 200:
+        meta = meta_adapter.error_fields(
+            long_lived, secrets=(client_secret, short_token)
+        )
         raise IgOAuthRefused(
             "long_lived_failed",
-            f"long-lived exchange answered {long_lived.status_code}",
+            f"long-lived exchange answered {long_lived.status_code}; {meta}",
         )
     body = _json_object(long_lived, reason="malformed_response")
     token = body.get("access_token")
@@ -494,8 +509,9 @@ async def read_identity(
         params={"fields": "id,user_id,username", "access_token": token},
     )
     if profile.status_code != 200:
+        meta = meta_adapter.error_fields(profile, secrets=(token,))
         raise IgOAuthRefused(
-            "profile_failed", f"profile read answered {profile.status_code}"
+            "profile_failed", f"profile read answered {profile.status_code}; {meta}"
         )
     body = _json_object(profile, reason="malformed_response")
     ig_user_id = body.get("user_id")
