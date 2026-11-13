@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import {
   sourceFolderName,
   sourceStateLabel,
 } from "@/lib/drive";
+import { onReturnAfterHandoff } from "@/lib/handoff-return";
 import type { SourceMix } from "@/lib/source-mix";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 import { DriveFolderPickerDialog } from "./drive-folder-picker";
@@ -65,6 +66,9 @@ export function DriveCard({
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  /** Stops listening for the page to be shown again after the hand-off. */
+  const stopListening = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopListening.current?.(), []);
   const [removingId, setRemovingId] = useState<string | null>(null);
   // The folder whose removal is waiting on a confirmation: only where removing
   // it resets the shares (`removeFolderWarning`).
@@ -95,10 +99,9 @@ export function DriveCard({
    *
    * `window.location.assign`, not a new tab: the callback is a real
    * navigation (`GET /auth/google-drive/callback`) that lands back in this
-   * app, so a same-tab redirect needs no listener and no guessing about when
-   * the person came back. No `setConnecting(false)` on success: the page is
-   * leaving, and clearing it would flash the button back to its resting
-   * label during the navigation.
+   * app. `connecting` stays set while the page leaves, so the button does not
+   * flash back to its resting label during the navigation, and clears if the
+   * page is shown again instead (`handoff-return.ts`).
    */
   async function connectDrive() {
     onError(null);
@@ -111,6 +114,8 @@ export function DriveCard({
       return;
     }
     window.location.assign(result.authorizationUrl);
+    stopListening.current?.();
+    stopListening.current = onReturnAfterHandoff(() => setConnecting(false));
   }
 
   /**
