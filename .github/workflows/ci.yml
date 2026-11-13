@@ -1,6 +1,6 @@
 # CONTINUOUS INTEGRATION
 # This workflow runs lint, tests, and security checks on every push/PR.
-# Runs on GitHub's cloud runners (ubuntu-latest).
+# Runs on GitHub's cloud runners.
 # Production deploys via Railway (auto-deploy from main branch).
 
 name: CI
@@ -76,7 +76,11 @@ jobs:
   # whole session and refuses pytest-xdist.
   test-shard:
     name: Test shard ${{ matrix.group }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: ubuntu-26.04's ffmpeg 8, refusing the
+    # MPEG-audio decoders media_validation's codec whitelist keeps closed, also
+    # prints a line the probe does not recognize, so the probe reads as
+    # incomplete. ubuntu-24.04's ffmpeg 6.1 prints only the refusals.
+    runs-on: ubuntu-24.04
     # Well inside Railway's two-hour wait on the run. Running out this clock
     # cancels a leg rather than failing it, and Railway has deployed a commit
     # whose run ended cancelled, so the steps that install packages, collect
