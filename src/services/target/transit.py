@@ -242,7 +242,7 @@ def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dic
         encoding = media_validation.story_video_encoding()
         slowest, fastest = encoding["fps"]
         return [
-            {"duration": encoding["longest_seconds"]},
+            {"duration": encoding["trim_seconds"]},
             {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
             {
                 "crop": "pad",
@@ -255,7 +255,11 @@ def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dic
                 "audio_codec": encoding["audio_codec"],
                 "audio_frequency": encoding["audio_hz"],
                 "fps": f"{slowest}-{fastest}",
-                "bit_rate": encoding["video_bits_per_second"],
+                # Each stream's own rate: one bare rate caps the audio too.
+                "bit_rate": (
+                    f"av:video_(value_{encoding['video_bits_per_second']});"
+                    f"audio_(value_{encoding['audio_bits_per_second']})"
+                ),
             },
         ]
     underlay = "authenticated:" + transit_asset_ref.replace("/", ":")
