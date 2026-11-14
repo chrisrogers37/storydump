@@ -108,15 +108,31 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
 )
 
 
+#: How many seconds of the video's bit-rate cap the encoder's rate buffer
+#: holds. A VBR maximum binds the average over the buffer, not over the whole
+#: video, so a derivation can run over its cap's share of the file by about
+#: one buffer. Cloudinary does not say how large its encoder's buffer is; two
+#: seconds is the usual buffer of twice the maximum rate.
+RATE_BUFFER_SECONDS = 2
+
+
 def story_video_encoding() -> dict:
     """What every story video's derivation is encoded to, from the matrix, as
-    a video's evidence records it. The bit-rate cap is the lower of Meta's two
-    limits at the longest story: its VBR maximum, and its file size less the
-    audio, rounded down to the megabit so the container's overhead fits."""
+    a video's evidence records it. The audio is held to Meta's audio rate on
+    its own stream: one bit rate for both would cap the audio at the video's.
+    The video's cap is the lower of Meta's two limits at the longest story:
+    its VBR maximum, and its file size less the audio and one rate buffer
+    (`RATE_BUFFER_SECONDS`), rounded down to the megabit so the container's
+    overhead fits. The trim keeps every frame that starts before it, so it
+    sits one frame at the slowest rate allowed short of the longest story,
+    rounded down to the hundredth: the last frame kept ends before it."""
     matrix = SUPPORTED_MEDIA_MATRIX
     longest = matrix["duration_seconds"][1]
-    file_rate = matrix["provider_video_bytes"] * 8 // longest
-    fits_the_file = file_rate - matrix["provider_audio_bits_per_second"]
+    slowest = matrix["fps"][0]
+    audio = matrix["provider_audio_bits_per_second"]
+    fits_the_file = (matrix["provider_video_bytes"] * 8 - audio * longest) // (
+        longest + RATE_BUFFER_SECONDS
+    )
     return {
         "video_codec": list(matrix["video_codec"]),
         "audio_codec": matrix["audio_codec"],
@@ -126,7 +142,8 @@ def story_video_encoding() -> dict:
             matrix["provider_video_bits_per_second"],
             fits_the_file // 1_000_000 * 1_000_000,
         ),
-        "longest_seconds": longest,
+        "audio_bits_per_second": audio,
+        "trim_seconds": math.floor((longest - 1 / slowest) * 100) / 100,
     }
 
 
@@ -800,9 +817,10 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
     """A video's evidence of what the probe read: its video stream's codec and
     frame size, its duration and frame rate ("unstated" for one it did not
     state) and whether it holds audio, with the encoding its derivation is
-    sent, which trims it to the longest story."""
-    encoding = story_video_encoding()
-    longest = encoding["longest_seconds"]
+    sent. A video longer than the longest story is recorded as trimmed to the
+    longest story, the length its card names; the derivation's trim
+    (`story_video_encoding`) ends it just short of that length."""
+    longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"][1]
     return {
         "codec": video.get("codec_name"),
         "width": video.get("width"),
@@ -813,7 +831,7 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
         "trimmed_to_seconds": (
             str(longest) if duration is not None and duration > longest else None
         ),
-        "derivation": encoding,
+        "derivation": story_video_encoding(),
     }
 
 
