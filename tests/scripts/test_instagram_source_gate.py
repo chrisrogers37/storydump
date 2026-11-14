@@ -51,6 +51,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import json
 import sys
 import time
 import uuid
@@ -75,6 +76,7 @@ from src.config.settings import settings
 from src.services.target import (
     past_posts_activation,
     past_posts_composition,
+    past_posts_retry,
     ig_login_oauth,
     jobs,
     media_validation,
@@ -369,15 +371,21 @@ class Gate:
         return ran
 
     async def sweep_prompts(self):
-        """One pass of the worker's prompt sweep: each selected story's media is
-        prepared, then every due story gains its card. The sweeper's own loop,
-        stopped at its first wait."""
+        """The worker's prompt sweep as it serves a past post: one pass mints
+        each due story's prepare job, the media lane runs them (each story's
+        file fetched and judged), and the next pass gives every due story its
+        card. The sweeper's own loop, stopped at its first wait, each time."""
         if sys.platform != "linux":
             pytest.fail(
                 "the selected-media validator runs only on Linux"
                 " (`media_validation.run_bounded`): run this gate on the Linux lane",
                 pytrace=False,
             )
+        await self._sweep_once()
+        await self.prepare_files()
+        await self._sweep_once()
+
+    async def _sweep_once(self):
         stop = asyncio.Event()
 
         async def at_the_wait(event, seconds):
@@ -386,6 +394,17 @@ class Gate:
         with self.monkeypatch.context() as patch:
             patch.setattr(jobs, "wait_or_stop", at_the_wait)
             await worker.PromptSweeper(self.app).run(stop)
+
+    async def prepare_files(self, limit=100):
+        """The media lane's jobs, one at a time, until it has none it may run:
+        the prepare jobs the sweep minted. A job put back for a later try is
+        not run again here."""
+        media = [loop for loop in self.app.loops if loop.lane == "media"]
+        assert media, "the composed worker serves no media lane"
+        for _ in range(limit):
+            if not any([await loop.run_once() for loop in media]):
+                return
+        raise AssertionError(f"the media lane was still finding jobs after {limit}")
 
     async def deliver(self):
         """The sender sweep's one pass, and the `deliver_outbox` jobs it mints."""
@@ -592,6 +611,7 @@ async def armed_gate(world, monkeypatch, tmp_path, *, drive=()):
                 env=worker_env,
                 client=clients[1],
                 policy=fakes.OFFLINE,
+                retry=past_posts_retry.ONCE,
             )
             assert armed is not None, "the worker's key ring did not arm it"
             adapters = {"gdrive": DriveForbidden()}
@@ -825,17 +845,22 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             }
         ]
 
-        # The card is the rendered approval: the picture and the account, then
-        # the edit that gives that message its taps.
+        # The card is the rendered approval: its text with no taps, then the
+        # edit that puts the picture and the account on that same message and
+        # gives it its taps.
         await g.deliver()
-        (photo,) = g.telegram.sent("sendPhoto")
-        assert fakes.jpeg() in photo.body
-        assert fakes.multipart_field(photo, "caption").startswith(
-            "\U0001f4f8 @example_handle_a"
-        )
-        assert fakes.multipart_field(photo, "reply_markup") is None
-        (armed,) = g.telegram.sent("editMessageReplyMarkup")
-        markup = armed.json["reply_markup"]
+        (card,) = [
+            c
+            for c in g.telegram.sent("sendMessage")
+            if c.json.get("text", "").startswith("\U0001f4f8")
+        ]
+        assert "reply_markup" not in card.json
+        (edit,) = g.telegram.sent("editMessageMedia")
+        assert fakes.jpeg() in edit.body
+        media = json.loads(fakes.multipart_field(edit, "media"))
+        assert media["type"] == "photo"
+        assert media["caption"].startswith("\U0001f4f8 @example_handle_a")
+        markup = json.loads(fakes.multipart_field(edit, "reply_markup"))
         assert [
             b["callback_data"]
             for row in markup["inline_keyboard"]
@@ -847,7 +872,7 @@ async def test_a_connected_past_posts_runs_from_connect_to_a_posted_audit(
             f"v1:{verb}:{story['id']}"
             for verb in ("post", "posted", "skip", "reject", "cfg")
         ]
-        (notice,) = g.telegram.sent("sendMessage")
+        (notice,) = [c for c in g.telegram.sent("sendMessage") if c is not card]
         assert "@example_handle_a has no content left" in notice.json["text"]
         assert len(g.ig.cdn) == 2 and len(g.validated) == 2
 
@@ -1566,8 +1591,8 @@ async def test_two_accounts_and_two_workspaces_never_see_each_others_past_posts(
         await g.sweep_prompts()
         await g.deliver()
         assert {
-            fakes.multipart_field(c, "caption").splitlines()[0]
-            for c in g.telegram.sent("sendPhoto")
+            json.loads(fakes.multipart_field(c, "media"))["caption"].splitlines()[0]
+            for c in g.telegram.sent("editMessageMedia")
         } == {"\U0001f4f8 @example_handle_a", "\U0001f4f8 @example_handle_b"}
         details = {
             (s.account, s.path)
@@ -1907,10 +1932,10 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             "SELECT asset_media_id,position FROM instagram_media_assets WHERE media_item_id=%s",
             first["item"],
         )
-        (photo,) = g.telegram.sent("sendPhoto")
+        (edit,) = g.telegram.sent("editMessageMedia")
         assert (
             f"Instagram post, slide {asset['position']} of 10"
-            in fakes.multipart_field(photo, "caption")
+            in json.loads(fakes.multipart_field(edit, "media"))["caption"]
         )
         assert g.rows(
             "SELECT selected_asset_identity FROM instagram_intent_provenance WHERE intent_id=%s",
@@ -1966,6 +1991,18 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             landed.source,
         )
         await g.index(landed.source, smaller, whole=True)
+        # The second story holds the dropped slide, so the complete reindex
+        # keeps it for that story's own fetch to judge.
+        assert g.rows("SELECT state FROM media_items WHERE id=%s", second["item"]) == [
+            {"state": "available"}
+        ]
+        assert g.rows(
+            "SELECT count(*) AS n FROM instagram_media_assets WHERE source_id=%s",
+            landed.source,
+        ) == [{"n": 10}]
+        await g.sweep_prompts()
+        # Its fetch reads the post twice, both reads lack the slide, and the
+        # slide is retired before the story parks.
         assert g.rows("SELECT state FROM media_items WHERE id=%s", second["item"]) == [
             {"state": "removed"}
         ]
@@ -1973,7 +2010,6 @@ async def test_ten_slide_composition_keeps_each_identity_lock_and_deletion_tombs
             "SELECT count(*) AS n FROM instagram_media_assets WHERE source_id=%s",
             landed.source,
         ) == [{"n": 9}]
-        await g.sweep_prompts()
         assert g.state_of(second["id"]) == "review_required"
         assert g.rows(
             "SELECT last_error#>>'{error,reason}' AS reason FROM post_intents WHERE id=%s",

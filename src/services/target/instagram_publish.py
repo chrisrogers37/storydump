@@ -23,6 +23,7 @@ from src.services.target import (
     readers,
     refusal_evidence,
     source_policy,
+    vocabulary,
 )
 from src.services.target import source_read_admission as admission
 from src.services.target.transit import PastPostsUploadUncertain
@@ -31,26 +32,11 @@ from src.services.target.unit_of_work import unit_of_work
 logger = logging.getLogger(__name__)
 
 
-#: What a park says when it holds no refusal evidence, by the reason its
-#: preparation was not admitted (`MediaAdmissionPending.reason`): the chosen
-#: post is gone, what was chosen changed, or its media was judged one stories
-#: do not take.
-_ADMISSION_SENTENCES = {
-    "asset_unavailable": "the chosen post is no longer available",
-    "selected_asset_changed": "the chosen post's content changed",
-    "unsupported": "the chosen post's media is not one stories take",
-}
-
-
-def _park_notice(evidence, admission_reason=None) -> str:
+def _park_notice(evidence) -> str:
     """The park's notice: why it was refused, in plain words
-    (`refusal_evidence.plain`), else what its admission reason says, or that
-    no reason was recorded. Never a cause the record cannot support."""
-    reason = (
-        refusal_evidence.plain(evidence)
-        or _ADMISSION_SENTENCES.get(admission_reason)
-        or "no reason was recorded"
-    )
+    (`refusal_evidence.plain`), or that no reason was recorded. Never a cause
+    the record cannot support."""
+    reason = refusal_evidence.plain(evidence) or "no reason was recorded"
     return (
         "This story from your Instagram past posts could not be prepared."
         f" Refused: {reason}. Open the Queue to review it."
@@ -172,6 +158,15 @@ async def authorize(
         reason = verdict["reason"] if verdict else "past_posts_content_unavailable"
         if reason == "selected_asset_changed":
             reason = "past_posts_content_changed"
+        elif reason == "asset_unavailable":
+            # A slide a refused fetch parked: the story parks at once, saying
+            # what refused it.
+            raise refusal_evidence.attach(
+                PastPostsEffectRefused("past_posts_content_unavailable"),
+                refusal_evidence.latched(
+                    await _slide_capture(conn, workspace_id, subject)
+                ),
+            )
         elif reason in ("past_posts_revalidation_required", "validation_pending"):
             reason = "past_posts_revalidation_required"
         elif reason not in (
@@ -291,20 +286,108 @@ async def _write_stage(conn, *, workspace_id, intent_id, subject, artifact):
         raise PastPostsEffectRefused("past_posts_content_unavailable")
 
 
+async def _slide_capture(conn, workspace_id, subject):
+    """The locked subject's slide capture (`validation_capture`), or None when
+    the slide has no asset row."""
+    return await conn.scalar(
+        text(
+            "SELECT validation_capture FROM instagram_media_assets"
+            " WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item"
+        ),
+        dict(
+            ws=str(workspace_id),
+            sid=str(subject["source_id"]),
+            item=str(subject["media_item_id"]),
+        ),
+    )
+
+
+def _not_admitted(reason, subject) -> dict:
+    """Why the locked subject's preparation was not admitted, as a refusal
+    (`not_admitted`), for a park no refusal backs: *reason* and the item's
+    state, so the card and the notice say the same."""
+    return refusal_evidence.evidence(
+        "not_admitted", reason=reason, item_state=subject["media_item_state"]
+    )
+
+
+async def _record_park(conn, *, ws, iid, state, admission_reason, evidence) -> bool:
+    """Park a waiting past-posts story for review, in the caller's
+    transaction, on the reason its preparation was not admitted. The refusal's
+    *evidence* rides with the reason: `last_error -> 'error' -> 'refusal'`,
+    the audit detail's `refusal` and the notice (`refusal_evidence`). A slide
+    judged gone has no asset row left to hold it. False, and nothing logged,
+    when the story had already moved on."""
+    from src.services.target import publish_pipeline
+
+    reason = (
+        "past_posts_content_changed"
+        if admission_reason == "selected_asset_changed"
+        else "past_posts_content_unavailable"
+    )
+    await conn.execute(
+        text("UPDATE post_intents SET last_error=CAST(:error AS jsonb) WHERE id=:id"),
+        dict(
+            id=iid,
+            error=json.dumps(
+                {
+                    "v": 1,
+                    "error": {
+                        "type": "PastPostsEffectRefused",
+                        "reason": reason,
+                        "message": reason,
+                        "refusal": evidence,
+                    },
+                }
+            ),
+        ),
+    )
+    await audit.record(
+        conn,
+        workspace_id=ws,
+        entity_kind="post_intent",
+        entity_id_sql="CAST(:intent AS uuid)",
+        intent=iid,
+        from_state=state,
+        to_state=state,
+        detail={"reason": reason, "refusal": evidence},
+    )
+    tz = await conn.scalar(text("SELECT tz FROM workspaces WHERE id=:ws"), dict(ws=ws))
+    parked = await publish_pipeline.park_for_review(
+        conn,
+        workspace_id=ws,
+        intent_id=iid,
+        from_state=state,
+        tz=str(tz or "UTC"),
+        notice=_park_notice(evidence),
+    )
+    if parked:
+        logger.info(
+            "past-posts story %s parked for review from %s: %s (%s)",
+            iid,
+            state,
+            reason,
+            evidence.get("kind"),
+        )
+    return parked
+
+
 class PastPostsPipeline:
     def __init__(self, *, capability, fetch_selected, prepare_selected=None):
         self.capability, self.fetch_selected = capability, fetch_selected
         self.prepare_selected = prepare_selected
         self._completions = set()
 
-    def _uow(self, engine, ws):
-        return unit_of_work(engine, str(ws), actor_kind="system")
+    def _uow(self, engine, ws, actor_kind="system"):
+        return unit_of_work(engine, str(ws), actor_kind=actor_kind)
 
-    async def selected_prepare(self, *, engine, workspace_id, intent_id):
+    async def selected_prepare(self, *, engine, workspace_id, intent_id, attempt=1):
         """Prepare a bound card, or review definite content loss under fresh authority.
 
         A refusal alone is not authority: terminal, cancelled, missing and fenced
         subjects cannot acquire a new review transition. Selection stays immutable.
+        *attempt* is which try of the file this is (the prepare job's attempts).
+        Returns True when the story was parked for review.
         """
         if self.prepare_selected is None:
             raise PastPostsEffectRefused("past_posts_pipeline_not_configured")
@@ -347,8 +430,10 @@ class PastPostsPipeline:
                         subject["policy_revision"],
                     )
         try:
-            await self.prepare_selected(engine=engine, workspace_id=ws, intent_id=iid)
-            return
+            await self.prepare_selected(
+                engine=engine, workspace_id=ws, intent_id=iid, attempt=attempt
+            )
+            return False
         except source_policy.MediaAdmissionPending as exc:
             if exc.reason not in (
                 "selected_asset_changed",
@@ -356,13 +441,6 @@ class PastPostsPipeline:
                 "unsupported",
             ):
                 raise
-            reason = (
-                "past_posts_content_changed"
-                if exc.reason == "selected_asset_changed"
-                else "past_posts_content_unavailable"
-            )
-            from src.services.target import audit, publish_pipeline
-
             if snapshot is None:
                 raise
             capture, item_id, revision, asset, bound_asset, policy_revision = snapshot
@@ -401,58 +479,70 @@ class PastPostsPipeline:
                     subject is None
                     or subject["provider"] != "instagram_past_posts"
                     or str(subject["source_id"]) != capture.source_id
-                    or subject["state"]
-                    not in ("scheduled", "prompt_pending", "awaiting_approval")
+                    or subject["state"] not in vocabulary.WAITING_STATES
                     or subject["cancel_requested"]
                     or subject.get("provenance") is None
                 ):
                     raise
-                state = subject["state"]
-                # The refused fetch's evidence, when there is one, rides with the
-                # reason: `last_error -> 'error' -> 'refusal'` and the audit
-                # detail's `refusal` (`refusal_evidence`). A slide judged gone has
-                # no asset row left to hold it.
-                refusal = {"refusal": exc.evidence} if exc.evidence else {}
-                await conn.execute(
-                    text(
-                        "UPDATE post_intents SET last_error=CAST(:error AS jsonb) WHERE id=:id"
-                    ),
-                    dict(
-                        id=iid,
-                        error=json.dumps(
-                            {
-                                "v": 1,
-                                "error": {
-                                    "type": "PastPostsEffectRefused",
-                                    "reason": reason,
-                                    "message": reason,
-                                    **refusal,
-                                },
-                            }
-                        ),
-                    ),
-                )
-                await audit.record(
+                await _record_park(
                     conn,
-                    workspace_id=ws,
-                    entity_kind="post_intent",
-                    entity_id_sql="CAST(:intent AS uuid)",
-                    intent=iid,
-                    from_state=state,
-                    to_state=state,
-                    detail={"reason": reason, **refusal},
+                    ws=ws,
+                    iid=iid,
+                    state=subject["state"],
+                    admission_reason=exc.reason,
+                    evidence=exc.evidence or _not_admitted(exc.reason, subject),
                 )
-                tz = await conn.scalar(
-                    text("SELECT tz FROM workspaces WHERE id=:ws"), dict(ws=ws)
-                )
-                await publish_pipeline.park_for_review(
-                    conn,
-                    workspace_id=ws,
-                    intent_id=iid,
-                    from_state=state,
-                    tz=str(tz or "UTC"),
-                    notice=_park_notice(exc.evidence, exc.reason),
-                )
+            return True
+
+    async def park_late(
+        self,
+        *,
+        engine,
+        workspace_id,
+        intent_id,
+        tries,
+        late_seconds,
+        actor_kind="system",
+    ) -> bool:
+        """Park a story whose late window, *late_seconds* after its slot,
+        closed before its file could be fetched, as *actor_kind* (the reaper's
+        leg passes its own). Its evidence says so (`window_closed`): the *tries*
+        its prepare jobs spent, and the refusal its slide last recorded, read
+        under the story's lock. That is any refusal the capture holds, a
+        waiting one (`download_pending`) included, so not `latched`'s; a
+        retired slide, which has no asset row left to hold one, says it is no
+        longer indexed (`not_admitted`). No fetch decides it, so no fetch's
+        fence is needed: only that the story still waits for its slot. False
+        when it no longer does."""
+        ws, iid = str(workspace_id), str(intent_id)
+        async with self._uow(engine, ws, actor_kind).begin() as conn:
+            subject, _ = await lock_pipeline(
+                conn, workspace_id=ws, intent_id=iid, capability=self.capability
+            )
+            if (
+                subject is None
+                or subject["provider"] != "instagram_past_posts"
+                or subject["state"] not in vocabulary.UNSERVED_STATES
+                or subject["cancel_requested"]
+            ):
+                return False
+            capture = await _slide_capture(conn, ws, subject)
+            last = capture.get("refusal") if isinstance(capture, dict) else None
+            if last is None and subject["media_item_state"] == "removed":
+                last = _not_admitted("asset_unavailable", subject)
+            return await _record_park(
+                conn,
+                ws=ws,
+                iid=iid,
+                state=subject["state"],
+                admission_reason="asset_unavailable",
+                evidence=refusal_evidence.evidence(
+                    "window_closed",
+                    late_seconds=late_seconds,
+                    tries=tries,
+                    last_refusal=last,
+                ),
+            )
 
     async def _inspect(self, conn, ws, iid, *, capture=None):
         locked = await lock_pipeline(

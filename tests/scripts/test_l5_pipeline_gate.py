@@ -54,6 +54,7 @@ from src.services.target.publish_pipeline import (
 )
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.services.target.usage_precheck import UsagePrecheck
+from src.services.target.work_loop import WorkerConfig
 from tests.scripts.conftest import (
     _scratch,
     async_url,
@@ -1683,6 +1684,50 @@ class TestDefinitiveFailureClassification:
         assert edit["outcome_text"].endswith(f"\nRefused: {sentence}.")
 
 
+class TestAPoisonNoProviderErrorExplainsSaysItsOwnReason:
+    """A rung that spends the ladder with no provider error to record still
+    records why, in place of an earlier attempt's dead container, so the card
+    of the story it parks says the reason it went into review."""
+
+    def test_a_container_still_not_ready_on_the_last_try_says_so(self, pipe_db):
+        from src.services.target.publish_pipeline import POLL_BUDGET
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(status_script=["IN_PROGRESS"] * POLL_BUDGET)
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta))) == POISONED
+        _says_why(pipe_db, intent, binding, "container_pending", tries=5)
+
+    def test_a_lost_answer_to_the_container_create_on_the_last_try_says_so(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["transport"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        assert [
+            op["response"]["error"]
+            for op in _ops(pipe_db, intent)
+            if op["op_kind"] == "container_create"
+        ] == ["lost_response"]
+        _says_why(pipe_db, intent, binding, "answer_lost", tries=5)
+
+
 class TestADeadContainerIdDoesNotOutliveItsContainer:
     """On the RETRY path a stale container id lives only "between two
     instants" — the step-back and the next run.
@@ -2128,6 +2173,50 @@ def _notices(pipe_db, intent, binding):
             fetch=True,
         )
     ]
+
+
+#: An earlier attempt's dead container, as `_route_readiness` records it: the
+#: reason a story's card would show if a later route into review wrote none.
+EARLIER_DEAD_STATUS = "Error: Media upload has failed with error code 2207026"
+EARLIER_DEAD = {
+    "v": 1,
+    "error": {
+        "type": "ContainerDead",
+        "code": None,
+        "message": "Meta reported the container ERROR or EXPIRED",
+        "status_code": "ERROR",
+        "status": EARLIER_DEAD_STATUS,
+        "refusal": {
+            "v": 1,
+            "kind": "container_dead",
+            "status_code": "ERROR",
+            "status": EARLIER_DEAD_STATUS,
+        },
+    },
+}
+
+
+def _after_a_dead_container(pipe_db, intent):
+    _exec(
+        pipe_db,
+        "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+        (json.dumps(EARLIER_DEAD), intent),
+    )
+
+
+def _says_why(pipe_db, intent, binding, kind, **facts):
+    """The parked story records its own reason in place of the earlier
+    attempt's, and its card's review line says it, opened by "Why"."""
+    from src.services.target import refusal_evidence
+
+    row = _intent_row(pipe_db, intent)
+    assert row["state"] == "review_required"
+    refusal = row["last_error"]["error"]["refusal"]
+    assert refusal == refusal_evidence.evidence(kind, **facts)
+    line = _review_edit(pipe_db, intent, binding)["outcome_text"]
+    assert line.startswith("👀 Needs review")
+    assert line.endswith(f"\nWhy: {refusal_evidence.plain(refusal)}.")
+    assert EARLIER_DEAD_STATUS not in line and "Refused" not in line
 
 
 class TestTheFirstFetch:
@@ -3147,6 +3236,25 @@ class TestTheFloatsSafetyNets:
         assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
         assert len(_notices(pipe_db, intent, binding)) == 1
 
+    def test_a_dead_job_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        _after_a_dead_container(pipe_db, intent)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
+        _says_why(
+            pipe_db,
+            intent,
+            binding,
+            "budget_spent",
+            tries=5,
+            trying_to="post this story",
+        )
+
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
 
         intent, ref = _new_intent(pipe_db, state="skipped")
@@ -3300,6 +3408,30 @@ class TestTheFloatsSafetyNets:
         assert _intent_row(pipe_db, floating)["state"] == "approved", (
             "inside the TTL: untouched"
         )
+
+    def test_the_reaper_parks_with_its_own_reason_not_an_earlier_attempts(
+        self, pipe_db
+    ):
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, _ = _new_intent(pipe_db)
+        _after_a_dead_container(pipe_db, stale)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days',"
+            " cap_consumed_on = current_date WHERE id = %s",
+            (stale,),
+        )
+        _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        _says_why(pipe_db, stale, binding, "approved_stale", days=3)
 
     def test_the_reaper_lists_through_a_door_and_parks_as_the_worker_role(
         self, pipe_db
@@ -3469,6 +3601,11 @@ class TestTheFloatsSafetyNets:
 WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
 
 
+#: A slot far enough behind for the worker's reaper to expire its cadence
+#: story: the worker's late window, and a minute.
+PAST_ITS_WINDOW_S = -(WorkerConfig().planned_late_seconds + 60)
+
+
 def _waiting(pipe_db, state, *, flagged, slot_in_s=3600, age_s=0):
     """An undebited intent in *state*, its slot an hour ahead unless a test
     moves it, so no expiry leg reaches it by accident."""
@@ -3538,12 +3675,14 @@ class TestTheReapersCancelLeg:
         assert _states(pipe_db, intents) == list(WAITING_STATES)
 
     def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
-        """A flagged row past its slot or its approval TTL ends `cancelled`,
-        the label the reaper's cancel leg applies. Its unflagged twin
-        still expires — the expiry legs' positive control."""
+        """A flagged row past its late window or its approval TTL ends
+        `cancelled`, the label the reaper's cancel leg applies. Its unflagged
+        twin still expires — the expiry legs' positive control."""
         past = {
             flagged: [
-                _waiting(pipe_db, "scheduled", flagged=flagged, slot_in_s=-60),
+                _waiting(
+                    pipe_db, "scheduled", flagged=flagged, slot_in_s=PAST_ITS_WINDOW_S
+                ),
                 _waiting(
                     pipe_db, "awaiting_approval", flagged=flagged, age_s=2 * 86400
                 ),
@@ -3707,7 +3846,9 @@ class TestEveryLegRunsInTheFinalBody:
             (lease,),
         )
         flagged = _waiting(pipe_db, "scheduled", flagged=True)
-        late = _waiting(pipe_db, "prompt_pending", flagged=False, slot_in_s=-60)
+        late = _waiting(
+            pipe_db, "prompt_pending", flagged=False, slot_in_s=PAST_ITS_WINDOW_S
+        )
         stale = _waiting(pipe_db, "awaiting_approval", flagged=False, age_s=2 * 86400)
         lock = _exec(
             pipe_db,
@@ -3761,7 +3902,7 @@ class TestEveryLegRunsInTheFinalBody:
     def test_the_cancel_leg_ends_a_flagged_waiting_story(self, pipe_db, swept):
         assert _intent_row(pipe_db, swept["flagged"])["state"] == "cancelled"
 
-    def test_the_slot_leg_expires_a_story_past_its_slot(self, pipe_db, swept):
+    def test_the_slot_leg_expires_a_story_past_its_late_window(self, pipe_db, swept):
         assert _intent_row(pipe_db, swept["late"])["state"] == "expired"
 
     def test_the_approval_leg_expires_a_card_past_its_ttl(self, pipe_db, swept):
@@ -4166,18 +4307,24 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         )
         return intent, outcome
 
-    def test_the_answers_about_something_else_are_a_dead_token_and_throttling(self):
+    def test_the_answers_that_say_nothing_about_the_file_are_pinned(self):
         """Pinned here, so dropping a code from the set fails its cases below
         instead of taking them with it."""
-        assert NOT_ABOUT_THE_FILE == {190, 4, 17, 32, 613, 80002}
+        named = {0, 9, 190, 3, 102, 10, 341, 368, 4, 17, 32, 613, 80002}
+        assert NOT_ABOUT_THE_FILE == named | set(range(200, 300))
 
     @pytest.mark.parametrize("edge", ["create", "publish"])
-    @pytest.mark.parametrize("code", [190, 4, 17, 32, 613, 80002])
+    @pytest.mark.parametrize(
+        "code", [0, 9, 190, 3, 102, 10, 200, 299, 341, 368, 4, 17, 32, 613, 80002]
+    )
     def test_a_refusal_that_says_nothing_about_the_file_is_not_a_drift(
         self, pipe_db, edge, code
     ):
-        """A dead token or throttling that ends the story, at the create call
-        or at the publish call, records and tells nothing."""
+        """An answer that is not the file's that ends the story, at the create
+        call or at the publish call, records and tells nothing: no call made
+        (0), the posting cap (9), a dead token (190), a session or capability
+        answer (3, 102), a permission answer (10, and 200 and 299 for the
+        range), a limit (341, 368) or throttling."""
         from src.services.target.meta_adapter import MetaRetryableError
 
         meta = self._refusing(
@@ -4188,6 +4335,25 @@ class TestARefusalOfACheckedFileIsRecordedAndTold:
         assert outcome == POISONED
         kinds = {o["op_kind"] for o in _ops(pipe_db, intent)}
         assert ("publish" in kinds) == (edge == "publish"), "refused at the edge"
+        assert self._drifts(pipe_db, intent) == []
+        assert told.told == []
+
+    def test_the_posting_cap_at_the_container_call_is_not_a_drift(self, pipe_db):
+        """The cap reaches the pipeline as `MetaCapDeferral` (code 9). The
+        publish call defers on it; at the container call it ends the story on
+        its last attempt like any other answer, and records and tells
+        nothing."""
+        from src.services.target.meta_adapter import CAP_ERROR_CODE, MetaCapDeferral
+
+        meta = self._refusing(
+            "create",
+            lambda: MetaCapDeferral(
+                code=CAP_ERROR_CODE, subcode=2207042, message="posting cap reached"
+            ),
+        )
+        told = _Told()
+        intent, outcome = self._ends(pipe_db, meta, told)
+        assert outcome == POISONED
         assert self._drifts(pipe_db, intent) == []
         assert told.told == []
 

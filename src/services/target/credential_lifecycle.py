@@ -60,6 +60,7 @@ from src.services.target import (
     egress,
     google_drive_oauth,
     google_oidc,
+    meta_adapter,
     outbox,
     unit_of_work,
 )
@@ -72,12 +73,17 @@ logger = logging.getLogger(__name__)
 class RefreshRejected(StorydumpError):
     """The provider definitively rejected the credential (auth-class answer).
 
-    Carries the HTTP status only — never the token, never the response body
-    (a provider error body can echo request parameters back).
+    Carries the HTTP status and Meta's error fields as
+    `meta_adapter.error_fields` reads them (`meta_error`) — never the token,
+    and nothing else from the response body (a provider error body can echo
+    request parameters back).
     """
 
-    def __init__(self, status_code: int):
+    def __init__(
+        self, status_code: int, meta_error: str = meta_adapter.ERROR_FIELDS_UNREAD
+    ):
         self.status_code = status_code
+        self.meta_error = meta_error
         super().__init__(f"provider rejected the credential (HTTP {status_code})")
 
 
@@ -128,7 +134,8 @@ async def ig_refresh(
             )
         return new_token, expires_at
     if resp.status_code in _REJECTED_STATUSES:
-        raise RefreshRejected(resp.status_code)
+        meta = meta_adapter.error_fields(resp, secrets=(token,))
+        raise RefreshRejected(resp.status_code, meta)
     raise RefreshTransient(resp.status_code)
 
 
@@ -344,10 +351,11 @@ async def refresh_credential(deps, session, job) -> str:
             return "stale"
         logger.warning(
             "refresh_credential %s: credential %s definitively rejected"
-            " (HTTP %s) — marked dead, account flipped to reauth_required",
+            " (HTTP %s; %s) — marked dead, account flipped to reauth_required",
             job["id"],
             credential_id,
             exc.status_code,
+            exc.meta_error,
         )
         return "rejected"
 

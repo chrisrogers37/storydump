@@ -20,6 +20,8 @@ probe reads a time, never a post, so it changes no coverage claim.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -55,6 +57,8 @@ from src.services.target.media_adapters import (
 if TYPE_CHECKING:
     from src.services.target.instagram_catalog import PastPostsObservation
 
+logger = logging.getLogger(__name__)
+
 PROVIDER = "instagram_past_posts"
 LISTING_CEILING = 10_000
 PAGE_SIZE = 100
@@ -85,6 +89,9 @@ _EXPIRED_LINK = frozenset({401, 403, 404, 410})
 PREVIEW_GRAPH_REQUESTS = 2
 PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 PREVIEW_BUDGET_S = 8.0
+#: A download's wall budget when the caller names none (`WorkerConfig`'s
+#: `past_posts_download_seconds` names one per kind).
+DEFAULT_DOWNLOAD_SECONDS = 120.0
 _PREVIEW_FIELDS = _FETCH_FIELDS + ",thumbnail_url"
 _PREVIEW_CHILD_FIELDS = "id,media_type,media_url,thumbnail_url"
 
@@ -139,6 +146,9 @@ class _Turn:
     #: of an app-scoped owner when no verified id is recorded. Never persisted.
     profile: Optional[dict] = None
     profile_read: bool = False
+    #: The HTTP status of this turn's last Graph answer that was not an error,
+    #: for the evidence of a fetch that succeeded.
+    last_graph_status: Optional[int] = None
 
     @property
     def remaining(self):
@@ -209,6 +219,20 @@ class _Ownership:
     ok: bool
     test: str
     match: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SlideRead:
+    """The read of a post that lists its selected part: the part, the post and
+    the status its read answered, and its children as listed, with the status
+    of their read (None for a post read with no children)."""
+
+    part: dict
+    parent: dict
+    post_status: Optional[int]
+    parts: list
+    complete: bool
+    children_status: Optional[int]
 
 
 def _graph_refusal(response, error, url: str, token: str) -> dict:
@@ -469,6 +493,7 @@ class InstagramPastPostsAdapter:
             ) from None
         if not isinstance(body, dict):
             raise MediaRetryableError("Instagram returned an invalid response")
+        turn.last_graph_status = response.status_code
         error = body.get("error") or {}
         if error or response.is_error:
             code = error.get("code") if isinstance(error, dict) else None
@@ -679,7 +704,8 @@ class InstagramPastPostsAdapter:
 
         Before a request the turn cannot afford, the batch yields: the parent it
         was reading, and every later one, stay queued, and what completed is
-        returned. A parent the provider refused for good is `failed` and the
+        returned. A parent Graph says does not exist is `failed`, and one refused
+        without that proof is `deferred`, its slides untouched; either way the
         batch goes on, so one bad parent cannot starve the rest. A parent whose
         read is retryable is `deferred`, and the batch ends there, so a provider
         that is throttling or failing is not asked again this turn. A first
@@ -706,8 +732,14 @@ class InstagramPastPostsAdapter:
                     deferred.append(mid)
                     diagnostics.append("parent_read_retry_pending")
                     break
-                except MediaTerminalError:
-                    failed.append(mid)
+                except MediaTerminalError as exc:
+                    if refusal_evidence.proves_gone(refusal_evidence.of(exc)):
+                        failed.append(mid)
+                    else:
+                        # One answer that does not prove the post gone retires
+                        # none of its slides: the parent is read again later.
+                        deferred.append(mid)
+                        diagnostics.append("parent_read_unproven")
                     continue
                 observations.append(observation)
                 candidates.extend(
@@ -1043,6 +1075,15 @@ class InstagramPastPostsAdapter:
         parts, complete = (
             ((), False) if deferred_carousel else await self._children(parent, turn)
         )
+        if complete and not parts:
+            # A carousel always has slides, so a children read that lists none
+            # proves nothing about them: the post lands as one not yet read, and
+            # the index keeps what it holds.
+            logger.warning(
+                "instagram sync: post %s listed no slides; read as unknown",
+                parent.get("id"),
+            )
+            deferred_carousel, complete = True, False
         assets = []
         for position, part in enumerate(parts, 1):
             kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
@@ -1138,9 +1179,11 @@ class InstagramPastPostsAdapter:
             },
         }
 
-    async def _owned_parent(self, mid: str, turn: _Turn) -> dict:
-        """Post `mid` as Graph returns it now: owned by this account, same id."""
+    async def _owned_parent(self, mid: str, turn: _Turn) -> tuple[dict, Optional[int]]:
+        """Post `mid` as Graph returns it now, owned by this account and with the
+        same id, and the status that read answered."""
         parent = await self._graph(mid, turn, {"fields": _FETCH_FIELDS})
+        status = turn.last_graph_status
         ownership = await self._ownership(parent.get("owner"), turn)
         if not ownership.ok:
             raise refusal_evidence.attach(
@@ -1158,13 +1201,13 @@ class InstagramPastPostsAdapter:
                 MediaTerminalError("Instagram returned a different media item"),
                 refusal_evidence.evidence("identity_mismatch", id_matches=False),
             )
-        return parent
+        return parent, status
 
     async def _current_slide(
         self, mid, turn, selected_asset_id, expected_slide_count
-    ) -> dict:
-        """The selected part of post `mid` as Graph lists it now, or why it
-        cannot be fetched.
+    ) -> _SlideRead:
+        """The read of post `mid` that lists its selected part now, or why the
+        part cannot be fetched.
 
         One read that lacks the slide proves nothing, so a complete one is
         followed by a second, fresh read of the parent and its children. The
@@ -1176,11 +1219,14 @@ class InstagramPastPostsAdapter:
         """
         listed = []
         for _ in range(2):
-            parent = await self._owned_parent(mid, turn)
+            parent, post_status = await self._owned_parent(mid, turn)
+            turn.last_graph_status = None
             parts, complete = await self._children(parent, turn, seek=selected_asset_id)
             part = _slide(parts, selected_asset_id)
             if part is not None:
-                return part
+                return _SlideRead(
+                    part, parent, post_status, parts, complete, turn.last_graph_status
+                )
             if not complete:
                 raise _missing_slide(parts, complete, gone=False)
             listed.append({p.get("id") for p in parts})
@@ -1200,8 +1246,10 @@ class InstagramPastPostsAdapter:
         workspace_id: str,
         max_bytes: int,
         selected_asset_id: Optional[str] = None,
+        download_budget_s: Optional[float] = None,
         expected_slide_count: Optional[int] = None,
         on_counters: Optional[Callable[[MediaTurnCounters], None]] = None,
+        on_evidence: Optional[Callable[[dict], None]] = None,
     ) -> tuple[bytes, str, Optional[str]]:
         """Fetch current bytes; bound validation/effect callers supply selection.
 
@@ -1209,11 +1257,17 @@ class InstagramPastPostsAdapter:
         captured selected_asset_id. Freshly changed carousel bytes cannot
         inherit the previous child's evidence. No consumer is wired here. A
         preview is :meth:`fetch_preview`, never this full fetch.
+        download_budget_s is the download's wall budget, DEFAULT_DOWNLOAD_SECONDS
+        when None; a download it cuts off names it in the refusal's evidence.
         expected_slide_count is the slide count the index recorded for the
         post, None for a single post or when none was recorded: a selected
         slide the reads lack is judged gone only against it (`_current_slide`).
         on_counters is a synchronous local observer (no I/O), called once even
-        on failure/cancellation. Observer exceptions cannot alter read outcomes.
+        on failure/cancellation. on_evidence is one too, called once with a
+        successful fetch's evidence (`refusal_evidence`, kind "fetched"): each
+        answer's status and media type, the children read, and the file's
+        status, content type, size, sha256, host and expiry. Observer exceptions
+        cannot alter read outcomes.
         """
         turn = None
         try:
@@ -1226,9 +1280,10 @@ class InstagramPastPostsAdapter:
             # Every link status the CDN answered, so a second refusal keeps the first.
             link_statuses = []
             for attempt in range(2):
-                part = await self._current_slide(
+                read = await self._current_slide(
                     mid, turn, selected_asset_id, expected_slide_count
                 )
+                part = read.part
                 kind = {"IMAGE": "image", "VIDEO": "video"}.get(part.get("media_type"))
                 url = part.get("media_url")
                 if kind is None or not isinstance(url, str) or not url:
@@ -1242,7 +1297,8 @@ class InstagramPastPostsAdapter:
                             has_link=isinstance(url, str) and bool(url),
                         ),
                     )
-                policy = self._download_policy(url, max_bytes)
+                policy = self._download_policy(url, max_bytes, download_budget_s)
+                link = refusal_evidence.link_evidence(url)
                 try:
                     # Never forward the Instagram token to the CDN.
                     self._require_plain_client()
@@ -1260,14 +1316,18 @@ class InstagramPastPostsAdapter:
                             "over_byte_cap",
                             cap=exc.cap,
                             received=exc.received,
-                            host=refusal_evidence.link_evidence(url)["host"],
+                            host=link["host"],
                         ),
                     ) from None
                 except egress.EgressBudgetExhausted:
-                    raise MediaRetryableError(
-                        "Instagram download budget exhausted"
+                    raise refusal_evidence.attach(
+                        MediaRetryableError("Instagram download budget exhausted"),
+                        refusal_evidence.evidence(
+                            "download_budget_spent",
+                            seconds=policy.total_budget_s,
+                            host=link["host"],
+                        ),
                     ) from None
-                link = refusal_evidence.link_evidence(url)
                 if response.status_code in _EXPIRED_LINK:
                     link_statuses.append(response.status_code)
                     if attempt == 0:
@@ -1305,8 +1365,42 @@ class InstagramPastPostsAdapter:
                             host=link["host"],
                         ),
                     )
+                if on_evidence is not None:
+                    fetched = refusal_evidence.evidence(
+                        "fetched",
+                        post={
+                            "http_status": read.post_status,
+                            "media_type": refusal_evidence.short(
+                                read.parent.get("media_type")
+                            ),
+                        },
+                        children=None
+                        if read.children_status is None
+                        else {
+                            "http_status": read.children_status,
+                            "returned": len(read.parts),
+                            "complete": read.complete,
+                        },
+                        part={
+                            "media_type": refusal_evidence.short(part.get("media_type"))
+                        },
+                        file={
+                            "http_status": response.status_code,
+                            "content_type": refusal_evidence.short(mime),
+                            "bytes": len(response.content),
+                            "sha256": hashlib.sha256(response.content).hexdigest(),
+                            **link,
+                        },
+                        link_statuses=list(link_statuses),
+                    )
+                    try:
+                        on_evidence(fetched)
+                    except Exception:  # noqa: BLE001 - a diagnostic observer
+                        # cannot replace a successful read.
+                        pass
                 # This is a byte fetch, not video eligibility. Ingest activation
-                # must validate duration/codec before admitting video candidates.
+                # must validate the file (`media_validation`) before admitting
+                # video candidates.
                 return (
                     response.content,
                     f"Instagram {mid}.{'jpg' if kind == 'image' else 'mp4'}",
@@ -1459,7 +1553,9 @@ class InstagramPastPostsAdapter:
             },
         )
 
-    def _download_policy(self, url: str, max_bytes: int) -> egress.EgressPolicy:
+    def _download_policy(
+        self, url: str, max_bytes: int, budget_s: Optional[float] = None
+    ) -> egress.EgressPolicy:
         try:
             parsed = urlsplit(url)
             host = parsed.hostname or ""
@@ -1487,5 +1583,5 @@ class InstagramPastPostsAdapter:
             allowed_hosts=frozenset({host}),
             max_response_bytes=max_bytes,
             timeout_class="upload",
-            total_budget_s=120,
+            total_budget_s=DEFAULT_DOWNLOAD_SECONDS if budget_s is None else budget_s,
         )

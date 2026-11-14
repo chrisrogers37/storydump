@@ -72,6 +72,7 @@ class TestSnapshot:
             lanes=[
                 {"lane": "interactive", "ready": 3, "oldest_age": 4.26},
                 {"lane": "bulk", "ready": 12, "oldest_age": 130.0},
+                {"lane": "media", "ready": 2, "oldest_age": 9.04},
             ],
             pending=5,
             paced={"spent": 4, "held": True},
@@ -83,6 +84,7 @@ class TestSnapshot:
         assert len(ex.statements) == 4
         assert snap["lanes"]["interactive"] == {"ready": 3, "oldest_age_s": 4.3}
         assert snap["lanes"]["bulk"] == {"ready": 12, "oldest_age_s": 130.0}
+        assert snap["lanes"]["media"] == {"ready": 2, "oldest_age_s": 9.0}
         assert snap["outbox_pending"] == 5
         assert snap["tg_global"] == {
             "paced_windows_last_minute": 4,
@@ -127,6 +129,7 @@ class TestSnapshot:
         assert snap["lanes"] == {
             "interactive": {"ready": 0, "oldest_age_s": 0.0},
             "bulk": {"ready": 0, "oldest_age_s": 0.0},
+            "media": {"ready": 0, "oldest_age_s": 0.0},
         }
         assert snap["outbox_pending"] == 0
         assert snap["tg_global"] == {

@@ -300,6 +300,14 @@ REVOKE ALL ON FUNCTION fn_reaper_stale_approved(interval, integer) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_reaper_stale_approved(interval, integer) TO svc_worker;
 
+REVOKE ALL ON FUNCTION fn_reaper_parks_late(uuid, uuid) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_parks_late(uuid, uuid) TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_reaper_late_past_posts(interval, integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_late_past_posts(interval, integer) TO svc_worker;
+
 REVOKE ALL ON FUNCTION fn_health_posting_freshness() FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_health_posting_freshness() TO svc_ingress;
@@ -416,9 +424,9 @@ GRANT EXECUTE ON FUNCTION fn_signup_claim(text) TO svc_ingress;
 
 REVOKE ALL ON FUNCTION trg_users_consume_admission() FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, text) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid) TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, text) TO svc_ingress, svc_worker;
 
 REVOKE ALL ON FUNCTION fn_source_read_authority(uuid, uuid, boolean) FROM PUBLIC;
 
@@ -444,9 +452,9 @@ REVOKE ALL ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) FROM PUB
 
 GRANT EXECUTE ON FUNCTION fn_clock_tick(integer, interval, jsonb, boolean) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean) TO svc_worker;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(integer, interval, interval, boolean, boolean, interval) TO svc_worker;
 
 REVOKE ALL ON FUNCTION trg_past_posts_validation_capture_reset() FROM PUBLIC;
 
@@ -454,9 +462,9 @@ REVOKE ALL ON FUNCTION fn_mix_conversion_jobs(integer, text, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_mix_conversion_jobs(integer, text, text) TO svc_worker;
 
-REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean, text) FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean) TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_source_asset_suitability(uuid, uuid, integer, timestamp with time zone, boolean, uuid, uuid, uuid, boolean, text) TO svc_ingress, svc_worker;
 
 REVOKE ALL ON FUNCTION fn_selected_preparation_due(integer) FROM PUBLIC;
 

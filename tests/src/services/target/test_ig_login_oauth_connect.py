@@ -28,6 +28,22 @@ SHORT = {"data": [{"access_token": "IGQVJ-short", "user_id": 17841400000000001}]
 LONG = {"access_token": "IGQVJ-long", "token_type": "bearer", "expires_in": 5184000}
 PROFILE = {"user_id": "17841400000000001", "username": "example.brand", "id": "9"}
 
+#: What the requests carry, and Meta's own words: no refusal repeats any of them.
+SENT_CODE = "code-sentinel"
+SENT_SECRET = "secret-sentinel"
+SENT_TOKEN = "IGQVJ-sentinel"
+META_TEXT = "message-text-sentinel"
+#: A refused call's body as Meta shapes it, its message echoing the request.
+META_REFUSAL = {
+    "error": {
+        "message": f"{META_TEXT} {SENT_CODE} {SENT_SECRET} {SENT_TOKEN}",
+        "type": "OAuthException",
+        "code": 190,
+        "error_subcode": 463,
+        "fbtrace_id": "AbC123xyz",
+    }
+}
+
 
 def queued_egress(monkeypatch, answers):
     """Patch `egress.request` to answer *answers* in order — each a
@@ -47,14 +63,14 @@ def queued_egress(monkeypatch, answers):
     return calls
 
 
-async def _exchange(code="c0de#_"):
+async def _exchange(code="c0de#_", client_secret=APP_SECRET):
     async with httpx.AsyncClient() as client:
         return await ig.exchange_code(
             client,
             code=code,
             redirect_uri=REDIRECT,
             client_id=APP_ID,
-            client_secret=APP_SECRET,
+            client_secret=client_secret,
         )
 
 
@@ -142,6 +158,41 @@ class TestExchangeCode:
         with pytest.raises(ig.IgOAuthRefused) as info:
             await _exchange()
         assert info.value.reason == "malformed_response"
+
+    @pytest.mark.parametrize(
+        "granted, call",
+        [
+            ([], "token endpoint"),
+            ([{"data": [{"access_token": SENT_TOKEN}]}], "long-lived exchange"),
+            (
+                [
+                    {"data": [{"access_token": SENT_TOKEN}]},
+                    {"access_token": SENT_TOKEN},
+                ],
+                "profile read",
+            ),
+        ],
+    )
+    async def test_a_refusal_names_metas_four_fields_and_nothing_else(
+        self, monkeypatch, caplog, granted, call
+    ):
+        """The callback logs the refusal's message: Meta's code, subcode, type
+        and trace id, and never the code, the secret, a token or Meta's text."""
+        caplog.set_level("DEBUG")
+        answers = [(200, body) for body in granted] + [(400, META_REFUSAL)]
+        queued_egress(monkeypatch, answers)
+        with pytest.raises(ig.IgOAuthRefused) as info:
+            await _exchange(code=f"{SENT_CODE}#_", client_secret=SENT_SECRET)
+        assert info.value.detail == (
+            f"{call} answered 400; Meta error code=190 subcode=463"
+            " type=OAuthException fbtrace_id=AbC123xyz"
+        )
+        said, exc = [r.getMessage() for r in caplog.records], info.value
+        while exc is not None:
+            said += [str(exc), repr(exc)]
+            exc = exc.__cause__ or exc.__context__
+        for sentinel in (SENT_CODE, SENT_SECRET, SENT_TOKEN, META_TEXT):
+            assert not [line for line in said if sentinel in line]
 
     async def test_a_body_that_is_not_json_is_malformed_not_a_crash(self, monkeypatch):
         queued_egress(monkeypatch, [(200, b"<html>")])
@@ -288,6 +339,25 @@ class TestAuthorizationUrl:
         assert q["client_id"] == [APP_ID]
         assert q["redirect_uri"] == [REDIRECT]
         assert set(q["scope"][0].split(",")) == set(ig.REQUIRED_SCOPES)
+
+    def test_the_path_keeps_its_trailing_slash(self):
+        """Without the slash an iPhone hands the page to the Instagram app,
+        which cannot finish the login: its app-link file leaves only
+        `/oauth/authorize/*` to the browser."""
+        url = ig.authorization_url("st4te", redirect_uri=REDIRECT, client_id=APP_ID)
+        parts = urlsplit(url)
+        assert (parts.scheme, parts.netloc, parts.path) == (
+            "https",
+            "api.instagram.com",
+            "/oauth/authorize/",
+        )
+        assert set(parse_qs(parts.query)) == {
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "response_type",
+            "state",
+        }
 
 
 class _ScalarResult:

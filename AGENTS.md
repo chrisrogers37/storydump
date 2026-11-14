@@ -104,9 +104,7 @@ command that shows its commits, and a pull request's title and body are yours
 to check.
 
 A commit message, and a pull request's title and body, describe the change:
-its behavior and its tests. They carry no attribution lines — no
-`Co-authored-by` trailer, no "Generated with" footer — and name no review,
-reviewer or tool behind the change.
+its behavior and its tests.
 
 ### Main is production
 
@@ -160,7 +158,8 @@ Each layer is isolated. Do not violate the boundaries:
   (below).
 - **Worker** (`src/worker.py`, the composition root `src/main.py` dispatches
   to) → runs the same services as jobs: the elected clock (`scheduler.py`),
-  the two claim lanes `interactive` and `bulk` over the kind→executor registry
+  the three claim lanes (`interactive` 2, `bulk` 2, `media` 1 tasks; `media`
+  prepares past-posts files) over the kind→executor registry
   (`work_loop.py`, `jobs.py`), the publish pipeline (`publish_pipeline.py`)
   and the outbox sender (`outbox.py`). A kind whose seam the deployment lacks
   is parked by name, never run against a fake.
@@ -353,9 +352,11 @@ client, never a database connection. Install it with
    operating details, `GET /api/v1/ops/health`, which answers only the user ids
    in the API's `OPS_USER_IDS` — `storydump whoami` prints yours; without
    them the webhook is `not_checked`, not well, and `data.details` says why;
-   exit 4 then, the report and each verdict still printed. Two bounds against
-   the pollers: one reading has no watch clock, and one unreachable reading
-   is reported where the pollers wait for two) · `storydump deploys
+   exit 4 then, the report and each verdict still printed. Three bounds against
+   the pollers: one reading has no watch clock, one unreachable reading is
+   reported where the pollers wait for two, and neither `/health/delivery` nor
+   the API/worker commit split is judged here, though the scheduling monitor
+   pages on both) · `storydump deploys
    [--watch --commit <sha> --timeout <s>]` (the latest deployments on Railway
    through your own `railway` login, with the linked project checked first;
    exit 5 with the fix when Railway cannot be read; `--watch` ends 0 on both
@@ -364,8 +365,12 @@ client, never a database connection. Install it with
    · `storydump webhook status|register|deregister` (the bot's Telegram
    webhook, the deployment's variables read from this shell, no secret ever
    printed; exit 4 when a check fails) · `storydump doctor` (the token, the
-   API, the token store, the config, Railway, the migration ledger against
-   this checkout — each ok, wrong, missing or skipped with a one-line fix).
+   API, the token store, the config, Railway, the settings the API and the
+   worker must share, the migration ledger against this checkout — each ok,
+   wrong, missing or skipped with a one-line fix; the settings are read
+   through your own `railway` login and compared by a digest of each value,
+   and a setting that differs, or that one service lacks, is named, never its
+   value).
 
 `storydump --help` is the authoritative list. A new verb is classified for the
 safety block above before it ships: `tests/test_agent_docs.py` pins the names
@@ -400,12 +405,22 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
   pytest tests/scripts/
 ```
 
+To run only the database-free tests, with no server at hand, point the
+fixtures at a port where nothing listens, and the database-gated tests skip.
+A port that answers counts as a configured database (another PostgreSQL on
+5432, say), so a failed login there fails the run rather than skipping
+(`tests/conftest.py`, `server_is_listening`):
+
+```bash
+DB_HOST=127.0.0.1 DB_PORT=65499 pytest --no-cov tests/src/services/target/
+```
+
 ## Services
 
 The `Procfile` names the two deployed processes; both run the one tier.
 
 - **Worker:** `python -m src.main` — see the safety rules. `src/main.py` only
-  dispatches to `src.worker.main`, which elects the clock, claims jobs on two
+  dispatches to `src.worker.main`, which elects the clock, claims jobs on three
   lanes, runs the publish pipeline and sends the Telegram cards. It reads
   `TARGET_DATABASE_URL` from the process environment and exits 2 without it,
   or when it names a pooled host, no host, or cannot be read

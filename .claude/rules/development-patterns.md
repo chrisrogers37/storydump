@@ -90,7 +90,8 @@ logger.exception("sender-job sweep failed; retrying on cadence")
 - Never log a token, a secret, a connection string or `encrypted_payload`. A URL
   that embeds a token is redacted before it reaches an exception or a log line
   (`TelegramTransport.redact`); a provider's error body is summarised by status,
-  not quoted.
+  not quoted. A refused Instagram Login call or refresh adds Meta's error code,
+  subcode, type and trace id (`meta_adapter.error_fields`), never its message.
 - uvicorn's access and trace lines and the app's own refusal lines print no
   query string, and wherever a path they print carries a
   `CREDENTIAL_PATH_PREFIXES` prefix (`/api/v1/invitations/`, `/join/`), under a

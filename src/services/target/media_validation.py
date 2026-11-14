@@ -5,17 +5,26 @@ https://developers.facebook.com/documentation/instagram-platform/instagram-graph
 FFmpeg interface: ffprobe's JSON stream and format entries.
 
 Resource limits/private cwd are NOT a filesystem sandbox. MOV external-track
-references are refused before using explicit disabled dref/path options. No
-network, transformations, captions, URLs or raw decoder diagnostics are retained.
+references the container walker reads are refused; the probe runs with dref and
+path options disabled, which is what holds one in a container the walker could
+not read whole. No network, transformations, captions, URLs or raw decoder
+diagnostics are retained.
 
 Meta never receives a video's source file. It fetches the transit store's
 story derivation of it (`transit.story_transformation`, delivered as MP4 in the
 story frame), so a video is judged only on what the derivation keeps from it:
-its size, a well-formed self-contained container, a video stream the probe can
-open, its duration and its frame rate. The derivation is trimmed to the
-longest story and encoded to the matrix's story video
-(`story_video_encoding`), so a longer video is kept and only a shorter one is
-refused for its length. The frame rate is still refused outside the matrix:
+its size against what the transit store takes, a well-formed self-contained
+container, a video stream, its duration and its frame rate.
+What only the file could settle never leaves it pending: a container the walker
+cannot read whole, a stream the probe does not decode (`closed_decoders` names
+the decoders ffprobe declined, as ffprobe names them), more streams than the
+probe opens (by the walker's count of tracks, or at the probe's own stream
+bound, which also counts an attached picture) and a duration nothing states are
+left to the derivation, which re-encodes the file, and recorded. The
+derivation is trimmed to the longest story and encoded to the matrix's story
+video (`story_video_encoding`), so a longer video is kept and only a shorter one
+is refused for its length, the container's or its longest stream's. The frame
+rate is still refused outside the matrix:
 the derivation's frame-rate range is not documented for a source outside it.
 The source's container layout (edit lists, where `moov` sits), its encoding
 settings and its audio settings are the derivation's to set, and are not
@@ -34,12 +43,14 @@ import json
 import math
 import subprocess
 import os
+import re
 import resource
 import signal
 import shutil
 import struct
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -48,8 +59,11 @@ from typing import Literal, Mapping
 
 from .vocabulary import PUBLISH_MAX_BYTES
 
-MATRIX_VERSION = "instagram-story-2026-10-26-v3"
-EVIDENCE_VERSION = 2
+#: Stamped on every stored verdict. A stored refusal stamped with any other
+#: value is judged again (`fn_source_asset_suitability`), so it changes
+#: whenever a check could refuse or pass a file differently.
+MATRIX_VERSION = "instagram-story-2026-10-26-v5"
+EVIDENCE_VERSION = 4
 #: Meta: "File size: 100MB maximum"
 PROVIDER_VIDEO_BYTES = 100_000_000
 #: Meta: "File size: 8 MB maximum." (Story Image Specifications)
@@ -61,16 +75,14 @@ SUPPORTED_MEDIA_MATRIX = MappingProxyType(
         "checked": "2026-10-11",
         "provider_page_updated": "2026-09-28",
         "color_evidence": "Story Image Specifications explicitly permits conversion to sRGB",
-        "byte_caps": MappingProxyType(
-            {
-                "image": min(PUBLISH_MAX_BYTES["image"], PROVIDER_IMAGE_BYTES),
-                "video": min(PUBLISH_MAX_BYTES["video"], PROVIDER_VIDEO_BYTES),
-            }
-        ),
+        # What the transit store takes. Meta's own size limits govern the
+        # story derivation it delivers, and are judged on it
+        # (`judge_derivation`).
+        "byte_caps": MappingProxyType(dict(PUBLISH_MAX_BYTES)),
         "image": ("JPEG", "sRGB; provider converts other color spaces"),
         "video": (
             "MOV/MP4, well formed and self-contained",
-            "a video stream the probe can open: H.264 or HEVC, with AAC audio",
+            "a video stream, which the derivation encodes to H.264 with AAC audio",
             "delivered to Meta as the transit store's story derivation",
         ),
         # Meta: "Duration: 60 seconds maximum,  3 seconds minimum"
@@ -161,14 +173,15 @@ def _check_record(check: str, kind: str, measured: Mapping[str, object]) -> Mapp
 
 def _passed(kind: str, evidence: Mapping[str, object]) -> tuple:
     """Each check a supported file passed that holds it to a bound, recorded
-    from the evidence. A video whose probe states no frame rate was not judged
-    on one."""
+    from the evidence. A video whose probe states no duration or no frame rate
+    was not judged on it."""
     checks = [_check_record("byte_limit", kind, {"bytes": evidence["bytes"]})]
     if kind == "video":
-        duration = {"duration_seconds": evidence["duration_seconds"]}
-        if evidence["trimmed_to_seconds"] is not None:
-            duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
-        checks.append(_check_record("duration", kind, duration))
+        if _positive_fraction(evidence["duration_seconds"]) is not None:
+            duration = {"duration_seconds": evidence["duration_seconds"]}
+            if evidence["trimmed_to_seconds"] is not None:
+                duration["trimmed_to_seconds"] = evidence["trimmed_to_seconds"]
+            checks.append(_check_record("duration", kind, duration))
         if _positive_fraction(evidence["fps"]) is not None:
             checks.append(_check_record("fps", kind, {"fps": evidence["fps"]}))
     return tuple(checks)
@@ -208,6 +221,11 @@ class ValidationLimits:
     pixels: int = 8_000_000
     boxes: int = 20_000
     depth: int = 12
+    #: The most streams the probe opens (`-max_streams`). A file with more, by
+    #: the walk's count of tracks or at the probe's own bound (an attached
+    #: picture is one more), is not probed: its story derivation takes the first
+    #: video and audio stream.
+    streams: int = 16
     ffprobe: str = "ffprobe"
     temporary_root: str | None = None
 
@@ -220,6 +238,7 @@ class ValidationLimits:
             "pixels": 8_000_000,
             "boxes": 20_000,
             "depth": 12,
+            "streams": 16,
         }
         for name, ceiling in ceilings.items():
             value = getattr(self, name)
@@ -260,7 +279,8 @@ class ValidationPending(Exception):
 
 
 #: Every check a file can be refused by: the closed set `UnsupportedMedia`
-#: carries, which the refusal sentences (`refusal_evidence`) are held to.
+#: carries. The refusal sentences (`refusal_evidence`) cover it, and the checks
+#: it no longer holds (`refusal_evidence.LEGACY_CHECKS`).
 UNSUPPORTED_CHECKS = frozenset(
     {
         "byte_limit",
@@ -278,7 +298,6 @@ UNSUPPORTED_CHECKS = frozenset(
         "malformed_image",
         "malformed_video",
         "stream_topology",
-        "video_codec",
     }
 )
 
@@ -315,8 +334,13 @@ def _measured(exc: Exception, **values) -> Exception:
     other value as bounded text. These are the parsed facts a check read,
     never the tool's raw output.
     """
-    exc.measured = {key: _measured_value(value) for key, value in values.items()}
+    exc.measured = _bounded(values)
     return exc
+
+
+def _bounded(values: Mapping[str, object]) -> dict:
+    """*values* as a record keeps measured values (`_measured_value`)."""
+    return {key: _measured_value(value) for key, value in values.items()}
 
 
 @dataclass(frozen=True)
@@ -444,9 +468,18 @@ async def run_bounded(argv, limits, cwd, deadline):
 @dataclass(frozen=True)
 class ContainerEvidence:
     reason: str | None
-    pending: bool = False
-    #: For a refusal: the box list and the sample codecs walked so far.
+    #: For a refusal, and for a walk that stopped short: the box list and the
+    #: sample codecs walked so far.
     measured: Mapping[str, object] = field(default_factory=dict)
+    #: Why a walk that refused nothing could not read the container whole
+    #: (`container_budget`, `container_evidence_incomplete`), or None.
+    stopped: str | None = None
+    #: The tracks the walk found, each a stream to the probe: for a walk that
+    #: stopped short, those it reached.
+    streams: int = 0
+    #: The sample entries it found that the probe does not decode
+    #: (`_PROBE_SAMPLE_ENTRIES`), which the story derivation re-encodes.
+    undecoded: tuple[str, ...] = ()
 
 
 class _BoxBudget:
@@ -491,20 +524,28 @@ def _boxes(data: bytes, start: int, end: int, depth: int, budget: _BoxBudget):
 def inspect_container(
     data: bytes, limits: ValidationLimits | None = None
 ) -> ContainerEvidence:
-    """Small bounded ISO-BMFF walker; opaque payload text never becomes a box."""
+    """Small bounded ISO-BMFF walker; opaque payload text never becomes a box.
+
+    A container the walk cannot read whole, past its budget
+    (`container_budget`) or holding what it does not follow
+    (`container_evidence_incomplete`: a fragmented or compressed movie, a
+    reference of a kind it does not know), is not refused for that: the story
+    derivation re-encodes the file. The walk keeps what it read and names where
+    it stopped."""
     budget = _BoxBudget(limits or ValidationLimits())
     top = []
     tracks = []
     codecs = []
-    pending = False
+    # A compressed or fragmented movie, which the walk does not follow.
+    unfollowed = False
 
     def walk(start, end, depth, track=None):
-        nonlocal pending
+        nonlocal unfollowed
         for kind, payload, finish in _boxes(data, start, end, depth, budget):
             if depth == 0:
                 top.append(kind)
             if kind in (b"cmov", b"moof", b"mvex"):
-                pending = True
+                unfollowed = True
             if kind == b"trak":
                 track = {"refs": [], "indices": []}
                 tracks.append(track)
@@ -534,40 +575,53 @@ def inspect_container(
                         )
                         codecs.append(entry.decode("ascii", errors="replace"))
 
-    try:
-        walk(0, len(data), 0)
-        if top.count(b"moov") != 1 or b"mdat" not in top:
-            raise ValidationPending("container_evidence_incomplete")
-        for track in tracks:
-            if not track["indices"] or not track["refs"]:
-                pending = True
-            for index in track["indices"]:
-                if not 0 < index <= len(track["refs"]) or not track["refs"][index - 1]:
-                    pending = True
-        if not tracks or pending:
-            raise ValidationPending("container_evidence_incomplete")
-        # The decoders the probe may open on untrusted bytes (`_PROBE_CODECS`):
-        # a stream outside them is refused here rather than left to the probe.
-        refused = [
-            codec
-            for codec in codecs
-            if codec not in ("avc1", "avc3", "hvc1", "hev1", "mp4a")
-        ]
-        if refused:
-            raise _measured(UnsupportedMedia("video_codec"), refused_codecs=refused)
-        return ContainerEvidence(None)
-    except (UnsupportedMedia, ValidationPending) as exc:
-        measured = {
-            "boxes": [kind.decode("ascii", errors="replace") for kind in top],
-            "box_count": budget.count,
-            "sample_codecs": codecs,
-            **getattr(exc, "measured", {}),
-        }
-        return ContainerEvidence(
-            str(exc),
-            pending=isinstance(exc, ValidationPending),
-            measured=_measured(exc, **measured).measured,
+    def stop():
+        """Why the walk could not read the container whole, or None."""
+        try:
+            walk(0, len(data), 0)
+        except ValidationPending as exc:
+            return str(exc)
+        unresolved = any(
+            not track["indices"]
+            or not track["refs"]
+            or any(
+                not 0 < index <= len(track["refs"]) or not track["refs"][index - 1]
+                for index in track["indices"]
+            )
+            for track in tracks
         )
+        if (
+            top.count(b"moov") != 1
+            or b"mdat" not in top
+            or not tracks
+            or unfollowed
+            or unresolved
+        ):
+            return "container_evidence_incomplete"
+        return None
+
+    def walked():
+        """The top-level boxes, the count of boxes read and the sample codecs
+        walked so far, bounded as any measured value."""
+        return _bounded(
+            {
+                "boxes": [kind.decode("ascii", errors="replace") for kind in top],
+                "box_count": budget.count,
+                "sample_codecs": codecs,
+            }
+        )
+
+    try:
+        stopped = stop()
+    except UnsupportedMedia as exc:
+        return ContainerEvidence(str(exc), measured=walked())
+    return ContainerEvidence(
+        None,
+        measured=walked() if stopped else {},
+        stopped=stopped,
+        streams=len(tracks),
+        undecoded=tuple(c for c in codecs if c not in _PROBE_SAMPLE_ENTRIES),
+    )
 
 
 def _image_worker(path, pixels):
@@ -627,6 +681,20 @@ def _image_worker(path, pixels):
         )
 
 
+@contextmanager
+def _private_copy(data: bytes, limits: ValidationLimits):
+    """*data* as a read-only file in a private temporary directory, removed on
+    exit: the bounded tools read this copy, never the caller's bytes, and run
+    in its directory."""
+    with tempfile.TemporaryDirectory(
+        prefix="media-validation-", dir=limits.temporary_root
+    ) as directory:
+        local = Path(directory) / "asset"
+        local.write_bytes(data)
+        local.chmod(0o400)
+        yield local
+
+
 async def validate_media(
     source: ValidationInput, *, limits: ValidationLimits | None = None
 ) -> ValidationResult:
@@ -643,21 +711,9 @@ async def validate_media(
             )
         deadline = asyncio.get_running_loop().time() + limits.wall_seconds
         if source.kind == "video":
-            container = inspect_container(source.data, limits)
-            if container.reason:
-                raise _measured(
-                    (ValidationPending if container.pending else UnsupportedMedia)(
-                        container.reason
-                    ),
-                    **container.measured,
-                )
-        with tempfile.TemporaryDirectory(
-            prefix="media-validation-", dir=limits.temporary_root
-        ) as directory:
-            local = Path(directory) / "asset"
-            local.write_bytes(source.data)
-            local.chmod(0o400)
-            if source.kind == "image":
+            evidence.update(await _validate_video(source.data, limits, deadline))
+        else:
+            with _private_copy(source.data, limits) as local:
                 command = [
                     sys.executable,
                     "-c",
@@ -665,7 +721,7 @@ async def validate_media(
                     str(local),
                     str(limits.pixels),
                 ]
-                output = await run_bounded(command, limits, directory, deadline)
+                output = await run_bounded(command, limits, local.parent, deadline)
                 if output.returncode:
                     raise ValidationPending("decoder_unavailable")
                 try:
@@ -679,10 +735,6 @@ async def validate_media(
                 if "unsupported" in facts:
                     raise _measured(UnsupportedMedia(facts["unsupported"]), **measured)
                 evidence.update(facts)
-            else:
-                evidence.update(
-                    await _validate_video(local, limits, directory, deadline)
-                )
     except (UnsupportedMedia, ValidationPending) as exc:
         state = (
             "unsupported" if isinstance(exc, UnsupportedMedia) else "validation_pending"
@@ -732,11 +784,11 @@ def _positive_fraction(value):
 
 def inspect_video_facts(facts):
     """What the story derivation keeps of a video: its video stream (the first,
-    as the derivation takes it), the stream's duration (else the container's)
-    and its frame rate. A video shorter than the shortest story is refused; one
-    longer than the longest is kept, trimmed by the derivation, and recorded as
-    trimmed. A frame rate the probe does not state is not judged; one outside
-    the matrix is refused."""
+    as the derivation takes it), its duration (the longest the container or any
+    stream states) and its frame rate. A video shorter than the shortest story
+    is refused; one longer than the longest is kept, trimmed by the derivation,
+    and recorded as trimmed. A duration or a frame rate the probe does not
+    state is not judged; a frame rate outside the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
     if not videos:
@@ -744,44 +796,122 @@ def inspect_video_facts(facts):
             UnsupportedMedia("stream_topology"), streams=len(streams), video_streams=0
         )
     video = videos[0]
-    duration = _positive_fraction(video.get("duration")) or _positive_fraction(
-        facts.get("format", {}).get("duration")
-    )
-    if duration is None:
-        raise ValidationPending("timing_evidence_incomplete")
+    stated = [
+        _positive_fraction(entry.get("duration"))
+        for entry in (facts.get("format", {}), *streams)
+    ]
+    duration = max((value for value in stated if value is not None), default=None)
     fps = _positive_fraction(video.get("avg_frame_rate"))
     timing = dict(duration_seconds=duration, fps=fps)
-    shortest, longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"]
-    if duration < shortest:
+    shortest = SUPPORTED_MEDIA_MATRIX["duration_seconds"][0]
+    if duration is not None and duration < shortest:
         raise _measured(UnsupportedMedia("duration"), **timing)
     slowest, fastest = SUPPORTED_MEDIA_MATRIX["fps"]
     if fps is not None and not slowest <= fps <= fastest:
         raise _measured(UnsupportedMedia("fps"), **timing)
+    audio = any(s.get("codec_type") == "audio" for s in streams)
+    return _video_evidence(video, duration, fps, audio)
+
+
+def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
+    """A video's evidence of what the probe read: its video stream's codec and
+    frame size, its duration and frame rate ("unstated" for one it did not
+    state) and whether it holds audio, with the encoding its derivation is
+    sent, which trims it to the longest story."""
+    encoding = story_video_encoding()
+    longest = encoding["longest_seconds"]
     return {
         "codec": video.get("codec_name"),
         "width": video.get("width"),
         "height": video.get("height"),
-        "duration_seconds": str(duration),
+        "duration_seconds": "unstated" if duration is None else str(duration),
         "fps": "unstated" if fps is None else str(fps),
-        "audio": any(s.get("codec_type") == "audio" for s in streams),
-        "trimmed_to_seconds": str(longest) if duration > longest else None,
-        "derivation": story_video_encoding(),
+        "audio": audio,
+        "trimmed_to_seconds": (
+            str(longest) if duration is not None and duration > longest else None
+        ),
+        "derivation": encoding,
     }
 
 
-#: The decoders the probe may open on untrusted bytes. The container walker
-#: refuses a sample entry outside them before the probe runs.
-_PROBE_CODECS = "h264,hevc,aac"
+#: The decoders the probe may open on untrusted bytes, with the sample entries
+#: that name them. A stream outside them is not decoded: the probe reads its
+#: container facts, and the story derivation re-encodes it.
+_PROBE_DECODERS = {"h264": ("avc1", "avc3"), "hevc": ("hvc1", "hev1"), "aac": ("mp4a",)}
+_PROBE_CODECS = ",".join(_PROBE_DECODERS)  # `-codec_whitelist`
+_PROBE_SAMPLE_ENTRIES = tuple(
+    e for entries in _PROBE_DECODERS.values() for e in entries
+)
+
+
+#: ffmpeg's line for a decoder outside `-codec_whitelist` ("[mpeg4 @ 0x...]
+#: Codec (mpeg4) not on whitelist 'h264,hevc,aac'"), matched on a lowercased
+#: line: the probe's own bound, not a fault of the file, whose container facts
+#: still stand. Group 1 is the decoder it declined.
+_DECLINED = re.compile(
+    rb"^\[[^\]]* @ 0x[0-9a-f]+\] codec \(([^)]*)\) not on whitelist '[^']*'$"
+)
+
+#: ffmpeg's line for a message logged again at once ("Last message repeated
+#: N times"), matched on a lowercased line: it adds nothing to the line it
+#: repeats.
+_REPEATED = re.compile(rb"^ *last message repeated [0-9]+ times$")
+
+#: ffmpeg's line for a file with more streams than `-max_streams` ("Number of
+#: streams exceeds max_streams parameter (N), see the documentation if you
+#: wish to increase it"), matched on a lowercased line: the probe's own bound,
+#: whose consequences are the lines after it.
+_STREAM_BOUND = re.compile(
+    rb"^\[[^\]]* @ 0x[0-9a-f]+\] number of streams exceeds max_streams parameter"
+    rb" \([0-9]+\), see the documentation if you wish to increase it$"
+)
+
+
+class _ClosedDecoder(Exception):
+    """The probe stopped at decoders `-codec_whitelist` keeps closed, and at
+    nothing else (`_DECLINED`): ffprobe ends when it cannot open one.
+    `decoders` names them, once each and sorted, as ffprobe does."""
+
+    def __init__(self, decoders: list[str]):
+        super().__init__(decoders)
+        self.decoders = decoders
+
+
+class _StreamBound(Exception):
+    """The probe stopped at its own stream bound (`-max_streams`): the file
+    holds more streams than the probe opens, though the walk counted no more
+    than the bound (an attached picture is a stream to the probe and no track
+    to the walk)."""
 
 
 def _probe_succeeded(output):
-    """Return when the probe ran clean. Words that establish malformed bytes
-    refuse the file; a resource or capability failure leaves it pending."""
+    """Return when the probe ran clean, apart from the decoders it may not
+    open (`_DECLINED`), and raise `_ClosedDecoder` when those are all that
+    stopped it. A probe that reached its own stream bound (`_STREAM_BOUND`,
+    whose consequences are the lines after it) raises `_StreamBound`. Words
+    that establish malformed bytes refuse the file; a resource or capability
+    failure leaves it pending."""
     if output.returncode < 0:
         raise ValidationPending("resource_budget")
-    if output.returncode == 0 and not output.stderr:
-        return
     stderr = output.stderr.lower()
+    lines = stderr.splitlines()
+    if any(_STREAM_BOUND.match(line) for line in lines):
+        raise _StreamBound()
+    declined = [_DECLINED.match(line) for line in lines]
+    decoders = {
+        match.group(1).decode("ascii", errors="replace") for match in declined if match
+    }
+    if decoders:
+        stderr = b"\n".join(
+            line
+            for line, match in zip(lines, declined)
+            if not match and not _REPEATED.match(line)
+        )
+    if not stderr:
+        if output.returncode == 0:
+            return
+        if decoders:
+            raise _ClosedDecoder(sorted(decoders))
     if any(
         word in stderr
         for word in (
@@ -795,7 +925,51 @@ def _probe_succeeded(output):
     raise ValidationPending("probe_incomplete")
 
 
-async def _validate_video(local, limits, directory, deadline):
+async def _validate_video(data, limits, deadline):
+    """A video's evidence: the container walk, then what the probe reads of a
+    private copy. A walk that stopped short is recorded with what it read
+    (`container`), and so are the sample entries the probe does not decode
+    (`undecoded_codecs`). A file with more streams than the probe opens is not
+    probed, and one whose probe stops at a decoder it keeps closed, or at its
+    own stream bound (an attached picture is a stream to the probe and no
+    track to the walk), is judged without it: in each case the file is its
+    story derivation's to read, its evidence says why (`probe_skipped`), and
+    each fact the probe would give is unstated."""
+    container = inspect_container(data, limits)
+    if container.reason:
+        raise _measured(UnsupportedMedia(container.reason), **container.measured)
+    evidence = {}
+    if container.stopped:
+        evidence["container"] = {"stopped": container.stopped, **container.measured}
+    if container.undecoded:
+        evidence["undecoded_codecs"] = _measured_value(container.undecoded)
+    if container.streams > limits.streams:
+        evidence["probe_skipped"] = {
+            "streams": container.streams,
+            "max_streams": limits.streams,
+        }
+        facts = _video_evidence({})
+    else:
+        try:
+            with _private_copy(data, limits) as local:
+                facts = await _probe_video(local, limits, deadline)
+        except _ClosedDecoder as closed:
+            evidence["probe_skipped"] = {
+                "closed_decoders": _measured_value(closed.decoders)
+            }
+            facts = _video_evidence({})
+        except _StreamBound:
+            evidence["probe_skipped"] = {
+                "max_streams": limits.streams,
+                "walked_streams": container.streams,
+            }
+            facts = _video_evidence({})
+    return {**evidence, **facts}
+
+
+async def _probe_video(local, limits, deadline):
+    """What the probe reads of the private copy at *local*, run in its
+    directory."""
     output = await run_bounded(
         [
             limits.ffprobe,
@@ -816,7 +990,7 @@ async def _validate_video(local, limits, directory, deadline):
             "-err_detect",
             "explode",
             "-max_streams",
-            "3",
+            str(limits.streams),
             "-max_pixels",
             str(limits.pixels),
             "-show_entries",
@@ -826,7 +1000,7 @@ async def _validate_video(local, limits, directory, deadline):
             str(local),
         ],
         limits,
-        directory,
+        local.parent,
         deadline,
     )
     _probe_succeeded(output)

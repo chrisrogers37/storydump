@@ -1,10 +1,11 @@
 """The worker-liveness half of the scheduling detector (#1120).
 
-`scheduling_lag` watches the SCHEDULING CURSOR, whose population is
-`ig_accounts WHERE state = 'active'` — empty until a destination is active, so
-it correctly answers `no-signal` and correctly cannot see anything. These tests
-cover the axis that is NOT empty: whether the worker is still finishing the
-recurring jobs it runs regardless of how many tenants exist.
+`scheduling_lag` watches the SCHEDULING CURSOR, whose population is the
+clock's (an active account of an active, unpaused workspace) — empty until a
+destination is active, so it correctly answers `no-signal` and correctly cannot
+see anything. These tests cover the axis that is NOT empty: whether the worker
+is still finishing the recurring jobs it runs regardless of how many tenants
+exist, and that the cursor's population is the clock's own.
 
 The load-bearing property is that a system which has never run must not be
 reported with the same values as one that just succeeded.
@@ -15,6 +16,30 @@ from __future__ import annotations
 import pytest
 
 from src.services.target import scheduling_health
+from tests.src.services.target.schema_code import function_body
+from tests.src.services.target.test_content_runway import (
+    CLOCK_SCOPE,
+    DUE_NOW,
+    _plan_slot_conjuncts,
+)
+
+#: The `plan_slot` leg's conjunct the lag door keeps out of its WHERE: an
+#: active account with no cursor is counted, as a provisioning fault, and
+#: never stalled.
+CURSOR_SET = "a.next_slot_at IS NOT NULL"
+
+
+def test_the_lag_door_counts_the_accounts_the_clock_advances():
+    """`fn_health_scheduling_lag`'s population is `fn_clock_tick`'s, read from
+    the schema code rather than trusted to a comment: an account the tick
+    would advance is never left out, and one it would not, a paused or
+    inactive workspace's, never reads as stalled."""
+    leg = _plan_slot_conjuncts()
+    assert CURSOR_SET in leg and DUE_NOW in leg, "positive control: the leg was found"
+    door = function_body("fn_health_scheduling_lag").rsplit("WHERE", 1)[1]
+    assert " ".join(door.split()).split(" AND ") == [
+        c for c in leg if c not in (CLOCK_SCOPE, CURSOR_SET, DUE_NOW)
+    ]
 
 
 class _Row:
@@ -48,6 +73,7 @@ async def test_worker_freshness_reports_success_age_and_overdue_backlog():
             "last_success_age_seconds": 4021.9,
             "overdue_ready": 0,
             "max_overdue_seconds": None,
+            "worker_commit": "abc1234",
         }
     )
 
@@ -58,6 +84,7 @@ async def test_worker_freshness_reports_success_age_and_overdue_backlog():
         "last_success_age_seconds": 4021,
         "overdue_ready": 0,
         "max_overdue_seconds": None,
+        "commit": "abc1234",
     }
 
 
@@ -77,6 +104,7 @@ async def test_a_system_that_has_never_run_reports_none_rather_than_a_zero_age()
             "last_success_age_seconds": None,
             "overdue_ready": 0,
             "max_overdue_seconds": None,
+            "worker_commit": "abc1234",
         }
     )
 

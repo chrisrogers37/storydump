@@ -71,6 +71,15 @@ def floor(monkeypatch):
 ROW = {"id": "row-1", "binding_id": "b-1", "kind": "notification", "attempts": 1}
 
 
+def _warnings(caplog):
+    """The WARNINGs the outbox logged, as text."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == outbox.__name__ and r.levelname == "WARNING"
+    ]
+
+
 class TestSettleOnAFloodLimit:
     async def test_the_row_goes_back_to_pending_and_both_holds_are_written(self, floor):
         result = await outbox.settle(
@@ -249,11 +258,24 @@ class TestTheRowKeepsItsAttemptOnAFlood:
 
 class TestThePromptResendIsCapped:
     """An `approval_prompt` whose send keeps losing its
-    answer is resent, but not forever — past MAX_PROMPT_RESENDS it fails."""
+    answer is resent, but not forever — past MAX_PROMPT_RESENDS it fails. Every
+    row that fails in `resolve_ambiguous` is said once."""
 
     class _Session:
-        def __init__(self, kind, attempts, newer_edit=False, fresh=True):
-            self.row = (kind, attempts, newer_edit, fresh)
+        def __init__(self, kind, attempts, newer_edit=False, fresh=True, *, code=None):
+            # The columns `resolve_ambiguous` selects: the policy's four, the
+            # row's binding and story (an invitation has none), and its last
+            # failure's class and code.
+            self.row = (
+                kind,
+                attempts,
+                newer_edit,
+                fresh,
+                "b",
+                None if kind == "invitation" else "i",
+                "ambiguous",
+                code,
+            )
             self.updates = []
 
         async def execute(self, stmt, params=None):
@@ -275,10 +297,35 @@ class TestThePromptResendIsCapped:
         s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
 
-    async def test_past_the_cap_the_prompt_fails(self):
-        s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS + 1)
-        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+    async def test_past_the_cap_the_prompt_fails(self, caplog):
+        s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS + 1, code=502)
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
         assert s.updates == ["failed"]
+        (message,) = _warnings(caplog)
+        for part in (
+            "row x (approval_prompt)",
+            "story i",
+            "binding b",
+            f"gave up after {outbox.MAX_PROMPT_RESENDS + 1} sends",
+            "last failure ambiguous, code 502",
+        ):
+            assert part in message
+
+    @pytest.mark.parametrize(
+        "kind, attempts, fresh",
+        [
+            ("invitation", outbox.MAX_PROMPT_RESENDS + 1, True),
+            ("notification", outbox.MAX_NOTIFICATION_RESENDS + 1, True),
+            ("prompt_supersede", 2, False),
+        ],
+    )
+    async def test_every_give_up_is_said_once(self, caplog, kind, attempts, fresh):
+        s = self._Session(kind, attempts, fresh=fresh)
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+        (message,) = _warnings(caplog)
+        assert f"({kind})" in message and f"gave up after {attempts} sends" in message
 
     async def test_a_lost_card_edit_is_resent_until_confirmed(self):
         """A `prompt_supersede`, the card's edit, is idempotent, so a lost
@@ -347,6 +394,58 @@ class TestARefusalIsDefinitive:
         assert result["state"] == "failed" and result["external_message_ref"] is None
         assert floor["left"] == [("row-1", "failed", {"failure": ("refused", None)})]
         assert floor["ambiguous"] == [] and floor["holds"] == []
+
+
+class TestALostAnswerIsSaidOnce:
+    """`settle` of a lost answer logs one WARNING naming the row, its kind, the
+    attempt, and the failure's class and code — never the provider's text — so
+    a card or an edit sent again after one is visible in the log. For an edit
+    that carried the card's media it also says the picture is given up."""
+
+    async def test_it_names_the_row_the_attempt_and_the_failure_never_its_text(
+        self, floor, caplog
+    ):
+        lost = outbox.ChannelSendError("sendMessage: transport failure", code=502)
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            result = await outbox.settle(_ClaimSession(), ROW, error=lost)
+        assert result["state"] == "ambiguous"
+        (message,) = _warnings(caplog)
+        for part in ("row-1", "notification", "attempt 1", "ambiguous", "code 502"):
+            assert part in message
+        assert "transport failure" not in message, "the provider's text is not logged"
+        assert "media" not in message
+
+    async def test_an_edit_that_carried_the_cards_media_says_it_is_given_up(
+        self, floor, caplog, monkeypatch
+    ):
+        recorded = []
+
+        async def record(session, row, *, sent_as):
+            recorded.append((row["id"], sent_as))
+
+        monkeypatch.setattr(outbox, "_record_cards_media", record, raising=False)
+        edit = {
+            **ROW,
+            "kind": "prompt_supersede",
+            "intent_id": "i",
+            "workspace_id": "ws",
+            "payload": {"v": 1, "supersedes_ref": "77", "media": {"kind": "image"}},
+        }
+        lost = outbox.ChannelSendError("editMessageMedia: transport failure")
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            await outbox.settle(_ClaimSession(), edit, error=lost)
+        (message,) = _warnings(caplog)
+        assert "prompt_supersede" in message and "media is given up" in message
+        assert recorded == [("row-1", "text")], "the card's record follows"
+
+        # The same edit without a block gives nothing up.
+        caplog.clear()
+        bare = {**edit, "payload": {"v": 1, "supersedes_ref": "77"}}
+        with caplog.at_level("WARNING", logger=outbox.__name__):
+            await outbox.settle(_ClaimSession(), bare, error=lost)
+        (message,) = _warnings(caplog)
+        assert "prompt_supersede" in message and "given up" not in message
+        assert recorded == [("row-1", "text")]
 
 
 class TestALostAnswerIsResolvedOnALaterTick:
