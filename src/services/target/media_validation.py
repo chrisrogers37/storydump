@@ -817,9 +817,10 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
     """A video's evidence of what the probe read: its video stream's codec and
     frame size, its duration and frame rate ("unstated" for one it did not
     state) and whether it holds audio, with the encoding its derivation is
-    sent, which trims it to the longest story."""
-    encoding = story_video_encoding()
-    longest = encoding["longest_seconds"]
+    sent. A video longer than the longest story is recorded as trimmed to the
+    longest story, the length its card names; the derivation's trim
+    (`story_video_encoding`) ends it just short of that length."""
+    longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"][1]
     return {
         "codec": video.get("codec_name"),
         "width": video.get("width"),
@@ -830,7 +831,7 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
         "trimmed_to_seconds": (
             str(longest) if duration is not None and duration > longest else None
         ),
-        "derivation": encoding,
+        "derivation": story_video_encoding(),
     }
 
 
