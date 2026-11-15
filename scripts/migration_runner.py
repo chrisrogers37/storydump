@@ -83,8 +83,7 @@ from src.config.db_url import (
 
 # One fixed key for every runner invocation against a given database: the
 # whole run holds it (`_locked_connection`), so concurrent deploys serialize
-# and the loser finds the versions applied and no-ops. The cutover runbook's
-# rollback SQL takes the same key by its number.
+# and the loser finds the versions applied and no-ops.
 RUNNER_LOCK_KEY = 712_050_2026
 
 #: The longest a run waits, in seconds, for another run's lock before it
@@ -1254,24 +1253,16 @@ def status(dsn: str, migrations_dir) -> StatusReport:
         conn.close()
 
 
-def parity(
-    database_url: str,
-    against: str,
-    *,
-    database_url_name: str = DATABASE_URL_NAME,
-    against_name: str = "--against",
-) -> int:
+def parity(database_url: str, against: str) -> int:
     """The read-only `parity` command: the full catalog of *database_url*
-    against *against*'s, every difference printed, 1 when there is one. The
-    names are where each URL came from, which a refusal of one libpq cannot
-    read prints instead of its value: the CLI's own flags by default, the
-    variable an operator set when another script runs the command
-    (`scripts/cutover_rehearsal.py`)."""
+    against *against*'s, every difference printed, 1 when there is one. A
+    refusal of a URL libpq cannot read prints where it came from, the CLI's
+    own flags, instead of its value."""
     from scripts.schema_parity import print_comparison, schema_signature
 
     return print_comparison(
-        schema_signature(database_url, read_only=True, variable=database_url_name),
-        schema_signature(against, read_only=True, variable=against_name),
+        schema_signature(database_url, read_only=True, variable=DATABASE_URL_NAME),
+        schema_signature(against, read_only=True, variable="--against"),
     )
 
 

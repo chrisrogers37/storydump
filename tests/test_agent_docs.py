@@ -351,21 +351,12 @@ LIVE_ROOTS = (
 #: its subdirectories are live only where LIVE_ROOTS names them.
 LIVE_FLAT_ROOTS = ("documentation",)
 
-#: A live page ABOUT the legacy lineage — the cutover runbook, which moves the
-#: old database's ledger aside — may name one of its tables. Each entry is a claim with its reason AND the
-#: number of times the page names it: an exemption is read for the mentions
-#: that were there, so one more (a stale line about the worker's token hiding
-#: beside the pager's) or one fewer fails, and the page is read again.
-LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {
-    "documentation/operations/schema-cutover.md": {
-        "schema_version": (
-            2,
-            "the cutover runbook: the old database's version table, which the"
-            " cutover moves aside as `runner.legacy_schema_version` and its"
-            " rollback puts back",
-        ),
-    },
-}
+#: A live page ABOUT the legacy lineage may name one of its tables. Each entry
+#: is a claim with its reason AND the number of times the page names it: an
+#: exemption is read for the mentions that were there, so one more (a stale
+#: line about the worker's token hiding beside the pager's) or one fewer fails,
+#: and the page is read again.
+LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {}
 
 
 def _target_table_names() -> set[str]:

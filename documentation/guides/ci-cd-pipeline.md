@@ -110,8 +110,7 @@ Railway deploys both services from `main` (`ci.yml:4`). For each service,
    pending gated file (`-- runner:manual`) is listed as owed and is not
    applied. Production, built from schema code, owes none. A database whose
    schema predates `001` and `002`, such as one converted from the retired
-   chain, owes them, and the owner follows the
-   [cutover runbook](../operations/schema-cutover.md).
+   chain, owes them.
 3. **Start**, and the health check: `GET /health` must answer within 30 s
 4. **Restart policy** — `ON_FAILURE`, 10 retries; the old deployment gets 60 s to drain
 
