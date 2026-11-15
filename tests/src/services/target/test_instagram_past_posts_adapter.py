@@ -1479,9 +1479,10 @@ def assert_redacted(evidence, *also):
 async def test_a_graph_refusal_keeps_its_numbers_a_scrubbed_message_and_the_path(
     leg, path
 ):
-    """graph_error: Graph's status, numbers and trace id; its message with the
-    token, the token parameter and every link removed; and the path of the
-    request it refused, never that request's query."""
+    """graph_error: Graph's status and numbers; its type, message and trace id
+    with the token, the token parameter, every link and every control
+    character removed; and the path of the request it refused, never that
+    request's query."""
     said = (
         f"Invalid OAuth access token - Cannot parse access token {TOKEN}. "
         f"Retry https://graph.instagram.com/v26.0/{ASKED}?fields=id&access_token={TOKEN} "
@@ -1497,10 +1498,10 @@ async def test_a_graph_refusal_keeps_its_numbers_a_scrubbed_message_and_the_path
             json={
                 "error": {
                     "message": said,
-                    "type": "OAuthException",
+                    "type": f"OAuth\nException {TOKEN}",
                     "code": 100,
                     "error_subcode": 33,
-                    "fbtrace_id": "AbC123fakeTrace",
+                    "fbtrace_id": f"AbC123fakeTrace {TOKEN}",
                 }
             },
         )
@@ -1516,13 +1517,13 @@ async def test_a_graph_refusal_keeps_its_numbers_a_scrubbed_message_and_the_path
         "http_status": 400,
         "code": 100,
         "error_subcode": 33,
-        "type": "OAuthException",
+        "type": "OAuthException <token>",
         "message": (
             "Invalid OAuth access token - Cannot parse access token <token>. "
             "Retry <link graph.instagram.com> or download "
             f"<link {CDN_HOST}> instead."
         ),
-        "fbtrace_id": "AbC123fakeTrace",
+        "fbtrace_id": "AbC123fakeTrace <token>",
         "path": path,
     }
     assert_redacted(evidence)

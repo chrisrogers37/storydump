@@ -24,6 +24,7 @@ from src.services.target.meta_adapter import (
     MetaTerminalError,
     StubMetaAdapter,
     classify_error,
+    number_of,
 )
 
 
@@ -65,6 +66,38 @@ class TestTheErrorTaxonomy:
         err = MetaCapDeferral(code=9, message="cap hit")
         assert err.code == 9
         assert "cap hit" in str(err)
+
+
+class TestTheNumbersInMetasErrorObject:
+    """`number_of` reads every number in Meta's error object, the code and the
+    subcode, for each adapter."""
+
+    @pytest.mark.parametrize(
+        ("value", "number"),
+        [
+            pytest.param(190, 190, id="an-int"),
+            pytest.param("2207052", 2207052, id="a-decimal-string"),
+            pytest.param(" 463 ", 463, id="a-decimal-string-with-spaces"),
+            pytest.param(10**18 - 1, 10**18 - 1, id="eighteen-digits"),
+            pytest.param(True, None, id="true"),
+            pytest.param(4.9, None, id="a-float"),
+            pytest.param(4.0, None, id="a-whole-float"),
+            pytest.param(float("inf"), None, id="infinity"),
+            pytest.param(10**18, None, id="nineteen-digits"),
+            pytest.param("1" * 19, None, id="a-nineteen-digit-string"),
+            pytest.param("-4", None, id="a-signed-string"),
+            pytest.param(chr(0x664), None, id="an-arabic-indic-digit"),
+            pytest.param("abc", None, id="letters"),
+            pytest.param(None, None, id="absent"),
+        ],
+    )
+    def test_a_number_is_an_int_or_a_string_of_decimal_digits(self, value, number):
+        """An int, or a string of ASCII decimal digits, of at most
+        `NUMBER_DIGITS` digits; never a bool read as 1 or a float read as its
+        whole part, and an infinite value is no number rather than an error.
+        Mutation that reddens: read a bool, a float or a longer number as a
+        number, a non-ASCII digit as a digit, or a decimal string as none."""
+        assert number_of(value) == number
 
 
 class TestTheStubAdapter:

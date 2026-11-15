@@ -460,10 +460,20 @@ def test_scrub_text_removes_a_bearer_credential(text, scrubbed):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "mark",
-    ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"],
-    ids=["zero-width-space", "non-joiner", "joiner", "word-joiner", "byte-order-mark"],
+    [
+        pytest.param("\u200b", id="zero-width-space"),
+        pytest.param("\u200c", id="non-joiner"),
+        pytest.param("\u200d", id="joiner"),
+        pytest.param("\u2060", id="word-joiner"),
+        pytest.param("\ufeff", id="byte-order-mark"),
+        pytest.param("\n", id="newline"),
+        pytest.param("\r", id="carriage-return"),
+        pytest.param("\t", id="tab"),
+        pytest.param("\x1b", id="escape"),
+        pytest.param("\x85", id="next-line"),
+    ],
 )
-def test_scrub_text_removes_a_secret_split_by_a_zero_width_character(mark):
+def test_scrub_text_removes_a_secret_split_by_a_character_it_drops(mark):
     text = f"token {SECRET[:4]}{mark}{SECRET[4:]} seen"
     assert refusal_evidence.scrub_text(text, secrets=(SECRET,)) == "token <token> seen"
 
@@ -559,9 +569,12 @@ def test_scrub_text_leaves_plain_text_alone():
 
 
 @pytest.mark.unit
-def test_scrub_text_drops_nul():
-    """NUL is dropped (jsonb refuses it)."""
+def test_scrub_text_drops_every_control_character():
+    """NUL is dropped (jsonb refuses it), and so is every other control
+    character, so provider text cannot carry a log record across lines."""
     assert refusal_evidence.scrub_text("a\x00b\x00") == "ab"
+    text = "a\nb\r\nc\td\x1b[31me\x7ff\x85g\x9fh\x01i"
+    assert refusal_evidence.scrub_text(text) == "abcd[31mefghi"
 
 
 @pytest.mark.unit

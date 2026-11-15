@@ -268,10 +268,16 @@ class TestTheTaxonomy:
         def html(request):
             return httpx.Response(200, text="<html>")
 
+        def deep(request):
+            """Nested deeper than the parser follows."""
+            return httpx.Response(200, content=b"[" * 100_000 + b"]" * 100_000)
+
         with pytest.raises(MetaLostResponse):
             await _adapter(five).publish(REF, "ctr-1")
         with pytest.raises(MetaLostResponse):
             await _adapter(html).publish(REF, "ctr-1")
+        with pytest.raises(MetaLostResponse, match="non-JSON answer"):
+            await _adapter(deep).publish(REF, "ctr-1")
 
     async def test_an_answer_without_an_id_is_a_lost_response(self):
         def handler(request):
@@ -343,15 +349,25 @@ class TestTheLedgerKeepsMetasWord:
         assert exc.detail["http_status"] == 400
         assert TOKEN not in str(exc.detail) and TOKEN not in str(exc)
 
+    @pytest.mark.parametrize(
+        ("body", "code"),
+        [
+            pytest.param(b'{"error": {"code": 4}}', 4, id="a-code"),
+            pytest.param(b'{"error": {"code": Infinity}}', 0, id="an-infinite-code"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_a_bare_error_answer_still_types_with_an_empty_detail(self):
+    async def test_a_bare_error_answer_still_types_with_an_empty_detail(
+        self, body, code
+    ):
         def handler(request):
-            return httpx.Response(400, json={"error": {"code": 4}})
+            return httpx.Response(400, content=body)
 
         with pytest.raises(MetaRetryableError) as info:
             await _adapter(handler).create_container(
                 REF, media_url="u", media_kind="image"
             )
+        assert info.value.code == code
         assert info.value.subcode is None
         assert info.value.detail["http_status"] == 400
         assert info.value.detail["fbtrace_id"] is None
@@ -397,14 +413,6 @@ class TestTheLedgerKeepsMetasWord:
         assert exc.detail["error_user_msg"] == "x" * TEXT_LIMIT
         assert exc.detail["fbtrace_id"] == "trace<token>"
         assert exc.detail["is_transient"] is True
-
-    def test_a_subcode_is_an_int_or_a_decimal_string_never_a_bool(self):
-        from src.services.target.meta_adapter import subcode_of
-
-        assert subcode_of(2207052) == 2207052
-        assert subcode_of("2207052") == 2207052
-        assert subcode_of(True) is None
-        assert subcode_of("abc") is None and subcode_of(None) is None
 
 
 #: Provider text holding what the scrub keeps out beyond the configured token:
