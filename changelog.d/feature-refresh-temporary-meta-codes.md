@@ -1,0 +1,3 @@
+### Fixed
+
+- **A token refresh Meta refuses with a temporary error code no longer ends the Instagram connection (#87).** A refresh refused on HTTP 400, 401 or 403 marked the credential expired and the account as needing reconnection whatever Meta's answer said, so a throttling or downtime answer stopped a connected account from posting until it was connected again. A refusal carrying one of the codes Meta's error-handling guide calls temporary (1, 2, 4, 17 and 341) is now retried like a 429 or a 5xx, and the credential stays live. Any other refusal on those statuses, one whose answer has no readable code included, still marks it dead.

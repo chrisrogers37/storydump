@@ -48,11 +48,28 @@ class TestClassification:
 
     @pytest.mark.parametrize("status", [400, 401, 403])
     @pytest.mark.asyncio
-    async def test_auth_class_statuses_are_definitive(self, monkeypatch, status):
+    async def test_auth_class_statuses_without_a_code_are_definitive(
+        self, monkeypatch, status
+    ):
         _door_with(monkeypatch, _Resp(status))
         with pytest.raises(cl.RefreshRejected) as exc_info:
             await cl.ig_refresh("tok-SECRET")
         assert exc_info.value.status_code == status
+
+    @pytest.mark.parametrize(
+        ("code", "raised"), [(4, cl.RefreshTransient), (190, cl.RefreshRejected)]
+    )
+    @pytest.mark.asyncio
+    async def test_a_temporary_code_is_transient_and_a_final_one_definitive(
+        self, monkeypatch, code, raised
+    ):
+        """On one status, Meta's error code decides the route: 4 (API Too Many
+        Calls) is transient, for the ladder to retry, and 190 (a bad token) is
+        definitive."""
+        _door_with(monkeypatch, _Resp(400, {"error": {"code": code}}))
+        with pytest.raises(raised) as exc_info:
+            await cl.ig_refresh("tok-SECRET")
+        assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_a_rejection_carries_metas_four_fields_and_nothing_else(
