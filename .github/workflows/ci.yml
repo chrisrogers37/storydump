@@ -76,11 +76,7 @@ jobs:
   # whole session and refuses pytest-xdist.
   test-shard:
     name: Test shard ${{ matrix.group }}
-    # ubuntu-24.04, not ubuntu-latest: ubuntu-26.04's ffmpeg 8, refusing the
-    # MPEG-audio decoders media_validation's codec whitelist keeps closed, also
-    # prints a line the probe does not recognize, so the probe reads as
-    # incomplete. ubuntu-24.04's ffmpeg 6.1 prints only the refusals.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # Well inside Railway's two-hour wait on the run. Running out this clock
     # cancels a leg rather than failing it, and Railway has deployed a commit
     # whose run ended cancelled, so the steps that install packages, collect
@@ -93,8 +89,6 @@ jobs:
     env:
       # One collection order in every process that has to agree on it.
       PYTHONHASHSEED: "0"
-      # The apt packages the media probe tests need, and part of their cache key.
-      MEDIA_PACKAGES: ffmpeg
     services:
       postgres:
         # Every PostgreSQL service in this workflow runs 17.11, pinned by
@@ -156,71 +150,23 @@ jobs:
         timeout-minutes: 5
         run: pip install -e '.[cli]'
 
-      # The packages come from the runner's Ubuntu mirror, which has crawled at
-      # 30 kB/s and held a leg in this step for 40 minutes. They are cached per
-      # runner image and package list, since what ffmpeg needs depends on what
-      # the image holds. A leg downloads them when the image changes, when the
-      # cache has gone a week unused, and in a pull request until a run on main
-      # has saved the new image's cache.
-      - name: Name the runner image
-        id: runner-image
-        run: echo "version=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the media probe tools' packages
-        uses: actions/cache/restore@v4
+      # The media tests run on production's ffmpeg and ffprobe: the nixpkgs
+      # archive nixpacks.toml pins, read from that file, so a change to the pin
+      # reaches them with no edit here. media_validation reads what ffprobe
+      # prints, and that differs between ffmpeg versions.
+      - name: Install Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         timeout-minutes: 5
-        env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
-        with:
-          path: ~/media-probe-debs
-          key: media-probe-debs-${{ env.MEDIA_PACKAGES }}-${{ steps.runner-image.outputs.version }}
 
-      - name: Install local media probe tools
-        # Tests fail if tools are absent; actual deployment versions are proven
-        # separately in the pinned Nixpacks image, not inferred from this runner.
-        id: media-install
-        timeout-minutes: 12
+      - name: Install ffmpeg from the nixpkgs archive nixpacks.toml pins
+        timeout-minutes: 10
         run: |
-          if command -v ffprobe > /dev/null && command -v ffmpeg > /dev/null; then
-            ffmpeg -version | head -n 1
-            exit 0
-          fi
-          # A hit installs the saved packages with dpkg, which never fetches:
-          # apt, handed the same files, downloaded them from the mirror again.
-          debs=~/media-probe-debs
-          restored=false
-          if ls "$debs"/*.deb > /dev/null 2>&1; then
-            restored=true
-          fi
-          if [ "$restored" = true ] && sudo dpkg -i "$debs"/*.deb; then
-            echo "Installed the cached packages."
-          else
-            # -f on both calls repairs what a failed dpkg -i left half-done.
-            timeout 3m sudo apt-get update
-            timeout 6m sudo apt-get install -y -f --no-install-recommends --download-only $MEDIA_PACKAGES
-            # Only a leg that restored nothing saves: after a failed restore the
-            # archives hold just what the repair fetched.
-            if [ "$restored" = false ]; then
-              mkdir -p "$debs"
-              find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$debs" {} +
-              echo "downloaded=true" >> "$GITHUB_OUTPUT"
-            fi
-            sudo apt-get install -y -f --no-install-recommends $MEDIA_PACKAGES
-          fi
-          ffprobe -version > /dev/null
+          archive=$(python -c 'import tomllib; print(tomllib.load(open("nixpacks.toml", "rb"))["phases"]["setup"]["nixpkgsArchive"])')
+          nix-env -f "https://github.com/NixOS/nixpkgs/archive/$archive.tar.gz" -iA ffmpeg
+          command -v ffprobe
+          command -v ffmpeg
+          ffprobe -version | head -n 1
           ffmpeg -version | head -n 1
-
-      # Saved by a leg that downloaded. On a miss all five legs download and try
-      # to save; one does, and the save action only warns for the others, so
-      # continue-on-error is there for anything else that goes wrong in a save.
-      - name: Save the media probe tools' packages
-        if: steps.media-install.outputs.downloaded == 'true'
-        timeout-minutes: 5
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ~/media-probe-debs
-          key: media-probe-debs-${{ env.MEDIA_PACKAGES }}-${{ steps.runner-image.outputs.version }}
 
       - name: Generate test encryption key
         id: gen-key
