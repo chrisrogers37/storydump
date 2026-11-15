@@ -71,7 +71,11 @@ The local `scripts/pr_ready.sh` helper requires eight checks by name: Lint,
 Telegram ratchet, Test, Security Scan, Front End, Public record, Changelog
 Check and Schema consistency. The `Test shard` matrix is declared to it as
 covered by `Test`: its legs report as `Test shard 1` … `Test shard 5`, and
-`Test` needs every one of them. It checks both lists against the workflow. GitHub rulesets govern
+`Test` needs every one of them. It checks both lists against the workflow. A
+push to a branch with an open pull request starts a push run and a pull request
+run, and the helper reads each check across both: green when every run that ran
+it passed, so Changelog Check, which the push run skips, counts as the pull
+request run reports it. GitHub rulesets govern
 merge policy; review that configuration when changing job names. The helper's
 expectations do not establish the remote ruleset settings.
 

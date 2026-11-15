@@ -1,0 +1,3 @@
+### Fixed
+
+- **`scripts/pr_ready.sh` reads each required check once across a pull request's CI runs (#86).** A push to a branch with an open pull request starts a push run and a pull request run, and the rollup lists each check once per run, so the helper read every check as NOT READY, green ones included. A check now reads green when it passed in every run that ran it, and otherwise names what a run gave instead; a run that skipped the check counts only when every run skipped it, so Changelog Check, which the push run skips, reads as the pull request run reports it, and a check no run ran still reads NOT READY.

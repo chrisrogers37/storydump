@@ -236,3 +236,54 @@ class TestTheShardLegsAreCoveredByTest:
         r = run(tmp_path, workflow, _rollup(statusCheckRollup=checks))
         assert r.returncode == 1
         assert "'Test' is ABSENT" in r.stdout
+
+
+def _two_runs(push: dict[str, str], pull_request: dict[str, str]) -> list[dict]:
+    """The checks a push run and a pull_request run list for one head: every
+    job passed in both, but for the conclusions given, and the push run skips
+    Changelog Check, as `ci.yml` does."""
+
+    def one_run(conclusions: dict[str, str]) -> list[dict]:
+        return [
+            {**c, "conclusion": conclusions.get(c["name"], c["conclusion"])}
+            for c in _rollup()["statusCheckRollup"]
+        ]
+
+    return one_run({"Changelog Check": "SKIPPED", **push}) + one_run(pull_request)
+
+
+class TestEachCheckIsReadAcrossItsRuns:
+    """A push to a branch with an open pull request starts a push run and a
+    pull_request run, and the rollup lists each check once per run. A check is
+    green when every run that ran it passed; a skip is its result only when
+    every run skipped it."""
+
+    def test_a_check_passed_in_every_run_that_ran_it_is_ready(self, tmp_path, workflow):
+        r = run(tmp_path, workflow, _rollup(statusCheckRollup=_two_runs({}, {})))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "READY" in r.stdout and "NOT READY" not in r.stdout
+
+    @pytest.mark.parametrize(
+        ("push", "pull_request", "reads"),
+        [
+            pytest.param(
+                {"Test": "FAILURE"}, {}, "'Test' = FAILURE", id="failed-in-the-push-run"
+            ),
+            pytest.param(
+                {}, {"Test": "FAILURE"}, "'Test' = FAILURE", id="failed-in-the-pr-run"
+            ),
+            pytest.param(
+                {},
+                {"Changelog Check": "SKIPPED"},
+                "'Changelog Check' = SKIPPED",
+                id="skipped-in-both-runs",
+            ),
+        ],
+    )
+    def test_a_check_failed_in_any_run_or_skipped_in_all_is_refused(
+        self, tmp_path, workflow, push, pull_request, reads
+    ):
+        checks = _two_runs(push, pull_request)
+        r = run(tmp_path, workflow, _rollup(statusCheckRollup=checks))
+        assert r.returncode == 1
+        assert r.stdout.splitlines() == [f"NOT READY: {reads}"]
