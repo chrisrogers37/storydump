@@ -16,11 +16,12 @@ Each claim is one try, which `fn_claim_job` counts in the job's attempts:
   (`fn_reaper_late_past_posts`), the same way. A planned story's window is the
   miss leg's (`fn_planned_misses`), which tells its chats.
 - Otherwise the coordinator prepares the file
-  (`PastPostsPipeline.selected_prepare`). The preparation decides each refusal
-  on this try's number (`past_posts_retry`): a refusal that proves nothing puts
-  the job back after the retry's wait, with the try spent; a proven refusal or
-  the last try parks the story with its evidence. A wait that read nothing
-  puts the job back with the try restored.
+  (`PastPostsPipeline.selected_prepare`). The preparation decides each refusal,
+  and each check of the file that could not finish, on this try's number
+  (`past_posts_retry`): one that proves nothing puts the job back after the
+  retry's wait, with the try spent; a proven refusal or the last try parks the
+  story with its evidence. A wait that read nothing puts the job back with the
+  try restored.
 
 A job whose untyped faults spend its budget parks its story through
 `publish_pipeline.flip_exhausted`, as a spent publish job's story is.

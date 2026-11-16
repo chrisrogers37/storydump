@@ -1174,6 +1174,45 @@ async def test_the_try_is_the_attempt_the_prepare_job_hands_it(
     assert err.value.evidence == refusal and capture["refusal"] == refusal
 
 
+async def test_a_check_that_could_not_finish_is_decided_on_the_try(
+    past_posts_engine, origin, monkeypatch
+):
+    """A check of the file that could not finish on our side (its tool is
+    missing) is decided on the try's number too: before its last try the
+    story waits, and its last parks the story with the check's evidence. The
+    capture keeps the check's own reason, so the slide does not latch and a
+    later story tries the file again."""
+    src, _, intent = await selected(past_posts_engine, origin)
+
+    async def unavailable(*args, **kwargs):
+        raise media_validation.ValidationPending("tool_unavailable")
+
+    monkeypatch.setattr(media_validation, "run_bounded", unavailable)
+    prepared, _ = service(past_posts_engine, origin, retry=RETRY)
+    caught = []
+    for attempt in (RETRY.attempts - 1, RETRY.attempts):
+        with pytest.raises(source_policy.MediaAdmissionPending) as err:
+            await prepared.selected_prepare(
+                engine=past_posts_engine,
+                workspace_id=str(origin["ws"]),
+                intent_id=intent,
+                attempt=attempt,
+            )
+        capture = await capture_of(past_posts_engine, origin, intent)
+        caught.append((err.value.reason, capture["reason"], capture.get("attempt")))
+    assert caught == [
+        ("validation_pending", "tool_unavailable", RETRY.attempts - 1),
+        ("asset_unavailable", "tool_unavailable", RETRY.attempts),
+    ]
+    assert err.value.evidence == capture["refusal"]
+    assert (err.value.evidence["state"], err.value.evidence["check"]) == (
+        "validation_pending",
+        "tool_unavailable",
+    )
+    async with obs.uow(past_posts_engine, origin) as conn:
+        assert (await selection.verdict(conn, origin, src, intent=intent))["suitable"]
+
+
 async def test_the_last_try_parks_the_story_with_its_refusal(past_posts_engine, origin):
     """Once its tries are spent the story parks `asset_unavailable` with the
     last refusal, whatever the earlier ones were."""
