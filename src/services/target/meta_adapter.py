@@ -18,7 +18,8 @@ It also holds the one reading of Meta's error object: its numbers
 (:func:`int_of`, :func:`subcode_of`), which the real adapter routes on, and
 the four fields a refused Instagram Login call's log line names
 (:func:`error_fields`), for the connect leg (`ig_login_oauth`) and the refresh
-(`credential_lifecycle`).
+(`credential_lifecycle`), whose routing reads the code the same way
+(:func:`error_code`).
 
 ## The taxonomy IS the routing table
 
@@ -153,6 +154,27 @@ def subcode_of(value: Any) -> Optional[int]:
 ERROR_FIELDS_UNREAD = "Meta's error fields could not be read"
 
 
+def _error_object(response) -> Optional[dict]:
+    """A refused answer's `error` object, when its JSON body holds one naming
+    any of the four fields `error_fields` reads; None otherwise."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    named = ("code", "error_subcode", "type", "fbtrace_id")
+    if not isinstance(error, dict) or not any(field in error for field in named):
+        return None
+    return error
+
+
+def error_code(response) -> int:
+    """Meta's error code from a refused answer, read as `error_fields` reads
+    it (`int_of`): 0 when the answer holds no readable code."""
+    error = _error_object(response)
+    return 0 if error is None else int_of(error.get("code"))
+
+
 def error_fields(response, *, secrets=()) -> str:
     """Meta's error code, subcode, type and trace id from a refused answer's
     JSON body, as text for a log line, read as the publish adapter reads them:
@@ -162,13 +184,8 @@ def error_fields(response, *, secrets=()) -> str:
     anything a person entered never reaches the line. A body that is not
     JSON, or holds no `error` object naming any of the four, gets
     `ERROR_FIELDS_UNREAD`."""
-    try:
-        body = response.json()
-    except ValueError:
-        return ERROR_FIELDS_UNREAD
-    error = body.get("error") if isinstance(body, dict) else None
-    named = ("code", "error_subcode", "type", "fbtrace_id")
-    if not isinstance(error, dict) or not any(field in error for field in named):
+    error = _error_object(response)
+    if error is None:
         return ERROR_FIELDS_UNREAD
     error_type = refusal_evidence.scrub_text(error.get("type"), secrets=secrets)
     trace = refusal_evidence.scrub_text(error.get("fbtrace_id"), secrets=secrets)

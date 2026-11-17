@@ -26,8 +26,11 @@ here is loud, not latent.
   (marker NULL = immediately eligible), so prompting has exactly one door.
   The flips run under the account's source prefix and are bound to what the
   token was issued under: a rejection that outlived a
-  reauthorization flips nothing.
-- **Transient** (network faults, 429, 5xx — no definitive answer): raise, and
+  reauthorization flips nothing. Every 400, 401 or 403 is this answer, a body
+  with no readable code included, unless its error code is in
+  `_TEMPORARY_CODES`.
+- **Transient** (network faults, 429, 5xx, and a 400, 401 or 403 carrying one
+  of Meta's temporary codes — no answer about the credential): raise, and
   the lane's ladder retries with the attempt consumed. Never `mark_dead` on a
   fault: transient classes must not take the liveness edge.
 - **Undecryptable** (the ring cannot read the stored payload):
@@ -88,7 +91,8 @@ class RefreshRejected(StorydumpError):
 
 
 class RefreshTransient(StorydumpError):
-    """No definitive answer (429/5xx). The lane's ladder owns the retry."""
+    """No answer about the credential: a 429 or 5xx, or a 400, 401 or 403
+    carrying one of Meta's temporary codes. The lane's ladder owns the retry."""
 
     def __init__(self, status_code: int):
         self.status_code = status_code
@@ -97,8 +101,16 @@ class RefreshTransient(StorydumpError):
 
 #: Auth-class statuses on the refresh endpoint. 400 is included deliberately:
 #: the request shape is fixed (two params built by `refresh_params`), so a 400
-#: here can only be about the token. 429 and 5xx are transient.
+#: here is about the token unless Meta says it is throttling or down. A refusal
+#: on any of them is final unless its error code is in `_TEMPORARY_CODES`, and
+#: then it is transient, as a 429 and a 5xx are.
 _REJECTED_STATUSES = frozenset({400, 401, 403})
+
+#: Meta's temporary error codes, which its error-handling guide says to wait
+#: out and retry: 1 (API Unknown), 2 (API Service), 4 (API Too Many Calls),
+#: 17 (API User Too Many Calls) and 341 (Application limit reached). None is
+#: about the token.
+_TEMPORARY_CODES = frozenset({1, 2, 4, 17, 341})
 
 
 async def ig_refresh(
@@ -134,6 +146,8 @@ async def ig_refresh(
             )
         return new_token, expires_at
     if resp.status_code in _REJECTED_STATUSES:
+        if meta_adapter.error_code(resp) in _TEMPORARY_CODES:
+            raise RefreshTransient(resp.status_code)
         meta = meta_adapter.error_fields(resp, secrets=(token,))
         raise RefreshRejected(resp.status_code, meta)
     raise RefreshTransient(resp.status_code)
