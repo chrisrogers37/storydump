@@ -276,7 +276,7 @@ storydump doctor
 `storydump --help` is the authoritative list, grouped by auth, reads, writes and
 environment; the section below walks it.
 
-## The `storydump` CLI (v2)
+## The `storydump` CLI
 
 `storydump` is the developer and agent console over the API — a pure HTTP
 client, never a database connection. Install it with
@@ -379,7 +379,7 @@ the two documents use to the registry, not the judgement of what is dangerous.
 ## Testing
 
 ```bash
-pytest                          # full suite (~9,200 tests); pytest.ini turns coverage on
+pytest                          # full suite (over 10,000 tests); pytest.ini turns coverage on
 pytest tests/src/services/      # one area
 pytest -m unit                  # only the tests marked `unit`: a small subset, not every database-free test
 pytest --no-cov                 # skip coverage (faster)
@@ -398,7 +398,7 @@ through it, and the Homebrew `postgresql@17` keg is enough:
 ```bash
 docker run -d --name storydump-test-pg -p 65433:5432 \
   -e POSTGRES_USER=test_user -e POSTGRES_PASSWORD=test_password \
-  -e POSTGRES_DB=storyline_test postgres:17
+  -e POSTGRES_DB=storyline_test postgres:17.11
 PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH" \
 DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password \
 DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
@@ -523,9 +523,9 @@ the card, the web Queue and Settings, and the `storydump` write verbs.
 source .venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
-CI (`.github/workflows/ci.yml`) runs eight required checks on every push and
-PR: Lint (ruff check + format over the whole repository), the FC-2 Telegram
-ratchet (`scripts/telegram_ratchet.py`), Test (five shards, each on Python 3.12
+CI (`.github/workflows/ci.yml`) runs eight required checks: Lint (ruff check +
+format over the whole repository), the Telegram ratchet
+(`scripts/telegram_ratchet.py`), Test (five shards, each on Python 3.12
 against a PostgreSQL 17 service with `REQUIRE_TEST_DATABASE=1`, coverage of
 `src` and `storydump_cli`),
 Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
@@ -535,7 +535,11 @@ against the runtime dependencies; `next build` is left to Vercel's preview),
 Public record (`scripts/public_record.py`, the check under The record above),
 Changelog Check, and Schema consistency (`scripts/schema_consistency.py`: the
 schema built from this tree's code against the pinned schema-code base with
-the newer migration files replayed on it). `scripts/lint.sh`
+the newer migration files replayed on it). Each runs on a pull request to
+`main` and on a push to `main` or a `feature/*` branch, except that Changelog
+Check runs on pull requests only, and Public record skips a fork's pull request
+and a run Dependabot starts, since GitHub withholds the secret it reads from
+both. `scripts/lint.sh`
 is the local lint pass; `scripts/pr_ready.sh` answers whether a PR is really
 ready — it catches a check that was never scheduled, which a green rollup
 hides (`documentation/guides/ci-cd-pipeline.md`).
