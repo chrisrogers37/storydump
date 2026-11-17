@@ -22,7 +22,7 @@ python -m src.main                   # Starts the posting worker: the clock, the
 python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 make run                             # Runs `python -m src.main`: starts the posting worker
 make dev                             # Runs `python -m src.main` once .env exists: starts the posting worker
-python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots; only a database converted in place owes 001 and 002
+python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
 storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
@@ -68,8 +68,8 @@ rule above. The read verbs (`waitlist` among them: it lists, and admits no one),
 not on this list, check what it does before running it rather than inferring
 that absence means safe.
 
-The same holds outside the CLI. The migration runner's `apply`, `adopt`,
-`convert-ledger` and `repair` write the schema or its ledger on the database
+The same holds outside the CLI. The migration runner's `apply`, `adopt`
+and `repair` write the schema or its ledger on the database
 `--database-url` or `DATABASE_URL` names; `status` and `parity` only read. The
 `Makefile` exports `.env`, so `make drop-db`, `reset-db` and `db-restore` drop
 or overwrite the database it names, `create-db`, `init-db`, `setup-db` and
@@ -447,8 +447,8 @@ The `Procfile` names the two deployed processes; both run the one tier.
   `preDeployCommand` of every deploy of either service (`railway.toml`), so a
   merged migration is an applied one; `status` is the read-only report. A
   gated file (`-- runner:manual`: 001, 002) is never run by a deploy. A
-  database built from code adopts both, as production did; only one converted
-  in place owes them (`documentation/operations/schema-cutover.md`). The
+  database built from code adopts both, as production did
+  (`documentation/operations/schema-cutover.md`). The
   runner refuses to run where libpq connected to a pooled host, waits a
   bounded time for another run's lock (`RUNNER_LOCK_WAIT`), naming the holder,
   then fails the deploy with the old version serving, and unlocks before it

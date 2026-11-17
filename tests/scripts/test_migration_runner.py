@@ -32,6 +32,7 @@ from scripts.migration_runner import (
 from src.config.db_url import userinfo
 from src.config.settings import settings
 from tests.scripts.conftest import (
+    fetch_all,
     fetch_ledger,
     fetch_one,
     table_exists,
@@ -350,6 +351,30 @@ class TestIntegrity:
 
         with pytest.raises(MigrationRunnerError, match="002"):
             apply_pending(scratch_db, tmp_path)
+
+    @pytest.mark.parametrize("door", ["apply", "adopt"])
+    @pytest.mark.parametrize("bounded", [False, True])
+    def test_current_future_history_keeps_the_missing_file_diagnostic(
+        self, world_db, door, bounded
+    ):
+        corpus = runner_module.MIGRATIONS_DIR
+        # A version above every file in the tree: a ledger row no file stands for.
+        future = max(m.version for m in discover_migrations(corpus)) + 1
+        with psycopg2.connect(world_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO runner.schema_migrations (version, checksum, applied_by, status)"
+                " VALUES (%s, 'future-current-migration', current_user, 'applied')",
+                (future,),
+            )
+        ledger = "SELECT * FROM runner.schema_migrations ORDER BY version"
+        before = fetch_all(world_db, ledger)
+        kwargs = {"max_version": 0} if bounded else {}
+        with pytest.raises(MigrationRunnerError, match="no such file exists"):
+            if door == "apply":
+                apply_pending(world_db, corpus, **kwargs)
+            else:
+                adopt(world_db, corpus, corpus / "adoption_manifest.json", **kwargs)
+        assert fetch_all(world_db, ledger) == before
 
 
 class TestPostconditions:

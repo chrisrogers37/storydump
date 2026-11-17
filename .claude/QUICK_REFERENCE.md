@@ -12,7 +12,7 @@
 - `python -m src.main` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
 - `python -m src.worker` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
 - `make run` / `make dev` (both run `python -m src.main`: the posting worker)
-- `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 001 and 002 are owed only by a database converted in place; a manual file is always the owner's)
+- `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name; a manual file is always the owner's)
 
 The canonical list, with what each command does, is the safety block in
 `CLAUDE.md`; `tests/test_agent_docs.py` fails when this copy
@@ -22,8 +22,8 @@ Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
 `resolve <story> posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule` and `link` also write through the
 command port — a skip or a reject is final for that story. Ask first.
 
-The same holds outside the CLI: the migration runner's `apply`, `adopt`,
-`convert-ledger` and `repair`, the database `make` targets (`drop-db`,
+The same holds outside the CLI: the migration runner's `apply`, `adopt`
+and `repair`, the database `make` targets (`drop-db`,
 `reset-db`, `db-restore`, `create-db`, `init-db`, `setup-db`, `quickstart`,
 `db-shell`, `check-db`, `db-backup` and the `test` targets), the schema builder
 and `pytest tests/scripts/` run only against a local or throwaway database;
