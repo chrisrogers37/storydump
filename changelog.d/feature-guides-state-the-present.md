@@ -1,0 +1,3 @@
+### Documentation
+
+- **The agent guides and `README.md` state four facts without their dates.** `AGENTS.md` says the legacy tier is retired, production runs on a database built from schema code, the command vocabulary has 32 commands, and the email provider is Resend, ratified by the owner. `.claude/PROJECT_CONTEXT.md` says the first, second and fourth, and `README.md` says the second. They said the legacy tier was retired in September 2026, production moved to that database on 2026-10-17 (`documentation/operations/schema-cutover.md`), the vocabulary had 32 commands on 2026-10-20, and the owner ratified Resend on 2026-10-11.
