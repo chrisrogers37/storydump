@@ -140,8 +140,7 @@ Automatic apply then reports `001` and `002` as owed: the owner applies them
 explicitly, validates the intent constraints in a separate transaction, and
 confirms the snapshot backup before the archive drop. The
 [cutover runbook](documentation/operations/schema-cutover.md) records the
-production cutover as performed, and covers the rehearsal, the required
-zero-difference parity gate and rollback before 001.
+production cutover as performed.
 
 `make validate-env` loads the settings and builds the key ring, as both services do at startup, and
 `make check-health` asks the deployed API.

@@ -35,19 +35,19 @@ its predeploy (`railway.toml:8`), so **merged is applied**. The ledger is
   test worlds, `make init-db`) is entered by `adopt`, which records each file
   whose probe is true. Carry `-- runner:postcondition <SQL returning bool>`
   lines, or an `adoption_manifest.json` entry; a file with neither fails
-  `_load_manifest` (`scripts/migration_runner.py:912`). A false probe leaves it
+  `_load_manifest` (`scripts/migration_runner.py:911`). A false probe leaves it
   pending, and `apply` then runs it over a schema that already has it.
 - **A probe is permanent**: a false probe below a true one is an incoherent
-  chain and fails adopt (`migration_runner.py:1041`). So the code keeps 001's
+  chain and fails adopt (`migration_runner.py:1040`). So the code keeps 001's
   postconditions true: no catalog comments on `public`'s functions and relations
   (describe in `--` lines, as `ddl/__init__.py` says) and a pinned `search_path`
   on every `SECURITY DEFINER` function.
 - `000_initial.sql` is empty and never executed: a byte in it is refused at
-  discovery (`migration_runner.py:317`), and `apply` refuses a database that has
+  discovery (`migration_runner.py:316`), and `apply` refuses a database that has
   not adopted it.
 - No `BEGIN`/`COMMIT`: the runner wraps the file and its ledger row in one
   transaction, bounds its lock waits and retries a lock-wait failure
-  (`LOCK_TIMEOUT`, `LOCK_RETRY_DELAYS_S`, `migration_runner.py:125`-`:132`); the
+  (`LOCK_TIMEOUT`, `LOCK_RETRY_DELAYS_S`, `migration_runner.py:124`-`:131`); the
   file sets no `lock_timeout`. A retry re-runs the whole file, so take the
   contended lock before heavy work.
 - The run holds the runner's session lock (`RUNNER_LOCK_KEY`) through
@@ -69,10 +69,10 @@ its predeploy (`railway.toml:8`), so **merged is applied**. The ledger is
   deadlock (`test_a_waiting_run_lets_the_holder_build_an_index_concurrently`).
 - **An applied file is immutable** — the ledger stores its SHA-256, and a changed
   or deleted file fails every later apply (`ledger_discrepancies`,
-  `migration_runner.py:648`); a file at the base is immutable to the consistency
+  `migration_runner.py:647`); a file at the base is immutable to the consistency
   job too (`schema_consistency.py:57`). Fix forward with a new number, and never
   remove `001` or `002`: production's ledger records them.
-- Markers are a closed grammar (`KNOWN_MARKERS`, `migration_runner.py:147`):
+- Markers are a closed grammar (`KNOWN_MARKERS`, `migration_runner.py:146`):
   `postcondition`, `no-transaction`, `reapply-safe`, `manual`. A misspelt one is a
   hard failure at discovery, and a comment must not open with `runner` plus a
   marker word. A `-- runner:manual` file is owed by the deploy, never applied by
