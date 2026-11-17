@@ -2,8 +2,9 @@
 
 A refusal that proves nothing is tried again after a doubling wait: a CDN
 that refused the link, a Graph error that is not Graph's own "does not
-exist", an owner the turn could not prove. A story parks on such a refusal
-only once its attempts are spent. A proven class parks at once:
+exist", an owner the turn could not prove, a check of the fetched file that
+could not finish. A story parks on such a refusal only once its attempts are
+spent. A proven class parks at once:
 - Graph saying the post does not exist;
 - a file over a named byte bound;
 - a file whose kind Instagram names but whose link it withholds, on two

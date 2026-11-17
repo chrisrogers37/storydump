@@ -1011,24 +1011,24 @@ COVER = b"[mjpeg @ 0x3] Codec (mjpeg) not on whitelist 'h264,hevc,aac'\n"
         (
             1,
             CLOSED + b"moov atom truncated\n",
-            "validation_pending",
-            "probe_incomplete",
-            None,
+            "supported",
+            "validated",
+            {"fault_exit_status": 1},
         ),
         (
             0,
             b"Protocol 'http' not on whitelist 'file'!\n",
-            "validation_pending",
-            "probe_incomplete",
-            None,
+            "supported",
+            "validated",
+            {"fault_exit_status": 0},
         ),
         (
             1,
             b"[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] stream 0, error opening alias:"
             b" path='codec (x) not on whitelist'\n",
-            "validation_pending",
-            "probe_incomplete",
-            None,
+            "supported",
+            "validated",
+            {"fault_exit_status": 1},
         ),
         (
             1,
@@ -1040,9 +1040,9 @@ COVER = b"[mjpeg @ 0x3] Codec (mjpeg) not on whitelist 'h264,hevc,aac'\n"
         (
             0,
             b"skipped: codec (x) not on whitelist, left open\n",
-            "validation_pending",
-            "probe_incomplete",
-            None,
+            "supported",
+            "validated",
+            {"fault_exit_status": 0},
         ),
     ],
     ids=[
@@ -1065,7 +1065,9 @@ async def test_a_decoder_the_whitelist_keeps_closed_is_not_a_fault_of_the_file(
     probe opens, and its evidence names the decoder, as ffprobe does. Any
     other line still counts, a refused protocol among them: a line is the
     decoder's, or a repeat of it, only when it is that line whole, so a fault
-    that merely holds their words is still a fault."""
+    that merely holds their words is still a fault. Unless its words establish
+    malformed bytes, the file is its derivation's to read all the same, and
+    its evidence records the probe's exit status."""
     result = await validated_video(
         monkeypatch,
         tmp_path,
@@ -1562,12 +1564,12 @@ async def test_the_bounds_words_in_another_shape_are_not_the_probes_bound(
     monkeypatch, tmp_path, stderr
 ):
     """Only the probe's whole line is its stream bound: the same words inside
-    another message are a fault of their own, which leaves the file pending."""
+    another message are a fault of their own, recorded as one."""
     result = await validated_video(
         monkeypatch, tmp_path, probe_facts(), movie(), stderr=stderr, returncode=1
     )
-    assert (result.state, result.reason) == ("validation_pending", "probe_incomplete")
-    assert "probe_skipped" not in result.evidence
+    assert (result.state, result.reason) == ("supported", "validated")
+    assert result.evidence["probe_skipped"] == {"fault_exit_status": 1}
 
 
 async def test_the_probe_opens_up_to_its_named_stream_bound(monkeypatch, tmp_path):

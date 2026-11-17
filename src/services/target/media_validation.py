@@ -19,8 +19,9 @@ What only the file could settle never leaves it pending: a container the walker
 cannot read whole, a stream the probe does not decode (`closed_decoders` names
 the decoders ffprobe declined, as ffprobe names them), more streams than the
 probe opens (by the walker's count of tracks, or at the probe's own stream
-bound, which also counts an attached picture) and a duration nothing states are
-left to the derivation, which re-encodes the file, and recorded. The
+bound, which also counts an attached picture), a probe fault whose words
+establish nothing about the bytes (`fault_exit_status`) and a duration nothing
+states are left to the derivation, which re-encodes the file, and recorded. The
 derivation is trimmed to the longest story and encoded to the matrix's story
 video (`story_video_encoding`), so a longer video is kept and only a shorter one
 is refused for its length, the container's or its longest stream's. The frame
@@ -885,13 +886,24 @@ class _StreamBound(Exception):
     to the walk)."""
 
 
+class _ProbeFault(Exception):
+    """The probe logged a fault whose words establish nothing about the bytes,
+    or exited non-zero with nothing logged: its facts are not trusted.
+    `exit_status` is the probe's."""
+
+    def __init__(self, exit_status: int):
+        super().__init__(exit_status)
+        self.exit_status = exit_status
+
+
 def _probe_succeeded(output):
     """Return when the probe ran clean, apart from the decoders it may not
     open (`_DECLINED`), and raise `_ClosedDecoder` when those are all that
     stopped it. A probe that reached its own stream bound (`_STREAM_BOUND`,
     whose consequences are the lines after it) raises `_StreamBound`. Words
-    that establish malformed bytes refuse the file; a resource or capability
-    failure leaves it pending."""
+    that establish malformed bytes refuse the file, and any other fault raises
+    `_ProbeFault`; a probe ended by a signal, as a resource limit ends it,
+    leaves it pending."""
     if output.returncode < 0:
         raise ValidationPending("resource_budget")
     stderr = output.stderr.lower()
@@ -923,7 +935,7 @@ def _probe_succeeded(output):
         )
     ):
         raise UnsupportedMedia("malformed_video")
-    raise ValidationPending("probe_incomplete")
+    raise _ProbeFault(output.returncode)
 
 
 async def _validate_video(data, limits, deadline):
@@ -933,9 +945,10 @@ async def _validate_video(data, limits, deadline):
     (`undecoded_codecs`). A file with more streams than the probe opens is not
     probed, and one whose probe stops at a decoder it keeps closed, or at its
     own stream bound (an attached picture is a stream to the probe and no
-    track to the walk), is judged without it: in each case the file is its
-    story derivation's to read, its evidence says why (`probe_skipped`), and
-    each fact the probe would give is unstated."""
+    track to the walk), or faults in words that establish nothing about the
+    bytes, is judged without it: in each case the file is its story
+    derivation's to read, its evidence says why (`probe_skipped`), and each
+    fact the probe would give is unstated."""
     container = inspect_container(data, limits)
     if container.reason:
         raise _measured(UnsupportedMedia(container.reason), **container.measured)
@@ -944,27 +957,25 @@ async def _validate_video(data, limits, deadline):
         evidence["container"] = {"stopped": container.stopped, **container.measured}
     if container.undecoded:
         evidence["undecoded_codecs"] = _measured_value(container.undecoded)
+    skipped = None
     if container.streams > limits.streams:
-        evidence["probe_skipped"] = {
-            "streams": container.streams,
-            "max_streams": limits.streams,
-        }
-        facts = _video_evidence({})
+        skipped = {"streams": container.streams, "max_streams": limits.streams}
     else:
         try:
             with _private_copy(data, limits) as local:
                 facts = await _probe_video(local, limits, deadline)
         except _ClosedDecoder as closed:
-            evidence["probe_skipped"] = {
-                "closed_decoders": _measured_value(closed.decoders)
-            }
-            facts = _video_evidence({})
+            skipped = {"closed_decoders": _measured_value(closed.decoders)}
         except _StreamBound:
-            evidence["probe_skipped"] = {
+            skipped = {
                 "max_streams": limits.streams,
                 "walked_streams": container.streams,
             }
-            facts = _video_evidence({})
+        except _ProbeFault as fault:
+            skipped = {"fault_exit_status": fault.exit_status}
+    if skipped is not None:
+        evidence["probe_skipped"] = skipped
+        facts = _video_evidence({})
     return {**evidence, **facts}
 
 

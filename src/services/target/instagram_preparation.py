@@ -369,7 +369,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
         )
         refusal = _validation_refusal(validation, counters)
-        await self._land(
+        parked = await self._land(
             engine,
             workspace_id,
             intent_id,
@@ -381,11 +381,13 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             if fetched is None
             else {**fetched, "counters": asdict(counters)},
         )
+        if validation.state == "unsupported":
+            raise source_policy.MediaAdmissionPending("unsupported", evidence=refusal)
         if validation.state != "supported":
+            # A check that could not finish waits for its next try, as a
+            # refusal that proves nothing does, and its last parks the story.
             raise source_policy.MediaAdmissionPending(
-                "unsupported"
-                if validation.state == "unsupported"
-                else "validation_pending",
+                "asset_unavailable" if parked else "validation_pending",
                 evidence=refusal,
             )
         return SelectedPastPostsBytes(
@@ -485,9 +487,11 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         fetch=None,
     ):
         """Record the fetch's outcome on the slide's capture. A refused fetch
-        (no validation) is the retry rule's to decide (`past_posts_retry`): True
+        (no validation), or a check that could not finish (a pending
+        validation), is the retry rule's to decide (`past_posts_retry`): True
         when it parks the story, else the capture keeps the attempt and the
-        refusal."""
+        refusal. A pending check keeps its own reason on the capture, so its
+        slide does not latch and a later story tries the file again."""
         # Reacquire and reread in this SAME transaction; _start cannot return an
         # executor or context that outlives its checkpoint.
         async with unit_of_work(engine, str(ws), actor_kind="worker").begin() as conn:
@@ -554,7 +558,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 raise _unsuitable(verdict, subject)
             state = validation.state if validation else "validation_pending"
             park = reason = None
-            if validation is None:
+            if state == "validation_pending":
                 # Decided under the row locks, on the try the prepare job counts
                 # and the last refusal the slide's capture keeps.
                 park = past_posts_retry.parks(

@@ -125,7 +125,8 @@ names.
    whole, a stream `ffprobe` does not decode (`closed_decoders` names the decoders it
    declined, as it names them), a file with more streams than the probe opens (16, by
    the walker's count of tracks or at the probe's own stream bound, where an attached
-   picture is one more) and a duration nothing states are left to the derivation and
+   picture is one more), a probe fault whose words establish nothing about the bytes
+   (`fault_exit_status`) and a duration nothing states are left to the derivation and
    recorded, never left pending. The
    transformation trims the derivation to 60 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
@@ -395,8 +396,9 @@ link, generation and revision, and its validation evidence.
   again for publishing transit. Each read first makes a fresh Graph lookup, and retries
   once if the CDN link proves expired.
   - The card's read runs in the story's own `prepare_past_post` job, on the worker's
-    `media` lane, never in the prompt sweep. A refusal that proves nothing is tried
-    again after a wait that doubles from 30 s to 15 min. The story parks for review
+    `media` lane, never in the prompt sweep. A refusal that proves nothing, or a
+    check of the file that could not finish, is tried again after a wait that
+    doubles from 30 s to 15 min. The story parks for review
     with its evidence on a proven refusal, on its eighth try, or when a download could
     no longer finish within an hour of its slot.
   - The CDN request never carries the Instagram token. It goes only to
