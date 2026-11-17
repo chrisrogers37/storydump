@@ -42,7 +42,7 @@ to use Storydump.
 
 There is one tier, `src/services/target/`.
 
-Where it runs: the worker and the API are two Railway services from this repository (`Procfile`, `railway.toml`), the database is Neon PostgreSQL, and the web front end in `landing/` deploys to Vercel — `documentation/guides/cloud-deployment.md`. Python 3.10 or newer (`setup.py`; CI runs 3.10).
+Where it runs: the worker and the API are two Railway services from this repository (`Procfile`, `railway.toml`), the database is Neon PostgreSQL, and the web front end in `landing/` deploys to Vercel — `documentation/guides/cloud-deployment.md`. Python 3.12 or newer (`setup.py`; CI runs 3.12).
 
 Operators: see the [retention policy](documentation/operations/retention-policy.md) for the periodic cleanup boundary and data classes that accumulate.
 
