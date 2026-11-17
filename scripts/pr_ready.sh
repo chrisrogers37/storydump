@@ -126,13 +126,23 @@ for name in "${REQUIRED[@]}"; do
   # `gh` renders a pending conclusion as "" and NOT null, so `//` never falls
   # through and a RUNNING check reads as ABSENT — two states with opposite
   # responses (wait vs investigate).
+  #
+  # ONE RESULT PER CHECK, read across every run that lists it. A push to a
+  # branch with an open pull request starts a push run and a pull_request run,
+  # and the rollup lists each check once per run, from the run's latest attempt.
+  # A run that skipped the check (the push run skips Changelog Check) gave it
+  # no result, so SKIPPED is the result only when every run skipped it.
+  # Otherwise it reads SUCCESS when every run that ran it passed, and names
+  # whatever else any run gave.
   v=$(jq -r --arg n "$name" '
-        .statusCheckRollup[]? | select((.name // .context) == $n) |
+        [.statusCheckRollup[]? | select((.name // .context) == $n) |
         if .__typename == "CheckRun" then
           (if (.status // "") != "COMPLETED" then "RUNNING(\(.status // "?"))"
            elif (.conclusion // "") == "" then "NO-CONCLUSION"
            else .conclusion end)
-        else (if (.state // "") == "" then "NO-STATE" else .state end) end' <<<"$J")
+        else (if (.state // "") == "" then "NO-STATE" else .state end) end]
+        | unique | (if . == ["SKIPPED"] then . else . - ["SKIPPED"] end)
+        | if . == ["SUCCESS"] then "SUCCESS" else . - ["SUCCESS"] | join(", ") end' <<<"$J")
   # ABSENT is the dangerous one: "nothing failed" is TRUE of a check that never
   # ran, so absence must never read as success.
   if [ -z "$v" ]; then
