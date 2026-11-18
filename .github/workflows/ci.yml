@@ -11,6 +11,15 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Every job's GITHUB_TOKEN reads the repository and nothing more, whatever the
+# repository's default; a job that needs another permission names it in its
+# own block. No checkout leaves the token in its clone (persist-credentials:
+# false), and nothing after a checkout fetches or pushes. Every action is
+# pinned to a full commit SHA, its release in a trailing comment, and
+# .github/dependabot.yml proposes their updates.
+permissions:
+  contents: read
+
 env:
   # How many parallel legs run the test suite. The test-shard matrix lists
   # 1..TEST_SPLITS, and each leg refuses to run if the two disagree.
@@ -21,10 +30,12 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -49,10 +60,12 @@ jobs:
     name: Telegram ratchet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -115,18 +128,19 @@ jobs:
       - name: Check the matrix covers TEST_SPLITS
         run: test "${{ strategy.job-total }}" = "$TEST_SPLITS"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Migration tests build the pinned schema-code base from history.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         timeout-minutes: 5
         env:
           # A stalled download gives up and runs as a miss.
@@ -218,7 +232,7 @@ jobs:
 
       # Uploaded only after a green run: a failed leg publishes no times.
       - name: Upload the collection fingerprint
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: collection-shard-${{ matrix.group }}
           path: collection-shard-${{ matrix.group }}.txt
@@ -227,7 +241,7 @@ jobs:
           retention-days: 7
 
       - name: Upload coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-shard-${{ matrix.group }}
           path: .coverage.shard-${{ matrix.group }}
@@ -237,7 +251,7 @@ jobs:
           retention-days: 7
 
       - name: Upload test durations
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: durations-shard-${{ matrix.group }}
           path: test-durations-shard-${{ matrix.group }}.json
@@ -265,7 +279,7 @@ jobs:
           for r in $RESULTS; do [ "$r" = success ] || exit 1; done
 
       - name: Download the collection fingerprints
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: collection-shard-*
           path: fingerprints
@@ -279,17 +293,19 @@ jobs:
           test "$(ls fingerprints | wc -l)" -eq "$TEST_SPLITS"
           test "$(sort -u fingerprints/*.txt | wc -l)" -eq 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
       # Coverage gates nothing (there is no threshold), so a failure to combine
       # or report it must not fail Test either.
       - name: Download coverage data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         continue-on-error: true
         with:
           pattern: coverage-shard-*
@@ -308,7 +324,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download test durations
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         continue-on-error: true
         with:
           pattern: durations-shard-*
@@ -324,7 +340,7 @@ jobs:
           jq -S --indent 4 -s 'add | map_values((. * 1000 | round) / 1000)' durations-parts/*.json > .test_durations
 
       - name: Upload the merged test durations
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         continue-on-error: true
         with:
           name: test-durations
@@ -338,10 +354,12 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -364,7 +382,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload bandit report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bandit-security-report
           path: bandit-report.json
@@ -400,9 +418,11 @@ jobs:
     # `next build` is deliberately ABSENT: Vercel already builds every PR, so
     # duplicating it here buys nothing but minutes.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # Pinned rather than floating, and mirrored by `engines` in
           # landing/package.json so CI and a laptop agree on the contract.
@@ -459,12 +479,13 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 'dependabot[bot]')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -495,12 +516,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -541,10 +563,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
       - name: Install dependencies
@@ -554,7 +577,7 @@ jobs:
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/storyline_test
           REPLAY_DATABASE_URL: postgresql://test_user:test_password@localhost:5433/storyline_test
         run: python -m scripts.schema_consistency --out schema-consistency
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: schema-consistency
