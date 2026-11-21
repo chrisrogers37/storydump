@@ -1,7 +1,12 @@
 """Past-posts source durable stage/permit ownership under real tenant roles."""
 
 import asyncio
+from dataclasses import replace
+from datetime import datetime, timezone
+import hashlib
 import importlib.util
+import json
+import subprocess
 import uuid
 
 import pytest
@@ -9,6 +14,10 @@ from sqlalchemy import text
 
 from src.services.target import (
     jobs,
+    media_validation,
+    outbox,
+    prompts,
+    publish_pipeline,
     provider_ops,
     publish_cap,
     refusal_evidence,
@@ -17,8 +26,10 @@ from src.services.target import (
 from src.services.target.transit import (
     PastPostsUploadEvidence,
     PastPostsUploadUncertain,
+    story_transformation,
 )
 from src.services.target.unit_of_work import in_transaction
+from tests.fixtures import fake_providers
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -92,6 +103,15 @@ async def ready(engine, chain):
             dict(user=str(chain["user"]), id=intent),
         )
         await apply_gucs(conn, tenant_id=str(chain["ws"]), actor_kind="system")
+    job = await lease_publish_job(engine, chain, intent)
+    coordinator = module().PastPostsPipeline(
+        capability=foundation.capability(), fetch_selected=selected.fetch_selected
+    )
+    return src, item, intent, job, coordinator, calls
+
+
+async def lease_publish_job(engine, chain, intent):
+    async with observations.uow(engine, chain) as conn:
         assert (
             await publish_cap.flip_to_publishing(
                 conn,
@@ -121,10 +141,7 @@ async def ready(engine, chain):
             .mappings()
             .one()
         )
-    coordinator = module().PastPostsPipeline(
-        capability=foundation.capability(), fetch_selected=selected.fetch_selected
-    )
-    return src, item, intent, job, coordinator, calls
+    return job
 
 
 async def state(engine, chain, intent):
@@ -163,6 +180,180 @@ async def off(engine, chain, src):
             ),
             dict(id=src["source_id"]),
         )
+
+
+def synthetic_video(tmp_path, color):
+    path = tmp_path / f"{color}.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color={color}:size=64x112:rate=25",
+            "-t",
+            "61",
+            "-c:v",
+            "libx264",
+            "-movflags",
+            "+faststart",
+            str(path),
+        ],
+        check=True,
+        timeout=15,
+    )
+    return path.read_bytes()
+
+
+async def validate_with_legacy_encoding(validate, source):
+    """Write the pre-#73 video evidence and digest through normal preparation."""
+    result = await validate(source)
+    assert result.state == "supported"
+    evidence = {
+        **result.evidence,
+        "derivation": {
+            "video_codec": ["h264", "high", "4.2"],
+            "audio_codec": "aac",
+            "audio_hz": 48_000,
+            "fps": [23, 60],
+            "video_bits_per_second": 13_000_000,
+            "longest_seconds": 60,
+        },
+        "trimmed_to_seconds": "60",
+    }
+    payload = {
+        "kind": source.kind,
+        "generation": source.source_generation,
+        "revision": source.observation_revision,
+        "asset": source.selected_asset_id,
+        "matrix": result.matrix_version,
+        "evidence_version": result.evidence_version,
+        "state": result.state,
+        "reason": result.reason,
+        "evidence": evidence,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return replace(result, fingerprint=digest, evidence=evidence)
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["legacy-stage", "new-trim"])
+async def test_staged_video_preview_and_review_use_the_stored_capture(
+    past_posts_engine, origin, monkeypatch, tmp_path, legacy
+):
+    from src import worker
+
+    engine, ws = past_posts_engine, str(origin["ws"])
+    clip = synthetic_video(tmp_path, "red")
+    validate = media_validation.validate_media
+
+    async def old_validate(source):
+        return await validate_with_legacy_encoding(validate, source)
+
+    with monkeypatch.context() as patch:
+        if legacy:
+            patch.setattr(media_validation, "validate_media", old_validate)
+        (
+            prepared,
+            _,
+            intent,
+            binding,
+            card_id,
+        ) = await preparation.approved_past_posts_card(
+            engine, origin, kind="video", content=clip
+        )
+        job = await lease_publish_job(engine, origin, intent)
+        coordinator = module().PastPostsPipeline(
+            capability=foundation.capability(), fetch_selected=prepared.fetch_selected
+        )
+        transit = Transit()
+        await coordinator.stage(
+            engine=engine, job=job, intent_id=intent, transit=transit
+        )
+
+    before = await preparation.proof(engine, origin, intent)
+    capture = before["validation_capture"]
+    assert before["transit_artifact_ref"] is not None
+    assert capture["evidence"]["duration_seconds"] == "61"
+    cutoff = "60" if legacy else "59.95"
+    assert capture["evidence"]["trimmed_to_seconds"] == cutoff
+    if not legacy:
+        trim, *_ = story_transformation(transit.calls[0], media_kind="video")
+        assert str(trim["duration"]) == cutoff
+        # Another encoding is now current. The review still reads the stage's cutoff.
+        encoding = {**media_validation.story_video_encoding(), "trim_seconds": 58.75}
+        monkeypatch.setattr(media_validation, "story_video_encoding", lambda: encoding)
+
+    telegram = fake_providers.FakeTelegram()
+    fetch = worker._card_media_fetch(engine, {}, fetch_selected=prepared.fetch_selected)
+    poller = outbox.OutboxPoller(
+        lambda: observations.uow(engine, origin),
+        binding_id=binding,
+        transport=telegram.transport(media_fetch=fetch).for_chat("synthetic-chat"),
+        clock=lambda: datetime.now(timezone.utc),
+        interval_seconds=1,
+        chat_limit=20,
+        chat_window_seconds=60,
+        global_limit=30,
+        global_window_seconds=1,
+        past_posts_capability=foundation.capability(),
+    )
+    assert (await poller.tick())["kind"] == "approval_prompt"
+    assert (await poller.tick())["kind"] == "prompt_supersede"
+    assert [call.method for call in telegram.calls] == [
+        "sendMessage",
+        "editMessageMedia",
+    ]
+    (edit,) = telegram.sent("editMessageMedia")
+    media = json.loads(fake_providers.multipart_field(edit, "media"))
+    assert media["type"] == "video" and clip in edit.body
+    assert f"✂️ Trimmed to {cutoff} s" in media["caption"]
+    after = await preparation.proof(engine, origin, intent)
+    assert after["validation_capture"]["evidence"] == capture["evidence"]
+    assert after["validation_fingerprint"] == before["validation_fingerprint"]
+    assert after["transit_artifact_ref"] == before["transit_artifact_ref"]
+
+    if legacy:
+        altered, _ = preparation.service(
+            engine, origin, kind="video", content=synthetic_video(tmp_path, "blue")
+        )
+        with pytest.raises(
+            source_policy.MediaAdmissionPending,
+            match="past_posts_revalidation_required",
+        ):
+            await altered.fetch_selected(
+                engine=engine, workspace_id=ws, intent_id=intent
+            )
+
+    async with observations.uow(engine, origin) as conn:
+        assert (
+            await conn.scalar(
+                text("SELECT payload->>'sent_as' FROM channel_outbox WHERE id=:id"),
+                {"id": card_id},
+            )
+            == "media"
+        )
+        assert await publish_pipeline.park_for_review(
+            conn,
+            workspace_id=ws,
+            intent_id=intent,
+            from_state="publishing",
+            tz="UTC",
+            notice="Synthetic review",
+        )
+        review = await prompts.rerender_prompt(conn, intent_id=intent)
+    assert f"✂️ Trimmed to {cutoff} s" in review["text"]
+    assert await poller.tick() is not None
+    assert await poller.tick() is not None
+    assert await poller.tick() is None
+    (review_edit,) = telegram.sent("editMessageCaption")
+    assert f"✂️ Trimmed to {cutoff} s" in review_edit.json["caption"]
+    assert "Needs review" in review_edit.json["caption"]
+    assert len(telegram.sent("editMessageMedia")) == 1
 
 
 async def test_past_posts_admission_stage_and_permit_copy_are_atomic(

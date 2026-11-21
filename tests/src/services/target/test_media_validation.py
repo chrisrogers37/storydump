@@ -252,8 +252,10 @@ def probe_facts(
     [
         ("2.999", None, None),
         ("3", "3", None),
-        ("60", "60", None),
-        ("60.001", "60001/1000", "60"),
+        ("59.95", "1199/20", None),
+        ("59.96", "1499/25", "59.95"),
+        ("60", "60", "59.95"),
+        ("60.001", "60001/1000", "59.95"),
     ],
 )
 def test_exact_video_duration_boundaries(duration, text, trimmed):
@@ -342,7 +344,7 @@ def test_a_timing_the_probe_does_not_state_is_not_judged(facts, key):
 @pytest.mark.parametrize(
     "facts,duration,trimmed",
     [
-        (probe_facts(duration="59", audio_duration="62"), "62", "60"),
+        (probe_facts(duration="59", audio_duration="62"), "62", "59.95"),
         (probe_facts(duration="2", audio_duration="5"), "5", None),
         (probe_facts(duration=None, format_duration="12.5"), "25/2", None),
     ],
@@ -1428,6 +1430,25 @@ async def validated_video(
     )
 
 
+async def test_video_fingerprint_tracks_source_proof_across_encoding_changes(
+    monkeypatch, tmp_path
+):
+    before = await validated_video(monkeypatch, tmp_path, probe_facts(duration="61"))
+    encoding = {**v.story_video_encoding(), "trim_seconds": 57.25}
+    monkeypatch.setattr(v, "story_video_encoding", lambda: encoding)
+    source = request(movie(), "video")
+    after = await v.validate_media(source)
+    assert before.fingerprint == after.fingerprint
+    assert before.evidence["derivation"] != after.evidence["derivation"] == encoding
+    assert after.evidence["trimmed_to_seconds"] == "57.25"
+    for changed in (
+        replace(source, observation_revision=8),
+        replace(source, selected_asset_id="another-child"),
+        replace(source, data=movie(late=True)),
+    ):
+        assert (await v.validate_media(changed)).fingerprint != before.fingerprint
+
+
 async def test_a_supported_video_records_each_check_it_passed_with_its_bounds(
     monkeypatch, tmp_path
 ):
@@ -1652,7 +1673,7 @@ async def test_a_video_longer_than_a_story_passes_its_duration_check_trimmed(
     assert result.state == "supported"
     assert dict(duration["measured"]) == {
         "duration_seconds": "72",
-        "trimmed_to_seconds": str(longest),
+        "trimmed_to_seconds": "59.95",
         "min_seconds": shortest,
         "max_seconds": longest,
     }
