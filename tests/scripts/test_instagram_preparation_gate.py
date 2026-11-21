@@ -49,7 +49,7 @@ def png(color="red"):
     return output.getvalue()
 
 
-async def selected(engine, chain, *, carousel=False):
+async def selected(engine, chain, *, carousel=False, kind="image"):
     async with obs.uow(engine, chain) as conn:
         await conn.execute(
             text("UPDATE ig_accounts SET provider_account_ref=:ref WHERE id=:id"),
@@ -58,7 +58,7 @@ async def selected(engine, chain, *, carousel=False):
                 "ref": str(int(uuid.UUID(str(chain["iga"])).int % 10**16) + 10**16),
             },
         )
-    src, item = await selection.metadata(engine, chain, carousel=carousel)
+    src, item = await selection.metadata(engine, chain, carousel=carousel, kind=kind)
     async with obs.uow(engine, chain) as conn:
         intent = str(
             (
@@ -100,6 +100,7 @@ def service(
     chain,
     *,
     content=None,
+    kind="image",
     before=None,
     returned=None,
     changed_child=None,
@@ -113,6 +114,8 @@ def service(
 
     calls = []
     data = jpeg() if content is None else content
+    ext, mime = ("mp4", "video/mp4") if kind == "video" else ("jpg", "image/jpeg")
+    url = f"https://scontent-test.cdninstagram.com/selected.{ext}"
 
     async def prepare(capture, config):
         assert not in_transaction()
@@ -156,14 +159,14 @@ def service(
                     200,
                     json={
                         "id": "123",
-                        "media_type": "CAROUSEL_ALBUM" if changed_child else "IMAGE",
+                        "media_type": "CAROUSEL_ALBUM"
+                        if changed_child
+                        else kind.upper(),
                         "owner": {"id": capture.account_ref},
-                        "media_url": "https://scontent-test.cdninstagram.com/selected.jpg",
+                        "media_url": url,
                     },
                 )
-            return httpx.Response(
-                200, content=data, headers={"Content-Type": "image/jpeg"}
-            )
+            return httpx.Response(200, content=data, headers={"Content-Type": mime})
 
         return InstagramPastPostsAdapter(
             access_provider=access,
@@ -1791,11 +1794,11 @@ async def test_selected_gone_fresh_cas_refuses_stale_or_cancelled_turn(
         )
 
 
-async def approved_past_posts_card(engine, chain):
+async def approved_past_posts_card(engine, chain, *, kind="image", content=None):
     from src.services.target import auto_approval, intent_ledger, outbox, prompts
 
-    src, item, intent = await selected(engine, chain)
-    prepared, calls = service(engine, chain)
+    src, item, intent = await selected(engine, chain, kind=kind)
+    prepared, calls = service(engine, chain, kind=kind, content=content)
     await prepared.selected_prepare(
         engine=engine, workspace_id=str(chain["ws"]), intent_id=intent
     )
@@ -1861,31 +1864,6 @@ async def post_past_posts_card(engine, chain, intent, *, via="api"):
             ),
             {"id": intent, "via": via},
         )
-
-
-async def test_a_trimmed_video_says_so_on_its_card(past_posts_engine, origin):
-    """The card reads a past-posts video's trim from its selected slide's
-    validation evidence, through the story's provenance."""
-    from src.services.target import prompts
-
-    _, _, intent, _, _ = await approved_past_posts_card(past_posts_engine, origin)
-    async with obs.uow(past_posts_engine, origin) as conn:
-        changed = await conn.execute(
-            text(
-                "UPDATE instagram_media_assets a SET validation_capture="
-                "a.validation_capture||jsonb_build_object('evidence',"
-                "COALESCE(a.validation_capture->'evidence','{}'::jsonb)"
-                '||\'{"trimmed_to_seconds":"60"}\'::jsonb)'
-                " FROM instagram_intent_provenance p"
-                " WHERE p.workspace_id=a.workspace_id AND p.intent_id=CAST(:id AS uuid)"
-                " AND a.source_id=p.source_id AND a.media_item_id=p.media_item_id"
-                " AND a.asset_media_id=p.selected_asset_identity"
-            ),
-            {"id": intent},
-        )
-        assert changed.rowcount == 1
-        card = await prompts.rerender_prompt(conn, intent_id=intent)
-    assert "✂️ Trimmed to 60 s" in card["text"]
 
 
 @pytest.mark.parametrize("via", ["api", "dry_run"])

@@ -536,9 +536,21 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
                 )
-            if provenance["transit_artifact_ref"] is not None and (
+            staged = provenance["transit_artifact_ref"] is not None
+            staged_video = staged and subject["media_kind"] == "video"
+            pinned = provenance["validation_fingerprint"]
+            if staged and (
                 validation is None
-                or provenance["validation_fingerprint"] != validation.fingerprint
+                or pinned != subject["current_fingerprint"]
+                or (
+                    pinned != validation.fingerprint
+                    and not (
+                        staged_video
+                        and media_validation.matches_legacy_video_fingerprint(
+                            validation, subject["current_capture"], pinned
+                        )
+                    )
+                )
                 or str(provenance["capture_generation_id"])
                 != selected.capture.generation_id
                 or provenance["capture_observation_revision"]
@@ -556,6 +568,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if not verdict or not verdict["suitable"]:
                 raise _unsuitable(verdict, subject)
+            if staged_video:
+                # Keep the staged proof and the delivery settings recorded with it.
+                return False
             state = validation.state if validation else "validation_pending"
             park = reason = None
             if state == "validation_pending":
@@ -631,7 +646,7 @@ WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
                 )
-            if provenance["transit_artifact_ref"] is None:
+            if not staged:
                 await conn.execute(
                     text("""
 UPDATE instagram_intent_provenance SET capture_generation_id=:gid,capture_observation_revision=:rev,
