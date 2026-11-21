@@ -199,7 +199,7 @@ class TestExchangeCode:
             "error": {
                 **META_REFUSAL["error"],
                 "type": f"OAuthException {sent[0]}",
-                "fbtrace_id": f"AbC123xyz {sent[1]}",
+                "fbtrace_id": f"trace-for-tests {sent[1]}",
             }
         }
         answers = [(200, body) for body in granted] + [(400, refusal)]
@@ -208,7 +208,7 @@ class TestExchangeCode:
             await _exchange(code=f"{SENT_CODE}#_", client_secret=SENT_SECRET)
         assert info.value.detail == (
             f"{call} answered 400; Meta error code=190 subcode=463"
-            " type=OAuthException <token> fbtrace_id=AbC123xyz <token>"
+            " type=OAuthException <token> fbtrace_id=trace-for-tests <token>"
         )
         said, exc = [r.getMessage() for r in caplog.records], info.value
         while exc is not None:
