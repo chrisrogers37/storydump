@@ -168,6 +168,28 @@ def _staged_capture_matches(provenance, subject, generation_id) -> bool:
     )
 
 
+async def _video_upload_holds_capture(conn, *, ws, intent_id, validation) -> bool:
+    """A live upload admission for this proof holds the recorded delivery settings."""
+    return await conn.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM instagram_artifacts"
+            " WHERE workspace_id=:ws AND intent_id=:intent"
+            " AND admitted_resource_type='video' AND cleanup_state='pending'"
+            " AND data_generation_id=CAST(:gid AS uuid)"
+            " AND observation_revision=:rev AND selected_asset_identity=:asset"
+            " AND validation_fingerprint=:fingerprint)"
+        ),
+        dict(
+            ws=ws,
+            intent=intent_id,
+            gid=validation.source_generation,
+            rev=validation.observation_revision,
+            asset=validation.selected_asset_id,
+            fingerprint=validation.fingerprint,
+        ),
+    )
+
+
 class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
@@ -541,7 +563,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                     "past_posts_revalidation_required"
                 )
             staged = provenance["transit_artifact_ref"] is not None
-            staged_video = staged and subject["media_kind"] == "video"
+            video = subject["media_kind"] == "video"
             pinned = provenance["validation_fingerprint"]
             if staged and (
                 validation is None
@@ -551,7 +573,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 or (
                     pinned != validation.fingerprint
                     and not (
-                        staged_video
+                        video
                         and media_validation.matches_legacy_video_fingerprint(
                             validation, subject["current_capture"], pinned
                         )
@@ -570,8 +592,26 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if not verdict or not verdict["suitable"]:
                 raise _unsuitable(verdict, subject)
-            if staged_video:
+            if staged and video:
                 # Keep the staged proof and the delivery settings recorded with it.
+                return False
+            if (
+                video
+                and validation is not None
+                and validation.state == "supported"
+                and validation.fingerprint == pinned
+                and _staged_capture_matches(
+                    provenance, subject, selected.capture.generation_id
+                )
+                and not media_validation.matches_video_delivery(
+                    validation, subject["current_capture"]
+                )
+                and await _video_upload_holds_capture(
+                    conn, ws=str(ws), intent_id=str(iid), validation=validation
+                )
+            ):
+                # Admission checked the uploader's cutoff. Keep it while its
+                # artifact is in flight or awaiting attachment to this intent.
                 return False
             state = validation.state if validation else "validation_pending"
             park = reason = None

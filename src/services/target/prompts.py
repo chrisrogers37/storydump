@@ -300,7 +300,7 @@ def _settled_card(row, *, intent_id: str, line: str) -> dict:
 #: API. Every table is bound on the workspace.
 _CARD_FACTS = (
     "SELECT i.state, i.cancel_requested, i.publish_step, i.media_item_id,"
-    "       m.state AS item_state, m.auto_approve, w.api_publishing_enabled"
+    "       m.state AS item_state, m.auto_approve, m.media_kind, w.api_publishing_enabled"
     "  FROM post_intents i"
     "  JOIN media_items m ON m.workspace_id = :ws AND m.id = i.media_item_id"
     "  JOIN workspaces w ON w.id = :ws"
@@ -318,14 +318,26 @@ async def card_facts(session, *, workspace_id: str, intent_id: str) -> Optional[
     )
 
 
-async def card_keyboard_for(
-    session, *, workspace_id: str, intent_id: str
-) -> Optional[dict]:
-    """A card's keyboard for its story as it is now: the sender's, at every
-    edit of an approval card. None when the story is gone, or carries no
-    keyboard."""
-    facts = await card_facts(session, workspace_id=workspace_id, intent_id=intent_id)
-    return None if facts is None else keyboard_of(intent_id, facts)
+async def review_video_header(
+    session, *, workspace_id: str, intent_id: str, sent_as: Optional[str]
+) -> Optional[str]:
+    """Rerender the header of an existing past-posts video in review."""
+    row = await readers.row(
+        session,
+        _CARD_WITH_PROVIDER
+        + " WHERE card.id=:id AND card.workspace_id=:ws"
+        + " AND card.state='review_required' AND card.media_kind='video'"
+        + " AND s.provider='instagram_past_posts'",
+        id=intent_id,
+        ws=workspace_id,
+    )
+    if row is None:
+        return None
+    card = render_card(
+        {**await _with_scheduler(session, row), "intent_id": intent_id},
+        api_publishing_enabled=bool(row["api_publishing_enabled"]),
+    )
+    return card.get("caption", card["text"]) if sent_as == "media" else card["text"]
 
 
 async def _scheduler_name(

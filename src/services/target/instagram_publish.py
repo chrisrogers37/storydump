@@ -20,6 +20,7 @@ from src.services.target import (
     audit,
     instagram_artifacts,
     jobs,
+    media_validation,
     readers,
     refusal_evidence,
     source_policy,
@@ -632,6 +633,13 @@ class PastPostsPipeline:
                 or p["selected_asset_identity"] != v.selected_asset_id
                 or p["validation_fingerprint"] != v.fingerprint
             ):
+                raise PastPostsEffectRefused("past_posts_revalidation_required")
+            if selected.media_kind == "video" and not (
+                media_validation.matches_video_delivery(
+                    v, await _slide_capture(conn, ws, subject)
+                )
+            ):
+                # A fetch with another encoder may have landed before this lock.
                 raise PastPostsEffectRefused("past_posts_revalidation_required")
             ref = "ws/" + ws + "/" + uuid.uuid4().hex
             artifact_ref = await instagram_artifacts.admit_upload(

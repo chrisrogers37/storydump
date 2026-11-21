@@ -22,7 +22,7 @@ probe opens (by the walker's count of tracks, or at the probe's own stream
 bound, which also counts an attached picture), a probe fault whose words
 establish nothing about the bytes (`fault_exit_status`) and a duration nothing
 states are left to the derivation, which re-encodes the file, and recorded. The
-derivation is trimmed to the longest story and encoded to the matrix's story
+derivation is trimmed at the encoder's cutoff and encoded to the matrix's story
 video (`story_video_encoding`), so a longer video is kept and only a shorter one
 is refused for its length, the container's or its longest stream's. The frame
 rate is still refused outside the matrix:
@@ -792,6 +792,17 @@ def _validation_fingerprint(kind, generation, revision, asset, state, reason, ev
     return hashlib.sha256(
         json.dumps(fingerprint_data, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def matches_video_delivery(validation: ValidationResult, capture: object) -> bool:
+    """Whether the stored capture records the delivery settings we just validated."""
+    evidence = capture.get("evidence") if isinstance(capture, Mapping) else None
+    return isinstance(evidence, Mapping) and all(
+        key in evidence
+        and key in validation.evidence
+        and evidence[key] == validation.evidence[key]
+        for key in _DELIVERY_EVIDENCE
+    )
 
 
 def matches_legacy_video_fingerprint(
