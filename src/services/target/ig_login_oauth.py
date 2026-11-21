@@ -363,10 +363,9 @@ class IgGrant:
 
 
 def _json_object(response: httpx.Response, *, reason: str) -> dict:
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise IgOAuthRefused(reason, "the endpoint did not answer JSON") from exc
+    body = meta_adapter.json_body(response)
+    if body is meta_adapter.UNREADABLE:
+        raise IgOAuthRefused(reason, "the endpoint did not answer JSON")
     if not isinstance(body, dict):
         raise IgOAuthRefused(reason, "the endpoint body is not a JSON object")
     return body

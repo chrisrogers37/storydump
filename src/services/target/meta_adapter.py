@@ -14,9 +14,11 @@ what the worker's composition root wires** (`worker.py::_meta_from_env`),
 which is exactly what the seam was built for: the pipeline routes on these
 error types and never learns which adapter produced them.
 
-It also holds the one reading of Meta's error object: its numbers
-(:func:`int_of`, :func:`subcode_of`), which the real adapter routes on, and
-the four fields a refused Instagram Login call's log line names
+It also holds the one reading of Meta's error object (:func:`error_object`),
+which every adapter reads an answer through: the real adapter routes on its
+code and keeps the rest for the ledger, the past-posts read
+(`instagram_past_posts_adapter`) keeps it as a refusal's evidence, and a
+refused Instagram Login call's log line names four of its fields
 (:func:`error_fields`), for the connect leg (`ig_login_oauth`) and the refresh
 (`credential_lifecycle`), whose routing reads the code the same way
 (:func:`error_code`).
@@ -59,6 +61,8 @@ below — on evidence from Meta's primary docs, not from a single incident.
 from __future__ import annotations
 
 import itertools
+import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from src.exceptions.base import StorydumpError
@@ -130,69 +134,110 @@ def classify_error(code: int) -> type:
     return MetaRetryableError
 
 
-def int_of(value: Any) -> int:
-    """A number Meta answers with, as an int: 0 when it is absent or not one."""
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
+#: The most digits a number in Meta's answer may have: more than any code or
+#: subcode Meta answers with, and few enough to keep a record or a log line
+#: short.
+NUMBER_DIGITS = 18
+_DIGITS = re.compile(f"[0-9]{{1,{NUMBER_DIGITS}}}")
 
 
-def subcode_of(value: Any) -> Optional[int]:
-    """Meta's `error_subcode`: an int, sometimes a decimal string; never a
-    bool read as 1."""
+def number_of(value: Any) -> Optional[int]:
+    """A number in Meta's answer, as an int: an int, or a string of decimal
+    digits (Meta sometimes writes a subcode so), of at most `NUMBER_DIGITS`
+    digits. None for anything else: a bool, a float (an infinite one
+    included), a longer number, any other value."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdecimal():
-        return int(value.strip())
+        return value if abs(value) < 10**NUMBER_DIGITS else None
+    if isinstance(value, str):
+        digits = value.strip()
+        return int(digits) if _DIGITS.fullmatch(digits) else None
     return None
 
 
-#: What `error_fields` says of an answer that names none of the four.
+#: What `json_body` answers for a body that cannot be read.
+UNREADABLE = object()
+
+
+def json_body(response) -> Any:
+    """A Meta answer's JSON body, or `UNREADABLE`: a body that is not JSON, or
+    that nests deeper than the parser follows."""
+    try:
+        return response.json()
+    except (ValueError, RecursionError):
+        return UNREADABLE
+
+
+@dataclass(frozen=True)
+class ErrorObject:
+    """Meta's `error` object as `error_object` reads it; a field it could not
+    read is None."""
+
+    code: Optional[int] = None
+    subcode: Optional[int] = None
+    type: Optional[str] = None
+    message: Optional[str] = None
+    fbtrace_id: Optional[str] = None
+    user_title: Optional[str] = None
+    user_msg: Optional[str] = None
+    is_transient: bool = False
+
+
+def error_object(body, *, secrets=()) -> Optional[ErrorObject]:
+    """The `error` object of an answer's JSON body, read the one way every
+    adapter reads it: its code and subcode by `number_of`; each text field,
+    when it is a string, through `refusal_evidence.scrub_text` with *secrets*
+    (what the request carried), so it carries no control character, and a
+    type and a trace id bounded as short fields; `is_transient` only when
+    Meta says true. None when the body holds no `error` object."""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return None
+
+    def text(field: str, limit: int) -> Optional[str]:
+        value = error.get(field)
+        if not isinstance(value, str):
+            return None
+        return refusal_evidence.scrub_text(value, secrets=secrets)[:limit] or None
+
+    return ErrorObject(
+        code=number_of(error.get("code")),
+        subcode=number_of(error.get("error_subcode")),
+        type=text("type", refusal_evidence.FIELD_LIMIT),
+        message=text("message", refusal_evidence.TEXT_LIMIT),
+        fbtrace_id=text("fbtrace_id", refusal_evidence.FIELD_LIMIT),
+        user_title=text("error_user_title", refusal_evidence.TEXT_LIMIT),
+        user_msg=text("error_user_msg", refusal_evidence.TEXT_LIMIT),
+        is_transient=error.get("is_transient") is True,
+    )
+
+
+#: What `error_fields` says of an answer whose four fields could not be read.
 ERROR_FIELDS_UNREAD = "Meta's error fields could not be read"
 
 
-def _error_object(response) -> Optional[dict]:
-    """A refused answer's `error` object, when its JSON body holds one naming
-    any of the four fields `error_fields` reads; None otherwise."""
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    error = body.get("error") if isinstance(body, dict) else None
-    named = ("code", "error_subcode", "type", "fbtrace_id")
-    if not isinstance(error, dict) or not any(field in error for field in named):
-        return None
-    return error
-
-
 def error_code(response) -> int:
-    """Meta's error code from a refused answer, read as `error_fields` reads
-    it (`int_of`): 0 when the answer holds no readable code."""
-    error = _error_object(response)
-    return 0 if error is None else int_of(error.get("code"))
+    """Meta's error code from a refused answer (`error_object`): 0 when the
+    answer holds no readable code."""
+    error = error_object(json_body(response)) or ErrorObject()
+    return error.code or 0
 
 
 def error_fields(response, *, secrets=()) -> str:
-    """Meta's error code, subcode, type and trace id from a refused answer's
-    JSON body, as text for a log line, read as the publish adapter reads them:
-    the numbers by `int_of` and `subcode_of`, the two text fields through
-    `refusal_evidence.scrub_text` with *secrets* (what the request carried).
-    Nothing else in the body is read, so its message, a token, a code or
-    anything a person entered never reaches the line. A body that is not
-    JSON, or holds no `error` object naming any of the four, gets
-    `ERROR_FIELDS_UNREAD`."""
-    error = _error_object(response)
-    if error is None:
+    """Meta's error code, subcode, type and trace id from a refused answer,
+    as text for a log line, read by `error_object` with *secrets* (what the
+    request carried). Nothing else in the body is read, so its message, a
+    token, a code or anything a person entered never reaches the line. A body
+    that cannot be read, or whose `error` object holds none of the four in a
+    form `error_object` reads, gets `ERROR_FIELDS_UNREAD`. It never raises."""
+    error = error_object(json_body(response), secrets=secrets) or ErrorObject()
+    fields = (error.code, error.subcode, error.type, error.fbtrace_id)
+    if all(field is None for field in fields):
         return ERROR_FIELDS_UNREAD
-    error_type = refusal_evidence.scrub_text(error.get("type"), secrets=secrets)
-    trace = refusal_evidence.scrub_text(error.get("fbtrace_id"), secrets=secrets)
     return (
-        f"Meta error code={int_of(error.get('code'))}"
-        f" subcode={subcode_of(error.get('error_subcode'))}"
-        f" type={error_type} fbtrace_id={trace}"
+        f"Meta error code={error.code} subcode={error.subcode}"
+        f" type={error.type} fbtrace_id={error.fbtrace_id}"
     )
 
 

@@ -128,8 +128,18 @@ class TestExchangeCode:
         await _exchange()
         assert all(c["policy"] is not None for c in calls)
 
-    async def test_a_refused_code_is_named_exchange_failed(self, monkeypatch):
-        queued_egress(monkeypatch, [(400, {"error_message": "Invalid code"})])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"error_message": "Invalid code"}, id="no-error-object"),
+            pytest.param(b"[" * 100_000 + b"]" * 100_000, id="nested-past-the-parser"),
+            pytest.param(b'{"error": {"code": Infinity}}', id="an-infinite-code"),
+        ],
+    )
+    async def test_a_refused_code_is_named_exchange_failed(self, monkeypatch, body):
+        """A refusal is named whatever its body holds: Meta's fields are read
+        without raising, so the callback gets its refusal."""
+        queued_egress(monkeypatch, [(400, body)])
         with pytest.raises(ig.IgOAuthRefused) as info:
             await _exchange()
         assert info.value.reason == "exchange_failed"
@@ -160,32 +170,45 @@ class TestExchangeCode:
         assert info.value.reason == "malformed_response"
 
     @pytest.mark.parametrize(
-        "granted, call",
+        "granted, call, sent",
         [
-            ([], "token endpoint"),
-            ([{"data": [{"access_token": SENT_TOKEN}]}], "long-lived exchange"),
+            ([], "token endpoint", (SENT_SECRET, SENT_CODE)),
+            (
+                [{"data": [{"access_token": SENT_TOKEN}]}],
+                "long-lived exchange",
+                (SENT_SECRET, SENT_TOKEN),
+            ),
             (
                 [
                     {"data": [{"access_token": SENT_TOKEN}]},
                     {"access_token": SENT_TOKEN},
                 ],
                 "profile read",
+                (SENT_TOKEN, SENT_TOKEN),
             ),
         ],
     )
     async def test_a_refusal_names_metas_four_fields_and_nothing_else(
-        self, monkeypatch, caplog, granted, call
+        self, monkeypatch, caplog, granted, call, sent
     ):
         """The callback logs the refusal's message: Meta's code, subcode, type
-        and trace id, and never the code, the secret, a token or Meta's text."""
+        and trace id, what the call sent redacted from the two text fields,
+        and never the code, the secret, a token or Meta's text."""
         caplog.set_level("DEBUG")
-        answers = [(200, body) for body in granted] + [(400, META_REFUSAL)]
+        refusal = {
+            "error": {
+                **META_REFUSAL["error"],
+                "type": f"OAuthException {sent[0]}",
+                "fbtrace_id": f"trace-for-tests {sent[1]}",
+            }
+        }
+        answers = [(200, body) for body in granted] + [(400, refusal)]
         queued_egress(monkeypatch, answers)
         with pytest.raises(ig.IgOAuthRefused) as info:
             await _exchange(code=f"{SENT_CODE}#_", client_secret=SENT_SECRET)
         assert info.value.detail == (
             f"{call} answered 400; Meta error code=190 subcode=463"
-            " type=OAuthException fbtrace_id=AbC123xyz"
+            " type=OAuthException <token> fbtrace_id=trace-for-tests <token>"
         )
         said, exc = [r.getMessage() for r in caplog.records], info.value
         while exc is not None:
@@ -194,11 +217,21 @@ class TestExchangeCode:
         for sentinel in (SENT_CODE, SENT_SECRET, SENT_TOKEN, META_TEXT):
             assert not [line for line in said if sentinel in line]
 
-    async def test_a_body_that_is_not_json_is_malformed_not_a_crash(self, monkeypatch):
-        queued_egress(monkeypatch, [(200, b"<html>")])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"<html>", id="not-json"),
+            pytest.param(b"[" * 100_000 + b"]" * 100_000, id="nested-past-the-parser"),
+        ],
+    )
+    async def test_a_body_that_is_not_json_is_malformed_not_a_crash(
+        self, monkeypatch, body
+    ):
+        queued_egress(monkeypatch, [(200, body)])
         with pytest.raises(ig.IgOAuthRefused) as info:
             await _exchange()
         assert info.value.reason == "malformed_response"
+        assert info.value.detail == "the endpoint did not answer JSON"
 
     def test_every_reason_the_leg_can_raise_is_in_the_closed_set(self):
         for reason in (
@@ -338,6 +371,7 @@ class TestAuthorizationUrl:
         assert q["state"] == ["st4te"]
         assert q["client_id"] == [APP_ID]
         assert q["redirect_uri"] == [REDIRECT]
+        assert q["response_type"] == ["code"]
         assert set(q["scope"][0].split(",")) == set(ig.REQUIRED_SCOPES)
 
     def test_the_path_keeps_its_trailing_slash(self):

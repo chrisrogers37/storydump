@@ -247,10 +247,6 @@ RAW_TARGET_READERS = {
 #: to the code that scrubs it from the text, or a name that means something else
 #: in that function.
 MESSAGE_EXEMPTIONS = {
-    ("src/services/target/instagram_graph.py", "_call", "token"): "the Graph "
-    "access token, passed only to the provider-text scrub "
-    "(refusal_evidence.scrub_text, directly or through _scrub and _detail_of), "
-    "which replaces it in the text with <token>",
     ("src/services/target/outbox.py", "pace_and_claim", "scope"): "the pacing "
     "scope's label (tg_chat or tg_global), not an ASGI scope",
 }

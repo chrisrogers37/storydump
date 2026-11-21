@@ -42,7 +42,6 @@ struck from any message anyway.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
@@ -59,12 +58,15 @@ from src.services.target.ig_credentials import IgCredentialDead
 from src.services.target.ig_login_oauth import GRAPH_BASE
 from src.services.target.meta_adapter import (
     OAUTH_ERROR_CODE,
+    UNREADABLE,
+    ErrorObject,
     MetaError,
     MetaLostResponse,
     MetaRetryableError,
     classify_error,
-    int_of,
-    subcode_of,
+    error_object,
+    json_body,
+    number_of,
 )
 from src.services.target.oauth_states import RingUnavailable
 
@@ -229,8 +231,8 @@ class InstagramGraphAdapter:
             first = rows
         config = first.get("config") if isinstance(first.get("config"), dict) else {}
         return {
-            "quota_usage": int_of(first.get("quota_usage")),
-            "quota_total": int_of(config.get("quota_total")),
+            "quota_usage": number_of(first.get("quota_usage")) or 0,
+            "quota_total": number_of(config.get("quota_total")) or 0,
         }
 
     async def aclose(self) -> None:
@@ -300,26 +302,26 @@ class InstagramGraphAdapter:
             raise MetaLostResponse(
                 f"{where}: {type(exc).__name__}: {scrubbed}"
             ) from None
-        try:
-            body = response.json()
-        except (json.JSONDecodeError, ValueError):
+        body = json_body(response)
+        if body is UNREADABLE:
             raise MetaLostResponse(
                 f"{where}: non-JSON answer (HTTP {response.status_code})"
-            ) from None
-        if isinstance(body, dict) and isinstance(body.get("error"), dict):
-            error = body["error"]
-            code = int_of(error.get("code"))
-            subcode = subcode_of(error.get("error_subcode"))
-            message = self._scrub(error.get("message"), token) or ""
+            )
+        error = error_object(body, secrets=(token,))
+        if error is not None:
+            # A code that cannot be read is 0, which `classify_error` routes
+            # as retryable.
+            code = error.code or 0
+            message = error.message or ""
             if response.status_code >= 500:
                 raise MetaLostResponse(
                     f"{where}: HTTP {response.status_code} code={code}: {message}"
                 )
             raise classify_error(code)(
                 code=code,
-                subcode=subcode,
+                subcode=error.subcode,
                 message=message,
-                detail=self._detail_of(error, response.status_code, token),
+                detail=self._detail_of(error, response.status_code),
             )
         if response.status_code >= 500:
             raise MetaLostResponse(f"{where}: HTTP {response.status_code}")
@@ -338,18 +340,18 @@ class InstagramGraphAdapter:
             return None
         return refusal_evidence.scrub_text(str(value), secrets=(token,)) or None
 
-    @classmethod
-    def _detail_of(cls, error: dict, http_status: int, token: str) -> dict:
-        """Meta's answer for the ledger, every text field
-        scrubbed and capped: the subcode, the user-facing title and message,
-        the trace id Meta support asks for, the transient hint Meta
-        documents, and the HTTP status."""
+    @staticmethod
+    def _detail_of(error: ErrorObject, http_status: int) -> dict:
+        """Meta's answer for the ledger, as `meta_adapter.error_object` read
+        it, the token redacted from every text field and each capped: the subcode,
+        the user-facing title and message, the trace id Meta support asks
+        for, the transient hint Meta documents, and the HTTP status."""
         return {
-            "error_subcode": subcode_of(error.get("error_subcode")),
-            "error_user_title": cls._scrub(error.get("error_user_title"), token),
-            "error_user_msg": cls._scrub(error.get("error_user_msg"), token),
-            "fbtrace_id": cls._scrub(error.get("fbtrace_id"), token),
-            "is_transient": bool(error.get("is_transient")),
+            "error_subcode": error.subcode,
+            "error_user_title": error.user_title,
+            "error_user_msg": error.user_msg,
+            "fbtrace_id": error.fbtrace_id,
+            "is_transient": error.is_transient,
             "http_status": int(http_status),
         }
 

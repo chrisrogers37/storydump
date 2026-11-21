@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from src.services.target import egress, refusal_evidence, vocabulary
+from src.services.target import egress, meta_adapter, refusal_evidence, vocabulary
 from src.services.target.media_adapters import (
     MediaCredentialDead,
     MediaRetryableError,
@@ -235,22 +235,22 @@ class _SlideRead:
     children_status: Optional[int]
 
 
-def _graph_refusal(response, error, url: str, token: str) -> dict:
+def _graph_refusal(response, error: meta_adapter.ErrorObject, url: str) -> dict:
     """What Graph said when it refused a read, as refusal evidence.
 
-    Its numbers, its scrubbed text and the request's path. The query and the
+    Its numbers and its text as `meta_adapter.error_object` read them, the
+    token redacted from the text, and the request's path. The query and the
     headers are never read, so neither the fields asked for nor the token can
     reach the record.
     """
-    error = error if isinstance(error, dict) else {}
     return refusal_evidence.evidence(
         "graph_error",
         http_status=response.status_code,
-        code=refusal_evidence.whole(error.get("code")),
-        error_subcode=refusal_evidence.whole(error.get("error_subcode")),
-        type=refusal_evidence.short(error.get("type")),
-        message=refusal_evidence.scrub_text(error.get("message"), secrets=(token,)),
-        fbtrace_id=refusal_evidence.short(error.get("fbtrace_id")),
+        code=error.code,
+        error_subcode=error.subcode,
+        type=error.type,
+        message=error.message,
+        fbtrace_id=error.fbtrace_id,
         path=refusal_evidence.graph_path(url),
     )
 
@@ -485,42 +485,34 @@ class InstagramPastPostsAdapter:
             raise MediaRetryableError("Instagram read budget exhausted") from None
         except egress.ResponseTooLarge:
             raise MediaGraphResponseTooLarge() from None
-        try:
-            body = response.json()
-        except ValueError:
-            raise MediaRetryableError(
-                "Instagram returned an invalid response"
-            ) from None
+        body = meta_adapter.json_body(response)
         if not isinstance(body, dict):
             raise MediaRetryableError("Instagram returned an invalid response")
         turn.last_graph_status = response.status_code
-        error = body.get("error") or {}
-        if error or response.is_error:
-            code = error.get("code") if isinstance(error, dict) else None
-            if code in (190, 102) or response.status_code == 401:
+        if body.get("error") or response.is_error:
+            error = (
+                meta_adapter.error_object(body, secrets=(turn.access.token,))
+                or meta_adapter.ErrorObject()
+            )
+            if error.code in (190, 102) or response.status_code == 401:
                 raise MediaCredentialDead("Reconnect this Instagram account")
             if (
                 response.status_code >= 500
                 or response.status_code == 429
-                or code in (4, 17, 32, 613, 80002)
-                or (isinstance(error, dict) and error.get("is_transient") is True)
+                or error.code in (4, 17, 32, 613, 80002)
+                or error.is_transient
             ):
                 raise MediaRetryableError("Instagram temporarily refused the read")
             if (
                 caption
-                and code == 100
-                and isinstance(error, dict)
-                and isinstance(error.get("message"), str)
-                and re.search(
-                    r"nonexisting field\s*\(caption\)", error["message"], re.I
-                )
+                and error.code == 100
+                and error.message
+                and re.search(r"nonexisting field\s*\(caption\)", error.message, re.I)
             ):
                 raise _CaptionUnsupported("caption_field_unsupported")
             raise refusal_evidence.attach(
                 MediaTerminalError("Instagram media is unavailable to this account"),
-                _graph_refusal(
-                    response, error, f"{self._base}/{path}", turn.access.token
-                ),
+                _graph_refusal(response, error, f"{self._base}/{path}"),
             )
         return body
 

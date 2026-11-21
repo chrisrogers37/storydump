@@ -61,9 +61,10 @@ _TOKEN_PARAM = re.compile(
 )
 #: A bearer credential, as an Authorization header's text says it.
 _BEARER = re.compile(r"\b(?P<scheme>bearer\s+)[A-Za-z0-9._~+/-]{8,}=*", re.I)
-#: What can split a secret without being seen: NUL (jsonb refuses it too) and
-#: the zero-width characters.
-_INVISIBLE = re.compile("[\x00\u200b\u200c\u200d\u2060\ufeff]")
+#: What can split a secret without being seen, or a log record across lines:
+#: the control characters (NUL, which jsonb refuses too, a newline, a carriage
+#: return, a tab, an escape) and the zero-width characters.
+_DROPPED = re.compile("[\x00-\x1f\x7f-\x9f\u200b\u200c\u200d\u2060\ufeff]")
 #: A provider object id, as a message names it: masked in a chat line.
 _LONG_ID = re.compile(r"\d{15,}")
 #: How many measured values the generic sentence names, and how many items of
@@ -178,13 +179,14 @@ def scrub_text(value, *, secrets=()) -> Optional[str]:
     what would open it, and a signature outside a link becomes `s--<SIG>--`.
     A link with its scheme is masked before parameters, so a parameter's value
     written up against it cannot leave its tail behind; one without its scheme
-    after them, so its host cannot take in a value written up against it. NUL
-    and the zero-width characters are dropped first, so none can split what
-    the scrub matches, and the result is bounded.
+    after them, so its host cannot take in a value written up against it. The
+    control characters and the zero-width characters are dropped first, so
+    none can split what the redaction matches or the line the text is logged on,
+    and the result is bounded.
     """
     if not isinstance(value, str):
         return None
-    text = _INVISIBLE.sub("", value)
+    text = _DROPPED.sub("", value)
     for secret in secrets:
         if secret:
             for form in _secret_forms(secret):
