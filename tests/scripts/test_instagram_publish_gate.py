@@ -1,9 +1,7 @@
 """Past-posts source durable stage/permit ownership under real tenant roles."""
 
 import asyncio
-from dataclasses import replace
 from functools import partial
-import hashlib
 import importlib.util
 import json
 import subprocess
@@ -27,7 +25,7 @@ from src.services.target.transit import (
     PastPostsUploadUncertain,
 )
 from src.services.target.unit_of_work import in_transaction
-from tests.fixtures import fake_providers
+from tests.fixtures import fake_providers, validation_proofs
 from tests.scripts import test_instagram_preparation_gate as preparation
 from tests.scripts import test_instagram_observations_gate as observations
 from tests.scripts import test_instagram_sources_gate as foundation
@@ -206,36 +204,7 @@ def synthetic_video(tmp_path, color):
 
 
 async def validate_with_legacy_encoding(validate, source):
-    """Write the pre-#73 video evidence and digest through normal preparation."""
-    result = await validate(source)
-    assert result.state == "supported"
-    evidence = {
-        **result.evidence,
-        "derivation": {
-            "video_codec": ["h264", "high", "4.2"],
-            "audio_codec": "aac",
-            "audio_hz": 48_000,
-            "fps": [23, 60],
-            "video_bits_per_second": 13_000_000,
-            "longest_seconds": 60,
-        },
-        "trimmed_to_seconds": "60",
-    }
-    payload = {
-        "kind": source.kind,
-        "generation": source.source_generation,
-        "revision": source.observation_revision,
-        "asset": source.selected_asset_id,
-        "matrix": result.matrix_version,
-        "evidence_version": result.evidence_version,
-        "state": result.state,
-        "reason": result.reason,
-        "evidence": evidence,
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    return replace(result, fingerprint=digest, evidence=evidence)
+    return validation_proofs.legacy_video_validation(await validate(source))
 
 
 @pytest.mark.parametrize("legacy", [True, False], ids=["legacy-stage", "new-trim"])

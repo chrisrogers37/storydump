@@ -799,7 +799,8 @@ def matches_legacy_video_fingerprint(
 ) -> bool:
     """Check an already staged video's original digest with today's source
     proof and the encoding and trim recorded at staging. The file hash,
-    identity, verdict and validation versions must all still match."""
+    identity, verdict and validation versions must all still match. Remove
+    this compatibility path after no staged video carries an older digest."""
     if (
         validation.state != "supported"
         or not isinstance(capture, Mapping)
@@ -840,9 +841,9 @@ def inspect_video_facts(facts):
     """What the story derivation keeps of a video: its video stream (the first,
     as the derivation takes it), its duration (the longest the container or any
     stream states) and its frame rate. A video shorter than the shortest story
-    is refused; one longer than the longest is kept, trimmed by the derivation,
-    and recorded as trimmed. A duration or a frame rate the probe does not
-    state is not judged; a frame rate outside the matrix is refused."""
+    is refused. Evidence records a trim whenever the source exceeds the
+    encoder's cutoff. A duration or frame rate the probe does not state is
+    left to the derivation. A frame rate outside the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
     if not videos:
