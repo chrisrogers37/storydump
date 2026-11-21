@@ -1,0 +1,12 @@
+# Proposes the newest release of each SHA-pinned action in .github/workflows,
+# all of them in one pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
