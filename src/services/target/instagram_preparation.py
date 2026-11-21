@@ -158,6 +158,16 @@ def _validation_pass(validation, counters) -> dict | None:
     )
 
 
+def _staged_capture_matches(provenance, subject, generation_id) -> bool:
+    """Does the selected slide still carry the source proof the stage pinned?"""
+    return (
+        str(provenance["capture_generation_id"]) == generation_id
+        and provenance["capture_observation_revision"]
+        == subject["observation_revision"]
+        and provenance["validation_fingerprint"] == subject["current_fingerprint"]
+    )
+
+
 class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
@@ -209,12 +219,8 @@ class SelectedPreparation:
                     raise source_policy.MediaAdmissionPending(
                         "past_posts_revalidation_required"
                     )
-                if provenance["transit_artifact_ref"] is not None and (
-                    str(provenance["capture_generation_id"]) != capture.generation_id
-                    or provenance["capture_observation_revision"]
-                    != subject["observation_revision"]
-                    or provenance["validation_fingerprint"]
-                    != subject["current_fingerprint"]
+                if provenance["transit_artifact_ref"] is not None and not (
+                    _staged_capture_matches(provenance, subject, capture.generation_id)
                 ):
                     raise source_policy.MediaAdmissionPending(
                         "past_posts_revalidation_required"
@@ -376,10 +382,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected,
             validation,
             refusal=refusal,
-            passed=_validation_pass(validation, counters),
-            fetch=None
-            if fetched is None
-            else {**fetched, "counters": asdict(counters)},
+            counters=counters,
+            fetch=fetched,
         )
         if validation.state == "unsupported":
             raise source_policy.MediaAdmissionPending("unsupported", evidence=refusal)
@@ -483,7 +487,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         validation,
         *,
         refusal=None,
-        passed=None,
+        counters=None,
         fetch=None,
     ):
         """Record the fetch's outcome on the slide's capture. A refused fetch
@@ -541,7 +545,9 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             pinned = provenance["validation_fingerprint"]
             if staged and (
                 validation is None
-                or pinned != subject["current_fingerprint"]
+                or not _staged_capture_matches(
+                    provenance, subject, selected.capture.generation_id
+                )
                 or (
                     pinned != validation.fingerprint
                     and not (
@@ -551,10 +557,6 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                         )
                     )
                 )
-                or str(provenance["capture_generation_id"])
-                != selected.capture.generation_id
-                or provenance["capture_observation_revision"]
-                != subject["observation_revision"]
             ):
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
@@ -601,13 +603,14 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 evidence["attempt"] = selected.attempt
             if refusal is not None:
                 evidence["refusal"] = refusal
-            if passed is not None:
-                evidence["passed"] = passed
             # What the fetch that got these bytes read (`refusal_evidence`, kind
             # "fetched"), whatever the validation then found.
             if fetch is not None:
-                evidence["fetch"] = fetch
+                evidence["fetch"] = {**fetch, "counters": asdict(counters)}
             if validation:
+                passed = _validation_pass(validation, counters)
+                if passed is not None:
+                    evidence["passed"] = passed
                 evidence.update(
                     fingerprint=validation.fingerprint,
                     matrix_version=validation.matrix_version,

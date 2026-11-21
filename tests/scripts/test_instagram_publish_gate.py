@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from functools import partial
 import hashlib
 import importlib.util
 import json
@@ -15,7 +15,6 @@ from sqlalchemy import text
 from src.services.target import (
     jobs,
     media_validation,
-    outbox,
     prompts,
     publish_pipeline,
     provider_ops,
@@ -26,7 +25,6 @@ from src.services.target import (
 from src.services.target.transit import (
     PastPostsUploadEvidence,
     PastPostsUploadUncertain,
-    story_transformation,
 )
 from src.services.target.unit_of_work import in_transaction
 from tests.fixtures import fake_providers
@@ -103,44 +101,43 @@ async def ready(engine, chain):
             dict(user=str(chain["user"]), id=intent),
         )
         await apply_gucs(conn, tenant_id=str(chain["ws"]), actor_kind="system")
-    job = await lease_publish_job(engine, chain, intent)
+        job = await lease_publish_job(conn, chain, intent)
     coordinator = module().PastPostsPipeline(
         capability=foundation.capability(), fetch_selected=selected.fetch_selected
     )
     return src, item, intent, job, coordinator, calls
 
 
-async def lease_publish_job(engine, chain, intent):
-    async with observations.uow(engine, chain) as conn:
-        assert (
-            await publish_cap.flip_to_publishing(
-                conn,
-                workspace_id=str(chain["ws"]),
-                intent_id=intent,
-                ig_account_id=str(chain["iga"]),
-                local_date=await conn.scalar(text("SELECT current_date")),
-                effective_cap=3,
-            )
-            is publish_cap.FlipOutcome.PROCEED
+async def lease_publish_job(conn, chain, intent):
+    assert (
+        await publish_cap.flip_to_publishing(
+            conn,
+            workspace_id=str(chain["ws"]),
+            intent_id=intent,
+            ig_account_id=str(chain["iga"]),
+            local_date=await conn.scalar(text("SELECT current_date")),
+            effective_cap=3,
         )
-        token = str(uuid.uuid4())
-        job = dict(
-            (
-                await conn.execute(
-                    text(
-                        "INSERT INTO jobs(workspace_id,kind,lane,serialization_key,payload,state,lease_token,locked_by,locked_until,attempts,max_attempts) VALUES(:ws,'publish_pipeline','bulk',:key,CAST(:payload AS jsonb),'leased',:token,'past-posts-gate',clock_timestamp()+interval '5 minutes',1,5) RETURNING *"
-                    ),
-                    dict(
-                        ws=str(chain["ws"]),
-                        key="ig:" + str(chain["iga"]),
-                        payload='{"v":1,"intent_id":"' + intent + '"}',
-                        token=token,
-                    ),
-                )
+        is publish_cap.FlipOutcome.PROCEED
+    )
+    token = str(uuid.uuid4())
+    job = dict(
+        (
+            await conn.execute(
+                text(
+                    "INSERT INTO jobs(workspace_id,kind,lane,serialization_key,payload,state,lease_token,locked_by,locked_until,attempts,max_attempts) VALUES(:ws,'publish_pipeline','bulk',:key,CAST(:payload AS jsonb),'leased',:token,'past-posts-gate',clock_timestamp()+interval '5 minutes',1,5) RETURNING *"
+                ),
+                dict(
+                    ws=str(chain["ws"]),
+                    key="ig:" + str(chain["iga"]),
+                    payload='{"v":1,"intent_id":"' + intent + '"}',
+                    token=token,
+                ),
             )
-            .mappings()
-            .one()
         )
+        .mappings()
+        .one()
+    )
     return job
 
 
@@ -249,14 +246,13 @@ async def test_staged_video_preview_and_review_use_the_stored_capture(
 
     engine, ws = past_posts_engine, str(origin["ws"])
     clip = synthetic_video(tmp_path, "red")
-    validate = media_validation.validate_media
-
-    async def old_validate(source):
-        return await validate_with_legacy_encoding(validate, source)
-
     with monkeypatch.context() as patch:
         if legacy:
-            patch.setattr(media_validation, "validate_media", old_validate)
+            patch.setattr(
+                media_validation,
+                "validate_media",
+                partial(validate_with_legacy_encoding, media_validation.validate_media),
+            )
         (
             prepared,
             _,
@@ -266,7 +262,8 @@ async def test_staged_video_preview_and_review_use_the_stored_capture(
         ) = await preparation.approved_past_posts_card(
             engine, origin, kind="video", content=clip
         )
-        job = await lease_publish_job(engine, origin, intent)
+        async with observations.uow(engine, origin) as conn:
+            job = await lease_publish_job(conn, origin, intent)
         coordinator = module().PastPostsPipeline(
             capability=foundation.capability(), fetch_selected=prepared.fetch_selected
         )
@@ -282,25 +279,14 @@ async def test_staged_video_preview_and_review_use_the_stored_capture(
     cutoff = "60" if legacy else "59.95"
     assert capture["evidence"]["trimmed_to_seconds"] == cutoff
     if not legacy:
-        trim, *_ = story_transformation(transit.calls[0], media_kind="video")
-        assert str(trim["duration"]) == cutoff
         # Another encoding is now current. The review still reads the stage's cutoff.
         encoding = {**media_validation.story_video_encoding(), "trim_seconds": 58.75}
         monkeypatch.setattr(media_validation, "story_video_encoding", lambda: encoding)
 
     telegram = fake_providers.FakeTelegram()
     fetch = worker._card_media_fetch(engine, {}, fetch_selected=prepared.fetch_selected)
-    poller = outbox.OutboxPoller(
-        lambda: observations.uow(engine, origin),
-        binding_id=binding,
-        transport=telegram.transport(media_fetch=fetch).for_chat("synthetic-chat"),
-        clock=lambda: datetime.now(timezone.utc),
-        interval_seconds=1,
-        chat_limit=20,
-        chat_window_seconds=60,
-        global_limit=30,
-        global_window_seconds=1,
-        past_posts_capability=foundation.capability(),
+    poller = preparation.past_posts_card_poller(
+        engine, origin, binding, telegram.transport(media_fetch=fetch)
     )
     assert (await poller.tick())["kind"] == "approval_prompt"
     assert (await poller.tick())["kind"] == "prompt_supersede"

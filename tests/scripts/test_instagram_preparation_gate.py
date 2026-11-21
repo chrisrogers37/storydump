@@ -1843,6 +1843,23 @@ async def approved_past_posts_card(engine, chain, *, kind="image", content=None)
     return prepared, calls, intent, binding, outbox_id
 
 
+def past_posts_card_poller(engine, chain, binding, transport):
+    from src.services.target import outbox
+
+    return outbox.OutboxPoller(
+        lambda: obs.uow(engine, chain),
+        binding_id=binding,
+        transport=transport.for_chat("synthetic-chat"),
+        clock=lambda: datetime.now(timezone.utc),
+        interval_seconds=1,
+        chat_limit=20,
+        chat_window_seconds=60,
+        global_limit=30,
+        global_window_seconds=1,
+        past_posts_capability=foundation.capability(),
+    )
+
+
 async def post_past_posts_card(engine, chain, intent, *, via="api"):
     # The same complete ledger updates used by the existing auto-approval gate;
     # no provider call is made, and real transition/audit guards remain active.
@@ -1871,7 +1888,7 @@ async def test_posted_rule_past_posts_card_sends_text_outcome_without_selected_f
     past_posts_engine, origin, via
 ):
     from src.channels.telegram_transport import TelegramTransport
-    from src.services.target import outbox, prompts
+    from src.services.target import prompts
 
     prepared, calls, intent, binding, oid = await approved_past_posts_card(
         past_posts_engine, origin
@@ -1902,21 +1919,7 @@ async def test_posted_rule_past_posts_card_sends_text_outcome_without_selected_f
         media_fetch=no_fetch,
     )
 
-    def factory():
-        return obs.uow(past_posts_engine, origin)
-
-    poller = outbox.OutboxPoller(
-        factory,
-        binding_id=binding,
-        transport=transport.for_chat("synthetic-chat"),
-        clock=lambda: datetime.now(timezone.utc),
-        interval_seconds=1,
-        chat_limit=20,
-        chat_window_seconds=60,
-        global_limit=30,
-        global_window_seconds=1,
-        past_posts_capability=foundation.capability(),
-    )
+    poller = past_posts_card_poller(past_posts_engine, origin, binding, transport)
     result = await poller.tick()
     assert result["state"] == "sent" and poller.sent == 1 and poller.deferred == 0
     assert len(sent) == 1 and sent[0][0].endswith("/sendMessage")
@@ -1954,7 +1957,6 @@ async def test_a_story_posted_while_its_cards_picture_is_fetched_keeps_the_text_
     nothing is left to send."""
     from src import worker
     from src.channels.telegram_transport import TelegramTransport
-    from src.services.target import outbox
 
     prepared, calls, intent, binding, oid = await approved_past_posts_card(
         past_posts_engine, origin
@@ -1980,21 +1982,7 @@ async def test_a_story_posted_while_its_cards_picture_is_fetched_keeps_the_text_
         media_fetch=late_fetch,
     )
 
-    def factory():
-        return obs.uow(past_posts_engine, origin)
-
-    poller = outbox.OutboxPoller(
-        factory,
-        binding_id=binding,
-        transport=transport.for_chat("synthetic-chat"),
-        clock=lambda: datetime.now(timezone.utc),
-        interval_seconds=1,
-        chat_limit=20,
-        chat_window_seconds=60,
-        global_limit=30,
-        global_window_seconds=1,
-        past_posts_capability=foundation.capability(),
-    )
+    poller = past_posts_card_poller(past_posts_engine, origin, binding, transport)
     first = await poller.tick()
     assert first["state"] == "sent" and first["kind"] == "approval_prompt"
     assert fetched == [] and len(sent) == 1 and sent[0].endswith("/sendMessage")
