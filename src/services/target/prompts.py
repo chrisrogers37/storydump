@@ -318,15 +318,24 @@ async def card_facts(session, *, workspace_id: str, intent_id: str) -> Optional[
     )
 
 
-async def review_video_header(
+async def card_keyboard_for(
+    session, *, workspace_id: str, intent_id: str
+) -> Optional[dict]:
+    """A card's keyboard for its story as it is now."""
+    facts = await card_facts(session, workspace_id=workspace_id, intent_id=intent_id)
+    return None if facts is None else keyboard_of(intent_id, facts)
+
+
+async def past_posts_video_header(
     session, *, workspace_id: str, intent_id: str, sent_as: Optional[str]
 ) -> Optional[str]:
-    """Rerender the header of an existing past-posts video in review."""
+    """Rerender an existing past-posts video's header from its stored cutoff."""
+
     row = await readers.row(
         session,
         _CARD_WITH_PROVIDER
         + " WHERE card.id=:id AND card.workspace_id=:ws"
-        + " AND card.state='review_required' AND card.media_kind='video'"
+        + " AND card.media_kind='video'"
         + " AND s.provider='instagram_past_posts'",
         id=intent_id,
         ws=workspace_id,

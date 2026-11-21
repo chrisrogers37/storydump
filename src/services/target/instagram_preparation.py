@@ -595,24 +595,30 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             if staged and video:
                 # Keep the staged proof and the delivery settings recorded with it.
                 return False
-            if (
-                video
-                and validation is not None
-                and validation.state == "supported"
-                and validation.fingerprint == pinned
-                and _staged_capture_matches(
-                    provenance, subject, selected.capture.generation_id
+            if video and validation is not None and validation.state == "supported":
+                same_proof = (
+                    validation.fingerprint == pinned
+                    and _staged_capture_matches(
+                        provenance, subject, selected.capture.generation_id
+                    )
                 )
-                and not media_validation.matches_video_delivery(
-                    validation, subject["current_capture"]
-                )
-                and await _video_upload_holds_capture(
+                if (
+                    not same_proof
+                    or not media_validation.matches_video_delivery(
+                        validation, subject["current_capture"]
+                    )
+                ) and await _video_upload_holds_capture(
                     conn, ws=str(ws), intent_id=str(iid), validation=validation
-                )
-            ):
-                # Admission checked the uploader's cutoff. Keep it while its
-                # artifact is in flight or awaiting attachment to this intent.
-                return False
+                ):
+                    if not same_proof:
+                        # The proof changed after admission. The old upload stays
+                        # available for cleanup, but cannot regain stage authority.
+                        raise source_policy.MediaAdmissionPending(
+                            "past_posts_revalidation_required"
+                        )
+                    # Admission checked the uploader's cutoff. Keep it while its
+                    # artifact is in flight or awaiting attachment to this intent.
+                    return False
             state = validation.state if validation else "validation_pending"
             park = reason = None
             if state == "validation_pending":

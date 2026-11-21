@@ -1277,8 +1277,8 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
     so the edits after it bring the line and the keyboard alone; a paced edit
     keeps it and uploads again after the hold. Called after the pacing, which
     a keyboard never changes, so a paced attempt reads and writes none of
-    this. A past-posts video in review also gets the current stored trim in
-    its text or caption, using the recorded message type."""
+    this. Review and later edits of a past-posts video render the stored
+    trim again. A pending upload to the chat is dropped during review."""
     from src.services.target import prompts  # noqa: PLC0415 — cycle
 
     if not _takes_the_storys_keyboard(row):
@@ -1312,17 +1312,20 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
             payload["sent_as"] = card["sent_as"]
     if (
         facts
-        and facts["state"] == "review_required"
         and facts.get("media_kind") == "video"
+        and facts["state"] not in prompts.LIVE_FOR_A_CARD
     ):
-        header = await prompts.review_video_header(
-            session,
-            workspace_id=ws,
-            intent_id=intent_id,
-            sent_as=payload.get("sent_as"),
+        in_review = facts["state"] == "review_required"
+        sent_as = payload.get("sent_as")
+        if payload.get("media") and not in_review:
+            sent_as = "media"
+        header = await prompts.past_posts_video_header(
+            session, workspace_id=ws, intent_id=intent_id, sent_as=sent_as
         )
         if header is not None:
             payload["header"] = header
+            if in_review:
+                payload.pop("media", None)
     return {**row, "payload": payload}
 
 
