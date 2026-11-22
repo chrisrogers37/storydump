@@ -20,6 +20,7 @@ from src.services.target import (
     audit,
     instagram_artifacts,
     jobs,
+    media_validation,
     readers,
     refusal_evidence,
     source_policy,
@@ -300,6 +301,14 @@ async def _slide_capture(conn, workspace_id, subject):
             item=str(subject["media_item_id"]),
         ),
     )
+
+
+async def _check_video_delivery(conn, ws, subject, selected):
+    """The upload uses the encoding that belongs to the current captured proof."""
+    if selected.media_kind == "video" and not media_validation.matches_video_delivery(
+        selected.validation, await _slide_capture(conn, ws, subject)
+    ):
+        raise PastPostsEffectRefused("past_posts_revalidation_required")
 
 
 def _not_admitted(reason, subject) -> dict:
@@ -633,6 +642,8 @@ class PastPostsPipeline:
                 or p["validation_fingerprint"] != v.fingerprint
             ):
                 raise PastPostsEffectRefused("past_posts_revalidation_required")
+            # A fetch with another encoder may have landed before this lock.
+            await _check_video_delivery(conn, ws, subject, selected)
             ref = "ws/" + ws + "/" + uuid.uuid4().hex
             artifact_ref = await instagram_artifacts.admit_upload(
                 conn,
@@ -689,6 +700,7 @@ class PastPostsPipeline:
                 or artifact["created_asset_ref"] != evidence.public_id
             ):
                 raise PastPostsEffectRefused("past_posts_revalidation_required")
+            await _check_video_delivery(conn, ws, subject, selected)
             await _write_stage(
                 conn, workspace_id=ws, intent_id=iid, subject=subject, artifact=artifact
             )

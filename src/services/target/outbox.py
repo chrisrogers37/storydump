@@ -1261,7 +1261,7 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
     copy a lost answer left behind carries no buttons. The card's record is
     rewritten through the one fence, so the ambiguous path and the later
     edits read what was sent. An edit of a card gets the keyboard of its
-    story as it is now (`prompts.card_keyboard_for`): no caller picks one,
+    story as it is now (`prompts.card_facts`): no caller picks one,
     so a rejected card loses its buttons because it is rejected. An edit's
     record is not rewritten, since only the transport reads its keyboard, and
     a resent edit is claimed and given one again. An edit of a card whose
@@ -1277,7 +1277,8 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
     so the edits after it bring the line and the keyboard alone; a paced edit
     keeps it and uploads again after the hold. Called after the pacing, which
     a keyboard never changes, so a paced attempt reads and writes none of
-    this."""
+    this. Review and later edits of a past-posts video render the stored
+    trim again. A pending upload to the chat is dropped during review."""
     from src.services.target import prompts  # noqa: PLC0415 — cycle
 
     if not _takes_the_storys_keyboard(row):
@@ -1287,11 +1288,9 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
         payload.pop("reply_markup", None)
         await _leave_sending(session, row["id"], "sending", payload=payload)
         return {**row, "payload": payload}
-    keyboard = await prompts.card_keyboard_for(
-        session,
-        workspace_id=str(row["workspace_id"]),
-        intent_id=str(row["intent_id"]),
-    )
+    ws, intent_id = str(row["workspace_id"]), str(row["intent_id"])
+    facts = await prompts.card_facts(session, workspace_id=ws, intent_id=intent_id)
+    keyboard = prompts.keyboard_of(intent_id, facts) if facts is not None else None
     if keyboard is None:
         payload.pop("reply_markup", None)
     else:
@@ -1311,6 +1310,22 @@ async def _with_the_storys_keyboard(session, row: dict) -> dict:
                 payload["outcome_text"] = card["outcome_text"]
         elif card.get("sent_as"):
             payload["sent_as"] = card["sent_as"]
+    if (
+        facts
+        and facts.get("media_kind") == "video"
+        and facts["state"] not in prompts.LIVE_FOR_A_CARD
+    ):
+        in_review = facts["state"] == "review_required"
+        sent_as = payload.get("sent_as")
+        if payload.get("media") and not in_review:
+            sent_as = "media"
+        header = await prompts.past_posts_video_header(
+            session, workspace_id=ws, intent_id=intent_id, sent_as=sent_as
+        )
+        if header is not None:
+            payload["header"] = header
+            if in_review:
+                payload.pop("media", None)
     return {**row, "payload": payload}
 
 

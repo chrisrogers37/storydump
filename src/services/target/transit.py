@@ -230,8 +230,8 @@ def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dic
     left and right for one taller than 9:16 (`c_pad` never crops). The asset
     is `authenticated`, so the layer names it as such and the whole signed
     URL authorises the layer (Cloudinary: an authenticated layer needs the
-    signed URL, no separate signature). A video is trimmed to the longest
-    story first, so nothing past it is framed or encoded, then takes
+    signed URL, no separate signature). A video is trimmed at the encoder's
+    cutoff first, so nothing past it is framed or encoded, then takes
     Cloudinary's own blurred-background padding, then is encoded to the story
     spec, all from the validation matrix (`media_validation.story_video_encoding`).
     Every step is a dict, so the SDK never renders a named transformation.

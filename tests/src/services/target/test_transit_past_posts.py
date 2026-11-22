@@ -136,6 +136,8 @@ async def test_actual_signed_multipart_and_matching_creation(monkeypatch, kind):
         ]
     )
     assert decoded["eager"] == expected
+    if kind == "video":
+        assert decoded["eager"].split("/", 1)[0] == "du_59.95"
     assert signature == cloudinary.utils.api_sign_request(
         decoded, "test-secret", signature_version=2
     )

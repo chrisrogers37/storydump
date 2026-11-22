@@ -128,7 +128,7 @@ names.
    picture is one more), a probe fault whose words establish nothing about the bytes
    (`fault_exit_status`) and a duration nothing states are left to the derivation and
    recorded, never left pending. The
-   transformation trims the derivation to 60 seconds
+   transformation sets the video trim cutoff to 59.95 seconds
    and pins its codec (H.264 high profile, level 4.2), its audio (AAC at 48 kHz), its
    frame-rate range (23 to 60 fps) and its bit rates (12 Mbit/s for the video, 128 kbit/s for the audio), from the
    validation matrix (`media_validation.story_video_encoding`); its container layout is
@@ -321,10 +321,13 @@ that hold no unresolved upload.
 - **Likes and comments** can be unavailable. Missing values do not mean zero.
 - **Videos.** A candidate video is checked when its story is prepared: a video at least
   3 seconds long, at 23 to 60 frames a second where its file states a rate, in a
-  well-formed MP4 or MOV that `ffprobe` can read, is `supported`, and one longer than
-  60 seconds is trimmed to 60 by its derivation. Meta receives the
-  transit store's derivation of it, never the file itself, so the file's edit lists,
-  `moov` position, codec settings and audio settings are not judged.
+  well-formed MP4 or MOV that `ffprobe` can read, is `supported`. A clip
+  longer than the encoder's cutoff is trimmed at that cutoff, currently
+  59.95 seconds. The card reads the cutoff from the selected slide's validation
+  capture, which a staged video keeps across encoding changes. A delivery URL
+  minted later requests the encoder's settings at that time. Meta receives the
+  transit store's derivation. The source file's edit lists, `moov` position,
+  codec settings and audio settings are left to the derivation.
 - **Captions and attribution.** Instagram Login can return a caption, but not for every
   post or grant. Credit detection cannot be promised, and attribution can be unknown.
   Excluding unknown attribution can leave a past-posts source with no eligible items.

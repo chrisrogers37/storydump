@@ -22,7 +22,7 @@ probe opens (by the walker's count of tracks, or at the probe's own stream
 bound, which also counts an attached picture), a probe fault whose words
 establish nothing about the bytes (`fault_exit_status`) and a duration nothing
 states are left to the derivation, which re-encodes the file, and recorded. The
-derivation is trimmed to the longest story and encoded to the matrix's story
+derivation is trimmed at the encoder's cutoff and encoded to the matrix's story
 video (`story_video_encoding`), so a longer video is kept and only a shorter one
 is refused for its length, the container's or its longest stream's. The frame
 rate is still refused outside the matrix:
@@ -119,7 +119,8 @@ RATE_BUFFER_SECONDS = 2
 
 def story_video_encoding() -> dict:
     """What every story video's derivation is encoded to, from the matrix, as
-    a video's evidence records it. The audio is held to Meta's audio rate on
+    a video's evidence records it. The source fingerprint excludes this
+    delivery configuration. The audio is held to Meta's audio rate on
     its own stream: one bit rate for both would cap the audio at the video's.
     The video's cap is the lower of Meta's two limits at the longest story:
     its VBR maximum, and its file size less the audio and one rate buffer
@@ -746,20 +747,19 @@ async def validate_media(
     else:
         failed_check = None
         passed_checks = _passed(source.kind, evidence)
-    fingerprint_data = {
-        "kind": source.kind,
-        "generation": source.source_generation,
-        "revision": source.observation_revision,
-        "asset": source.selected_asset_id,
-        "matrix": MATRIX_VERSION,
-        "evidence_version": EVIDENCE_VERSION,
-        "state": state,
-        "reason": reason,
-        "evidence": evidence,
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_data, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    fingerprint = _validation_fingerprint(
+        source.kind,
+        source.source_generation,
+        source.observation_revision,
+        source.selected_asset_id,
+        state,
+        reason,
+        {
+            key: value
+            for key, value in evidence.items()
+            if key not in _DELIVERY_EVIDENCE
+        },
+    )
     return ValidationResult(
         state,
         reason,
@@ -770,6 +770,71 @@ async def validate_media(
         MappingProxyType(evidence),
         failed_check=failed_check,
         passed_checks=passed_checks,
+    )
+
+
+#: Delivery choices are recorded alongside the proof of the source file.
+_DELIVERY_EVIDENCE = ("derivation", "trimmed_to_seconds")
+
+
+def _validation_fingerprint(kind, generation, revision, asset, state, reason, evidence):
+    fingerprint_data = {
+        "kind": kind,
+        "generation": generation,
+        "revision": revision,
+        "asset": asset,
+        "matrix": MATRIX_VERSION,
+        "evidence_version": EVIDENCE_VERSION,
+        "state": state,
+        "reason": reason,
+        "evidence": evidence,
+    }
+    return hashlib.sha256(
+        json.dumps(fingerprint_data, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def matches_video_delivery(validation: ValidationResult, capture: object) -> bool:
+    """Whether the stored capture records the delivery settings we just validated."""
+    evidence = capture.get("evidence") if isinstance(capture, Mapping) else None
+    return isinstance(evidence, Mapping) and all(
+        key in evidence
+        and key in validation.evidence
+        and evidence[key] == validation.evidence[key]
+        for key in _DELIVERY_EVIDENCE
+    )
+
+
+def matches_legacy_video_fingerprint(
+    validation: ValidationResult, capture: object, fingerprint: str
+) -> bool:
+    """Check an already staged video's original digest with today's source
+    proof and the encoding and trim recorded at staging. The file hash,
+    identity, verdict and validation versions must all still match. Remove
+    this compatibility path after no staged video carries an older digest."""
+    if (
+        validation.state != "supported"
+        or not isinstance(capture, Mapping)
+        or capture.get("fingerprint") != fingerprint
+    ):
+        return False
+    recorded = capture.get("evidence")
+    if not isinstance(recorded, dict) or not all(
+        key in recorded for key in _DELIVERY_EVIDENCE
+    ):
+        return False
+    evidence = {
+        **validation.evidence,
+        **{key: recorded[key] for key in _DELIVERY_EVIDENCE},
+    }
+    return fingerprint == _validation_fingerprint(
+        "video",
+        validation.source_generation,
+        validation.observation_revision,
+        validation.selected_asset_id,
+        validation.state,
+        validation.reason,
+        evidence,
     )
 
 
@@ -787,9 +852,9 @@ def inspect_video_facts(facts):
     """What the story derivation keeps of a video: its video stream (the first,
     as the derivation takes it), its duration (the longest the container or any
     stream states) and its frame rate. A video shorter than the shortest story
-    is refused; one longer than the longest is kept, trimmed by the derivation,
-    and recorded as trimmed. A duration or a frame rate the probe does not
-    state is not judged; a frame rate outside the matrix is refused."""
+    is refused. Evidence records a trim whenever the source exceeds the
+    encoder's cutoff. A duration or frame rate the probe does not state is
+    left to the derivation. A frame rate outside the matrix is refused."""
     streams = facts.get("streams", [])
     videos = [s for s in streams if s.get("codec_type") == "video"]
     if not videos:
@@ -818,10 +883,10 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
     """A video's evidence of what the probe read: its video stream's codec and
     frame size, its duration and frame rate ("unstated" for one it did not
     state) and whether it holds audio, with the encoding its derivation is
-    sent. A video longer than the longest story is recorded as trimmed to the
-    longest story, the length its card names; the derivation's trim
-    (`story_video_encoding`) ends it just short of that length."""
-    longest = SUPPORTED_MEDIA_MATRIX["duration_seconds"][1]
+    sent. A video longer than the derivation's cutoff records that cutoff for
+    its card."""
+    encoding = story_video_encoding()
+    cutoff = str(encoding["trim_seconds"])
     return {
         "codec": video.get("codec_name"),
         "width": video.get("width"),
@@ -830,9 +895,9 @@ def _video_evidence(video, duration=None, fps=None, audio=None) -> dict:
         "fps": "unstated" if fps is None else str(fps),
         "audio": audio,
         "trimmed_to_seconds": (
-            str(longest) if duration is not None and duration > longest else None
+            cutoff if duration is not None and duration > Fraction(cutoff) else None
         ),
-        "derivation": story_video_encoding(),
+        "derivation": encoding,
     }
 
 

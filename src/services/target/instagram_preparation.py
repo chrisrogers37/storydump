@@ -158,6 +158,38 @@ def _validation_pass(validation, counters) -> dict | None:
     )
 
 
+def _staged_capture_matches(provenance, subject, generation_id) -> bool:
+    """Does the selected slide still carry the source proof the stage pinned?"""
+    return (
+        str(provenance["capture_generation_id"]) == generation_id
+        and provenance["capture_observation_revision"]
+        == subject["observation_revision"]
+        and provenance["validation_fingerprint"] == subject["current_fingerprint"]
+    )
+
+
+async def _video_upload_holds_capture(conn, *, ws, intent_id, validation) -> bool:
+    """A live upload admission for this proof holds the recorded delivery settings."""
+    return await conn.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM instagram_artifacts"
+            " WHERE workspace_id=:ws AND intent_id=:intent"
+            " AND admitted_resource_type='video' AND cleanup_state='pending'"
+            " AND data_generation_id=CAST(:gid AS uuid)"
+            " AND observation_revision=:rev AND selected_asset_identity=:asset"
+            " AND validation_fingerprint=:fingerprint)"
+        ),
+        dict(
+            ws=ws,
+            intent=intent_id,
+            gid=validation.source_generation,
+            rev=validation.observation_revision,
+            asset=validation.selected_asset_id,
+            fingerprint=validation.fingerprint,
+        ),
+    )
+
+
 class SelectedPreparation:
     def __init__(self, ports: PastPostsPreparationPorts):
         self.ports = ports
@@ -209,12 +241,8 @@ class SelectedPreparation:
                     raise source_policy.MediaAdmissionPending(
                         "past_posts_revalidation_required"
                     )
-                if provenance["transit_artifact_ref"] is not None and (
-                    str(provenance["capture_generation_id"]) != capture.generation_id
-                    or provenance["capture_observation_revision"]
-                    != subject["observation_revision"]
-                    or provenance["validation_fingerprint"]
-                    != subject["current_fingerprint"]
+                if provenance["transit_artifact_ref"] is not None and not (
+                    _staged_capture_matches(provenance, subject, capture.generation_id)
                 ):
                     raise source_policy.MediaAdmissionPending(
                         "past_posts_revalidation_required"
@@ -376,10 +404,8 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             selected,
             validation,
             refusal=refusal,
-            passed=_validation_pass(validation, counters),
-            fetch=None
-            if fetched is None
-            else {**fetched, "counters": asdict(counters)},
+            counters=counters,
+            fetch=fetched,
         )
         if validation.state == "unsupported":
             raise source_policy.MediaAdmissionPending("unsupported", evidence=refusal)
@@ -483,7 +509,7 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
         validation,
         *,
         refusal=None,
-        passed=None,
+        counters=None,
         fetch=None,
     ):
         """Record the fetch's outcome on the slide's capture. A refused fetch
@@ -536,13 +562,23 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
                 )
-            if provenance["transit_artifact_ref"] is not None and (
+            staged = provenance["transit_artifact_ref"] is not None
+            video = subject["media_kind"] == "video"
+            pinned = provenance["validation_fingerprint"]
+            if staged and (
                 validation is None
-                or provenance["validation_fingerprint"] != validation.fingerprint
-                or str(provenance["capture_generation_id"])
-                != selected.capture.generation_id
-                or provenance["capture_observation_revision"]
-                != subject["observation_revision"]
+                or not _staged_capture_matches(
+                    provenance, subject, selected.capture.generation_id
+                )
+                or (
+                    pinned != validation.fingerprint
+                    and not (
+                        video
+                        and media_validation.matches_legacy_video_fingerprint(
+                            validation, subject["current_capture"], pinned
+                        )
+                    )
+                )
             ):
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
@@ -556,6 +592,33 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
             )
             if not verdict or not verdict["suitable"]:
                 raise _unsuitable(verdict, subject)
+            if staged and video:
+                # Keep the staged proof and the delivery settings recorded with it.
+                return False
+            if video and validation is not None and validation.state == "supported":
+                same_proof = (
+                    validation.fingerprint == pinned
+                    and _staged_capture_matches(
+                        provenance, subject, selected.capture.generation_id
+                    )
+                )
+                if (
+                    not same_proof
+                    or not media_validation.matches_video_delivery(
+                        validation, subject["current_capture"]
+                    )
+                ) and await _video_upload_holds_capture(
+                    conn, ws=str(ws), intent_id=str(iid), validation=validation
+                ):
+                    if not same_proof:
+                        # The proof changed after admission. The old upload stays
+                        # available for cleanup, but cannot regain stage authority.
+                        raise source_policy.MediaAdmissionPending(
+                            "past_posts_revalidation_required"
+                        )
+                    # Admission checked the uploader's cutoff. Keep it while its
+                    # artifact is in flight or awaiting attachment to this intent.
+                    return False
             state = validation.state if validation else "validation_pending"
             park = reason = None
             if state == "validation_pending":
@@ -586,13 +649,14 @@ VALUES(:ws,:id,:sid,:item,:origin,:gid,:rev,:gid,:rev,:asset,:epoch,:policy)
                 evidence["attempt"] = selected.attempt
             if refusal is not None:
                 evidence["refusal"] = refusal
-            if passed is not None:
-                evidence["passed"] = passed
             # What the fetch that got these bytes read (`refusal_evidence`, kind
             # "fetched"), whatever the validation then found.
             if fetch is not None:
-                evidence["fetch"] = fetch
+                evidence["fetch"] = {**fetch, "counters": asdict(counters)}
             if validation:
+                passed = _validation_pass(validation, counters)
+                if passed is not None:
+                    evidence["passed"] = passed
                 evidence.update(
                     fingerprint=validation.fingerprint,
                     matrix_version=validation.matrix_version,
@@ -631,7 +695,7 @@ WHERE workspace_id=:ws AND source_id=:sid AND media_item_id=:item
                 raise source_policy.MediaAdmissionPending(
                     "past_posts_revalidation_required"
                 )
-            if provenance["transit_artifact_ref"] is None:
+            if not staged:
                 await conn.execute(
                     text("""
 UPDATE instagram_intent_provenance SET capture_generation_id=:gid,capture_observation_revision=:rev,
