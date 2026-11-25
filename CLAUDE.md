@@ -32,7 +32,7 @@ python -m src.main                   # Starts the posting worker: the clock, the
 python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 make run                             # Runs `python -m src.main`: starts the posting worker
 make dev                             # Runs `python -m src.main` once .env exists: starts the posting worker
-python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots; only a database converted in place owes 001 and 002
+python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 002 drops the archive snapshots
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
 storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
