@@ -58,7 +58,7 @@ Telegram.
 └─────────────────────────────────────┘
 ```
 
-**RULE**: the CLI never imports `src` except `src/services/target/vocabulary.py`; SQL lives in the services under the unit of work; the API's routes call the services. There is one tier: the legacy tier was retired in September 2026, and its schema and snapshots are gone.
+**RULE**: the CLI never imports `src` except `src/services/target/vocabulary.py`; SQL lives in the services under the unit of work; the API's routes call the services. There is one tier: the legacy tier is retired, and its schema and snapshots are gone.
 
 ---
 
@@ -176,14 +176,14 @@ correctly).
 - The target tier is the only tier. Version: `src/__init__.py`; changes:
   `CHANGELOG.md` under `## [Unreleased]`, and the fragments in `changelog.d/`
   not yet folded into it.
-- **Outbound email sends only where it is configured**: Resend, ratified
-  2026-10-11. An invitation is emailed from the API after it commits, when the
+- **Outbound email sends only where it is configured**: Resend, ratified.
+  An invitation is emailed from the API after it commits, when the
   API has `RESEND_API_KEY` and `EMAIL_FROM`. Its response says whether it was
   sent, and it always carries the link, shown once
   (`AGENTS.md` › What is deliberately not wired).
 - Some vocabulary commands have no executor yet and answer 501
   (`commands.UNBUILT`); one job kind has none (`work_loop.UNBUILT_KINDS`).
-- Production moved on 2026-10-17 to a database built from schema code, and
+- Production runs on a database built from schema code, and
   the legacy schema and its snapshots are gone
   (`documentation/operations/schema-cutover.md`). An agent never applies a
   `-- runner:manual` file.

@@ -42,7 +42,7 @@ to use Storydump.
 
 There is one tier, `src/services/target/`.
 
-Where it runs: the worker and the API are two Railway services from this repository (`Procfile`, `railway.toml`), the database is Neon PostgreSQL, and the web front end in `landing/` deploys to Vercel — `documentation/guides/cloud-deployment.md`. Python 3.10 or newer (`setup.py`; CI runs 3.10).
+Where it runs: the worker and the API are two Railway services from this repository (`Procfile`, `railway.toml`), the database is Neon PostgreSQL, and the web front end in `landing/` deploys to Vercel — `documentation/guides/cloud-deployment.md`. Python 3.12 or newer (`setup.py`; CI runs 3.12).
 
 Operators: see the [retention policy](documentation/operations/retention-policy.md) for the periodic cleanup boundary and data classes that accumulate.
 
@@ -130,7 +130,7 @@ characters in URL passwords; the owner login stays in the `DB_*` settings.
 it without executing it; later migrations apply on top of that base. The
 runner refuses to execute an unrecorded `000`.
 
-On a database built from schema code, such as production's since 2026-10-17,
+On a database built from schema code, such as production's,
 adoption records `000`, `001` and `002`, so automatic `runner apply`, including
 the deployment pre-step, has nothing owed. The
 [cutover runbook](documentation/operations/schema-cutover.md) records the

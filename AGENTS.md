@@ -137,8 +137,8 @@ Instagram Graph API, Google Drive, Cloudinary, Railway deployment, Next.js
 
 There is one tier. The design plan and the package names call it the *target*
 tier (`src/services/target/`, `src/models/target/`) because it was built beside
-the tier it replaced. The legacy tier was retired in September 2026, and its
-schema and snapshots are gone. Production moved on 2026-10-17 to a database
+the tier it replaced. The legacy tier is retired, and its
+schema and snapshots are gone. Production runs on a database
 built from schema code (`documentation/operations/schema-cutover.md`);
 `storydump posture` shows the ledger's head.
 
@@ -196,7 +196,7 @@ second authority is how the two drift.
 
 State changes go through one closed vocabulary
 (`src/services/target/commands.py::VOCABULARY`, re-exported from
-`vocabulary.py::COMMANDS` — 32 commands on 2026-10-20). The web adapter exposes
+`vocabulary.py::COMMANDS` — 32 commands). The web adapter exposes
 them as a single route — `POST /api/v1/workspaces/{ws}/commands/{command}`
 (`src/api/routes/v1.py`) — whose path segment is validated against that
 vocabulary, so the route table cannot drift from it. `create_workspace` is the
@@ -468,7 +468,7 @@ the worker and the API.
 
 **Outbound email sends only where it is configured.**
 
-- **The provider.** It is Resend, ratified by the owner on 2026-10-11.
+- **The provider.** It is Resend, ratified by the owner.
 - **Credentials.** `src/services/target/email_sender.py` still ships inert
   without them: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
   the sender address (`EMAIL_FROM`) are both set.
